@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -17,6 +18,32 @@ import { RecognitionService } from '../scanner/recognition.service';
 import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
+
+/**
+ * Stable fingerprint of what the client asked for.
+ *
+ * Only the fields that define the DELIVERY are hashed — supplier, reference and
+ * the item lines. Identifier order is normalised so a client that re-sends the
+ * same scans in a different order is still recognised as the same request
+ * rather than being rejected as a conflict.
+ */
+function fingerprint(dto: CreatePurchaseDto): string {
+  const canonical = {
+    supplierId: dto.supplierId,
+    referenceNo: dto.referenceNo ?? null,
+    paidAmount: dto.paidAmount ?? 0,
+    items: (dto.items ?? [])
+      .map((i) => ({
+        productId: i.productId,
+        unitCost: i.unitCost,
+        quantity: i.quantity ?? null,
+        price: i.price ?? null,
+        identifiers: [...(i.identifiers ?? [])].sort(),
+      }))
+      .sort((a, b) => (a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0)),
+  };
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
 
 interface RejectedLine {
   identifier: string;
@@ -63,6 +90,21 @@ export class PurchasingService {
     const branchId = this.tenant.requireBranchId();
     const items = dto.items ?? [];
     if (items.length === 0) throw new BadRequestException('Purchase must include at least one item');
+
+    /**
+     * Idempotent retry.
+     *
+     * Receiving is the strongest recognition-learning signal, so a retried
+     * request did more than duplicate stock — it also ran teach-on-confirm a
+     * second time and inflated `confirmations` for one logical action. Both
+     * failures are fixed by making the enclosing purchase idempotent.
+     *
+     * The fingerprint matters: without it, replaying a key with different
+     * contents would silently return the FIRST purchase, quietly discarding
+     * the delivery the employee actually scanned.
+     */
+    const replay = dto.clientUuid ? await this.findReplay(dto, companyId) : null;
+    if (replay) return replay;
 
     const supplier = await this.db.supplier.findUnique({ where: { id: uuidToBin(dto.supplierId) } });
     if (!supplier) throw new NotFoundException('Supplier not found');
@@ -161,6 +203,8 @@ export class PurchasingService {
             supplierId: supplier.id,
             userId: this.tenant.userId() ?? null,
             referenceNo: dto.referenceNo ?? null,
+            clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
+            clientRequestHash: dto.clientUuid ? fingerprint(dto) : null,
             date: new Date(),
             subtotal: total,
             taxTotal: 0,
@@ -253,6 +297,40 @@ export class PurchasingService {
       stockLines: preparedStock.length,
       total,
       rejected,
+    };
+  }
+
+  /**
+   * Look for a prior purchase created under this request identity.
+   *
+   * Returns the ORIGINAL outcome on an exact replay. A key reused with
+   * different contents is a client bug — two different deliveries sharing one
+   * key — and is rejected rather than silently answered with the wrong result.
+   *
+   * Scoped by company: the unique index is (company_id, client_uuid), so one
+   * company's key can never suppress another company's receiving.
+   */
+  private async findReplay(dto: CreatePurchaseDto, companyId: Buffer) {
+    const prior = await this.db.purchase.findFirst({
+      where: { companyId, clientUuid: uuidToBin(dto.clientUuid!) },
+      include: { items: true, units: { select: { id: true } } },
+    });
+    if (!prior) return null;
+
+    if (prior.clientRequestHash && prior.clientRequestHash !== fingerprint(dto)) {
+      throw new ConflictException(
+        'This request id was already used for a different delivery. Start a new one.',
+      );
+    }
+
+    const stockLines = prior.items.length - prior.units.length;
+    return {
+      purchaseId: binToUuid(prior.id),
+      unitsCreated: prior.units.length,
+      stockLines: stockLines > 0 ? stockLines : 0,
+      total: Number(prior.total),
+      rejected: [] as unknown[],
+      replayed: true,
     };
   }
 

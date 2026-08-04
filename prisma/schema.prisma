@@ -493,6 +493,11 @@ model Purchase {
   supplierId  Bytes          @map("supplier_id") @db.Binary(16)
   userId      Bytes?         @map("user_id") @db.Binary(16)
   referenceNo String?        @map("reference_no") @db.VarChar(40)
+  /// Client-generated request identity for safe retries (see 0013).
+  clientUuid  Bytes?         @map("client_uuid") @db.Binary(16)
+  /// sha256 of the request payload, so a replayed key with different content
+  /// is a conflict rather than a wrong "already done".
+  clientRequestHash String?  @map("client_request_hash") @db.Char(64)
   date        DateTime       @default(now()) @db.DateTime(6)
   subtotal    Decimal        @db.Decimal(14, 2)
   taxTotal    Decimal        @default(0) @map("tax_total") @db.Decimal(14, 2)
@@ -514,6 +519,7 @@ model Purchase {
   @@index([companyId, branchId, date])
   @@index([supplierId])
   @@index([userId])
+  @@unique([companyId, clientUuid])
   @@map("purchases")
 }
 
