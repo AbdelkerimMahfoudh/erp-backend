@@ -106,21 +106,31 @@ function matches(row: any, where: any): boolean {
   return true;
 }
 
-function sortDesc(rows: any[], field: string) {
-  return [...rows].sort((a, b) => {
-    const d = b[field].getTime() - a[field].getTime();
-    return d !== 0 ? d : Buffer.compare(b.id, a.id);
-  });
+/** Sole sort key: UUIDv7 id, descending. Unique, so there are no ties. */
+function sortDesc(rows: any[]) {
+  return [...rows].sort((a, b) => Buffer.compare(b.id, a.id));
 }
 
 function makeStore(units: any[], stock: any[], branchId: Buffer | null = BRANCH) {
-  const model = (rows: any[], sortField: string) => ({
-    findMany: jest.fn(async ({ where, take }: any) =>
-      sortDesc(rows.filter((r) => matches(r, where)), sortField).slice(0, take),
-    ),
+  const model = (rows: any[]) => ({
+    findMany: jest.fn(async ({ where, take, cursor, skip }: any) => {
+      let page = sortDesc(rows.filter((r) => matches(r, where)));
+      if (cursor?.id) {
+        // Prisma resolves the anchor by primary key, independently of `where`.
+        // Mirrored here so the "anchor row left the filtered set" case is a
+        // real test rather than an accident of the double.
+        const ordered = sortDesc(rows);
+        const anchor = ordered.find((r: any) => r.id.equals(cursor.id));
+        page = anchor
+          ? page.filter((r: any) => Buffer.compare(r.id, anchor.id) < 0)
+          : [];
+        if (skip && !anchor) page = [];
+      }
+      return page.slice(0, take);
+    }),
     count: jest.fn(async ({ where }: any) => rows.filter((r) => matches(r, where)).length),
   });
-  const db = { unit: model(units, 'dateIn'), stockItem: model(stock, 'updatedAt') };
+  const db = { unit: model(units), stockItem: model(stock) };
   const tenant = { branchId: () => branchId };
   const service = new InventoryService(db as never, tenant as never, {} as never, {} as never);
   return { service, db };
@@ -249,18 +259,36 @@ describe('listStock — pagination', () => {
     expect(page.totals).toEqual({ units: 0, stock: 0 });
   });
 
-  it('survives a stale cursor: rows removed after the cursor was issued do not break paging', async () => {
+  it('survives the anchor row leaving the filtered set between pages', async () => {
     const units = Array.from({ length: 120 }, (_, i) => makeUnit(i + 1));
     const { service } = makeStore(units, []);
-    const first = await service.listStock({ limit: 50 });
+    const first = await service.listStock({ status: 'in_stock' as never, limit: 50 });
 
-    // The anchor row is sold and leaves the filtered set between pages.
+    /**
+     * The realistic staleness: somebody sells the anchor unit while a colleague
+     * is scrolling. The row still EXISTS — nothing financial is hard-deleted —
+     * it simply no longer matches `status: in_stock`.
+     *
+     * This is exactly why the sort key is the primary key: Prisma resolves the
+     * anchor by id regardless of the filter, so paging continues from the right
+     * place instead of truncating the list at page one.
+     */
     const anchor = decodeCursor(first.nextCursor!);
-    const survivors = units.filter((u) => !anchor.seen.includes(binToUuid(u.id)));
-    const { service: after } = makeStore(survivors, []);
+    const afterSale = units.map((u) =>
+      binToUuid(u.id) === anchor.id ? { ...u, status: 'sold' } : u,
+    );
+    const { service: after } = makeStore(afterSale, []);
 
-    const second = await after.listStock({ limit: 50, cursor: first.nextCursor! });
+    const second = await after.listStock({
+      status: 'in_stock' as never,
+      limit: 50,
+      cursor: first.nextCursor!,
+    });
+
     expect(second.rows.length).toBeGreaterThan(0);
+    // And it resumes past the anchor rather than repeating earlier rows.
+    const firstIds = new Set(first.rows.map((r) => binToUuid(r.id)));
+    expect(second.rows.every((r) => !firstIds.has(binToUuid(r.id)))).toBe(true);
   });
 
   it('rejects a malformed cursor rather than silently restarting', async () => {

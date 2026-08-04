@@ -69,53 +69,15 @@ export interface InventoryPage {
 }
 
 /**
- * Keyset predicate: strictly older than the boundary, plus rows sharing the
- * boundary timestamp that were not already emitted.
+ * The boundary is simply the last row of the page.
  *
- * `notIn` on a binary id is the one comparison Prisma exposes for `Bytes`
- * (there is no `lt`), and it is exactly what tie-breaking needs.
+ * `id` is a total order on its own, so one row identifies the position exactly
+ * — no set of tied ids to carry, and the cursor stays a constant ~90 characters
+ * regardless of how much stock exists. See `inventory-cursor.ts` for the
+ * measurements that forced this design.
  */
-function keysetWhere(field: 'dateIn' | 'updatedAt', cursor: InventoryCursor | null) {
-  if (!cursor) return {};
-  const at = new Date(cursor.at);
-  const seen = cursor.seen.map(uuidToBin);
-  return {
-    OR: [
-      { [field]: { lt: at } },
-      { [field]: at, ...(seen.length ? { id: { notIn: seen } } : {}) },
-    ],
-  };
-}
-
-/**
- * Boundary = the last row's sort value, plus every id already emitted at that
- * value.
- *
- * The `seen` set must ACCUMULATE while the boundary timestamp does not advance.
- * A bulk receive can stamp a whole delivery inside one microsecond; if `seen`
- * only carried the current page, the timestamp would never move and paging
- * would loop — serving page one again forever. Carrying the previous cursor's
- * ids forward is what lets it walk through a large tie group.
- *
- * Trade-off: a tie group larger than a page inflates the cursor by one uuid per
- * row. Real `date_in` values are microsecond-precision and per-row, so groups
- * are normally tiny; the growth is bounded by the size of one tie group.
- */
-function buildCursor<T extends { id: Buffer }>(
-  section: CursorSection,
-  page: T[],
-  sortValue: (row: T) => Date,
-  previous: InventoryCursor | null,
-): InventoryCursor {
-  const at = sortValue(page[page.length - 1]);
-  const tied = page
-    .filter((row) => sortValue(row).getTime() === at.getTime())
-    .map((row) => binToUuid(row.id));
-
-  const carried =
-    previous && new Date(previous.at).getTime() === at.getTime() ? previous.seen : [];
-
-  return { section, at: at.toISOString(), seen: [...new Set([...carried, ...tied])] };
+function buildCursor(section: CursorSection, page: { id: Buffer }[]): InventoryCursor {
+  return { section, id: binToUuid(page[page.length - 1].id) };
 }
 
 /**
@@ -448,18 +410,22 @@ export class InventoryService {
 
     // ── Units first, then stock. A page may span the boundary. ──
     if (!cursor || cursor.section === 'unit') {
+      const anchor = cursor?.section === 'unit' ? uuidToBin(cursor.id) : undefined;
       const units = await this.db.unit.findMany({
-        where: { ...unitWhere, ...keysetWhere('dateIn', cursor?.section === 'unit' ? cursor : null) },
+        where: unitWhere,
         include: { product: { select: INVENTORY_PRODUCT_SELECT } },
-        orderBy: [{ dateIn: 'desc' }, { id: 'desc' }],
+        // `id` alone is the sort key: UUIDv7 is unique and time-ordered, so
+        // this is "newest first" with no ties to break.
+        orderBy: { id: 'desc' },
         take: limit + 1,
+        ...(anchor ? { cursor: { id: anchor }, skip: 1 } : {}),
       });
 
       const page = units.slice(0, limit);
       rows.push(...page.map(toUnitRow));
 
       if (units.length > limit) {
-        nextCursor = encodeCursor(buildCursor('unit', page, (u) => u.dateIn, cursor?.section === 'unit' ? cursor : null));
+        nextCursor = encodeCursor(buildCursor('unit', page));
         return { rows, nextCursor, hasMore: true, totals: { units: unitTotal, stock: stockTotal } };
       }
     }
@@ -471,21 +437,20 @@ export class InventoryService {
     // Fill the rest of the page from stock so a page is never short merely
     // because it crossed the boundary between the two shapes.
     const remaining = limit - rows.length;
+    const stockAnchor = cursor?.section === 'stock' ? uuidToBin(cursor.id) : undefined;
     const stock = await this.db.stockItem.findMany({
-      where: {
-        ...stockWhere,
-        ...keysetWhere('updatedAt', cursor?.section === 'stock' ? cursor : null),
-      },
+      where: stockWhere,
       include: { product: { select: INVENTORY_PRODUCT_SELECT } },
-      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      orderBy: { id: 'desc' },
       take: remaining + 1,
+      ...(stockAnchor ? { cursor: { id: stockAnchor }, skip: 1 } : {}),
     });
 
     const stockPage = stock.slice(0, remaining);
     rows.push(...stockPage.map(toStockRow));
 
     if (stock.length > remaining) {
-      nextCursor = encodeCursor(buildCursor('stock', stockPage, (r) => r.updatedAt, cursor?.section === 'stock' ? cursor : null));
+      nextCursor = encodeCursor(buildCursor('stock', stockPage));
     }
 
     return {
