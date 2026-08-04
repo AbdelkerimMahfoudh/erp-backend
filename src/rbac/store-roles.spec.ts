@@ -41,11 +41,29 @@ describe('store-facing roles', () => {
 describe('Store Employee', () => {
   it('can do the operational job: sell, receive, transfer, add stock', () => {
     expect(has('store_employee', 'sale.create')).toBe(true);
-    expect(has('store_employee', 'sale.return')).toBe(true);
     // The permission whose absence caused the receiving 403.
     expect(has('store_employee', 'purchase.manage')).toBe(true);
     expect(has('store_employee', 'unit.add')).toBe(true);
     expect(has('store_employee', 'unit.transfer')).toBe(true);
+  });
+
+  it('cannot COMPLETE a return — only a Manager or Owner may', () => {
+    // `returnUnit` voids the sale line, restocks the unit and computes a refund.
+    // That is final authority, not the request the approved rule describes.
+    expect(has('store_employee', 'sale.return')).toBe(false);
+  });
+
+  it('cannot activate an import', () => {
+    // The approved rule gives the employee preparation only; import.run is
+    // reserved for activation.
+    expect(has('store_employee', 'import.run')).toBe(false);
+  });
+
+  it('cannot sell below cost — the floor is gated on a permission it lacks', () => {
+    // discount.apply is safe to hold precisely because the cost floor is
+    // enforced independently, on discount.override.
+    expect(has('store_employee', 'discount.apply')).toBe(true);
+    expect(has('store_employee', 'discount.override')).toBe(false);
   });
 
   it('sees cost — an approved decision', () => {
@@ -78,15 +96,18 @@ describe('Store Employee', () => {
     }
   });
 
-  it('covers everything both legacy employee roles could do', () => {
-    // The merge must not quietly remove an ability either role already had,
-    // or a migrated user would lose access to their own job.
+  it('keeps every legacy ability EXCEPT the two the audit removed', () => {
+    // The merge must not quietly drop day-to-day abilities, or a migrated user
+    // loses access to their own job. Two are withheld deliberately because
+    // their real behaviour is final authority — see the tests above.
+    const AUDITED_OUT = new Set(['sale.return', 'import.run']);
     const legacy = new Set([
       ...ROLE_PERMISSIONS.sales_employee,
       ...ROLE_PERMISSIONS.warehouse_employee,
     ]);
+
     for (const perm of legacy) {
-      expect(has('store_employee', perm)).toBe(true);
+      expect(has('store_employee', perm)).toBe(!AUDITED_OUT.has(perm));
     }
   });
 });
@@ -102,10 +123,15 @@ describe('Store Manager', () => {
       'unit.transfer',
       'closing.perform',
       'report.view',
-      'discount.override',
     ]) {
       expect(has('store_manager', perm)).toBe(true);
     }
+  });
+
+  it('cannot sell below cost without explicit Owner delegation', () => {
+    // discount.override reads like a discount setting but is the below-cost
+    // gate. Every manager holding it permanently would be blanket authority.
+    expect(has('store_manager', 'discount.override')).toBe(false);
   });
 
   it('includes everything a Store Employee can do', () => {

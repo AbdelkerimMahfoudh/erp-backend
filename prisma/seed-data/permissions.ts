@@ -50,16 +50,20 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
    * Store Manager — the operational and approval baseline, plus cost.
    *
    * Deliberately WITHOUT `expense.manage`: the approved decisions describe a
-   * narrower manager than the old branch_manager, and inventing spend authority
-   * from a permission that merely happened to exist would be inventing a
-   * business rule. Grant it explicitly if the Owner decides otherwise.
+   * narrower manager, and inventing spend authority from a permission that
+   * merely happened to exist would be inventing a business rule.
    *
-   * Price editing has no permission to grant — it stays Owner-delegated and is
-   * blocked on per-user overrides, which do not exist yet (see docs/21).
+   * Deliberately WITHOUT `discount.override` either. That permission is not
+   * about discounts — `assertBelowCostAllowed` uses it as the gate for SELLING
+   * BELOW COST. Granting it to every manager would hand out permanent
+   * below-cost authority by default. It becomes an Owner-delegated per-user
+   * grant once overrides exist.
+   *
+   * Price editing has no permission to grant at all; it stays Owner-delegated.
    */
   store_manager: [
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
-    'discount.override', 'unit.add', 'unit.transfer', 'import.run',
+    'unit.add', 'unit.transfer', 'import.run',
     'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
   ],
 
@@ -70,16 +74,27 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
    *
    * Has `cost.view` (an approved decision: employees see product cost and the
    * last selling price) but NOT `report.view` — cost visibility must not drag
-   * profit dashboards along with it, which is exactly why they are separate
-   * permissions.
+   * profit dashboards along with it, which is exactly why they are separate.
    *
-   * No `expense.manage`: the model cannot yet express "submit an expense" as
-   * distinct from "manage expenses", so the narrower reading wins and a
-   * submit-only permission is recorded as future work.
+   * Three permissions were audited OUT because their real behaviour is final
+   * authority, not the operational work the role needs:
+   *
+   *   sale.return  — `returnUnit` voids the sale line, restocks the unit and
+   *                  computes a REFUND. That completes a return; the approved
+   *                  rule is that an employee only requests one. Needs a future
+   *                  `return.request`.
+   *   import.run   — reserved for activating imported inventory. Needs the
+   *                  future `import.prepare` / `import.approve` split.
+   *   expense.manage — the model cannot express "submit" separately from
+   *                  "manage", so the narrower reading wins.
+   *
+   * `discount.apply` is retained because it cannot bypass the cost floor:
+   * below-cost selling is gated independently on `discount.override`, which
+   * this role does not have.
    */
   store_employee: [
-    'sale.create', 'sale.return', 'cost.view', 'discount.apply',
-    'unit.add', 'unit.transfer', 'import.run', 'purchase.manage',
+    'sale.create', 'cost.view', 'discount.apply',
+    'unit.add', 'unit.transfer', 'purchase.manage',
   ],
 
   administrator: ADMIN_KEYS,
