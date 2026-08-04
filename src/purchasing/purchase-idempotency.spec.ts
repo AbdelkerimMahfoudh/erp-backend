@@ -115,6 +115,12 @@ function makeService(companyId: Buffer = COMPANY) {
       }),
     } as never,
     { learn: jest.fn(async () => { learnCalls += 1; }) } as never,
+    // Outbox: enqueue counts as the learning intent for these tests, since the
+    // sweeper is what actually calls learn() in production.
+    {
+      enqueueTx: jest.fn(async (_tx: unknown, intents: unknown[]) => { learnCalls += intents.length; }),
+      processNow: jest.fn(async () => {}),
+    } as never,
     { enqueueDailyRecompute: jest.fn(), enqueueBranchRefresh: jest.fn() } as never,
   );
 

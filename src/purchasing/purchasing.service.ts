@@ -15,6 +15,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { TrackingStrategyRegistry } from '../tracking/tracking-strategy.registry';
 import { RecognitionService } from '../scanner/recognition.service';
+import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
 import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
@@ -82,6 +83,7 @@ export class PurchasingService {
     private readonly notifications: NotificationsService,
     private readonly strategies: TrackingStrategyRegistry,
     private readonly recognition: RecognitionService,
+    private readonly outbox: RecognitionOutboxService,
     @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
   ) {}
 
@@ -258,6 +260,24 @@ export class PurchasingService {
           after: { total, units: committableUnits.length, stockLines: preparedStock.length },
           branchId,
         });
+
+        /**
+         * Queue teach-on-confirm in the SAME transaction as the purchase.
+         *
+         * This is the whole point of the outbox: stock and the intent to learn
+         * from it either both exist or neither does. One event per code, so a
+         * delivery carrying several codes retries each independently.
+         */
+        await this.outbox.enqueueTx(tx as never, learnPlans.map((plan) => ({
+          companyId,
+          purchaseId: pid,
+          codeType: plan.codeType,
+          code: plan.code,
+          productId: plan.productId,
+          supplierId: supplier.id,
+          source: 'receiving',
+        })));
+
         return pid;
       });
     } catch (e) {
@@ -270,15 +290,10 @@ export class PurchasingService {
     // 5. Post-commit side effects: notifications + recognition learning.
     // Receiving is the STRONGEST learning signal, and only fires on a confirmed
     // (committed) purchase. Supplier context is stamped for future intelligence.
-    for (const plan of learnPlans) {
-      await this.recognition.learn({
-        codeType: plan.codeType,
-        code: plan.code,
-        productId: plan.productId,
-        source: 'receiving',
-        supplierId: supplier.id,
-      });
-    }
+    // Intents were queued in the SAME transaction as the purchase, so nothing
+    // can be lost here. Draining now is only an optimisation — if this process
+    // dies the sweeper picks the events up.
+    await this.outbox.processNow();
 
     const received = committableUnits.length + preparedStock.reduce((s, l) => s + l.quantity, 0);
     if (received > 0) {

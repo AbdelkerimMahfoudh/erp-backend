@@ -6,6 +6,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { ProductAttributesService } from '../tracking/product-attributes.service';
 import { RecognitionService } from '../scanner/recognition.service';
+import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
 import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { isValidImei, tacOf } from '../inventory/imei.util';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -35,6 +36,7 @@ export class CatalogService {
     private readonly audit: AuditService,
     private readonly attributes: ProductAttributesService,
     private readonly recognition: RecognitionService,
+    private readonly outbox: RecognitionOutboxService,
   ) {}
 
   async create(dto: CreateProductDto): Promise<Product> {
@@ -55,45 +57,61 @@ export class CatalogService {
     const schema = this.attributes.parseSchema(schemaRaw);
     const { extras } = this.attributes.validateValues(schema, dto.specifications);
 
-    const product = await this.db.product.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        categoryId,
-        brand: dto.brand,
-        model: dto.model,
-        variant: dto.variant ?? null,
-        trackingType: trackingType ?? 'imei',
-        specifications: (dto.specifications ?? undefined) as Prisma.InputJsonValue | undefined,
-        barcode: dto.barcode ?? null,
-        defaultCost: dto.defaultCost ?? null,
-        defaultPrice: dto.defaultPrice ?? null,
-        reorderThreshold: dto.reorderThreshold ?? 0,
-      },
-    });
-    await this.audit.record({
-      entityType: 'Product',
-      entityId: product.id,
-      action: 'create',
-      after: {
-        brand: product.brand,
-        model: product.model,
-        trackingType: product.trackingType,
-        ...(extras.length ? { attributesForReview: extras } : {}),
-      },
+    const product = await this.db.$transaction(async (tx) => {
+      const created = await tx.product.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId,
+          categoryId,
+          brand: dto.brand,
+          model: dto.model,
+          variant: dto.variant ?? null,
+          trackingType: trackingType ?? 'imei',
+          specifications: (dto.specifications ?? undefined) as Prisma.InputJsonValue | undefined,
+          barcode: dto.barcode ?? null,
+          defaultCost: dto.defaultCost ?? null,
+          defaultPrice: dto.defaultPrice ?? null,
+          reorderThreshold: dto.reorderThreshold ?? 0,
+        },
+      });
+
+      await this.audit.recordTx(tx, {
+        entityType: 'Product',
+        entityId: created.id,
+        action: 'create',
+        after: {
+          brand: created.brand,
+          model: created.model,
+          trackingType: created.trackingType,
+          ...(extras.length ? { attributesForReview: extras } : {}),
+        },
+      });
+
+      /**
+       * A product's barcode becomes a recognition alias. Queued in the SAME
+       * transaction as the product, so a crash cannot leave a product whose
+       * barcode the scanner never learned.
+       */
+      if (created.barcode) {
+        await this.outbox.enqueueTx(tx as never, [
+          {
+            companyId,
+            // Catalog creation has no purchase; the unique event key is
+            // (company, null, barcode, code), so re-creating the same barcode
+            // alias is a no-op rather than duplicate evidence.
+            purchaseId: null,
+            codeType: 'barcode',
+            code: created.barcode,
+            productId: created.id,
+            source: 'manual',
+          },
+        ]);
+      }
+
+      return created;
     });
 
-    // Teach the scanner: a product's barcode becomes a recognition alias. Many
-    // products may carry aliases from different suppliers/packaging — each is a
-    // distinct learned mapping to the same product.
-    if (product.barcode) {
-      await this.recognition.learn({
-        codeType: 'barcode',
-        code: product.barcode,
-        productId: product.id,
-        source: 'manual',
-      });
-    }
+    await this.outbox.processNow();
     return product;
   }
 

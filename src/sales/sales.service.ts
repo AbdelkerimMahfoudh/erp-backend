@@ -51,7 +51,11 @@ export class SalesService {
 
     // Idempotency (offline retries).
     if (dto.clientUuid) {
-      const existing = await this.db.sale.findUnique({ where: { clientUuid: uuidToBin(dto.clientUuid) } });
+      // Scoped by company (0014): one company's key must never resolve — or
+      // suppress — another company's sale.
+      const existing = await this.db.sale.findFirst({
+        where: { companyId, clientUuid: uuidToBin(dto.clientUuid) },
+      });
       if (existing) return this.toResponse(existing);
     }
 

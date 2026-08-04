@@ -178,6 +178,7 @@ model Company {
   branchCounters     BranchCounter[]
   productCategories  ProductCategory[]
   productRecognitions ProductRecognition[]
+  recognitionOutbox RecognitionOutbox[]
 
   @@map("companies")
 }
@@ -581,6 +582,39 @@ model Customer {
   @@map("customers")
 }
 
+/// Queued teach-on-confirm events, written in the SAME transaction as the
+/// purchase so a crash cannot lose learning. Unique per (company, purchase,
+/// code) — replaying a purchase or a sweep cannot double-count evidence.
+model RecognitionOutbox {
+  id          Bytes     @id @db.Binary(16)
+  companyId   Bytes     @map("company_id") @db.Binary(16)
+  purchaseId  Bytes?    @map("purchase_id") @db.Binary(16)
+  codeType    String    @map("code_type") @db.VarChar(16)
+  code        String    @db.VarChar(64)
+  productId   Bytes     @map("product_id") @db.Binary(16)
+  supplierId  Bytes?    @map("supplier_id") @db.Binary(16)
+  source      String    @db.VarChar(32)
+  /// pending | processing | done | failed
+  status      String    @default("pending") @db.VarChar(16)
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error") @db.VarChar(500)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  processedAt DateTime? @map("processed_at") @db.DateTime(6)
+  /// Lease deadline. An expired lease means the worker died; the row is
+  /// claimable again without manual intervention.
+  claimedUntil DateTime? @map("claimed_until") @db.DateTime(6)
+  /// Exponential backoff, so one permanently failing row cannot hammer the DB.
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, purchaseId, codeType, code])
+  @@index([status, updatedAt])
+  @@index([status, nextAttemptAt, claimedUntil])
+  @@map("recognition_outbox")
+}
+
 model Sale {
   id         Bytes         @id @db.Binary(16)
   companyId  Bytes         @map("company_id") @db.Binary(16)
@@ -613,7 +647,7 @@ model Sale {
   returns  Return[]
 
   @@unique([branchId, invoiceNo])
-  @@unique([clientUuid])
+  @@unique([companyId, clientUuid])
   @@index([companyId, branchId, soldAt])
   @@index([companyId, userId, soldAt])
   @@index([customerId])

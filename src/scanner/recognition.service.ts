@@ -46,6 +46,15 @@ export interface LearningEvent {
  *  - A correction re-points the aggregate but preserves the prior mapping in
  *    the event; it never hard-deletes.
  */
+/** The subset of Prisma the learning path touches — request client or a tx. */
+type LearningTxClient = {
+  productRecognition: {
+    findFirst: (args: unknown) => Promise<any>;
+    create: (args: unknown) => Promise<any>;
+    update: (args: unknown) => Promise<any>;
+  };
+};
+
 @Injectable()
 export class RecognitionService {
   constructor(
@@ -64,17 +73,29 @@ export class RecognitionService {
     return this.scorer.score(signals);
   }
 
-  async learn(ev: LearningEvent): Promise<void> {
-    const companyId = this.tenant.companyId();
+  /**
+   * Record a confirmed code -> product association.
+   *
+   * `opts` exists for the outbox worker, which runs OUTSIDE a request: there is
+   * no CLS tenant context to read a company from, and the learning mutation
+   * must share a transaction with marking the outbox row done — otherwise a
+   * crash between the two would re-increment evidence on recovery.
+   */
+  async learn(
+    ev: LearningEvent,
+    opts?: { tx?: LearningTxClient; companyId?: Buffer },
+  ): Promise<void> {
+    const db = (opts?.tx ?? this.db) as LearningTxClient;
+    const companyId = opts?.companyId ?? this.tenant.companyId();
     const now = new Date();
-    const existing = await this.db.productRecognition.findFirst({
-      where: { codeType: ev.codeType, code: ev.code },
+    const existing = await db.productRecognition.findFirst({
+      where: { codeType: ev.codeType, code: ev.code, companyId },
     });
 
     // New mapping — first time this code is taught.
     if (!existing) {
       const id = newUuidV7Bin();
-      await this.db.productRecognition.create({
+      await db.productRecognition.create({
         data: {
           id,
           companyId,
@@ -95,7 +116,7 @@ export class RecognitionService {
 
     // Reinforcement — same code confirms the same product.
     if (existing.productId.equals(ev.productId)) {
-      await this.db.productRecognition.update({
+      await db.productRecognition.update({
         where: { id: existing.id },
         data: {
           timesSeen: { increment: 1 },
@@ -114,7 +135,7 @@ export class RecognitionService {
     // corrections is cumulative — a "confusing code" signal). The prior mapping
     // survives as an append-only event.
     await this.recordEvent(existing.id, `correction:${ev.source}`, existing.productId, ev.productId, ev.supplierId);
-    await this.db.productRecognition.update({
+    await db.productRecognition.update({
       where: { id: existing.id },
       data: {
         productId: ev.productId,
