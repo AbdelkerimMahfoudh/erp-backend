@@ -1,5 +1,8 @@
 import { ConflictException } from '@nestjs/common';
 import { PurchasingService } from './purchasing.service';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { CreatePurchaseDto } from './dto/create-purchase.dto';
 import { uuidToBin, binToUuid } from '../common/utils/uuid.util';
 
 /**
@@ -208,12 +211,24 @@ describe('purchase idempotency', () => {
     expect(purchases).toHaveLength(2);
   });
 
-  it('a request without a key keeps working (idempotency is opt-in)', async () => {
-    const { service, purchases } = makeService();
+  it('rejects a request with no client key at validation level', async () => {
+    // Mobile is the only consumer, so the key is REQUIRED rather than opt-in:
+    // an unkeyed receive is exactly the retry that duplicates a delivery.
+    const dto = plainToInstance(CreatePurchaseDto, {
+      supplierId: binToUuid(SUPPLIER),
+      items: [{ productId: PRODUCT, unitCost: 800, identifiers: ['356888000000001'] }],
+    });
+    const errors = await validate(dto, { whitelist: true });
+    expect(errors.some((e) => e.property === 'clientUuid')).toBe(true);
+  });
 
-    await service.createPurchase(dtoFor({ clientUuid: undefined }));
-    await service.createPurchase(dtoFor({ clientUuid: undefined }));
-
-    expect(purchases).toHaveLength(2);
+  it('accepts a request that supplies the key', async () => {
+    const dto = plainToInstance(CreatePurchaseDto, {
+      clientUuid: KEY,
+      supplierId: binToUuid(SUPPLIER),
+      items: [{ productId: PRODUCT, unitCost: 800, identifiers: ['356888000000001'] }],
+    });
+    const errors = await validate(dto, { whitelist: true });
+    expect(errors.some((e) => e.property === 'clientUuid')).toBe(false);
   });
 });

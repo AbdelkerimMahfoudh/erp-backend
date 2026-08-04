@@ -72,15 +72,14 @@ export class ReceiveItemDto {
 
 export class CreatePurchaseDto {
   /**
-   * Client-generated request identity, created ONCE per receiving session and
+   * REQUIRED. Client-generated request identity, created ONCE per receiving session and
    * reused across every retry — including an offline replay. Retrying with the
    * same key returns the original purchase instead of receiving the delivery
    * twice. Same convention as CreateSaleDto.clientUuid.
    */
-  @ApiPropertyOptional({ format: 'uuid' })
-  @IsOptional()
+  @ApiProperty({ format: 'uuid' })
   @IsUUID()
-  clientUuid?: string;
+  clientUuid!: string;
 
   @ApiProperty({ format: 'uuid' })
   @IsUUID()

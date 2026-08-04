@@ -103,7 +103,7 @@ export class PurchasingService {
      * contents would silently return the FIRST purchase, quietly discarding
      * the delivery the employee actually scanned.
      */
-    const replay = dto.clientUuid ? await this.findReplay(dto, companyId) : null;
+    const replay = await this.findReplay(dto, companyId);
     if (replay) return replay;
 
     const supplier = await this.db.supplier.findUnique({ where: { id: uuidToBin(dto.supplierId) } });
@@ -203,8 +203,8 @@ export class PurchasingService {
             supplierId: supplier.id,
             userId: this.tenant.userId() ?? null,
             referenceNo: dto.referenceNo ?? null,
-            clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
-            clientRequestHash: dto.clientUuid ? fingerprint(dto) : null,
+            clientUuid: uuidToBin(dto.clientUuid),
+            clientRequestHash: fingerprint(dto),
             date: new Date(),
             subtotal: total,
             taxTotal: 0,
@@ -312,7 +312,7 @@ export class PurchasingService {
    */
   private async findReplay(dto: CreatePurchaseDto, companyId: Buffer) {
     const prior = await this.db.purchase.findFirst({
-      where: { companyId, clientUuid: uuidToBin(dto.clientUuid!) },
+      where: { companyId, clientUuid: uuidToBin(dto.clientUuid) },
       include: { items: true, units: { select: { id: true } } },
     });
     if (!prior) return null;
