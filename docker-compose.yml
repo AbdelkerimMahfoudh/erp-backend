@@ -1,0 +1,30 @@
+# Optional local MySQL 8.4 for the Phone Store ERP — for machines WITHOUT a
+# local MySQL. If you already run MySQL 8.0+ (e.g. WAMP on port 3306), you do
+# NOT need this: just point DATABASE_URL at your instance.
+#
+# The architecture targets MySQL 8.0+ as a provider — it is not tied to this
+# container or to WAMP.
+#
+# On first init, scripts in ./prisma/sql/init run as root (alphabetical order):
+#   00_roles.sql (users + grants). 10_grants_post.sql is applied AFTER migrations.
+services:
+  db:
+    image: mysql:8.4
+    container_name: phonestore_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: phonestore
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "3310:3306"   # host 3310 to avoid clashing with a local/WAMP MySQL on 3306
+    volumes:
+      - phonestore_mysqldata:/var/lib/mysql
+      - ./prisma/sql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  phonestore_mysqldata:

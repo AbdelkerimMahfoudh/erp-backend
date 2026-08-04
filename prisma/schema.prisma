@@ -1,0 +1,1144 @@
+// ===========================================================================
+// Phone Store Management ERP — Prisma schema (MySQL 8 / InnoDB)
+// Design: docs/10_DATABASE_SCHEMA.md · Architecture: docs/06_TECHNICAL_ARCHITECTURE.md
+//
+// Conventions (MySQL 8.0+):
+//   * PRIMARY KEYS = UUIDv7 stored as BINARY(16) (Prisma `Bytes @db.Binary(16)`),
+//     generated APP-SIDE (offline-friendly). See prisma/lib/uuid.ts for the
+//     string <-> binary conversion helpers. No DB default — the app/seed supply
+//     the id on every create (a create middleware does this in the API phase).
+//   * Money = Decimal(14,2) (never float). Timestamps = DateTime(6), UTC.
+//   * company_id on EVERY table incl. line tables — tenant isolation is
+//     ENFORCED IN THE BACKEND (app-layer), because MySQL has no RLS.
+//   * Enums map to native MySQL ENUM columns.
+//
+// NOT modelled here — implemented in migration 0002_mysql_extras:
+//   generated columns (sold-once `active_unit_id`, settings `branch_scope`) +
+//   their UNIQUE indexes, FULLTEXT product search, CHECK constraints,
+//   app-user GRANTs + audit-log append-only REVOKE.
+// ===========================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider          = "mysql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+// ------------------------------- Enums -------------------------------------
+
+enum RoleKey {
+  owner
+  administrator
+  branch_manager
+  sales_employee
+  warehouse_employee
+}
+
+enum BranchType {
+  store
+  warehouse
+}
+
+enum TrackingType {
+  imei
+  serial
+  quantity
+}
+
+enum CodeType {
+  tac
+  barcode
+  serial_prefix
+}
+
+enum UnitStatus {
+  in_stock
+  reserved
+  sold
+  returned
+  faulty
+  in_transit
+  transferred_out
+}
+
+enum PurchaseStatus {
+  paid
+  partial
+  unpaid
+}
+
+enum SalePayStatus {
+  paid
+  partial
+  credit
+}
+
+enum PaymentMethod {
+  cash
+  card
+  mobile
+  bank
+  other
+}
+
+enum TransferStatus {
+  ready_to_ship
+  in_transit
+  received
+  cancelled
+  // Future (design-only): draft, pending_approval, rejected
+}
+
+enum ExpenseRecurrence {
+  none
+  monthly
+  yearly
+}
+
+enum ImportStatus {
+  parsing
+  preview
+  committed
+  failed
+}
+
+enum ImportRowStatus {
+  valid
+  warning
+  error
+}
+
+enum AuditAction {
+  create
+  update
+  delete
+  status_change
+  override
+  login
+  logout
+}
+
+enum SyncStatus {
+  pending
+  accepted
+  conflict
+  rejected
+}
+
+// ------------------------- Tenancy & Access --------------------------------
+
+model Company {
+  id           Bytes    @id @db.Binary(16)
+  name         String   @db.VarChar(160)
+  currency     String   @default("USD") @db.Char(3)
+  timezone     String   @default("UTC") @db.VarChar(64)
+  settingsJson Json     @map("settings") @db.Json
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  branches          Branch[]
+  users             User[]
+  roles             Role[]
+  rolePermissions   RolePermission[]
+  userBranches      UserBranch[]
+  products          Product[]
+  units             Unit[]
+  stockItems        StockItem[]
+  suppliers         Supplier[]
+  purchases         Purchase[]
+  purchaseItems     PurchaseItem[]
+  supplierPayments  SupplierPayment[]
+  customers         Customer[]
+  sales             Sale[]
+  saleItems         SaleItem[]
+  payments          Payment[]
+  returns           Return[]
+  stockTransfers    StockTransfer[]
+  transferItems     TransferItem[]
+  expenseTemplates  ExpenseTemplate[]
+  expenses          Expense[]
+  dailyClosings     DailyClosing[]
+  dailyDigests      DailyDigest[]
+  digestLines       DigestLine[]
+  notifications     Notification[]
+  importBatches     ImportBatch[]
+  importRows        ImportRow[]
+  reportDefinitions ReportDefinition[]
+  reportSnapshots   ReportSnapshot[]
+  auditLogs         AuditLog[]
+  settings          Setting[]
+  syncDevices        SyncDevice[]
+  outboxChanges      OutboxChange[]
+  authSessions       AuthSession[]
+  branchCounters     BranchCounter[]
+  productCategories  ProductCategory[]
+  productRecognitions ProductRecognition[]
+
+  @@map("companies")
+}
+
+model Branch {
+  id        Bytes      @id @db.Binary(16)
+  companyId Bytes      @map("company_id") @db.Binary(16)
+  name      String     @db.VarChar(160)
+  type      BranchType @default(store)
+  address   String?    @db.VarChar(255)
+  phone     String?    @db.VarChar(40)
+  isActive  Boolean    @default(true) @map("is_active")
+  createdAt DateTime   @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime   @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt DateTime?  @map("deleted_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  userBranches     UserBranch[]
+  units            Unit[]
+  stockItems       StockItem[]
+  purchases        Purchase[]
+  sales            Sale[]
+  transfersFrom    StockTransfer[]   @relation("TransferFrom")
+  transfersTo      StockTransfer[]   @relation("TransferTo")
+  expenseTemplates ExpenseTemplate[]
+  expenses         Expense[]
+  dailyClosings    DailyClosing[]
+  dailyDigests     DailyDigest[]
+  notifications    Notification[]
+  importBatches    ImportBatch[]
+  settings         Setting[]
+  branchCounters   BranchCounter[]
+
+  @@unique([companyId, name]) // company_id is the leftmost column → covers company scans
+  @@map("branches")
+}
+
+model User {
+  id           Bytes     @id @db.Binary(16)
+  companyId    Bytes     @map("company_id") @db.Binary(16)
+  name         String    @db.VarChar(160)
+  login        String    @db.VarChar(120)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  pinHash      String?   @map("pin_hash") @db.VarChar(255)
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at") @db.DateTime(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt    DateTime? @map("deleted_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  userBranches      UserBranch[]
+  unitsCreated      Unit[]             @relation("UnitCreatedBy")
+  unitsUpdated      Unit[]             @relation("UnitUpdatedBy")
+  purchases         Purchase[]
+  supplierPayments  SupplierPayment[]
+  sales             Sale[]
+  returns           Return[]
+  transfersSent     StockTransfer[]    @relation("TransferSentBy")
+  transfersReceived StockTransfer[]    @relation("TransferReceivedBy")
+  expenses          Expense[]
+  dailyClosings     DailyClosing[]
+  digestLines       DigestLine[]
+  notifications     Notification[]
+  importBatches     ImportBatch[]
+  reportDefinitions ReportDefinition[]
+  auditLogs         AuditLog[]
+  syncDevices       SyncDevice[]
+  authSessions      AuthSession[]
+
+  @@unique([companyId, login]) // company_id leftmost → covers company scans
+  @@map("users")
+}
+
+model Role {
+  id        Bytes   @id @db.Binary(16)
+  companyId Bytes   @map("company_id") @db.Binary(16)
+  key       RoleKey
+  name      String  @db.VarChar(80)
+
+  company         Company          @relation(fields: [companyId], references: [id])
+  rolePermissions RolePermission[]
+  userBranches    UserBranch[]
+
+  @@unique([companyId, key]) // company_id leftmost → covers company scans
+  @@map("roles")
+}
+
+model Permission {
+  id    Bytes  @id @db.Binary(16)
+  key   String @unique @db.VarChar(80)
+  label String @db.VarChar(160)
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  companyId    Bytes @map("company_id") @db.Binary(16)
+  roleId       Bytes @map("role_id") @db.Binary(16)
+  permissionId Bytes @map("permission_id") @db.Binary(16)
+
+  company    Company    @relation(fields: [companyId], references: [id])
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([companyId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+model UserBranch {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  userId    Bytes @map("user_id") @db.Binary(16)
+  branchId  Bytes @map("branch_id") @db.Binary(16)
+  roleId    Bytes @map("role_id") @db.Binary(16)
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch  Branch  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  role    Role    @relation(fields: [roleId], references: [id])
+
+  @@unique([userId, branchId])
+  @@index([companyId])
+  @@index([branchId])
+  @@index([roleId])
+  @@map("user_branches")
+}
+
+// ------------------------- Catalog & Inventory -----------------------------
+
+model Product {
+  id               Bytes        @id @db.Binary(16)
+  companyId        Bytes        @map("company_id") @db.Binary(16)
+  categoryId       Bytes?       @map("category_id") @db.Binary(16)
+  brand            String       @db.VarChar(80)
+  model            String       @db.VarChar(120)
+  variant          String?      @db.VarChar(120)
+  trackingType     TrackingType @default(imei) @map("tracking_type")
+  specifications   Json?        @db.Json // adaptive, category-defined attribute values
+  barcode          String?      @db.VarChar(64)
+  defaultCost      Decimal?     @map("default_cost") @db.Decimal(14, 2)
+  defaultPrice     Decimal?     @map("default_price") @db.Decimal(14, 2)
+  reorderThreshold Int          @default(0) @map("reorder_threshold")
+  taxRate          Decimal?     @map("tax_rate") @db.Decimal(6, 4) // reserved v2
+  createdAt        DateTime     @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt        DateTime?    @map("deleted_at") @db.DateTime(6)
+
+  company       Company              @relation(fields: [companyId], references: [id])
+  category      ProductCategory?     @relation(fields: [categoryId], references: [id])
+  units         Unit[]
+  stockItems    StockItem[]
+  purchaseItems PurchaseItem[]
+  saleItems     SaleItem[]
+  transferItems TransferItem[]
+  recognitions  ProductRecognition[]
+
+  @@unique([companyId, brand, model, variant]) // company_id leftmost → covers company scans
+  @@unique([companyId, barcode])
+  @@index([categoryId])
+  @@map("products")
+}
+
+// Category taxonomy with a default tracking type + adaptive attribute schema.
+model ProductCategory {
+  id                  Bytes        @id @db.Binary(16)
+  companyId           Bytes        @map("company_id") @db.Binary(16)
+  name                String       @db.VarChar(80)
+  defaultTrackingType TrackingType @map("default_tracking_type")
+  attributeSchema     Json?        @map("attribute_schema") @db.Json
+  isActive            Boolean      @default(true) @map("is_active")
+  createdAt           DateTime     @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt           DateTime     @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  products Product[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@map("product_categories")
+}
+
+// Learning map: a scanned code (TAC / barcode / future serial_prefix) → product.
+model ProductRecognition {
+  id              Bytes     @id @db.Binary(16)
+  companyId       Bytes     @map("company_id") @db.Binary(16)
+  codeType        CodeType  @map("code_type")
+  code            String    @db.VarChar(64)
+  productId       Bytes     @map("product_id") @db.Binary(16)
+  timesSeen       Int       @default(1) @map("times_seen")
+  confirmations   Int       @default(0)
+  corrections     Int       @default(0)
+  lastSeenAt      DateTime? @map("last_seen_at") @db.DateTime(6)
+  lastConfirmedAt DateTime? @map("last_confirmed_at") @db.DateTime(6)
+  lastCorrectedAt DateTime? @map("last_corrected_at") @db.DateTime(6)
+  sourceStats     Json?     @map("source_stats") @db.Json // {receiving,scan,sale,manual} counts
+  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, codeType, code])
+  @@index([companyId, productId])
+  @@index([productId])
+  @@map("product_recognition")
+}
+
+model TacCatalog {
+  tac            String  @id @db.Char(8)
+  brand          String? @db.VarChar(80)
+  model          String? @db.VarChar(120)
+  defaultVariant String? @map("default_variant") @db.VarChar(120)
+
+  @@map("tac_catalog")
+}
+
+model Unit {
+  id            Bytes      @id @db.Binary(16)
+  companyId     Bytes      @map("company_id") @db.Binary(16)
+  productId     Bytes      @map("product_id") @db.Binary(16)
+  branchId      Bytes      @map("branch_id") @db.Binary(16)
+  supplierId    Bytes?     @map("supplier_id") @db.Binary(16)
+  purchaseId    Bytes?     @map("purchase_id") @db.Binary(16)
+  imeiPrimary   String?    @map("imei_primary") @db.VarChar(15)
+  imeiSecondary String?    @map("imei_secondary") @db.VarChar(15)
+  serialNo      String?    @map("serial_no") @db.VarChar(60)
+  // NOTE: a generated STORED `identifier` = COALESCE(imei_primary, serial_no)
+  // with a UNIQUE index exists in the DB (migration 0008) — not modelled here
+  // (Prisma can't express generated columns; appears as an expected diff extra).
+  cost          Decimal    @db.Decimal(14, 2) // exact per-unit cost (D4)
+  status        UnitStatus @default(in_stock)
+  dateIn        DateTime   @default(now()) @map("date_in") @db.DateTime(6)
+  dateSold      DateTime?  @map("date_sold") @db.DateTime(6)
+  imageRef      String?    @map("image_ref") @db.VarChar(512)
+  createdAt     DateTime   @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt     DateTime   @updatedAt @map("updated_at") @db.DateTime(6)
+  createdById   Bytes?     @map("created_by") @db.Binary(16)
+  updatedById   Bytes?     @map("updated_by") @db.Binary(16)
+
+  company   Company   @relation(fields: [companyId], references: [id])
+  product   Product   @relation(fields: [productId], references: [id])
+  branch    Branch    @relation(fields: [branchId], references: [id])
+  supplier  Supplier? @relation(fields: [supplierId], references: [id])
+  purchase  Purchase? @relation(fields: [purchaseId], references: [id])
+  createdBy User?     @relation("UnitCreatedBy", fields: [createdById], references: [id])
+  updatedBy User?     @relation("UnitUpdatedBy", fields: [updatedById], references: [id])
+
+  saleItems     SaleItem[]
+  returns       Return[]
+  transferItems TransferItem[]
+
+  @@unique([imeiSecondary]) // MySQL allows multiple NULLs → unique-when-present
+  @@index([companyId, branchId, status])
+  @@index([productId])
+  @@index([supplierId])
+  @@index([purchaseId])
+  @@map("units")
+}
+
+model StockItem {
+  id        Bytes    @id @db.Binary(16)
+  companyId Bytes    @map("company_id") @db.Binary(16)
+  productId Bytes    @map("product_id") @db.Binary(16)
+  branchId  Bytes    @map("branch_id") @db.Binary(16)
+  quantity  Int      @default(0) // CHECK (>=0) in 0002
+  cost      Decimal  @db.Decimal(14, 2)
+  price     Decimal  @db.Decimal(14, 2)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+  branch  Branch  @relation(fields: [branchId], references: [id])
+
+  @@unique([companyId, productId, branchId])
+  @@index([productId])
+  @@index([branchId])
+  @@map("stock_items")
+}
+
+// -------------------- Suppliers, Purchases & Sales -------------------------
+
+model Supplier {
+  id        Bytes     @id @db.Binary(16)
+  companyId Bytes     @map("company_id") @db.Binary(16)
+  name      String    @db.VarChar(160)
+  phone     String?   @db.VarChar(40)
+  notes     String?   @db.Text
+  balance   Decimal   @default(0) @db.Decimal(14, 2)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt DateTime? @map("deleted_at") @db.DateTime(6)
+
+  company   Company           @relation(fields: [companyId], references: [id])
+  purchases Purchase[]
+  units     Unit[]
+  payments  SupplierPayment[]
+
+  @@unique([companyId, name]) // company_id leftmost → covers company scans
+  @@map("suppliers")
+}
+
+model Purchase {
+  id          Bytes          @id @db.Binary(16)
+  companyId   Bytes          @map("company_id") @db.Binary(16)
+  branchId    Bytes          @map("branch_id") @db.Binary(16)
+  supplierId  Bytes          @map("supplier_id") @db.Binary(16)
+  userId      Bytes?         @map("user_id") @db.Binary(16)
+  referenceNo String?        @map("reference_no") @db.VarChar(40)
+  date        DateTime       @default(now()) @db.DateTime(6)
+  subtotal    Decimal        @db.Decimal(14, 2)
+  taxTotal    Decimal        @default(0) @map("tax_total") @db.Decimal(14, 2)
+  total       Decimal        @db.Decimal(14, 2)
+  amountPaid  Decimal        @default(0) @map("amount_paid") @db.Decimal(14, 2)
+  status      PurchaseStatus @default(unpaid)
+  dueDate     DateTime?      @map("due_date") @db.Date
+  createdAt   DateTime       @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company  Company           @relation(fields: [companyId], references: [id])
+  branch   Branch            @relation(fields: [branchId], references: [id])
+  supplier Supplier          @relation(fields: [supplierId], references: [id])
+  user     User?             @relation(fields: [userId], references: [id])
+  items    PurchaseItem[]
+  units    Unit[]
+  payments SupplierPayment[]
+
+  @@index([companyId, branchId, date])
+  @@index([supplierId])
+  @@index([userId])
+  @@map("purchases")
+}
+
+model PurchaseItem {
+  id         Bytes   @id @db.Binary(16)
+  companyId  Bytes   @map("company_id") @db.Binary(16)
+  purchaseId Bytes   @map("purchase_id") @db.Binary(16)
+  productId  Bytes   @map("product_id") @db.Binary(16)
+  quantity   Int
+  unitCost   Decimal @map("unit_cost") @db.Decimal(14, 2)
+  taxAmount  Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
+
+  company  Company  @relation(fields: [companyId], references: [id])
+  purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id])
+
+  @@index([purchaseId])
+  @@index([companyId])
+  @@index([productId])
+  @@map("purchase_items")
+}
+
+model SupplierPayment {
+  id          Bytes         @id @db.Binary(16)
+  companyId   Bytes         @map("company_id") @db.Binary(16)
+  supplierId  Bytes         @map("supplier_id") @db.Binary(16)
+  purchaseId  Bytes?        @map("purchase_id") @db.Binary(16)
+  amount      Decimal       @db.Decimal(14, 2)
+  method      PaymentMethod
+  paidAt      DateTime      @default(now()) @map("paid_at") @db.DateTime(6)
+  createdById Bytes?        @map("created_by") @db.Binary(16)
+
+  company   Company   @relation(fields: [companyId], references: [id])
+  supplier  Supplier  @relation(fields: [supplierId], references: [id])
+  purchase  Purchase? @relation(fields: [purchaseId], references: [id])
+  createdBy User?     @relation(fields: [createdById], references: [id])
+
+  @@index([companyId, supplierId])
+  @@index([purchaseId])
+  @@index([createdById])
+  @@map("supplier_payments")
+}
+
+model Customer {
+  id        Bytes     @id @db.Binary(16)
+  companyId Bytes     @map("company_id") @db.Binary(16)
+  name      String?   @db.VarChar(160)
+  phone     String?   @db.VarChar(40)
+  notes     String?   @db.Text
+  balance   Decimal   @default(0) @db.Decimal(14, 2)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt DateTime? @map("deleted_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  sales   Sale[]
+
+  @@index([companyId])
+  @@map("customers")
+}
+
+model Sale {
+  id         Bytes         @id @db.Binary(16)
+  companyId  Bytes         @map("company_id") @db.Binary(16)
+  branchId   Bytes         @map("branch_id") @db.Binary(16)
+  userId     Bytes         @map("user_id") @db.Binary(16)
+  customerId Bytes?        @map("customer_id") @db.Binary(16)
+  invoiceNo  String        @map("invoice_no") @db.VarChar(24)
+  soldAt     DateTime      @default(now()) @map("sold_at") @db.DateTime(6)
+  subtotal   Decimal       @db.Decimal(14, 2)
+  discount   Decimal       @default(0) @db.Decimal(14, 2)
+  taxTotal   Decimal       @default(0) @map("tax_total") @db.Decimal(14, 2)
+  total      Decimal       @db.Decimal(14, 2)
+  totalCost  Decimal       @map("total_cost") @db.Decimal(14, 2)
+  margin     Decimal       @db.Decimal(14, 2)
+  amountPaid Decimal       @default(0) @map("amount_paid") @db.Decimal(14, 2)
+  balanceDue Decimal       @default(0) @map("balance_due") @db.Decimal(14, 2)
+  payStatus  SalePayStatus @default(paid) @map("pay_status")
+  dueDate    DateTime?     @map("due_date") @db.Date
+  isReversed Boolean       @default(false) @map("is_reversed")
+  clientUuid Bytes?        @map("client_uuid") @db.Binary(16)
+  createdAt  DateTime      @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt  DateTime      @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  branch   Branch    @relation(fields: [branchId], references: [id])
+  user     User      @relation(fields: [userId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+  items    SaleItem[]
+  payments Payment[]
+  returns  Return[]
+
+  @@unique([branchId, invoiceNo])
+  @@unique([clientUuid])
+  @@index([companyId, branchId, soldAt])
+  @@index([companyId, userId, soldAt])
+  @@index([customerId])
+  @@map("sales")
+}
+
+model SaleItem {
+  id        Bytes   @id @db.Binary(16)
+  companyId Bytes   @map("company_id") @db.Binary(16)
+  saleId    Bytes   @map("sale_id") @db.Binary(16)
+  unitId    Bytes?  @map("unit_id") @db.Binary(16)
+  productId Bytes?  @map("product_id") @db.Binary(16)
+  quantity  Int     @default(1)
+  price     Decimal @db.Decimal(14, 2)
+  cost      Decimal @db.Decimal(14, 2)
+  discount  Decimal @default(0) @db.Decimal(14, 2)
+  taxAmount Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  voided    Boolean @default(false)
+
+  company Company  @relation(fields: [companyId], references: [id])
+  sale    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  unit    Unit?    @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  product Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
+  returns Return[]
+
+  // sold-once: generated column `active_unit_id` + UNIQUE + CHECK added in 0002
+  @@index([saleId])
+  @@index([companyId])
+  @@index([unitId])
+  @@index([productId])
+  @@map("sale_items")
+}
+
+model Payment {
+  id        Bytes         @id @db.Binary(16)
+  companyId Bytes         @map("company_id") @db.Binary(16)
+  saleId    Bytes         @map("sale_id") @db.Binary(16)
+  method    PaymentMethod
+  amount    Decimal       @db.Decimal(14, 2)
+  paidAt    DateTime      @default(now()) @map("paid_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@index([saleId])
+  @@index([companyId])
+  @@map("payments")
+}
+
+model Return {
+  id           Bytes    @id @db.Binary(16)
+  companyId    Bytes    @map("company_id") @db.Binary(16)
+  saleId       Bytes    @map("sale_id") @db.Binary(16)
+  saleItemId   Bytes?   @map("sale_item_id") @db.Binary(16)
+  unitId       Bytes?   @map("unit_id") @db.Binary(16)
+  reason       String?  @db.VarChar(255)
+  refundAmount Decimal  @default(0) @map("refund_amount") @db.Decimal(14, 2)
+  restock      Boolean  @default(true)
+  returnedAt   DateTime @default(now()) @map("returned_at") @db.DateTime(6)
+  createdById  Bytes?   @map("created_by") @db.Binary(16)
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  sale     Sale      @relation(fields: [saleId], references: [id])
+  saleItem SaleItem? @relation(fields: [saleItemId], references: [id])
+  unit     Unit?     @relation(fields: [unitId], references: [id])
+  createdBy User?    @relation(fields: [createdById], references: [id])
+
+  @@index([companyId, saleId])
+  @@index([saleItemId])
+  @@index([unitId])
+  @@index([createdById])
+  @@map("returns")
+}
+
+// ---------------------------- Branch Transfers -----------------------------
+
+model StockTransfer {
+  id           Bytes          @id @db.Binary(16)
+  companyId    Bytes          @map("company_id") @db.Binary(16)
+  fromBranchId Bytes          @map("from_branch_id") @db.Binary(16)
+  toBranchId   Bytes          @map("to_branch_id") @db.Binary(16)
+  transferNo   String?        @map("transfer_no") @db.VarChar(24)
+  status       TransferStatus @default(ready_to_ship)
+  sentById     Bytes?         @map("sent_by") @db.Binary(16)
+  receivedById Bytes?         @map("received_by") @db.Binary(16)
+  sentAt       DateTime       @default(now()) @map("sent_at") @db.DateTime(6)
+  receivedAt   DateTime?      @map("received_at") @db.DateTime(6)
+
+  company    Company        @relation(fields: [companyId], references: [id])
+  fromBranch Branch         @relation("TransferFrom", fields: [fromBranchId], references: [id])
+  toBranch   Branch         @relation("TransferTo", fields: [toBranchId], references: [id])
+  sentBy     User?          @relation("TransferSentBy", fields: [sentById], references: [id])
+  receivedBy User?          @relation("TransferReceivedBy", fields: [receivedById], references: [id])
+  items      TransferItem[]
+
+  @@unique([fromBranchId, transferNo])
+  @@index([companyId])
+  @@index([fromBranchId])
+  @@index([toBranchId])
+  @@index([sentById])
+  @@index([receivedById])
+  @@map("stock_transfers")
+}
+
+model TransferItem {
+  id         Bytes  @id @db.Binary(16)
+  companyId  Bytes  @map("company_id") @db.Binary(16)
+  transferId Bytes  @map("transfer_id") @db.Binary(16)
+  unitId     Bytes? @map("unit_id") @db.Binary(16)
+  productId  Bytes? @map("product_id") @db.Binary(16)
+  quantity   Int    @default(1)
+
+  company  Company       @relation(fields: [companyId], references: [id])
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  unit     Unit?         @relation(fields: [unitId], references: [id])
+  product  Product?      @relation(fields: [productId], references: [id])
+
+  @@index([transferId])
+  @@index([companyId])
+  @@index([unitId])
+  @@index([productId])
+  @@map("transfer_items")
+}
+
+// ------------------ Finance, Closing & Notification Center -----------------
+
+model ExpenseTemplate {
+  id         Bytes             @id @db.Binary(16)
+  companyId  Bytes             @map("company_id") @db.Binary(16)
+  branchId   Bytes?            @map("branch_id") @db.Binary(16)
+  category   String            @db.VarChar(60)
+  amount     Decimal           @db.Decimal(14, 2)
+  recurrence ExpenseRecurrence @default(monthly)
+  dayOfMonth Int?              @map("day_of_month") @db.SmallInt
+  isActive   Boolean           @default(true) @map("is_active")
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  branch   Branch?   @relation(fields: [branchId], references: [id])
+  expenses Expense[]
+
+  @@index([companyId])
+  @@index([branchId])
+  @@map("expense_templates")
+}
+
+model Expense {
+  id          Bytes    @id @db.Binary(16)
+  companyId   Bytes    @map("company_id") @db.Binary(16)
+  branchId    Bytes?   @map("branch_id") @db.Binary(16)
+  templateId  Bytes?   @map("template_id") @db.Binary(16)
+  category    String   @db.VarChar(60)
+  amount      Decimal  @db.Decimal(14, 2)
+  spentOn     DateTime @map("spent_on") @db.Date
+  note        String?  @db.Text
+  createdById Bytes?   @map("created_by") @db.Binary(16)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company   Company          @relation(fields: [companyId], references: [id])
+  branch    Branch?          @relation(fields: [branchId], references: [id])
+  template  ExpenseTemplate? @relation(fields: [templateId], references: [id])
+  createdBy User?            @relation(fields: [createdById], references: [id])
+
+  @@index([companyId, branchId, spentOn])
+  @@index([templateId])
+  @@index([createdById])
+  @@map("expenses")
+}
+
+model DailyClosing {
+  id           Bytes    @id @db.Binary(16)
+  companyId    Bytes    @map("company_id") @db.Binary(16)
+  branchId     Bytes    @map("branch_id") @db.Binary(16)
+  closingDate  DateTime @map("closing_date") @db.Date
+  expectedCash Decimal  @map("expected_cash") @db.Decimal(14, 2)
+  countedCash  Decimal  @map("counted_cash") @db.Decimal(14, 2)
+  difference   Decimal  @db.Decimal(14, 2)
+  totalSales   Decimal  @map("total_sales") @db.Decimal(14, 2)
+  totalProfit  Decimal  @map("total_profit") @db.Decimal(14, 2)
+  isLocked     Boolean  @default(true) @map("is_locked")
+  notes        String?  @db.Text
+  closedById   Bytes?   @map("closed_by") @db.Binary(16)
+  closedAt     DateTime @default(now()) @map("closed_at") @db.DateTime(6)
+
+  company  Company      @relation(fields: [companyId], references: [id])
+  branch   Branch       @relation(fields: [branchId], references: [id])
+  closedBy User?        @relation(fields: [closedById], references: [id])
+  digest   DailyDigest?
+
+  @@unique([branchId, closingDate])
+  @@index([companyId])
+  @@index([closedById])
+  @@map("daily_closings")
+}
+
+model DailyDigest {
+  id              Bytes    @id @db.Binary(16)
+  companyId       Bytes    @map("company_id") @db.Binary(16)
+  branchId        Bytes    @map("branch_id") @db.Binary(16)
+  closingId       Bytes?   @unique @map("closing_id") @db.Binary(16)
+  digestDate      DateTime @map("digest_date") @db.Date
+  revenue         Decimal  @db.Decimal(14, 2)
+  costOfGoodsSold Decimal  @map("cost_of_goods_sold") @db.Decimal(14, 2)
+  grossProfit     Decimal  @map("gross_profit") @db.Decimal(14, 2)
+  generatedAt     DateTime @default(now()) @map("generated_at") @db.DateTime(6)
+
+  company Company       @relation(fields: [companyId], references: [id])
+  branch  Branch        @relation(fields: [branchId], references: [id])
+  closing DailyClosing? @relation(fields: [closingId], references: [id])
+  lines   DigestLine[]
+
+  @@unique([branchId, digestDate])
+  @@index([companyId])
+  @@map("daily_digests")
+}
+
+model DigestLine {
+  id           Bytes          @id @db.Binary(16)
+  companyId    Bytes          @map("company_id") @db.Binary(16)
+  digestId     Bytes          @map("digest_id") @db.Binary(16)
+  identifier   String?        @db.VarChar(64) // tracked unit identifier (IMEI or serial); null for quantity
+  productLabel String?        @map("product_label") @db.VarChar(200)
+  employeeId   Bytes?         @map("employee_id") @db.Binary(16)
+  salePrice    Decimal?       @map("sale_price") @db.Decimal(14, 2)
+  purchaseCost Decimal?       @map("purchase_cost") @db.Decimal(14, 2)
+  profit       Decimal?       @db.Decimal(14, 2)
+  method       PaymentMethod?
+  soldAt       DateTime?      @map("sold_at") @db.DateTime(6)
+
+  company  Company     @relation(fields: [companyId], references: [id])
+  digest   DailyDigest @relation(fields: [digestId], references: [id], onDelete: Cascade)
+  employee User?       @relation(fields: [employeeId], references: [id])
+
+  @@index([digestId])
+  @@index([companyId])
+  @@index([employeeId])
+  @@map("digest_lines")
+}
+
+// -------- System: Notifications, Import, Reports, Audit, Sync, Settings -----
+
+model Notification {
+  id           Bytes    @id @db.Binary(16)
+  companyId    Bytes    @map("company_id") @db.Binary(16)
+  branchId     Bytes?   @map("branch_id") @db.Binary(16)
+  targetUserId Bytes?   @map("target_user_id") @db.Binary(16)
+  type         String   @db.VarChar(60)
+  title        String   @db.VarChar(200)
+  body         String?  @db.Text
+  actionLink   String?  @map("action_link") @db.VarChar(255)
+  isRead       Boolean  @default(false) @map("is_read")
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  company    Company @relation(fields: [companyId], references: [id])
+  branch     Branch? @relation(fields: [branchId], references: [id])
+  targetUser User?   @relation(fields: [targetUserId], references: [id])
+
+  @@index([companyId, targetUserId, isRead, createdAt])
+  @@index([branchId])
+  @@map("notifications")
+}
+
+model ImportBatch {
+  id        Bytes        @id @db.Binary(16)
+  companyId Bytes        @map("company_id") @db.Binary(16)
+  branchId  Bytes        @map("branch_id") @db.Binary(16)
+  userId    Bytes?       @map("user_id") @db.Binary(16)
+  fileRef   String       @map("file_ref") @db.VarChar(512)
+  status    ImportStatus @default(parsing)
+  totalRows Int          @default(0) @map("total_rows")
+  validRows Int          @default(0) @map("valid_rows")
+  errorRows Int          @default(0) @map("error_rows")
+  createdAt DateTime     @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime     @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company Company     @relation(fields: [companyId], references: [id])
+  branch  Branch      @relation(fields: [branchId], references: [id])
+  user    User?       @relation(fields: [userId], references: [id])
+  rows    ImportRow[]
+
+  @@index([companyId])
+  @@index([branchId])
+  @@index([userId])
+  @@map("import_batches")
+}
+
+model ImportRow {
+  id        Bytes           @id @db.Binary(16)
+  companyId Bytes           @map("company_id") @db.Binary(16)
+  batchId   Bytes           @map("batch_id") @db.Binary(16)
+  rowNumber Int             @map("row_number")
+  raw       Json?           @db.Json
+  parsed    Json?           @db.Json
+  status    ImportRowStatus
+  message   String?         @db.Text
+
+  company Company     @relation(fields: [companyId], references: [id])
+  batch   ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([batchId])
+  @@index([companyId])
+  @@map("import_rows")
+}
+
+model ReportDefinition {
+  id          Bytes    @id @db.Binary(16)
+  companyId   Bytes    @map("company_id") @db.Binary(16)
+  name        String   @db.VarChar(160)
+  type        String   @db.VarChar(60)
+  params      Json     @db.Json
+  ownerUserId Bytes?   @map("owner_user_id") @db.Binary(16)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  company   Company          @relation(fields: [companyId], references: [id])
+  owner     User?            @relation(fields: [ownerUserId], references: [id])
+  snapshots ReportSnapshot[]
+
+  @@index([companyId])
+  @@index([ownerUserId])
+  @@map("report_definitions")
+}
+
+model ReportSnapshot {
+  id           Bytes     @id @db.Binary(16)
+  companyId    Bytes     @map("company_id") @db.Binary(16)
+  definitionId Bytes     @map("definition_id") @db.Binary(16)
+  rangeStart   DateTime? @map("range_start") @db.Date
+  rangeEnd     DateTime? @map("range_end") @db.Date
+  fileRef      String?   @map("file_ref") @db.VarChar(512)
+  generatedAt  DateTime  @default(now()) @map("generated_at") @db.DateTime(6)
+
+  company    Company          @relation(fields: [companyId], references: [id])
+  definition ReportDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+
+  @@index([definitionId])
+  @@index([companyId])
+  @@map("report_snapshots")
+}
+
+model AuditLog {
+  id         BigInt      @id @default(autoincrement())
+  companyId  Bytes       @map("company_id") @db.Binary(16)
+  branchId   Bytes?      @map("branch_id") @db.Binary(16)
+  userId     Bytes?      @map("user_id") @db.Binary(16)
+  entityType String      @map("entity_type") @db.VarChar(60)
+  entityId   Bytes?      @map("entity_id") @db.Binary(16)
+  action     AuditAction
+  before     Json?       @db.Json
+  after      Json?       @db.Json
+  reason     String?     @db.Text
+  ip         String?     @db.VarChar(45)
+  at         DateTime    @default(now()) @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User?   @relation(fields: [userId], references: [id])
+
+  @@index([companyId, entityType, entityId, at])
+  @@index([userId])
+  @@map("audit_logs")
+}
+
+model Setting {
+  id        Bytes  @id @db.Binary(16)
+  companyId Bytes  @map("company_id") @db.Binary(16)
+  branchId  Bytes? @map("branch_id") @db.Binary(16)
+  key       String @db.VarChar(80)
+  value     Json   @db.Json
+
+  company Company @relation(fields: [companyId], references: [id])
+  branch  Branch? @relation(fields: [branchId], references: [id])
+
+  // Company-wide uniqueness (branch_id NULL) enforced via the `branch_scope`
+  // generated column + UNIQUE in 0002. This covers the branch-specific case.
+  @@unique([companyId, branchId, key])
+  @@map("settings")
+}
+
+model SyncDevice {
+  id             Bytes     @id @db.Binary(16)
+  companyId      Bytes     @map("company_id") @db.Binary(16)
+  userId         Bytes     @map("user_id") @db.Binary(16)
+  deviceId       String    @map("device_id") @db.VarChar(120)
+  lastPullCursor BigInt?   @map("last_pull_cursor")
+  lastSeenAt     DateTime? @map("last_seen_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceId])
+  @@index([companyId])
+  @@map("sync_devices")
+}
+
+model OutboxChange {
+  id         Bytes      @id @db.Binary(16) // client-generated UUIDv7 (idempotency key)
+  companyId  Bytes      @map("company_id") @db.Binary(16)
+  deviceId   String     @map("device_id") @db.VarChar(120)
+  entityType String     @map("entity_type") @db.VarChar(60)
+  entityId   Bytes?     @map("entity_id") @db.Binary(16)
+  op         String     @db.VarChar(20)
+  payload    Json?      @db.Json
+  status     SyncStatus @default(pending)
+  reason     String?    @db.Text
+  receivedAt DateTime   @default(now()) @map("received_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, status])
+  @@index([deviceId])
+  @@map("outbox_changes")
+}
+
+// Auth sessions — one row per active login/device. Backs rotating refresh tokens
+// and per-device revocation (see docs/15_SECURITY_ARCHITECTURE.md §5, §7, §8).
+// Only the Argon2 hash of the refresh secret is stored, never the raw token.
+model AuthSession {
+  id               Bytes     @id @db.Binary(16)
+  companyId        Bytes     @map("company_id") @db.Binary(16)
+  userId           Bytes     @map("user_id") @db.Binary(16)
+  deviceId         String?   @map("device_id") @db.VarChar(120)
+  deviceName       String?   @map("device_name") @db.VarChar(120)
+  platform         String?   @db.VarChar(40)
+  appVersion       String?   @map("app_version") @db.VarChar(40)
+  userAgent        String?   @map("user_agent") @db.VarChar(255)
+  ip               String?   @db.VarChar(45)
+  refreshTokenHash String    @map("refresh_token_hash") @db.VarChar(255)
+  lastUsedAt       DateTime? @map("last_used_at") @db.DateTime(6)
+  expiresAt        DateTime  @map("expires_at") @db.DateTime(6)
+  revokedAt        DateTime? @map("revoked_at") @db.DateTime(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("auth_sessions")
+}
+
+// Atomic per-branch sequences (invoice numbers, etc.). Incremented inside the
+// owning transaction so numbers are gap-free and concurrency-safe.
+model BranchCounter {
+  companyId Bytes    @map("company_id") @db.Binary(16)
+  branchId  Bytes    @map("branch_id") @db.Binary(16)
+  kind      String   @db.VarChar(30)
+  seq       BigInt   @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  branch  Branch  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@id([branchId, kind])
+  @@index([companyId])
+  @@map("branch_counters")
+}
+
+// --------------------------- Analytics rollups -----------------------------
+// Derived/cache tables (rebuildable from sale_items/units/stock_items). No FK
+// constraints by design — they are refreshed, never the source of truth.
+// Analytics are tracking-type INDEPENDENT: every figure comes from sale_items,
+// with category_id + tracking_type denormalized for fast grouping.
+
+model DailyRollup {
+  id          Bytes    @id @db.Binary(16)
+  companyId   Bytes    @map("company_id") @db.Binary(16)
+  branchId    Bytes    @map("branch_id") @db.Binary(16)
+  day         DateTime @db.Date
+  revenue     Decimal  @db.Decimal(14, 2)
+  cogs        Decimal  @db.Decimal(14, 2)
+  grossProfit Decimal  @map("gross_profit") @db.Decimal(14, 2)
+  salesCount  Int      @map("sales_count")
+  qtySold     Int      @map("qty_sold")
+  expenses    Decimal  @db.Decimal(14, 2)
+  netProfit   Decimal  @map("net_profit") @db.Decimal(14, 2)
+  refreshedAt DateTime @map("refreshed_at") @db.DateTime(6)
+
+  @@unique([branchId, day])
+  @@index([companyId, day])
+  @@map("daily_rollups")
+}
+
+model ProductDailyRollup {
+  id           Bytes        @id @db.Binary(16)
+  companyId    Bytes        @map("company_id") @db.Binary(16)
+  branchId     Bytes        @map("branch_id") @db.Binary(16)
+  day          DateTime     @db.Date
+  productId    Bytes        @map("product_id") @db.Binary(16)
+  categoryId   Bytes?       @map("category_id") @db.Binary(16)
+  trackingType TrackingType @map("tracking_type")
+  qtySold      Int          @map("qty_sold")
+  revenue      Decimal      @db.Decimal(14, 2)
+  cogs         Decimal      @db.Decimal(14, 2)
+  grossProfit  Decimal      @map("gross_profit") @db.Decimal(14, 2)
+  refreshedAt  DateTime     @map("refreshed_at") @db.DateTime(6)
+
+  @@unique([branchId, day, productId])
+  @@index([companyId, day])
+  @@index([companyId, categoryId, day])
+  @@index([companyId, trackingType, day])
+  @@map("product_daily_rollups")
+}
+
+model ProductVelocity {
+  id          Bytes     @id @db.Binary(16)
+  companyId   Bytes     @map("company_id") @db.Binary(16)
+  branchId    Bytes     @map("branch_id") @db.Binary(16)
+  productId   Bytes     @map("product_id") @db.Binary(16)
+  sold7d      Int       @default(0) @map("sold_7d")
+  sold30d     Int       @default(0) @map("sold_30d")
+  lastSoldAt  DateTime? @map("last_sold_at") @db.DateTime(6)
+  refreshedAt DateTime  @map("refreshed_at") @db.DateTime(6)
+
+  @@unique([companyId, branchId, productId])
+  @@map("product_velocity")
+}
+
+model InventoryValuation {
+  id              Bytes        @id @db.Binary(16)
+  companyId       Bytes        @map("company_id") @db.Binary(16)
+  branchId        Bytes        @map("branch_id") @db.Binary(16)
+  productId       Bytes        @map("product_id") @db.Binary(16)
+  categoryId      Bytes?       @map("category_id") @db.Binary(16)
+  trackingType    TrackingType @map("tracking_type")
+  unitsCount      Int          @default(0) @map("units_count")
+  quantity        Int          @default(0)
+  inventoryValue  Decimal      @map("inventory_value") @db.Decimal(14, 2)
+  expectedRevenue Decimal      @map("expected_revenue") @db.Decimal(14, 2)
+  expectedProfit  Decimal      @map("expected_profit") @db.Decimal(14, 2)
+  refreshedAt     DateTime     @map("refreshed_at") @db.DateTime(6)
+
+  @@unique([companyId, branchId, productId])
+  @@map("inventory_valuation")
+}

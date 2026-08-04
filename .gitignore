@@ -1,0 +1,51 @@
+# ── Secrets ────────────────────────────────────────────────────────────────
+# .env holds OWNER_SEED_PASSWORD and database credentials. The negation must
+# stay AFTER the wildcard, or the example file is swallowed by it.
+.env
+.env.*
+!.env.example
+
+# ── Dependencies & build output ────────────────────────────────────────────
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# ── Test & coverage output ─────────────────────────────────────────────────
+coverage/
+.nyc_output/
+junit.xml
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Database dumps & local data ────────────────────────────────────────────
+# Dumps contain live business data (IMEIs, costs, customers) and must never be
+# committed. Backups belong outside the repository — see docs/22.
+*.sql.gz
+*.dump
+*.bak
+dumps/
+backups/
+# NOTE: prisma/migrations/**/*.sql and prisma/sql/** are SCHEMA, not data, and
+# are deliberately NOT ignored.
+
+# ── Temporary files ────────────────────────────────────────────────────────
+tmp/
+temp/
+*.tmp
+*.pid
+*.seed
+
+# ── Editor & OS artifacts ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
