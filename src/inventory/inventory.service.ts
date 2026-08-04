@@ -14,6 +14,12 @@ import { TrackingStrategyRegistry } from '../tracking/tracking-strategy.registry
 import { TrackingStrategy } from '../tracking/tracking-strategy';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { assertTransition } from './unit-state-machine';
+import {
+  decodeCursor,
+  encodeCursor,
+  type CursorSection,
+  type InventoryCursor,
+} from './inventory-cursor';
 import { unitIdentifier } from './unit-identifier.util';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
 
@@ -37,11 +43,146 @@ const INVENTORY_PRODUCT_SELECT = {
   specifications: true,
 } as const;
 
+const DEFAULT_PAGE_SIZE = 50;
+/** Upper bound a client may request. Guards against a single huge query. */
+const MAX_PAGE_SIZE = 200;
+
+export interface InventoryFilter {
+  status?: UnitStatus;
+  productId?: string;
+  /** Free text across product name, barcode and serialized identifiers. */
+  search?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface InventoryPage {
+  rows: InventoryRow[];
+  /** Opaque; pass back verbatim to fetch the next page. Null at the end. */
+  nextCursor: string | null;
+  hasMore: boolean;
+  /**
+   * Counts of everything matching the filter, not just this page — so the UI
+   * can say "12 of 340" instead of implying the first page is the whole stock.
+   */
+  totals: { units: number; stock: number };
+}
+
 /**
- * Row cap per shape. A single branch's live stock sits far below this, so no
- * pagination framework is warranted yet; revisit if a real store approaches it.
+ * Keyset predicate: strictly older than the boundary, plus rows sharing the
+ * boundary timestamp that were not already emitted.
+ *
+ * `notIn` on a binary id is the one comparison Prisma exposes for `Bytes`
+ * (there is no `lt`), and it is exactly what tie-breaking needs.
  */
-const INVENTORY_PAGE_SIZE = 200;
+function keysetWhere(field: 'dateIn' | 'updatedAt', cursor: InventoryCursor | null) {
+  if (!cursor) return {};
+  const at = new Date(cursor.at);
+  const seen = cursor.seen.map(uuidToBin);
+  return {
+    OR: [
+      { [field]: { lt: at } },
+      { [field]: at, ...(seen.length ? { id: { notIn: seen } } : {}) },
+    ],
+  };
+}
+
+/**
+ * Boundary = the last row's sort value, plus every id already emitted at that
+ * value.
+ *
+ * The `seen` set must ACCUMULATE while the boundary timestamp does not advance.
+ * A bulk receive can stamp a whole delivery inside one microsecond; if `seen`
+ * only carried the current page, the timestamp would never move and paging
+ * would loop — serving page one again forever. Carrying the previous cursor's
+ * ids forward is what lets it walk through a large tie group.
+ *
+ * Trade-off: a tie group larger than a page inflates the cursor by one uuid per
+ * row. Real `date_in` values are microsecond-precision and per-row, so groups
+ * are normally tiny; the growth is bounded by the size of one tie group.
+ */
+function buildCursor<T extends { id: Buffer }>(
+  section: CursorSection,
+  page: T[],
+  sortValue: (row: T) => Date,
+  previous: InventoryCursor | null,
+): InventoryCursor {
+  const at = sortValue(page[page.length - 1]);
+  const tied = page
+    .filter((row) => sortValue(row).getTime() === at.getTime())
+    .map((row) => binToUuid(row.id));
+
+  const carried =
+    previous && new Date(previous.at).getTime() === at.getTime() ? previous.seen : [];
+
+  return { section, at: at.toISOString(), seen: [...new Set([...carried, ...tied])] };
+}
+
+/**
+ * Search must reach what an employee actually types: a product name, a barcode
+ * off the box, or the last digits of an IMEI read off the device. Restricting
+ * it to the rows already downloaded would quietly search a fraction of stock.
+ */
+function unitSearchClauses(q: string) {
+  return [
+    { imeiPrimary: { contains: q } },
+    { imeiSecondary: { contains: q } },
+    { serialNo: { contains: q } },
+    { product: { brand: { contains: q } } },
+    { product: { model: { contains: q } } },
+    { product: { variant: { contains: q } } },
+    { product: { barcode: { contains: q } } },
+  ];
+}
+
+function stockSearchClauses(q: string) {
+  return [
+    { product: { brand: { contains: q } } },
+    { product: { model: { contains: q } } },
+    { product: { variant: { contains: q } } },
+    { product: { barcode: { contains: q } } },
+  ];
+}
+
+type UnitWithProduct = Unit & { product: InventoryProduct | null };
+type StockWithProduct = {
+  id: Buffer;
+  productId: Buffer;
+  quantity: number;
+  cost: Prisma.Decimal;
+  price: Prisma.Decimal;
+  product: InventoryProduct | null;
+};
+
+function toUnitRow(unit: UnitWithProduct): InventoryUnitRow {
+  return {
+    kind: 'unit',
+    id: unit.id,
+    // The DB has a generated `identifier` column Prisma cannot model, so it is
+    // derived here to keep one canonical lookup key for the client.
+    identifier: unit.imeiPrimary ?? unit.serialNo ?? '',
+    imeiPrimary: unit.imeiPrimary,
+    imeiSecondary: unit.imeiSecondary,
+    serialNo: unit.serialNo,
+    status: unit.status,
+    cost: unit.cost,
+    dateIn: unit.dateIn,
+    productId: unit.productId,
+    product: unit.product,
+  };
+}
+
+function toStockRow(line: StockWithProduct): InventoryStockRow {
+  return {
+    kind: 'stock',
+    id: line.id,
+    productId: line.productId,
+    quantity: line.quantity,
+    cost: line.cost,
+    price: line.price,
+    product: line.product,
+  };
+}
 
 export interface InventoryProduct {
   brand: string;
@@ -269,68 +410,90 @@ export class InventoryService {
    * `cost` on either shape is removed by the global cost-gating interceptor
    * for callers without `cost.view`; nothing extra is needed here.
    */
-  async listStock(filter: {
-    status?: UnitStatus;
-    productId?: string;
-  }): Promise<InventoryRow[]> {
+  async listStock(filter: InventoryFilter): Promise<InventoryPage> {
     const branchId = this.tenant.branchId();
     const productId = filter.productId ? uuidToBin(filter.productId) : undefined;
-
-    const units = await this.db.unit.findMany({
-      where: {
-        ...(branchId ? { branchId } : {}),
-        ...(filter.status ? { status: filter.status } : {}),
-        ...(productId ? { productId } : {}),
-      },
-      include: { product: { select: INVENTORY_PRODUCT_SELECT } },
-      orderBy: { dateIn: 'desc' },
-      take: INVENTORY_PAGE_SIZE,
-    });
-
-    const unitRows: InventoryRow[] = units.map((unit) => ({
-      kind: 'unit',
-      id: unit.id,
-      // The DB has a generated `identifier` column Prisma cannot model, so it
-      // is derived here to keep one canonical lookup key for the client.
-      identifier: unit.imeiPrimary ?? unit.serialNo ?? '',
-      imeiPrimary: unit.imeiPrimary,
-      imeiSecondary: unit.imeiSecondary,
-      serialNo: unit.serialNo,
-      status: unit.status,
-      cost: unit.cost,
-      dateIn: unit.dateIn,
-      productId: unit.productId,
-      product: unit.product,
-    }));
+    const limit = Math.min(Math.max(filter.limit ?? DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
+    const cursor = filter.cursor ? decodeCursor(filter.cursor) : null;
+    const search = filter.search?.trim() || undefined;
 
     // Quantity stock has no lifecycle, so it only belongs under "in stock" and
     // the unfiltered view. Listing it under Sold or Faulty would be meaningless.
     const includeQuantity = !filter.status || filter.status === 'in_stock';
-    if (!includeQuantity) return unitRows;
 
+    const unitWhere = {
+      ...(branchId ? { branchId } : {}),
+      ...(filter.status ? { status: filter.status } : {}),
+      ...(productId ? { productId } : {}),
+      ...(search ? { OR: unitSearchClauses(search) } : {}),
+    };
+    const stockWhere = {
+      ...(branchId ? { branchId } : {}),
+      ...(productId ? { productId } : {}),
+      // A zero row is a product that once had stock here; it is not stock.
+      quantity: { gt: 0 },
+      ...(search ? { OR: stockSearchClauses(search) } : {}),
+    };
+
+    // Totals are counted, never inferred from the page. A client that derives
+    // "12 items" from a 12-row first page would understate real stock, which is
+    // the exact failure this pagination exists to remove.
+    const [unitTotal, stockTotal] = await Promise.all([
+      this.db.unit.count({ where: unitWhere }),
+      includeQuantity ? this.db.stockItem.count({ where: stockWhere }) : Promise.resolve(0),
+    ]);
+
+    const rows: InventoryRow[] = [];
+    let nextCursor: string | null = null;
+
+    // ── Units first, then stock. A page may span the boundary. ──
+    if (!cursor || cursor.section === 'unit') {
+      const units = await this.db.unit.findMany({
+        where: { ...unitWhere, ...keysetWhere('dateIn', cursor?.section === 'unit' ? cursor : null) },
+        include: { product: { select: INVENTORY_PRODUCT_SELECT } },
+        orderBy: [{ dateIn: 'desc' }, { id: 'desc' }],
+        take: limit + 1,
+      });
+
+      const page = units.slice(0, limit);
+      rows.push(...page.map(toUnitRow));
+
+      if (units.length > limit) {
+        nextCursor = encodeCursor(buildCursor('unit', page, (u) => u.dateIn, cursor?.section === 'unit' ? cursor : null));
+        return { rows, nextCursor, hasMore: true, totals: { units: unitTotal, stock: stockTotal } };
+      }
+    }
+
+    if (!includeQuantity) {
+      return { rows, nextCursor: null, hasMore: false, totals: { units: unitTotal, stock: 0 } };
+    }
+
+    // Fill the rest of the page from stock so a page is never short merely
+    // because it crossed the boundary between the two shapes.
+    const remaining = limit - rows.length;
     const stock = await this.db.stockItem.findMany({
       where: {
-        ...(branchId ? { branchId } : {}),
-        ...(productId ? { productId } : {}),
-        // A zero row is a product that once had stock here; it is not stock.
-        quantity: { gt: 0 },
+        ...stockWhere,
+        ...keysetWhere('updatedAt', cursor?.section === 'stock' ? cursor : null),
       },
       include: { product: { select: INVENTORY_PRODUCT_SELECT } },
-      orderBy: { updatedAt: 'desc' },
-      take: INVENTORY_PAGE_SIZE,
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      take: remaining + 1,
     });
 
-    const stockRows: InventoryRow[] = stock.map((line) => ({
-      kind: 'stock',
-      id: line.id,
-      productId: line.productId,
-      quantity: line.quantity,
-      cost: line.cost,
-      price: line.price,
-      product: line.product,
-    }));
+    const stockPage = stock.slice(0, remaining);
+    rows.push(...stockPage.map(toStockRow));
 
-    return [...unitRows, ...stockRows];
+    if (stock.length > remaining) {
+      nextCursor = encodeCursor(buildCursor('stock', stockPage, (r) => r.updatedAt, cursor?.section === 'stock' ? cursor : null));
+    }
+
+    return {
+      rows,
+      nextCursor,
+      hasMore: nextCursor !== null,
+      totals: { units: unitTotal, stock: stockTotal },
+    };
   }
 
   async markFaulty(unitId: string): Promise<Unit> {

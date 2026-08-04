@@ -13,12 +13,16 @@ export class InventoryController {
 
   @Get('inventory')
   @ApiOperation({
-    summary: 'Stock at the active branch — discriminated by `kind`',
+    summary: 'Stock at the active branch — paginated, discriminated by `kind`',
     description:
-      'Returns both shapes of stock: `kind:"unit"` for serialized devices ' +
-      '(identifier + status) and `kind:"stock"` for quantity-tracked products ' +
-      '(count, no status). Quantity rows appear only when no status filter is ' +
-      'applied or the filter is `in_stock`, since they have no lifecycle.',
+      'Returns `{ rows, nextCursor, hasMore, totals }`. Rows carry ' +
+      '`kind:"unit"` for serialized devices (identifier + status) or ' +
+      '`kind:"stock"` for quantity-tracked products (count, no status). ' +
+      'Quantity rows appear only when no status filter is applied or it is ' +
+      '`in_stock`, since they have no lifecycle. ' +
+      'Paging is keyset-based: pass `nextCursor` back verbatim. `totals` counts ' +
+      'everything matching the filter, not just the returned page, so a client ' +
+      'can never mistake the first page for the whole inventory.',
   })
   list(@Query() query: InventoryQueryDto) {
     return this.inventory.listStock(query);
