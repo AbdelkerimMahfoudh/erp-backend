@@ -21,13 +21,14 @@ const prisma = new PrismaClient();
 
 const DEMO_COMPANY_ID = uuidToBin('018f0000-0000-7000-8000-000000000001');
 
-const VALID_ROLES: RoleKey[] = [
-  'owner',
-  'administrator',
-  'branch_manager',
-  'sales_employee',
-  'warehouse_employee',
-];
+/**
+ * Store-facing roles only. The legacy members still exist in the enum so
+ * historical rows stay valid, but no new assignment may use them — that is what
+ * lets them be retired later without a data migration.
+ *
+ * `administrator` is an internal SaaS role and is deliberately not offered here.
+ */
+const VALID_ROLES: RoleKey[] = ['owner', 'store_manager', 'store_employee'];
 
 async function main() {
   const [login, password, roleArg, ...nameParts] = process.argv.slice(2);

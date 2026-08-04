@@ -3,6 +3,8 @@
 
 export type RoleKey =
   | 'owner'
+  | 'store_manager'
+  | 'store_employee'
   | 'administrator'
   | 'branch_manager'
   | 'sales_employee'
@@ -36,8 +38,50 @@ const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
   (k) => k !== 'cost.view' && k !== 'discount.override',
 );
 
+/**
+ * Store-facing roles. Authorization is permission-based everywhere — nothing in
+ * the codebase compares against a role NAME — so this table is the single
+ * definition of what each role can do.
+ */
 export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
   owner: ALL_PERMISSION_KEYS,
+
+  /**
+   * Store Manager — the operational and approval baseline, plus cost.
+   *
+   * Deliberately WITHOUT `expense.manage`: the approved decisions describe a
+   * narrower manager than the old branch_manager, and inventing spend authority
+   * from a permission that merely happened to exist would be inventing a
+   * business rule. Grant it explicitly if the Owner decides otherwise.
+   *
+   * Price editing has no permission to grant — it stays Owner-delegated and is
+   * blocked on per-user overrides, which do not exist yet (see docs/21).
+   */
+  store_manager: [
+    'sale.create', 'sale.return', 'cost.view', 'discount.apply',
+    'discount.override', 'unit.add', 'unit.transfer', 'import.run',
+    'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
+  ],
+
+  /**
+   * Store Employee — one job, replacing the artificial sales/warehouse split
+   * that produced a 403 when the person responsible for receiving tried to
+   * receive.
+   *
+   * Has `cost.view` (an approved decision: employees see product cost and the
+   * last selling price) but NOT `report.view` — cost visibility must not drag
+   * profit dashboards along with it, which is exactly why they are separate
+   * permissions.
+   *
+   * No `expense.manage`: the model cannot yet express "submit an expense" as
+   * distinct from "manage expenses", so the narrower reading wins and a
+   * submit-only permission is recorded as future work.
+   */
+  store_employee: [
+    'sale.create', 'sale.return', 'cost.view', 'discount.apply',
+    'unit.add', 'unit.transfer', 'import.run', 'purchase.manage',
+  ],
+
   administrator: ADMIN_KEYS,
   branch_manager: [
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
@@ -49,8 +93,13 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
   warehouse_employee: ['unit.add', 'unit.transfer', 'import.run'],
 };
 
+/** Only these three are shown in store-facing onboarding. */
+export const STORE_FACING_ROLES: RoleKey[] = ['owner', 'store_manager', 'store_employee'];
+
 export const ROLE_LABELS: Record<RoleKey, string> = {
   owner: 'Owner',
+  store_manager: 'Store Manager',
+  store_employee: 'Store Employee',
   administrator: 'Administrator',
   branch_manager: 'Branch Manager',
   sales_employee: 'Sales Employee',

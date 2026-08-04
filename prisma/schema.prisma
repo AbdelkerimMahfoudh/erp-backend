@@ -32,7 +32,17 @@ datasource db {
 
 enum RoleKey {
   owner
+
+  /// Store-facing roles (0016). Owner + these three are the only roles shown
+  /// in store onboarding.
+  store_manager
+  store_employee
+
+  /// Internal SaaS role — never offered in store-facing onboarding.
   administrator
+
+  /// Legacy, retained until no assignment references them. Retiring them is a
+  /// separate migration; see docs/21.
   branch_manager
   sales_employee
   warehouse_employee
