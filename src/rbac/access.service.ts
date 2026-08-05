@@ -2,6 +2,7 @@ import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { binToUuid } from '../common/utils/uuid.util';
+import { isCompanyPermission } from './permission-scope';
 
 /**
  * Resolves a user's effective permissions from `user_branches → role →
@@ -10,8 +11,11 @@ import { binToUuid } from '../common/utils/uuid.util';
  *
  * - With a `branchId`: permissions for the user's role at that branch; throws
  *   403 if the user is not assigned to it.
- * - Without a `branchId`: the union of the user's permissions across all their
- *   branches (used for company-level checks).
+ * - Without a `branchId`: the union across all the user's branches, **filtered to
+ *   company-wide permissions only**. Branch-scoped authority is never granted
+ *   without a branch context, so a permission that belongs to one branch — a
+ *   role permission there, or a per-branch delegated grant — cannot apply
+ *   company-wide. This is the branch-safety boundary Stage 2 delegation relies on.
  */
 @Injectable()
 export class AccessService {
@@ -36,8 +40,16 @@ export class AccessService {
       where: { roleId: { in: roleIds } },
       select: { permission: { select: { key: true } } },
     });
+    const keys = rolePermissions.map((rp) => rp.permission.key);
 
-    return new Set(rolePermissions.map((rp) => rp.permission.key));
+    // Branch-scoped resolution: everything the role has at this specific branch.
+    if (branchId) {
+      return new Set(keys);
+    }
+
+    // No branch context: only company-wide permissions survive the union, so
+    // branch-scoped authority never leaks across branches (fail-closed).
+    return new Set(keys.filter(isCompanyPermission));
   }
 
   /** Branches the user is assigned to (for the app's branch picker / X-Branch-Id). */
