@@ -29,3 +29,29 @@ export const COMPANY_PERMISSIONS: ReadonlySet<string> = new Set<string>([
 export function isCompanyPermission(key: string): boolean {
   return COMPANY_PERMISSIONS.has(key);
 }
+
+/**
+ * Permissions an Owner may delegate per branch (F1 Stage 2). Deliberately tiny.
+ *
+ * `discount.override` (the below-cost gate), `user.manage` and `settings.manage`
+ * are NEVER delegatable, and neither is anything not listed here — the grant API
+ * rejects any key outside this set, and resolution honours only these, so a
+ * malicious or stale grant of another permission can never take effect.
+ */
+export const DELEGATABLE_PERMISSIONS: ReadonlySet<string> = new Set<string>(['price.edit']);
+
+export function isDelegatable(key: string): boolean {
+  return DELEGATABLE_PERMISSIONS.has(key);
+}
+
+/**
+ * The role a per-branch delegated grant may attach to and be effective for.
+ * Delegation is a manager-only feature this phase ("delegate to a particular
+ * Store Manager"), so a grant is honoured only while the assignment's role is
+ * this one. Downgrading a manager to employee therefore neutralizes the grant
+ * automatically, without waiting on any role-change endpoint to clean it up.
+ *
+ * This is the single, deliberate place delegation references a role — general
+ * endpoint authorization stays permission-based and never compares a role name.
+ */
+export const DELEGATION_ELIGIBLE_ROLE = 'store_manager';

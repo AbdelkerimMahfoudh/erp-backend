@@ -2,7 +2,7 @@ import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { binToUuid } from '../common/utils/uuid.util';
-import { isCompanyPermission } from './permission-scope';
+import { isCompanyPermission, isDelegatable, DELEGATION_ELIGIBLE_ROLE } from './permission-scope';
 
 /**
  * Resolves a user's effective permissions from `user_branches → role →
@@ -24,7 +24,7 @@ export class AccessService {
   async getEffectivePermissions(userId: Buffer, branchId?: Buffer): Promise<Set<string>> {
     const assignments = await this.db.userBranch.findMany({
       where: branchId ? { userId, branchId } : { userId },
-      select: { roleId: true },
+      select: { id: true, roleId: true, role: { select: { key: true } } },
     });
 
     if (branchId && assignments.length === 0) {
@@ -42,14 +42,31 @@ export class AccessService {
     });
     const keys = rolePermissions.map((rp) => rp.permission.key);
 
-    // Branch-scoped resolution: everything the role has at this specific branch.
-    if (branchId) {
-      return new Set(keys);
-    }
-
     // No branch context: only company-wide permissions survive the union, so
     // branch-scoped authority never leaks across branches (fail-closed).
-    return new Set(keys.filter(isCompanyPermission));
+    if (!branchId) {
+      return new Set(keys.filter(isCompanyPermission));
+    }
+
+    // Branch-scoped resolution: the role's permissions at this branch PLUS any
+    // per-branch delegated grants. A grant is honoured only on a
+    // delegation-eligible (store_manager) assignment and only for a delegatable
+    // permission — so downgrading the manager neutralizes it, and a stale or
+    // rogue grant of anything else can never take effect.
+    const effective = new Set(keys);
+    const eligible = assignments
+      .filter((a) => a.role.key === DELEGATION_ELIGIBLE_ROLE)
+      .map((a) => a.id);
+    if (eligible.length > 0) {
+      const grants = await this.db.userBranchPermission.findMany({
+        where: { userBranchId: { in: eligible } },
+        select: { permission: { select: { key: true } } },
+      });
+      for (const g of grants) {
+        if (isDelegatable(g.permission.key)) effective.add(g.permission.key);
+      }
+    }
+    return effective;
   }
 
   /** Branches the user is assigned to (for the app's branch picker / X-Branch-Id). */

@@ -205,6 +205,7 @@ model Company {
   syncDevices        SyncDevice[]
   outboxChanges      OutboxChange[]
   authSessions       AuthSession[]
+  userBranchPermissions UserBranchPermission[]
   branchCounters     BranchCounter[]
   productCategories  ProductCategory[]
   productRecognitions ProductRecognition[]
@@ -277,6 +278,7 @@ model User {
   company Company @relation(fields: [companyId], references: [id])
 
   userBranches      UserBranch[]
+  grantsMade        UserBranchPermission[] @relation("GrantsMade")
   unitsCreated      Unit[]             @relation("UnitCreatedBy")
   unitsUpdated      Unit[]             @relation("UnitUpdatedBy")
   purchases         Purchase[]
@@ -320,6 +322,7 @@ model Permission {
   label String @db.VarChar(160)
 
   rolePermissions RolePermission[]
+  userBranchPermissions UserBranchPermission[]
 
   @@map("permissions")
 }
@@ -351,11 +354,38 @@ model UserBranch {
   branch  Branch  @relation(fields: [branchId], references: [id], onDelete: Cascade)
   role    Role    @relation(fields: [roleId], references: [id])
 
+  permissions UserBranchPermission[]
+
   @@unique([userId, branchId])
   @@index([companyId])
   @@index([branchId])
   @@index([roleId])
   @@map("user_branches")
+}
+
+/// Per-branch delegated permission grant (F1 Stage 2). An Owner delegates a
+/// narrow, allow-listed permission (e.g. `price.edit`) to ONE assignment — a
+/// specific user in a specific branch. It is additive only (no deny), scoped to
+/// the `UserBranch` row (so removing the assignment cascades the grant away),
+/// and can never be company-global. Uniqueness is one grant per (assignment,
+/// permission). The delegatable allow-list and the branch-scoped resolution are
+/// enforced in code (see rbac/permission-scope.ts, access.service).
+model UserBranchPermission {
+  companyId    Bytes    @map("company_id") @db.Binary(16)
+  userBranchId Bytes    @map("user_branch_id") @db.Binary(16)
+  permissionId Bytes    @map("permission_id") @db.Binary(16)
+  grantedById  Bytes    @map("granted_by_id") @db.Binary(16)
+  grantedAt    DateTime @default(now()) @map("granted_at") @db.DateTime(6)
+
+  company    Company    @relation(fields: [companyId], references: [id])
+  userBranch UserBranch @relation(fields: [userBranchId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  grantedBy  User       @relation("GrantsMade", fields: [grantedById], references: [id])
+
+  @@id([userBranchId, permissionId])
+  @@index([companyId])
+  @@index([permissionId])
+  @@map("user_branch_permissions")
 }
 
 // ------------------------- Catalog & Inventory -----------------------------

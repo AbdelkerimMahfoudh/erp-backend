@@ -30,11 +30,21 @@ describe('store-facing roles', () => {
     expect(ROLE_LABELS.store_employee).toBe('Store Employee');
   });
 
-  it('leaves Owner untouched with full access', () => {
-    expect(ROLE_PERMISSIONS.owner.length).toBe(17);
+  it('leaves Owner with full access, now including price.edit', () => {
+    expect(ROLE_PERMISSIONS.owner.length).toBe(18);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
+    expect(has('owner', 'price.edit')).toBe(true);
+  });
+
+  it('price.edit is Owner-held by role and NOT in any other role baseline', () => {
+    // It reaches a Store Manager only through an Owner-created per-branch grant
+    // (F1 Stage 2), never by role. Administrator is money-sensitive-excluded.
+    expect(has('owner', 'price.edit')).toBe(true);
+    expect(has('store_manager', 'price.edit')).toBe(false);
+    expect(has('store_employee', 'price.edit')).toBe(false);
+    expect(has('administrator', 'price.edit')).toBe(false);
   });
 });
 
@@ -154,11 +164,16 @@ describe('Store Manager', () => {
     }
   });
 
-  it('has no permanent price-edit authority', () => {
-    // There is no price-edit permission to grant: editing stays Owner-delegated
-    // and is blocked on per-user overrides, which do not exist yet.
-    const all = new Set(Object.values(ROLE_PERMISSIONS).flat());
-    expect([...all].some((p) => p.includes('price'))).toBe(false);
+  it('has no permanent price-edit authority — it is Owner-delegated per branch', () => {
+    // price.edit exists now (F1 Stage 2) but reaches a Store Manager only through
+    // an Owner-created per-branch grant, never as a role baseline.
+    expect(has('store_manager', 'price.edit')).toBe(false);
+    expect(has('store_employee', 'price.edit')).toBe(false);
+    // Only the Owner holds it by role.
+    const holders = (Object.keys(ROLE_PERMISSIONS) as (keyof typeof ROLE_PERMISSIONS)[]).filter(
+      (role) => ROLE_PERMISSIONS[role].includes('price.edit'),
+    );
+    expect(holders).toEqual(['owner']);
   });
 });
 

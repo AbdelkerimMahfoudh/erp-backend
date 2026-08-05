@@ -1,5 +1,5 @@
-// Reference data seeded in ALL environments: the 17-permission catalog (R7)
-// and the role -> permission matrix for the five roles (D11).
+// Reference data seeded in ALL environments: the 18-permission catalog (R7;
+// `price.edit` added in F1 Stage 2) and the role -> permission matrix (D11).
 
 export type RoleKey =
   | 'owner'
@@ -28,14 +28,20 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'user.manage',         label: 'Manage users' },
   { key: 'settings.manage',     label: 'Manage settings' },
   { key: 'integrations.manage', label: 'Manage integrations (WhatsApp, FCM)' },
+  // F1 Stage 2. Owner-held by role; delegatable per branch to a Store Manager
+  // (the ONLY delegatable permission — see rbac/permission-scope.ts). It edits
+  // normal prices and never authorizes a below-cost sale, which stays gated on
+  // `discount.override` (Owner-only, never delegatable).
+  { key: 'price.edit',          label: 'Edit item prices' },
 ];
 
 export const ALL_PERMISSION_KEYS = PERMISSIONS.map((p) => p.key);
 
-// Money visibility (`cost.view`) and `discount.override` are NOT granted to the
-// Administrator by default — it is a technical/setup role (D11).
+// Money-sensitive permissions — cost visibility, below-cost override, and price
+// editing — are NOT granted to the Administrator by default; it is a
+// technical/setup role (D11), not a commercial one.
 const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
-  (k) => k !== 'cost.view' && k !== 'discount.override',
+  (k) => k !== 'cost.view' && k !== 'discount.override' && k !== 'price.edit',
 );
 
 /**
