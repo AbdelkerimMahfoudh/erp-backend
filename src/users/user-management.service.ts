@@ -144,8 +144,25 @@ export class UserManagementService {
       throw new BadRequestException('No changes were provided');
     }
 
+    // Deactivation must be a security boundary, not just a flag flip: in one
+    // transaction we set isActive=false AND revoke every active session, so the
+    // user's refresh tokens die and — because access tokens are bound to a
+    // session — their access tokens stop authorizing at once. Reactivation does
+    // NOT un-revoke sessions, so a re-enabled user must authenticate again.
+    const deactivating = changed.includes('isActive') && dto.isActive === false;
+    let sessionsRevoked = 0;
     try {
-      await this.db.user.update({ where: { id }, data });
+      const ops: Prisma.PrismaPromise<unknown>[] = [this.db.user.update({ where: { id }, data })];
+      if (deactivating) {
+        ops.push(
+          this.db.authSession.updateMany({
+            where: { userId: id, revokedAt: null },
+            data: { revokedAt: new Date() },
+          }),
+        );
+      }
+      const results = await this.db.$transaction(ops);
+      if (deactivating) sessionsRevoked = (results[1] as { count: number }).count;
     } catch (e) {
       // The per-company unique index is the real guarantee; this turns the
       // race-loser's 500 into a clear 409.
@@ -162,6 +179,7 @@ export class UserManagementService {
       action: changed.length === 1 && changed[0] === 'isActive' ? 'status_change' : 'update',
       before: this.auditable(before, changed),
       after: this.auditable(after, changed),
+      reason: deactivating ? `Deactivated; ${sessionsRevoked} active session(s) revoked` : undefined,
     });
 
     return this.toView(after);

@@ -90,7 +90,11 @@ export class AuthService {
   }
 
   private buildResponse(user: User, sessionId: Buffer, secret: string): AuthTokenResponse {
-    const access = this.tokens.signAccessToken(binToUuid(user.id), binToUuid(user.companyId));
+    const access = this.tokens.signAccessToken(
+      binToUuid(user.id),
+      binToUuid(user.companyId),
+      binToUuid(sessionId),
+    );
     return {
       tokenType: 'Bearer',
       accessToken: access.token,

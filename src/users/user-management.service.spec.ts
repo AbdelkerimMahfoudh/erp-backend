@@ -55,9 +55,19 @@ function user(over: Partial<UserRow> = {}): UserRow {
   };
 }
 
-function makeService(opts: { users?: UserRow[]; companyId?: Buffer; selfId?: string } = {}) {
+interface SessionRow {
+  id: Buffer;
+  companyId: Buffer;
+  userId: Buffer;
+  revokedAt: Date | null;
+}
+
+function makeService(
+  opts: { users?: UserRow[]; companyId?: Buffer; selfId?: string; sessions?: SessionRow[] } = {},
+) {
   const companyId = opts.companyId ?? COMPANY;
   const users: UserRow[] = opts.users ?? [];
+  const sessions: SessionRow[] = opts.sessions ?? [];
   const audits: any[] = [];
 
   // The tenant extension injects companyId into every where clause; the double
@@ -126,6 +136,22 @@ function makeService(opts: { users?: UserRow[]; companyId?: Buffer; selfId?: str
         return copy(row);
       }),
     },
+    authSession: {
+      // Scoped by companyId (tenant extension) + userId + revokedAt filter.
+      updateMany: jest.fn(async ({ where, data }: any) => {
+        const w = scoped(where ?? {});
+        const hits = sessions.filter(
+          (s) =>
+            s.companyId.equals(w.companyId) &&
+            (w.userId === undefined || s.userId.equals(w.userId)) &&
+            (w.revokedAt === undefined || (w.revokedAt === null ? s.revokedAt === null : false)),
+        );
+        for (const s of hits) if ('revokedAt' in data) s.revokedAt = data.revokedAt;
+        return { count: hits.length };
+      }),
+    },
+    // Array form: run the already-invoked mock promises together, like Prisma.
+    $transaction: jest.fn(async (ops: Promise<unknown>[]) => Promise.all(ops)),
   };
 
   const service = new UserManagementService(
@@ -138,7 +164,11 @@ function makeService(opts: { users?: UserRow[]; companyId?: Buffer; selfId?: str
     { record: jest.fn(async (p: unknown) => void audits.push(p)) } as never,
   );
 
-  return { service, db, users, audits };
+  return { service, db, users, sessions, audits };
+}
+
+function session(userId: Buffer, over: Partial<SessionRow> = {}): SessionRow {
+  return { id: newUuidV7Bin(), companyId: COMPANY, userId, revokedAt: null, ...over };
 }
 
 async function dtoErrors(payload: object): Promise<string[]> {
@@ -364,5 +394,88 @@ describe('store-facing DTO cannot assign roles or Platform Administrator', () =>
   it('rejects a blank name and an over-long phone', async () => {
     expect(await dtoErrors({ name: '   ' })).not.toEqual([]);
     expect(await dtoErrors({ phone: '+' + '1'.repeat(40) })).not.toEqual([]);
+  });
+});
+
+describe('deactivation is a security boundary (F1.1)', () => {
+  it('revokes every active session for the user, atomically, and audits it', async () => {
+    const u = user({ login: 'seller', isActive: true });
+    const sessions = [session(u.id), session(u.id), session(u.id, { revokedAt: new Date() })];
+    const { service, users, audits } = makeService({ users: [u], sessions, selfId: OWNER_ID });
+
+    await service.update(binToUuid(u.id), { isActive: false });
+
+    expect(users[0].isActive).toBe(false);
+    expect(sessions.filter((s) => s.revokedAt !== null)).toHaveLength(3); // all now revoked
+    const entry = audits.find((a) => a.entityType === 'User');
+    expect(entry.action).toBe('status_change');
+    // The reason records the count but never a token, hash or secret.
+    expect(entry.reason).toMatch(/2 active session\(s\) revoked/);
+    expect(JSON.stringify(entry).toLowerCase()).not.toMatch(/hash|secret|refresh|token/);
+  });
+
+  it("revokes only the target user's sessions, not another user's", async () => {
+    const target = user({ login: 'target' });
+    const bystander = user({ login: 'bystander' });
+    const sessions = [session(target.id), session(bystander.id)];
+    const { service } = makeService({ users: [target, bystander], sessions, selfId: OWNER_ID });
+
+    await service.update(binToUuid(target.id), { isActive: false });
+
+    expect(sessions.find((s) => s.userId.equals(target.id))!.revokedAt).not.toBeNull();
+    expect(sessions.find((s) => s.userId.equals(bystander.id))!.revokedAt).toBeNull();
+  });
+
+  it('reactivation does NOT revive a revoked session — the user must log in again', async () => {
+    const revokedAt = new Date('2026-08-05T00:00:00Z');
+    const u = user({ login: 'seller', isActive: false });
+    const sessions = [session(u.id, { revokedAt })];
+    const { service, users } = makeService({ users: [u], sessions });
+
+    await service.update(binToUuid(u.id), { isActive: true });
+
+    expect(users[0].isActive).toBe(true);
+    expect(sessions[0].revokedAt).toBe(revokedAt); // untouched — still revoked
+  });
+
+  it('re-deactivating an already-inactive user is a controlled no-op (400)', async () => {
+    const u = user({ login: 'seller', isActive: false });
+    const { service } = makeService({ users: [u], selfId: OWNER_ID });
+
+    await expect(service.update(binToUuid(u.id), { isActive: false })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+
+  it("cannot deactivate — or revoke the sessions of — a user in another company", async () => {
+    const foreign = user({ companyId: OTHER_COMPANY, login: 'theirs' });
+    const foreignSession = session(foreign.id, { companyId: OTHER_COMPANY });
+    const { service } = makeService({ users: [foreign], sessions: [foreignSession] });
+
+    await expect(service.update(binToUuid(foreign.id), { isActive: false })).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(foreignSession.revokedAt).toBeNull();
+  });
+});
+
+describe('contact normalization (F1.1)', () => {
+  it('trims and lowercases the email at the DTO boundary', () => {
+    const dto = plainToInstance(UpdateUserDto, { email: '  Owner@Shop.MR  ' });
+    expect(dto.email).toBe('owner@shop.mr');
+  });
+
+  it('changing the phone does not touch the email verification mark, and vice versa', async () => {
+    const emailVerifiedAt = new Date('2026-08-01T00:00:00Z');
+    const phoneVerifiedAt = new Date('2026-08-02T00:00:00Z');
+    const u = user({ phone: '+22231234567', email: 'a@shop.mr', phoneVerifiedAt, emailVerifiedAt });
+    const { service, users } = makeService({ users: [u] });
+
+    await service.update(binToUuid(u.id), { phone: '+22239998877' });
+    expect(users[0].phoneVerifiedAt).toBeNull(); // phone changed → reset
+    expect(users[0].emailVerifiedAt).toBe(emailVerifiedAt); // email untouched
+
+    await service.update(binToUuid(u.id), { email: 'b@shop.mr' });
+    expect(users[0].emailVerifiedAt).toBeNull(); // email changed → reset
   });
 });

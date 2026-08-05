@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { HashingService } from '../common/security/hashing.service';
 import { AppConfigService } from '../common/config/app-config.service';
-import { newUuidV7Bin } from '../common/utils/uuid.util';
+import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 import { DeviceDto } from './dto/device.dto';
 
 interface CreateSessionParams {
@@ -81,6 +81,28 @@ export class SessionsService {
       data: { refreshTokenHash: await this.hashing.hash(newSecret), lastUsedAt: new Date() },
     });
     return { userId: session.userId, companyId: session.companyId };
+  }
+
+  /**
+   * True if this session still backs a valid access token: it exists, is not
+   * revoked or expired, belongs to `userIdStr`, and its user is active and not
+   * soft-deleted. Access tokens are bound to a session (`sid`) and revalidated on
+   * every request, so revoking the session — which deactivation does atomically —
+   * cuts off the access token at once and keeps it dead after any reactivation
+   * (the revoked session never returns; the user must log in again).
+   */
+  async isAccessValid(sessionId: Buffer, userIdStr: string): Promise<boolean> {
+    const session = await this.prisma.authSession.findUnique({
+      where: { id: sessionId },
+      include: { user: { select: { isActive: true, deletedAt: true } } },
+    });
+    if (!session || session.revokedAt || session.expiresAt <= new Date()) {
+      return false;
+    }
+    if (binToUuid(session.userId) !== userIdStr) {
+      return false;
+    }
+    return session.user.isActive && session.user.deletedAt === null;
   }
 
   async revoke(userId: Buffer, sessionId: Buffer): Promise<void> {
