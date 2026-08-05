@@ -252,6 +252,20 @@ model User {
   companyId    Bytes     @map("company_id") @db.Binary(16)
   name         String    @db.VarChar(160)
   login        String    @db.VarChar(120)
+  /// Contact phone in E.164 (e.g. +2223xxxxxxx). The future WhatsApp OTP and
+  /// recovery channel, so uniqueness is enforced in the database — see
+  /// @@unique([companyId, phone]) — not in application code, where two devices
+  /// could race onto one number. Null until captured; existing users stay null.
+  phone           String?   @db.VarChar(24)
+  /// Set only by a real verification event, and cleared whenever `phone`
+  /// changes. Never set it to fake "verified" — there is no verification
+  /// mechanism in Stage 1, so this stays null until Stage 4 delivers OTP.
+  phoneVerifiedAt DateTime? @map("phone_verified_at") @db.DateTime(6)
+  /// Optional recovery address. Not unique in Stage 1 (docs/23 §4 enforces
+  /// uniqueness only on `phone`); email uniqueness is deferred.
+  email           String?   @db.VarChar(160)
+  /// Set only by a real verification event, and cleared whenever `email` changes.
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.DateTime(6)
   passwordHash String    @map("password_hash") @db.VarChar(255)
   pinHash      String?   @map("pin_hash") @db.VarChar(255)
   isActive     Boolean   @default(true) @map("is_active")
@@ -282,6 +296,7 @@ model User {
   authSessions      AuthSession[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
+  @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
   @@map("users")
 }
 
