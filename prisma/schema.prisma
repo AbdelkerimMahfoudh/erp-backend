@@ -53,6 +53,24 @@ enum BranchType {
   warehouse
 }
 
+/// Language for Owner WhatsApp summaries. Separate from the app's UI language,
+/// which is a device preference — the Owner may read the app in one language
+/// and want the nightly message in another.
+enum SummaryLanguage {
+  en
+  ar
+}
+
+/// Money-receiving providers used in Mauritania, plus an escape hatch.
+/// `other` carries its name in `ReceivingAccount.providerName` rather than
+/// forcing a schema change every time a shop uses a new service.
+enum ReceivingProvider {
+  bankily
+  sedad
+  bim_bank
+  other
+}
+
 enum TrackingType {
   imei
   serial
@@ -182,6 +200,8 @@ model Company {
   reportSnapshots   ReportSnapshot[]
   auditLogs         AuditLog[]
   settings          Setting[]
+  companySettings   CompanySettings?
+  receivingAccounts ReceivingAccount[]
   syncDevices        SyncDevice[]
   outboxChanges      OutboxChange[]
   authSessions       AuthSession[]
@@ -1019,6 +1039,13 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+/// Internal operational tuning (thresholds, prefixes, scoring weights).
+///
+/// NOT the Owner-facing settings surface — it has no API, no validation and no
+/// audit, and is read directly by the analytics services. Owner-configured
+/// business policy lives in {@link CompanySettings} and {@link ReceivingAccount},
+/// where it is typed, validated, permission-guarded and audited. Do not add
+/// Owner-visible policy here.
 model Setting {
   id        Bytes  @id @db.Binary(16)
   companyId Bytes  @map("company_id") @db.Binary(16)
@@ -1033,6 +1060,86 @@ model Setting {
   // generated column + UNIQUE in 0002. This covers the branch-specific case.
   @@unique([companyId, branchId, key])
   @@map("settings")
+}
+
+/// Owner-configured business policy. Exactly one row per company.
+///
+/// Typed columns rather than JSON: every value here is a stable scalar that the
+/// server validates and other modules will branch on. A JSON blob would push
+/// that validation to whoever reads it next, and a policy that decides whether
+/// money leaves the till should not be a free-form document.
+///
+/// Company-scoped, not branch-scoped. The approved decisions (docs/21 §6, §8,
+/// §10) describe these as business-wide: one return policy, one set of shop
+/// accounts, one Owner receiving summaries, one security floor. Adding a branch
+/// dimension nobody asked for would be inventing a requirement.
+model CompanySettings {
+  companyId Bytes @id @map("company_id") @db.Binary(16)
+
+  /// Default return window. `0` means the shop does not accept returns; any
+  /// other value is the window in hours (24 and 48 are the common choices).
+  /// The server computes each sale's actual deadline when Returns is built —
+  /// nothing consumes this yet.
+  returnWindowHours Int @default(0) @map("return_window_hours")
+
+  /// Owner WhatsApp summaries (docs/21 §10). Nothing is sent in this phase.
+  whatsappLanguage       SummaryLanguage @default(en) @map("whatsapp_language")
+  whatsappIncludeAmounts Boolean         @default(false) @map("whatsapp_include_amounts")
+  whatsappDailyEnabled   Boolean         @default(false) @map("whatsapp_daily_enabled")
+  whatsappMonthlyEnabled Boolean         @default(false) @map("whatsapp_monthly_enabled")
+
+  /// The longest auto-lock interval any user may choose, in seconds.
+  /// `0` locks immediately. There is deliberately no value meaning "never" —
+  /// the approved decision forbids it, so it must not be representable.
+  autoLockMaxSeconds Int @default(300) @map("auto_lock_max_seconds")
+
+  /// Optimistic concurrency. Two Owner devices editing at once must not let the
+  /// slower save silently erase the faster one.
+  version     Int      @default(0)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+  updatedById Bytes?   @map("updated_by") @db.Binary(16)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@map("company_settings")
+}
+
+/// A shop account customers can send money to.
+///
+/// This records WHERE money is expected, nothing more. There are deliberately
+/// no columns for a PIN, password, API key, token or balance: the app does not
+/// authenticate to any provider and does not process payments (docs/21 §8, §16).
+/// If a future integration needs credentials they belong in a separate,
+/// encrypted, integrations-scoped store — never here.
+///
+/// Cash is not represented: it is always available and needs no configuration.
+model ReceivingAccount {
+  id        Bytes             @id @db.Binary(16)
+  companyId Bytes             @map("company_id") @db.Binary(16)
+  provider  ReceivingProvider
+
+  /// The provider's name, only when `provider` is `other`.
+  providerName String? @map("provider_name") @db.VarChar(60)
+
+  /// What the employee reads at the till, e.g. "Bankily – Main Counter".
+  /// Required, because "Bankily" three times over is not a choice anyone can make.
+  label String @db.VarChar(80)
+
+  /// Deactivated rather than deleted, so past transactions keep pointing at a
+  /// real account once money movement is recorded against it.
+  isActive  Boolean @default(true) @map("is_active")
+  sortOrder Int     @default(0) @map("sort_order")
+
+  version     Int      @default(0)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+  createdById Bytes?   @map("created_by") @db.Binary(16)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, label])
+  @@index([companyId, isActive, sortOrder])
+  @@map("receiving_accounts")
 }
 
 model SyncDevice {
