@@ -25,6 +25,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { TrackingModule } from './tracking/tracking.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { CategoriesModule } from './categories/categories.module';
+import { SettingsModule } from './settings/settings.module';
 import { ScannerModule } from './scanner/scanner.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
@@ -109,6 +110,7 @@ import { ClosingModule } from './closing/closing.module';
     AnalyticsModule,
     ExpensesModule,
     ClosingModule,
+    SettingsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
