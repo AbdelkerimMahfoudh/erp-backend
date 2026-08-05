@@ -73,10 +73,12 @@ describe('sanitizeDump', () => {
     expect(sql).toContain(data);
   });
 
-  it('preserves raw binary bytes exactly — the reason this is not a sed one-liner', () => {
-    // BINARY(16) UUIDs are dumped as raw bytes inside _binary '...'. 0x81 is not
-    // valid UTF-8; a utf8 read/write round trip replaces it with U+FFFD and
-    // every primary key in the database quietly changes.
+  it('preserves raw binary bytes exactly — legacy dumps taken before --hex-blob', () => {
+    // Older dumps write BINARY(16) UUIDs as raw bytes inside _binary '...'.
+    // 0x81 is not valid UTF-8; a utf8 read/write round trip replaces it with
+    // U+FFFD and every primary key in the database quietly changes. New dumps
+    // use --hex-blob, but the ones already on disk do not, and they must stay
+    // restorable.
     const key = Buffer.from([0x01, 0x8f, 0x81, 0xfe, 0x00, 0x70]).toString('latin1');
     const row = `INSERT INTO \`companies\` VALUES (_binary '${key}','Demo');`;
     const input = `${TRIGGER_DUMP}${row}\r\n`;
@@ -84,6 +86,49 @@ describe('sanitizeDump', () => {
     const { sql } = sanitizeDump(input);
 
     expect(Buffer.from(sql, 'latin1').includes(Buffer.from([0x8f, 0x81, 0xfe]))).toBe(true);
+    expect(sql).toContain(row);
+  });
+
+  it('handles a --hex-blob dump, where ids are plain ASCII hex', () => {
+    // The canonical command since E.1. Ids arrive as 0x… so the file is valid
+    // UTF-8, but the DEFINER problem is unchanged — that is what --hex-blob
+    // does NOT solve, and why this script still runs on every restore.
+    const row =
+      "INSERT INTO `companies` VALUES (0x018F0000000070008000000000000001,'Demo Phone Store');";
+    const input = `${TRIGGER_DUMP}${row}\r\n`;
+
+    const { sql, stripped } = sanitizeDump(input);
+
+    expect(stripped).toBe(1);
+    expect(sql).not.toContain('DEFINER=');
+    expect(sql).toContain(row);
+    // The hex id must be untouched, character for character.
+    expect(sql).toContain('0x018F0000000070008000000000000001');
+  });
+
+  it('a --hex-blob dump survives a UTF-8 round trip, unlike a raw-binary one', () => {
+    // This is the property --hex-blob buys: the file can be moved, synced and
+    // edited by ordinary text tools without silently losing every id.
+    const hexRow = "INSERT INTO `companies` VALUES (0x018F0000000070008000000000000001,'Demo');";
+    const rawBytes = Buffer.from([0x8f, 0x81, 0xfe]).toString('latin1');
+    const rawRow = `INSERT INTO \`companies\` VALUES (_binary '${rawBytes}','Demo');`;
+
+    const roundTrips = (line: string) => {
+      const bytes = Buffer.from(sanitizeDump(`${TRIGGER_DUMP}${line}\r\n`).sql, 'latin1');
+      return Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes);
+    };
+
+    expect(roundTrips(hexRow)).toBe(true);
+    expect(roundTrips(rawRow)).toBe(false);
+  });
+
+  it('never rewrites a hex-dump data line that contains DEFINER-like text', () => {
+    // Belt and braces: data lines are skipped wholesale, whatever they hold.
+    const row = "INSERT INTO `products` VALUES (0x0102,'Cable DEFINER=`root`@`localhost` 2m');";
+
+    const { sql, stripped } = sanitizeDump(`${TRIGGER_DUMP}${row}\r\n`);
+
+    expect(stripped).toBe(1); // the trigger's definer, not the product's name
     expect(sql).toContain(row);
   });
 
