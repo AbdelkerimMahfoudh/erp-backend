@@ -37,7 +37,8 @@ git -C <candidate> remote get-url origin   # → .../erp-docs.git
 
 ### Before modifying code, schema, data, configuration or documentation
 
-1. Locate and read the documentation repository's `CURRENT_HANDOFF.md`.
+1. Locate and read the documentation repository's `CURRENT_HANDOFF.md` **and the
+   most recent `SESSION_LOG.md` entries**.
 2. Read the relevant sections of `21_PRODUCT_DECISIONS.md`.
 3. Inspect Git status and recent commits in all affected repositories.
 4. Compare the handoff's recorded commit IDs with actual local **and** remote state.
@@ -57,16 +58,19 @@ limit or authorises takeover. On an authorised takeover, record the previous
 account, the takeover time, and whether its last handoff was complete or
 interrupted — then inspect every dirty file before continuing.
 
-Never run both accounts concurrently against the same working tree or database.
+**Take ownership only when `Status` is `READY_FOR_HANDOFF`** (or on an explicit,
+user-authorised takeover). Never run both accounts concurrently against the same
+working tree or database.
 
 ### At the start of an authorised implementation session
 
-Update `CURRENT_HANDOFF.md` **before** changing anything:
+Update `CURRENT_HANDOFF.md` **before** changing anything, recording all of:
 
 - `Status: IN_PROGRESS`
-- the active account label
-- the authorised task
-- repository state
+- `Owner:` the active account label (`CLAUDE-A` or `CLAUDE-B`)
+- `started_at_utc:` the takeover time in UTC
+- the **exact HEAD commit of all three repositories** at takeover
+- the **active phase and scope** of the authorised task
 - the next intended action
 
 Refresh it at every meaningful checkpoint — especially after a migration, a
@@ -78,9 +82,14 @@ commit or a completed subphase. Do not wait until context is nearly exhausted.
 2. Run all relevant verification that time allows.
 3. Commit and push only coherent changes.
 4. Never hide failing or uncommitted work.
-5. Update `CURRENT_HANDOFF.md`.
-6. Append a session entry to `SESSION_LOG.md`.
-7. Set `READY_FOR_HANDOFF`, or `BLOCKED` with the exact blocker.
+5. Update `CURRENT_HANDOFF.md`, recording: files and migrations changed; tests
+   and live verification; commits pushed per repository; known risks and
+   blockers; and the precise next task.
+6. Append a session entry to `SESSION_LOG.md` (append-only — never rewrite an
+   earlier entry). Update `21_PRODUCT_DECISIONS.md` and operational docs
+   whenever behaviour changed.
+7. Set `READY_FOR_HANDOFF` **only after all three working trees are clean and
+   pushed**; otherwise set `BLOCKED` with the exact blocker.
 8. Record the next exact action, precisely enough that the other account does
    not have to guess.
 
