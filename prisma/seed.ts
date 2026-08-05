@@ -123,6 +123,17 @@ async function seedDemo() {
   }
   console.log(`✓ Default settings: ${DEFAULT_SETTINGS.length} keys`);
 
+  // 5b. Owner-facing business policy (0019). Created with schema defaults so a
+  // brand-new company behaves exactly like a migrated one: `GET /settings`
+  // answers immediately instead of 404-ing at a shop that has done nothing
+  // wrong. `update: {}` keeps an Owner's real choices intact on reseed.
+  await prisma.companySettings.upsert({
+    where: { companyId: company.id },
+    update: {},
+    create: { companyId: company.id },
+  });
+  console.log('✓ Company settings row present');
+
   // 6. Baseline product categories with adaptive attribute schemas.
   const categories: {
     name: string;

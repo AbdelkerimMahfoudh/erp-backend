@@ -135,5 +135,7 @@ export const DEFAULT_SETTINGS: { key: string; value: unknown }[] = [
     },
   },
   { key: 'invoice_no_format', value: '{branch}-{seq:00000}' },
-  { key: 'whatsapp_schedule', value: { enabled: false, time: '21:00' } },
+  // `whatsapp_schedule` was removed in 0019. Owner-facing WhatsApp preferences
+  // are typed columns on `company_settings` now; keeping a second, unvalidated
+  // copy here would give "is the summary on?" two different answers.
 ];
