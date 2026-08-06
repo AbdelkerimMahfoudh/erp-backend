@@ -211,6 +211,8 @@ model Company {
   outboxChanges      OutboxChange[]
   authSessions       AuthSession[]
   userDevices        UserDevice[]
+  otpChallenges       OtpChallenge[]
+  verificationIntents VerificationIntent[]
   userBranchPermissions UserBranchPermission[]
   branchCounters     BranchCounter[]
   productCategories  ProductCategory[]
@@ -303,6 +305,8 @@ model User {
   syncDevices       SyncDevice[]
   authSessions      AuthSession[]
   userDevices       UserDevice[]
+  otpChallenges       OtpChallenge[]
+  verificationIntents VerificationIntent[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -1302,6 +1306,8 @@ model UserDevice {
   company  Company @relation(fields: [companyId], references: [id])
   user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   sessions AuthSession[]
+  otpChallenges       OtpChallenge[]
+  verificationIntents VerificationIntent[]
 
   @@index([companyId])
   @@index([userId, revokedAt])
@@ -1436,4 +1442,172 @@ model InventoryValuation {
 
   @@unique([companyId, branchId, productId])
   @@map("inventory_valuation")
+}
+
+// ─────────────────────── OTP & verification intent (F1 Stage 4A) ────────────
+
+/// What a one-time code is for. The purpose is part of the challenge identity,
+/// so a code issued to verify a phone can never be replayed to trust a device.
+enum OtpPurpose {
+  /// Confirming a phone number the user is adding or changing.
+  phone_verification
+
+  /// A sign-in from a device the server does not recognise (Stage 4B gates on this).
+  device_verification
+
+  /// Signing in again on a device after an explicit logout asked for re-verification.
+  logout_reauth
+}
+
+/// Terminal and non-terminal states of a challenge. A challenge leaves `pending`
+/// exactly once — every transition is conditional on the current state, so two
+/// concurrent verifications cannot both win.
+enum OtpStatus {
+  pending
+  verified
+  expired
+  cancelled
+  /// Too many wrong attempts. Distinct from `cancelled` so support can tell a
+  /// user "you locked it" from "the system replaced it".
+  locked
+}
+
+/// Why a delivery attempt did not reach the destination. Mirrors the messaging
+/// boundary's failure classes; kept as a column so support can answer "did it
+/// even send?" without reading provider logs.
+enum OtpDeliveryState {
+  /// Created but never handed to a channel.
+  not_sent
+  /// The channel accepted it. NOT proof the user received it.
+  accepted
+  /// No provider configured for this deployment.
+  channel_unavailable
+  /// Provider refused: bad number, unapproved template, opted out.
+  rejected
+  /// Network/timeout/5xx. A new controlled attempt may be made.
+  temporary_failure
+  not_authorized
+}
+
+/// A one-time code challenge.
+///
+/// The code itself is NEVER here. `codeHash` is an HMAC-SHA256 over the code
+/// keyed by a server-side pepper that lives in configuration, not in the
+/// database — six digits is ~20 bits, so an unkeyed hash in a stolen dump falls
+/// to a laptop in milliseconds, while a peppered one is useless without the key.
+///
+/// One effective challenge per (user, purpose, device) is enforced by a partial
+/// uniqueness pattern: `activeKey` is set while pending and NULL once the
+/// challenge reaches a terminal state, so MySQL's "NULLs do not collide" rule
+/// gives a real database guarantee instead of an application-level promise.
+model OtpChallenge {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  userId    Bytes @map("user_id") @db.Binary(16)
+
+  purpose OtpPurpose
+
+  /// The device this challenge is about, when the purpose concerns one. Null
+  /// for phone verification, which is about a number rather than a handset.
+  deviceId Bytes? @map("device_id") @db.Binary(16)
+
+  /// The destination AS IT WAS when the challenge was created. Snapshotted so a
+  /// later phone change cannot retarget a live challenge, and so support can see
+  /// where a code actually went.
+  destination String @db.VarChar(24)
+
+  /// For `phone_verification`: the candidate number being proven. Verification
+  /// only writes `User.phoneVerifiedAt` when this still matches the user's
+  /// current phone, so changing the number mid-flight invalidates the proof.
+  candidatePhone String? @map("candidate_phone") @db.VarChar(24)
+
+  /// HMAC-SHA256(code, pepper). Never the code. Never reversible.
+  codeHash String @map("code_hash") @db.VarChar(128)
+
+  status OtpStatus @default(pending)
+
+  /// Set while `pending`, cleared on any terminal transition. The UNIQUE index
+  /// over it is what makes "only one live challenge" a database fact.
+  activeKey String? @map("active_key") @db.VarChar(190)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  expiresAt DateTime @map("expires_at") @db.DateTime(6)
+
+  attemptCount  Int       @default(0) @map("attempt_count")
+  maxAttempts   Int       @map("max_attempts")
+  lastAttemptAt DateTime? @map("last_attempt_at") @db.DateTime(6)
+
+  sendCount       Int       @default(0) @map("send_count")
+  lastSentAt      DateTime? @map("last_sent_at") @db.DateTime(6)
+  resendNotBefore DateTime? @map("resend_not_before") @db.DateTime(6)
+
+  verifiedAt  DateTime? @map("verified_at") @db.DateTime(6)
+  consumedAt  DateTime? @map("consumed_at") @db.DateTime(6)
+  cancelledAt DateTime? @map("cancelled_at") @db.DateTime(6)
+  lockedAt    DateTime? @map("locked_at") @db.DateTime(6)
+
+  /// Channel name (`disabled`, `development-log`, later a real adapter) and the
+  /// provider's own message id when it gives one. Both safe to store and log.
+  provider          String?          @db.VarChar(40)
+  providerMessageId String?          @map("provider_message_id") @db.VarChar(120)
+  deliveryState     OtpDeliveryState @default(not_sent) @map("delivery_state")
+  /// Short, provider-neutral reason. Never a raw provider payload.
+  deliveryDetail    String?          @map("delivery_detail") @db.VarChar(200)
+
+  /// Client-supplied request identity, so a retried request reuses the live
+  /// challenge instead of sending a second code.
+  idempotencyKey String? @map("idempotency_key") @db.VarChar(120)
+
+  company Company     @relation(fields: [companyId], references: [id])
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device  UserDevice? @relation(fields: [deviceId], references: [id])
+
+  @@unique([activeKey])
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId])
+  @@index([userId, purpose, status])
+  @@index([expiresAt])
+  @@map("otp_challenges")
+}
+
+/// A short-lived, opaque ticket proving "this password was correct, but the
+/// device still needs verifying".
+///
+/// It exists so a new-device sign-in can be continued WITHOUT first issuing an
+/// access token — the whole point of Stage 4B. Only the hash is stored, so a
+/// leaked table yields nothing usable, and it is single-use and bound to one
+/// (company, user, purpose, device) so it cannot be carried anywhere else.
+///
+/// Stage 4A builds and tests it. Nothing issues one in the production login
+/// flow yet: `device_unrecognized` still blocks, unchanged.
+model VerificationIntent {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  userId    Bytes @map("user_id") @db.Binary(16)
+
+  purpose OtpPurpose
+
+  /// The device being verified, when the purpose concerns one.
+  deviceId Bytes? @map("device_id") @db.Binary(16)
+
+  /// SHA-256 of the raw token. The token is high-entropy (256 bits), so a plain
+  /// digest is sufficient here — unlike the six-digit code, which needs a pepper.
+  tokenHash String @unique @map("token_hash") @db.VarChar(128)
+
+  /// The challenge this intent is waiting on, when one exists.
+  challengeId Bytes? @map("challenge_id") @db.Binary(16)
+
+  createdAt  DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  expiresAt  DateTime  @map("expires_at") @db.DateTime(6)
+  /// Set exactly once, by the transaction that acts on it.
+  consumedAt DateTime? @map("consumed_at") @db.DateTime(6)
+
+  company Company     @relation(fields: [companyId], references: [id])
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device  UserDevice? @relation(fields: [deviceId], references: [id])
+
+  @@index([companyId])
+  @@index([userId, purpose])
+  @@index([expiresAt])
+  @@map("verification_intents")
 }

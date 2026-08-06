@@ -9,6 +9,8 @@ import { AuthService } from './auth.service';
 import { TokensService } from './tokens.service';
 import { SessionsService } from './sessions.service';
 import { DevicesService } from './devices.service';
+import { OtpService } from './otp/otp.service';
+import { VerificationIntentService } from './otp/verification-intent.service';
 import { DevicesController } from './devices.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
@@ -31,6 +33,9 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
     TokensService,
     SessionsService,
     DevicesService,
+    // Stage 4A infrastructure. Nothing in the login flow calls these yet.
+    OtpService,
+    VerificationIntentService,
     JwtStrategy,
     // Global JWT guard — every route requires a valid token unless @Public().
     { provide: APP_GUARD, useClass: JwtAuthGuard },
