@@ -11,8 +11,20 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
+import { isDelegatable, DELEGATION_ELIGIBLE_ROLE, DELEGATABLE_PERMISSIONS } from '../rbac/permission-scope';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { toE164, isValidEmail } from './contact.util';
+
+/**
+ * The one permission this API can delegate, as a server-side constant.
+ *
+ * It is deliberately NOT taken from the request. The route spells the authority
+ * out in its path (`/delegations/price-edit`), so there is no field a client
+ * could put `discount.override` or `user.manage` into — the narrow API cannot
+ * be turned into a general permission administration endpoint by sending a
+ * different body.
+ */
+const DELEGATED_PERMISSION = 'price.edit';
 
 /**
  * `active` — usable and contactable. `inactive` — deactivated (never deleted).
@@ -26,6 +38,10 @@ export interface UserBranchView {
   branchId: string;
   branchName: string;
   role: string;
+  /** Whether this assignment may receive delegated permissions (store_manager). */
+  canDelegate: boolean;
+  /** Delegatable permissions currently granted on THIS assignment (Stage 2). */
+  grantedPermissions: string[];
 }
 
 /**
@@ -46,6 +62,8 @@ export interface UserView {
   status: UserStatus;
   lastLoginAt: string | null;
   branches: UserBranchView[];
+  /** Permissions an Owner is allowed to delegate at all (the allow-list). */
+  delegatablePermissions: string[];
 }
 
 /** The exact columns the Team surface is allowed to read — hashes excluded. */
@@ -63,6 +81,7 @@ const USER_SELECT = {
     select: {
       branch: { select: { id: true, name: true } },
       role: { select: { key: true } },
+      permissions: { select: { permission: { select: { key: true } } } },
     },
   },
 } satisfies Prisma.UserSelect;
@@ -185,6 +204,146 @@ export class UserManagementService {
     return this.toView(after);
   }
 
+  // --------------------------------------------------- delegated price.edit
+
+  /**
+   * Delegate ordinary price editing to a Store Manager **in one branch**.
+   *
+   * The grant attaches to the `UserBranch` assignment, not to the user, which is
+   * what makes it branch-specific: `AccessService` only reads grants in the
+   * branch-scoped resolution path, so authority given in branch A cannot appear
+   * in branch B, and cannot appear at all without an `X-Branch-Id`.
+   *
+   * Idempotent by contract — repeating a grant is a no-op, not a second row.
+   * This never confers below-cost authority: that stays gated on
+   * `discount.override`, which is Owner-only and not delegatable.
+   */
+  async grantPriceEdit(userIdStr: string, branchIdStr: string): Promise<UserView> {
+    const assignment = await this.eligibleAssignment(userIdStr, branchIdStr);
+    const permission = await this.delegatedPermission();
+
+    try {
+      await this.db.userBranchPermission.create({
+        data: {
+          companyId: this.tenant.companyId(),
+          userBranchId: assignment.id,
+          permissionId: permission.id,
+          grantedById: this.tenant.requireUserId(),
+        },
+      });
+      await this.recordDelegation('create', userIdStr, branchIdStr, assignment.branchName);
+    } catch (e) {
+      // Two Owners granting at once: the composite primary key makes the loser
+      // a no-op rather than a duplicate. Already-granted is success.
+      if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+    }
+
+    return this.getOne(userIdStr);
+  }
+
+  /**
+   * Withdraw the delegation. Idempotent: revoking a grant that is not there
+   * succeeds, because the caller's intent — "this manager must not have it" —
+   * is satisfied either way.
+   */
+  async revokePriceEdit(userIdStr: string, branchIdStr: string): Promise<UserView> {
+    // Deliberately NOT the eligibility check: if a manager was downgraded, the
+    // grant row may still exist and an Owner must still be able to clear it.
+    const assignment = await this.assignment(userIdStr, branchIdStr);
+    const permission = await this.delegatedPermission();
+
+    const { count } = await this.db.userBranchPermission.deleteMany({
+      where: { userBranchId: assignment.id, permissionId: permission.id },
+    });
+    if (count > 0) {
+      await this.recordDelegation('delete', userIdStr, branchIdStr, assignment.branchName);
+    }
+
+    return this.getOne(userIdStr);
+  }
+
+  /** The assignment, scoped to this company by the tenant client. */
+  private async assignment(userIdStr: string, branchIdStr: string) {
+    if (!isUuid(userIdStr) || !isUuid(branchIdStr)) {
+      throw new NotFoundException('Branch assignment not found');
+    }
+    // A forged or another company's branch simply does not match — the tenant
+    // extension injects `companyId`, so this fails closed rather than leaking
+    // whether the branch exists elsewhere.
+    const found = await this.db.userBranch.findFirst({
+      where: { userId: uuidToBin(userIdStr), branchId: uuidToBin(branchIdStr) },
+      select: {
+        id: true,
+        role: { select: { key: true } },
+        branch: { select: { name: true } },
+        user: { select: { isActive: true, deletedAt: true } },
+      },
+    });
+    if (!found) {
+      throw new NotFoundException('This user has no assignment in that branch');
+    }
+    return { ...found, branchName: found.branch.name };
+  }
+
+  /** The assignment, plus every rule that makes it eligible to RECEIVE a grant. */
+  private async eligibleAssignment(userIdStr: string, branchIdStr: string) {
+    const found = await this.assignment(userIdStr, branchIdStr);
+
+    if (found.user.deletedAt || !found.user.isActive) {
+      throw new ConflictException('This user is deactivated and cannot receive delegated authority');
+    }
+    if (found.role.key !== DELEGATION_ELIGIBLE_ROLE) {
+      // Employees and administrators are refused here, not silently ignored, so
+      // the Owner learns why nothing happened.
+      throw new ConflictException(
+        'Price editing can only be delegated to a Store Manager in that branch',
+      );
+    }
+    return found;
+  }
+
+  private async delegatedPermission() {
+    const permission = await this.db.permission.findUnique({
+      where: { key: DELEGATED_PERMISSION },
+      select: { id: true },
+    });
+    if (!permission) {
+      // Migration 0022 guarantees this row exists; a miss means the database is
+      // behind the code, which is worth saying plainly rather than 500-ing.
+      throw new ConflictException(
+        `The "${DELEGATED_PERMISSION}" permission is missing — apply pending migrations`,
+      );
+    }
+    return permission;
+  }
+
+  /** Actor comes from the audit context; never any hash, token or secret. */
+  private recordDelegation(
+    action: 'create' | 'delete',
+    userIdStr: string,
+    branchIdStr: string,
+    branchName: string,
+  ): Promise<void> {
+    const payload = {
+      targetUserId: userIdStr,
+      branchId: branchIdStr,
+      branchName,
+      permission: DELEGATED_PERMISSION,
+    };
+    return this.audit.record({
+      entityType: 'UserBranchPermission',
+      entityId: uuidToBin(userIdStr),
+      action,
+      branchId: uuidToBin(branchIdStr),
+      before: action === 'delete' ? payload : undefined,
+      after: action === 'create' ? payload : undefined,
+      reason:
+        action === 'create'
+          ? `Delegated ${DELEGATED_PERMISSION} in ${branchName}`
+          : `Revoked ${DELEGATED_PERMISSION} in ${branchName}`,
+    });
+  }
+
   // ------------------------------------------------------------- internals
 
   private async findInCompany(idStr: string): Promise<UserRow> {
@@ -240,7 +399,13 @@ export class UserManagementService {
         branchId: binToUuid(ub.branch.id),
         branchName: ub.branch.name,
         role: ub.role.key,
+        canDelegate: ub.role.key === DELEGATION_ELIGIBLE_ROLE,
+        // Only delegatable grants are ever meaningful; filter defensively.
+        grantedPermissions: ub.permissions
+          .map((p) => p.permission.key)
+          .filter(isDelegatable),
       })),
+      delegatablePermissions: [...DELEGATABLE_PERMISSIONS],
     };
   }
 

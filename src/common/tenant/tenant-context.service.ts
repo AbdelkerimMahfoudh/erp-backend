@@ -39,4 +39,20 @@ export class TenantContext {
     const userId = this.cls.get('userId');
     return userId ? uuidToBin(userId) : undefined;
   }
+
+  /**
+   * The acting user, for columns that must record WHO did something and are
+   * NOT NULL — `user_branch_permissions.granted_by_id`, for one.
+   *
+   * Fail-closed like {@link companyId}: an authenticated route always has a
+   * user, so its absence is a programming error (a query issued outside a
+   * request), not a client mistake.
+   */
+  requireUserId(): Buffer {
+    const userId = this.userId();
+    if (!userId) {
+      throw new MissingTenantContextError('(request)', 'userId');
+    }
+    return userId;
+  }
 }

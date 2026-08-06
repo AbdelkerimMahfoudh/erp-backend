@@ -18,6 +18,10 @@ const COMPANY = uuidToBin('018f0000-0000-7000-8000-00000000c001');
 const OTHER_COMPANY = uuidToBin('018f0000-0000-7000-8000-00000000c002');
 const OWNER_ID = '018f0000-0000-7000-8000-00000000a001';
 
+/** The one delegatable permission, and a stable id for the double. */
+const PRICE_EDIT_KEY = 'price.edit';
+const PRICE_EDIT_ID = uuidToBin('018f0000-0000-7000-8000-00000000p001'.replace(/p/g, 'e'));
+
 interface UserRow {
   id: Buffer;
   companyId: Buffer;
@@ -32,7 +36,25 @@ interface UserRow {
   isActive: boolean;
   lastLoginAt: Date | null;
   deletedAt: Date | null;
-  userBranches: { branch: { id: Buffer; name: string }; role: { key: string } }[];
+  userBranches: UserBranchRow[];
+}
+
+/** One assignment. `permissions` are the per-branch delegated grants (Stage 2). */
+interface UserBranchRow {
+  id: Buffer;
+  branch: { id: Buffer; name: string };
+  role: { key: string };
+  permissions: { permission: { key: string } }[];
+}
+
+function assignment(over: Partial<UserBranchRow> = {}): UserBranchRow {
+  return {
+    id: newUuidV7Bin(),
+    branch: { id: newUuidV7Bin(), name: 'Main Store' },
+    role: { key: 'store_employee' },
+    permissions: [],
+    ...over,
+  };
 }
 
 function user(over: Partial<UserRow> = {}): UserRow {
@@ -50,7 +72,7 @@ function user(over: Partial<UserRow> = {}): UserRow {
     isActive: true,
     lastLoginAt: null,
     deletedAt: null,
-    userBranches: [{ branch: { id: newUuidV7Bin(), name: 'Main Store' }, role: { key: 'store_employee' } }],
+    userBranches: [assignment()],
     ...over,
   };
 }
@@ -63,12 +85,20 @@ interface SessionRow {
 }
 
 function makeService(
-  opts: { users?: UserRow[]; companyId?: Buffer; selfId?: string; sessions?: SessionRow[] } = {},
+  opts: {
+    users?: UserRow[];
+    companyId?: Buffer;
+    selfId?: string;
+    sessions?: SessionRow[];
+    /** Set false to simulate a database behind the code (0022 not applied). */
+    permissionExists?: boolean;
+  } = {},
 ) {
   const companyId = opts.companyId ?? COMPANY;
   const users: UserRow[] = opts.users ?? [];
   const sessions: SessionRow[] = opts.sessions ?? [];
   const audits: any[] = [];
+  const grantRows: any[] = [];
 
   // The tenant extension injects companyId into every where clause; the double
   // must do the same, or an unscoped query would pass here and leak in prod.
@@ -94,7 +124,12 @@ function makeService(
     emailVerifiedAt: u.emailVerifiedAt,
     isActive: u.isActive,
     lastLoginAt: u.lastLoginAt,
-    userBranches: u.userBranches.map((b) => ({ branch: { ...b.branch }, role: { ...b.role } })),
+    userBranches: u.userBranches.map((b) => ({
+      id: b.id,
+      branch: { ...b.branch },
+      role: { ...b.role },
+      permissions: b.permissions.map((p) => ({ permission: { ...p.permission } })),
+    })),
   });
 
   const db: any = {
@@ -150,6 +185,68 @@ function makeService(
         return { count: hits.length };
       }),
     },
+    // Assignments are reached through the tenant-scoped client, so the double
+    // resolves them from the in-company users only — a cross-company user or
+    // branch simply does not match, which is the fail-closed behaviour.
+    userBranch: {
+      findFirst: jest.fn(async ({ where }: any = {}) => {
+        const w = scoped(where ?? {});
+        for (const u of users) {
+          if (!u.companyId.equals(w.companyId)) continue;
+          if (w.userId !== undefined && !u.id.equals(w.userId)) continue;
+          const ub = u.userBranches.find(
+            (b) => w.branchId === undefined || b.branch.id.equals(w.branchId),
+          );
+          if (ub) {
+            return {
+              id: ub.id,
+              role: { ...ub.role },
+              branch: { name: ub.branch.name },
+              user: { isActive: u.isActive, deletedAt: u.deletedAt },
+            };
+          }
+        }
+        return null;
+      }),
+    },
+    // The composite primary key (user_branch_id, permission_id) is enforced for
+    // real, so "grant twice" exercises the same P2002 the database would raise.
+    userBranchPermission: {
+      create: jest.fn(async ({ data }: any) => {
+        const target = users
+          .flatMap((u) => u.userBranches)
+          .find((b) => b.id.equals(data.userBranchId));
+        if (!target) throw new Error('no such assignment');
+        if (target.permissions.some((p) => p.permission.key === PRICE_EDIT_KEY)) {
+          throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+            code: 'P2002',
+            clientVersion: 'test',
+          });
+        }
+        target.permissions.push({ permission: { key: PRICE_EDIT_KEY } });
+        grantRows.push({ ...data });
+        return data;
+      }),
+      deleteMany: jest.fn(async ({ where }: any) => {
+        const target = users
+          .flatMap((u) => u.userBranches)
+          .find((b) => b.id.equals(where.userBranchId));
+        if (!target) return { count: 0 };
+        const before = target.permissions.length;
+        target.permissions = target.permissions.filter(
+          (p) => p.permission.key !== PRICE_EDIT_KEY,
+        );
+        return { count: before - target.permissions.length };
+      }),
+    },
+    // Global reference data — no tenant scoping, exactly like the real model.
+    permission: {
+      findUnique: jest.fn(async ({ where }: any) =>
+        where.key === PRICE_EDIT_KEY && opts.permissionExists !== false
+          ? { id: PRICE_EDIT_ID }
+          : null,
+      ),
+    },
     // Array form: run the already-invoked mock promises together, like Prisma.
     $transaction: jest.fn(async (ops: Promise<unknown>[]) => Promise.all(ops)),
   };
@@ -160,11 +257,12 @@ function makeService(
       companyId: () => companyId,
       branchId: () => undefined,
       userId: () => (opts.selfId ? uuidToBin(opts.selfId) : uuidToBin(OWNER_ID)),
+      requireUserId: () => (opts.selfId ? uuidToBin(opts.selfId) : uuidToBin(OWNER_ID)),
     } as never,
     { record: jest.fn(async (p: unknown) => void audits.push(p)) } as never,
   );
 
-  return { service, db, users, sessions, audits };
+  return { service, db, users, sessions, audits, grantRows };
 }
 
 function session(userId: Buffer, over: Partial<SessionRow> = {}): SessionRow {
@@ -186,7 +284,7 @@ describe('listing the team', () => {
   it('returns each user with branches, role and a derived status', async () => {
     const { service } = makeService({
       users: [
-        user({ name: 'Owner', login: 'owner', phone: '+22231234567', userBranches: [{ branch: { id: newUuidV7Bin(), name: 'Main Store' }, role: { key: 'owner' } }] }),
+        user({ name: 'Owner', login: 'owner', phone: '+22231234567', userBranches: [assignment({ role: { key: 'owner' } })] }),
         user({ name: 'Seller', login: 'seller' }),
         user({ name: 'Gone', login: 'gone', isActive: false }),
       ],
@@ -196,7 +294,15 @@ describe('listing the team', () => {
 
     expect(list.map((u) => u.status)).toEqual(['active', 'pending_contact', 'inactive']);
     expect(list.find((u) => u.login === 'owner')!.branches).toEqual([
-      { branchId: expect.any(String), branchName: 'Main Store', role: 'owner' },
+      // Stage 2 added the delegation fields. An Owner assignment is not
+      // delegation-eligible — only a Store Manager is.
+      {
+        branchId: expect.any(String),
+        branchName: 'Main Store',
+        role: 'owner',
+        canDelegate: false,
+        grantedPermissions: [],
+      },
     ]);
   });
 

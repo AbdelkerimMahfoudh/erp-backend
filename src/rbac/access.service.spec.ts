@@ -132,3 +132,101 @@ describe('per-branch delegated grants (Stage 2)', () => {
     expect(perms.has('user.manage')).toBe(false);
   });
 });
+
+/**
+ * The remaining guarantees the delegation model rests on.
+ *
+ * These are deliberately separate from the cases above: those prove the happy
+ * path and the leak that must not happen, while these pin the edges that a
+ * later refactor is most likely to erode quietly.
+ */
+
+const ROLE_OWNER = newUuidV7Bin();
+const UB_OWNER = newUuidV7Bin();
+
+describe('Owner', () => {
+  /** Owner holds price.edit by role, and holds it in a branch context. */
+  function ownerService() {
+    const db: any = {
+      userBranch: {
+        findMany: jest.fn(async ({ where }: any) =>
+          (where.branchId === undefined || where.branchId.equals(BRANCH_A)
+            ? [{ id: UB_OWNER, roleId: ROLE_OWNER, role: { key: 'owner' } }]
+            : []),
+        ),
+      },
+      rolePermission: {
+        findMany: jest.fn(async () =>
+          // A realistic slice: one branch-scoped, one company-scoped, plus the
+          // new permission the Owner gained in Stage 2.
+          ['sale.create', 'user.manage', 'settings.manage', 'price.edit'].map((key) => ({
+            permission: { key },
+          })),
+        ),
+      },
+      userBranchPermission: { findMany: jest.fn(async () => []) },
+    };
+    return new AccessService(db as never);
+  }
+
+  it('has price.edit with a valid branch — by role, needing no grant', async () => {
+    expect((await ownerService().getEffectivePermissions(USER, BRANCH_A)).has('price.edit')).toBe(
+      true,
+    );
+  });
+
+  it('keeps company-level management working without a branch', async () => {
+    // The no-branch hardening must not have cost the Owner the ability to
+    // manage users and settings before a branch is chosen — that is exactly the
+    // cold-start path the mobile app takes.
+    const perms = await ownerService().getEffectivePermissions(USER);
+
+    expect(perms.has('user.manage')).toBe(true);
+    expect(perms.has('settings.manage')).toBe(true);
+    // …but branch-scoped authority still does not resolve without a branch.
+    expect(perms.has('sale.create')).toBe(false);
+    expect(perms.has('price.edit')).toBe(false);
+  });
+});
+
+describe('fail-closed scoping', () => {
+  it('an unknown permission is treated as branch-scoped', async () => {
+    // A permission nobody has classified must not leak company-wide. This is
+    // what makes adding a permission safe by default.
+    const db: any = {
+      userBranch: {
+        findMany: jest.fn(async () => [
+          { id: UB_A, roleId: ROLE_MANAGER, role: { key: 'store_manager' } },
+        ]),
+      },
+      rolePermission: {
+        findMany: jest.fn(async () => [{ permission: { key: 'something.invented.later' } }]),
+      },
+      userBranchPermission: { findMany: jest.fn(async () => []) },
+    };
+    const svc = new AccessService(db as never);
+
+    expect((await svc.getEffectivePermissions(USER)).has('something.invented.later')).toBe(false);
+    expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('something.invented.later')).toBe(
+      true,
+    );
+  });
+});
+
+describe('a grant takes effect on the NEXT request', () => {
+  it('resolves from the database every time, so nothing is cached in a token', async () => {
+    // Permissions are never embedded in the JWT. The proof that matters
+    // operationally: with the same user and the same branch, adding a grant row
+    // between two calls changes the second answer — no re-login, no new token.
+    const grants: Grant[] = [];
+    const svc = makeService([managerInA], grants);
+
+    expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('price.edit')).toBe(false);
+    grants.push({ userBranchId: UB_A, key: 'price.edit' });
+    expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('price.edit')).toBe(true);
+
+    // And revoking is just as immediate.
+    grants.length = 0;
+    expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('price.edit')).toBe(false);
+  });
+});
