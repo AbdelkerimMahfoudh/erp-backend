@@ -44,13 +44,13 @@ function user(companyId: Buffer, login: string, over: Partial<FakeUser> = {}): F
 }
 
 function makeService(opts: {
-  companies?: Record<string, { id: Buffer; isActive: boolean }>;
+  companies?: Record<string, { id: Buffer; isActive: boolean; publicStoreId: string }>;
   users?: FakeUser[];
   recognise?: unknown;
   verifyPassword?: boolean;
 } = {}) {
   const sessionId = newUuidV7Bin();
-  const companies = opts.companies ?? { [STORE_A]: { id: COMPANY_A, isActive: true } };
+  const companies = opts.companies ?? { [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A } };
   const users = opts.users ?? [user(COMPANY_A, 'owner')];
 
   const usersSvc = {
@@ -106,8 +106,9 @@ describe('tenant resolution by Store Account ID', () => {
 
     expect(prisma.company.findUnique).toHaveBeenCalledWith({
       where: { publicStoreId: STORE_A },
-      select: { id: true, isActive: true },
+      select: { id: true, isActive: true, publicStoreId: true },
     });
+    expect(res.user.publicStoreId).toBe(STORE_A);
     // The user was looked up WITHIN the resolved company.
     expect(usersSvc.findByLoginForAuth).toHaveBeenCalledWith(COMPANY_A, 'owner');
     expect(res.user.companyId).toBeDefined();
@@ -127,7 +128,10 @@ describe('tenant resolution by Store Account ID', () => {
     const ownerA = user(COMPANY_A, 'owner');
     const ownerB = user(COMPANY_B, 'owner');
     const setup = {
-      companies: { [STORE_A]: { id: COMPANY_A, isActive: true }, [STORE_B]: { id: COMPANY_B, isActive: true } },
+      companies: {
+        [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A },
+        [STORE_B]: { id: COMPANY_B, isActive: true, publicStoreId: STORE_B },
+      },
       users: [ownerA, ownerB],
     };
 
@@ -142,7 +146,7 @@ describe('tenant resolution by Store Account ID', () => {
 
   it('Store ID of company A + a login that exists only in company B is rejected', async () => {
     const { service } = makeService({
-      companies: { [STORE_A]: { id: COMPANY_A, isActive: true } },
+      companies: { [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A } },
       users: [user(COMPANY_B, 'owner')], // owner exists, but in a DIFFERENT company
     });
     await expect(doLogin(service)).rejects.toBeInstanceOf(UnauthorizedException);
@@ -150,7 +154,7 @@ describe('tenant resolution by Store Account ID', () => {
 
   it('an inactive company cannot authenticate', async () => {
     const { service, usersSvc } = makeService({
-      companies: { [STORE_A]: { id: COMPANY_A, isActive: false } },
+      companies: { [STORE_A]: { id: COMPANY_A, isActive: false, publicStoreId: STORE_A } },
       users: [user(COMPANY_A, 'owner')],
     });
     await expect(doLogin(service)).rejects.toBeInstanceOf(UnauthorizedException);

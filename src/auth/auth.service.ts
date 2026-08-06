@@ -15,7 +15,7 @@ export interface AuthTokenResponse {
   accessToken: string;
   expiresIn: number;
   refreshToken: string;
-  user: { id: string; name: string; login: string; companyId: string };
+  user: { id: string; name: string; login: string; companyId: string; publicStoreId: string };
   /** Present ONLY when this login enrolled a new device. The secret appears here and nowhere else. */
   device?: DeviceEnrollment;
 }
@@ -48,7 +48,7 @@ export class AuthService {
     const company = storeCode
       ? await this.prisma.company.findUnique({
           where: { publicStoreId: storeCode },
-          select: { id: true, isActive: true },
+          select: { id: true, isActive: true, publicStoreId: true },
         })
       : null;
     const user =
@@ -130,7 +130,9 @@ export class AuthService {
       });
     }
 
-    return { ...this.buildResponse(user, sessionId, secret), device: enrollment };
+    // `company` is guaranteed here: `user` is set only when the company resolved
+    // and was active, and we would have thrown otherwise.
+    return { ...this.buildResponse(user, sessionId, secret, company!.publicStoreId), device: enrollment };
   }
 
   async refresh(refreshToken: string): Promise<AuthTokenResponse> {
@@ -157,7 +159,15 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    return this.buildResponse(user, sessionId, newSecret);
+    const company = await this.prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { publicStoreId: true },
+    });
+    if (!company) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    return this.buildResponse(user, sessionId, newSecret, company.publicStoreId);
   }
 
   /**
@@ -190,7 +200,12 @@ export class AuthService {
     return { revoked: await this.sessions.revokeAll(userId) };
   }
 
-  private buildResponse(user: User, sessionId: Buffer, secret: string): AuthTokenResponse {
+  private buildResponse(
+    user: User,
+    sessionId: Buffer,
+    secret: string,
+    publicStoreId: string,
+  ): AuthTokenResponse {
     const access = this.tokens.signAccessToken(
       binToUuid(user.id),
       binToUuid(user.companyId),
@@ -206,6 +221,9 @@ export class AuthService {
         name: user.name,
         login: user.login,
         companyId: binToUuid(user.companyId),
+        // The public Store Account ID the client namespaces its device
+        // credential by (Stage 3.2). Not a secret.
+        publicStoreId,
       },
     };
   }

@@ -29,6 +29,14 @@ export class UsersService {
     return this.prisma.user.findUnique({ where: { id } });
   }
 
+  /** The user plus their company's public Store Account ID (for `/auth/me`). */
+  findByIdWithStore(id: Buffer) {
+    return this.prisma.user.findUnique({
+      where: { id },
+      include: { company: { select: { publicStoreId: true } } },
+    });
+  }
+
   async setLastLogin(id: Buffer): Promise<void> {
     await this.prisma.user.update({ where: { id }, data: { lastLoginAt: new Date() } });
   }

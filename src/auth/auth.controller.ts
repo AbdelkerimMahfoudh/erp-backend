@@ -63,7 +63,7 @@ export class AuthController {
   @Get('me')
   @ApiOperation({ summary: 'Get the authenticated user' })
   async me(@CurrentUser() user: AuthUser) {
-    const found = await this.users.findById(uuidToBin(user.userId));
+    const found = await this.users.findByIdWithStore(uuidToBin(user.userId));
     if (!found) {
       throw new UnauthorizedException();
     }
@@ -72,6 +72,9 @@ export class AuthController {
       name: found.name,
       login: found.login,
       companyId: binToUuid(found.companyId),
+      // Lets a RESTORED session namespace its device credential without a
+      // re-login (Stage 3.2). Not a secret.
+      publicStoreId: found.company.publicStoreId,
       isActive: found.isActive,
     };
   }
