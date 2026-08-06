@@ -4,6 +4,17 @@ import { IsNotEmpty, IsOptional, IsString, MaxLength, ValidateNested } from 'cla
 import { DeviceCredentialDto, DeviceDto } from './device.dto';
 
 export class LoginDto {
+  @ApiProperty({
+    example: 'F62B8-D1EEB',
+    maxLength: 24,
+    description:
+      'Public Store Account ID (Stage 3.2). Selects the company before login. Not a secret; case/dash-insensitive.',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(24)
+  storeAccountId: string;
+
   @ApiProperty({ example: 'owner', maxLength: 120 })
   @IsString()
   @IsNotEmpty()

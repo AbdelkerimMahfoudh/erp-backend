@@ -8,9 +8,10 @@ import { newUuidV7Bin } from '../common/utils/uuid.util';
  * User management foundation.
  *
  * NOTE: authentication lookups run BEFORE a tenant context exists, so they use
- * the unscoped system client ({@link PrismaService}) by design. In v1 (single
- * company) `login` is unique enough; multi-tenant login resolution (company code
- * / subdomain) is a future concern.
+ * the unscoped system client ({@link PrismaService}) by design. Login resolves
+ * the company from the public Store Account ID first (Stage 3.2), then finds the
+ * user WITHIN that company — `login` is unique only per company, so the lookup
+ * must be company-scoped or the same login in two companies would collide.
  */
 @Injectable()
 export class UsersService {
@@ -19,8 +20,9 @@ export class UsersService {
     private readonly hashing: HashingService,
   ) {}
 
-  findByLoginForAuth(login: string): Promise<User | null> {
-    return this.prisma.user.findFirst({ where: { login, deletedAt: null } });
+  /** Find a user by login, scoped to the already-resolved company. */
+  findByLoginForAuth(companyId: Buffer, login: string): Promise<User | null> {
+    return this.prisma.user.findFirst({ where: { companyId, login, deletedAt: null } });
   }
 
   findById(id: Buffer): Promise<User | null> {

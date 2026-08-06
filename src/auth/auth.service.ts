@@ -2,7 +2,9 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { User } from '@prisma/client';
 import { UsersService } from '../users/users.service';
 import { HashingService } from '../common/security/hashing.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
+import { normalizeStoreCode } from '../common/utils/store-code.util';
 import { TokensService } from './tokens.service';
 import { SessionsService } from './sessions.service';
 import { DevicesService, type DeviceEnrollment } from './devices.service';
@@ -26,13 +28,37 @@ export class AuthService {
     private readonly tokens: TokensService,
     private readonly sessions: SessionsService,
     private readonly devices: DevicesService,
+    private readonly prisma: PrismaService,
   ) {}
 
   async login(dto: LoginDto, meta: { ip?: string; userAgent?: string }): Promise<AuthTokenResponse> {
-    const user = await this.users.findByLoginForAuth(dto.login);
-    // Verify against a found+active user; generic failure prevents enumeration.
-    const ok = user && user.isActive && (await this.hashing.verify(user.passwordHash, dto.password));
-    if (!user || !ok) {
+    /*
+     * Tenant resolution (F1 Stage 3.2). The client names its company by the
+     * PUBLIC Store Account ID — never a binary company id it could forge. We
+     * resolve the company, then find the user WITHIN it, so the same login can
+     * exist in two companies without collision and a Store-ID-A + login-from-B
+     * pairing simply fails.
+     *
+     * Non-enumerating + timing-safe: a bad Store ID, a bad login and a bad
+     * password all produce the SAME generic failure, and every path spends one
+     * Argon2 verify so "no such company/user" cannot be told apart from "wrong
+     * password" by timing.
+     */
+    const storeCode = normalizeStoreCode(dto.storeAccountId);
+    const company = storeCode
+      ? await this.prisma.company.findUnique({
+          where: { publicStoreId: storeCode },
+          select: { id: true, isActive: true },
+        })
+      : null;
+    const user =
+      company && company.isActive ? await this.users.findByLoginForAuth(company.id, dto.login) : null;
+
+    const passwordOk = user
+      ? await this.hashing.verify(user.passwordHash, dto.password)
+      : await this.hashing.verifyDummy(dto.password);
+
+    if (!user || !user.isActive || !passwordOk) {
       throw new UnauthorizedException('Invalid credentials');
     }
 

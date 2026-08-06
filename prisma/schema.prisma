@@ -162,6 +162,11 @@ enum SyncStatus {
 model Company {
   id           Bytes    @id @db.Binary(16)
   name         String   @db.VarChar(160)
+  /// Public Store Account ID (F1 Stage 3.2): the human-typable, NON-secret code
+  /// that selects this company before login. Canonical = 10 uppercase hex chars.
+  /// Not the binary `id`, a branch id, a device id or a subscription id.
+  /// Generated on create, unique, immutable through store-facing APIs.
+  publicStoreId String  @unique @map("public_store_id") @db.VarChar(16)
   currency     String   @default("USD") @db.Char(3)
   timezone     String   @default("UTC") @db.VarChar(64)
   settingsJson Json     @map("settings") @db.Json

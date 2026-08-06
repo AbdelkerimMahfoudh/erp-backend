@@ -13,6 +13,7 @@ import { config as loadEnv } from 'dotenv';
 import { Prisma, PrismaClient, RoleKey, TrackingType } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { newUuidV7Bin, uuidToBin, binToUuid } from './lib/uuid';
+import { generateStoreCode } from '../src/common/utils/store-code.util';
 import {
   PERMISSIONS,
   ROLE_PERMISSIONS,
@@ -52,6 +53,9 @@ async function seedDemo() {
     create: {
       id: DEMO_COMPANY_ID,
       name: 'Demo Phone Store',
+      // Public Store Account ID (Stage 3.2). Generated once on create; the
+      // `update: {}` above never touches it, so re-seeding cannot change it.
+      publicStoreId: generateStoreCode(),
       currency: 'USD',
       timezone: 'UTC',
       settingsJson: {},
