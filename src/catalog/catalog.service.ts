@@ -38,6 +38,8 @@ const SPEC_MAX_DEPTH = 2;
 const SPEC_FORBIDDEN = /(^|_)(cost|price|margin|profit)($|_)/i;
 
 const DEFAULT_PAGE = 30;
+/** Cap on the specification-search id lookup — bounded, company-scoped. */
+const SPEC_SEARCH_LIMIT = 500;
 
 /**
  * A confirm-card for the scan→confirm→cost/quantity flow. The employee scans a
@@ -340,7 +342,7 @@ export class CatalogService {
     totalActive: number;
   }> {
     const limit = query.limit ?? DEFAULT_PAGE;
-    const where = this.buildWhere(query);
+    const where = this.buildWhere(query, await this.specificationMatches(query.q));
 
     let cursor: CatalogCursor | undefined;
     if (query.cursor) cursor = decodeCatalogCursor(query.cursor);
@@ -370,7 +372,37 @@ export class CatalogService {
     };
   }
 
-  private buildWhere(query: ListProductsDto): Prisma.ProductWhereInput {
+  /**
+   * Ids whose adaptive `specifications` contain the term.
+   *
+   * Done as a raw query on purpose. Prisma's `string_contains` on a MySQL JSON
+   * column needs an explicit `path`, and these specifications are
+   * category-defined — the keys are not known in advance — so there is no path
+   * to give. Without one the filter silently matches NOTHING, which a mocked
+   * test cannot reveal; it took a live query against MySQL to see it.
+   *
+   * Casting the document to text and matching it is the honest equivalent of
+   * "the words the user typed appear in this product's specs". The result feeds
+   * back into the main query as one more `OR id IN (…)` predicate, so keyset
+   * pagination and every other filter keep working unchanged. It is company
+   * scoped and capped, so it can never become an unbounded scan.
+   */
+  private async specificationMatches(term: string | undefined): Promise<Buffer[]> {
+    const q = term?.trim();
+    if (!q) return [];
+    // Escape the LIKE wildcards so a user typing '%' searches for a literal '%'.
+    const needle = `%${q.toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const rows = await this.db.$queryRaw<{ id: Buffer }[]>`
+      SELECT id FROM products
+      WHERE company_id = ${this.tenant.companyId()}
+        AND specifications IS NOT NULL
+        AND LOWER(CAST(specifications AS CHAR)) LIKE ${needle}
+      LIMIT ${SPEC_SEARCH_LIMIT}
+    `;
+    return rows.map((r) => r.id);
+  }
+
+  private buildWhere(query: ListProductsDto, specIds: Buffer[] = []): Prisma.ProductWhereInput {
     const where: Prisma.ProductWhereInput = {};
 
     const active = query.active ?? 'active';
@@ -383,14 +415,14 @@ export class CatalogService {
     const term = query.q?.trim();
     if (term) {
       // Exact-variant search: the fields a person actually types. Storage and
-      // colour live inside `specifications`, so the JSON is matched as text —
-      // MySQL has no index for that, but the set is company-scoped and small.
+      // colour live inside `specifications`, which is matched separately by
+      // `specificationMatches` and joined in here as an id list.
       where.OR = [
         { brand: { contains: term } },
         { model: { contains: term } },
         { variant: { contains: term } },
         { barcode: { contains: term } },
-        { specifications: { string_contains: term } },
+        ...(specIds.length ? [{ id: { in: specIds } }] : []),
       ];
     }
     return where;

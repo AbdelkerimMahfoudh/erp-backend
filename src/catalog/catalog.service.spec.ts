@@ -124,10 +124,11 @@ function makeService(
     if (w.OR) {
       const hit = w.OR.some((clause: any) => {
         const [field, cond] = Object.entries(clause)[0] as [string, any];
-        const term = cond.contains ?? cond.string_contains;
-        const value =
-          field === 'specifications' ? JSON.stringify(p.specifications ?? {}) : ((p as any)[field] ?? '');
-        return String(value).toLowerCase().includes(String(term).toLowerCase());
+        // Specification matches arrive as an id list from the raw query, because
+        // Prisma's JSON `string_contains` needs a path MySQL cannot supply here.
+        if (field === 'id' && cond.in) return cond.in.some((id: Buffer) => p.id.equals(id));
+        const value = (p as any)[field] ?? '';
+        return String(value).toLowerCase().includes(String(cond.contains).toLowerCase());
       });
       if (!hit) return false;
     }
@@ -232,6 +233,14 @@ function makeService(
       findMany: jest.fn(async () => [{ branchId: BRANCH }]),
     },
     $transaction: jest.fn(async (arg: any) => (typeof arg === 'function' ? arg(db) : Promise.all(arg))),
+    // The specification search is a raw query (see the service for why). The
+    // double answers it the way MySQL does: match the serialized document.
+    $queryRaw: jest.fn(async (_strings: unknown, ...values: unknown[]) => {
+      const needle = String(values[1] ?? '').replace(/^%|%$/g, '').replace(/\\(.)/g, '$1').toLowerCase();
+      return products
+        .filter((p) => inCompany(p) && p.specifications && JSON.stringify(p.specifications).toLowerCase().includes(needle))
+        .map((p) => ({ id: p.id }));
+    }),
   };
 
   const permissions = new Set(seed.permissions ?? ['catalog.manage']);
