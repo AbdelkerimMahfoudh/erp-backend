@@ -85,6 +85,13 @@ export interface ProductDetail extends ProductListRow {
   specifications: Record<string, unknown>;
   categoryName: string | null;
   reorderThreshold: number;
+  /**
+   * False once units, stock, purchases or sales exist under this product —
+   * changing the tracking mode would reinterpret that history, so the edit form
+   * disables the control and explains why rather than letting the user try and
+   * collect a 409. The server enforces the rule regardless (G1).
+   */
+  canChangeTracking: boolean;
   stockByBranch: ProductStockRow[];
   totalStock: number;
   defaultPrice: number | null;
@@ -316,14 +323,6 @@ export class CatalogService {
     };
   }
 
-  list(): Promise<Product[]> {
-    return this.db.product.findMany({
-      where: { deletedAt: null },
-      orderBy: [{ brand: 'asc' }, { model: 'asc' }],
-      take: 200,
-    });
-  }
-
   // ------------------------------------------------------------- G1 browsing
 
   /**
@@ -485,6 +484,7 @@ export class CatalogService {
       specifications: (product.specifications as Record<string, unknown>) ?? {},
       categoryName: product.category?.name ?? null,
       reorderThreshold: product.reorderThreshold,
+      canChangeTracking: !(await this.hasHistory(product.id)),
       stockByBranch,
       totalStock: stockByBranch.reduce((sum, s) => sum + s.quantity, 0),
       // The existing authoritative fallback price. G1 displays it; it does not

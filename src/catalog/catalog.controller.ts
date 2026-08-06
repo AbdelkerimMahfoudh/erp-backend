@@ -27,13 +27,6 @@ export class CatalogController {
     return this.catalog.listPage(query);
   }
 
-  /** @deprecated superseded by `GET /products` — kept while callers migrate. */
-  @Get('all')
-  @ApiOperation({ summary: 'Legacy unpaginated product list (capped at 200)' })
-  list() {
-    return this.catalog.list();
-  }
-
   @Get('search')
   @ApiOperation({ summary: 'Search products by brand/model/variant' })
   search(@Query('q') q: string) {

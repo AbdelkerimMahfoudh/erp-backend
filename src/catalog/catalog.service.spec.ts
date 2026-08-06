@@ -654,6 +654,17 @@ describe('detail', () => {
     expect(JSON.stringify(detail)).not.toContain('imei');
   });
 
+  it('tells the client whether tracking mode can still change', async () => {
+    // The edit form disables the control instead of letting the user try and
+    // collect a 409, so the flag has to be honest in both directions.
+    const fresh = product();
+    const used = product({ model: 'Used' });
+    const ctx = makeService({ products: [fresh, used], units: [{ productId: used.id, branchId: BRANCH, status: 'in_stock' }] });
+
+    expect((await ctx.service.getDetail(binToUuid(fresh.id))).canChangeTracking).toBe(true);
+    expect((await ctx.service.getDetail(binToUuid(used.id))).canChangeTracking).toBe(false);
+  });
+
   it('counts in-stock units per branch for a serialized product', async () => {
     const p = product({ trackingType: 'imei' });
     const { service } = makeService({
