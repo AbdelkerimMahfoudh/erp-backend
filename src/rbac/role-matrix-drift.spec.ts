@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROLE_PERMISSIONS } from '../../prisma/seed-data/permissions';
+import { PERMISSIONS, ROLE_PERMISSIONS } from '../../prisma/seed-data/permissions';
 
 /**
  * The permission matrix is written down twice, and both copies matter.
@@ -88,5 +88,81 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     for (const stmt of inserts) {
       expect(stmt).toMatch(/NOT EXISTS/);
     }
+  });
+});
+
+/**
+ * `price.edit` repeats the D2.1 lesson one level down.
+ *
+ * 0021 created the delegation TABLE, but the permission ROW is reference data,
+ * and reference data lives in the seed — which `migrate deploy` never runs. A
+ * production deploy would have produced a delegation table with nothing
+ * delegatable and Owners silently missing an authority the code assumes they
+ * hold. 0022 closes that, and these tests keep the SQL and the TypeScript
+ * catalogue from drifting apart again.
+ */
+describe('price.edit — migration and seed must agree', () => {
+  const backfill = sqlOf('0022_price_edit_permission_backfill');
+
+  /** Roles the migration inserts a `role_permissions` row for. */
+  const rolesGrantedInSql = (): string[] =>
+    [...backfill.split('INSERT INTO `role_permissions`').slice(1).join('\n').matchAll(/r\.`key` = '(\w+)'/g)]
+      .map((m) => m[1])
+      .sort();
+
+  it('creates the catalogue row the seed defines, with the same key and label', () => {
+    const seeded = PERMISSIONS.find((p) => p.key === 'price.edit');
+    expect(seeded).toBeDefined();
+    expect(backfill).toContain("'price.edit'");
+    // The label is user-visible; a mismatch between deploy and seed would show
+    // two different names for one authority depending on how you installed.
+    expect(backfill).toContain(`'${seeded!.label}'`);
+  });
+
+  it('grants it to Owner and to nobody else', () => {
+    expect(rolesGrantedInSql()).toEqual(['owner']);
+  });
+
+  it('never grants it to a manager, an employee or the administrator', () => {
+    // Store Manager receives it only per branch, per assignment, by an explicit
+    // Owner grant — never from the base role.
+    for (const role of ['store_manager', 'store_employee', 'administrator']) {
+      expect(backfill).not.toMatch(new RegExp(`r\\.\`key\` = '${role}'`));
+    }
+  });
+
+  it('agrees with the TypeScript matrix about who holds it by role', () => {
+    expect(ROLE_PERMISSIONS.owner).toContain('price.edit');
+    expect(ROLE_PERMISSIONS.store_manager).not.toContain('price.edit');
+    expect(ROLE_PERMISSIONS.store_employee).not.toContain('price.edit');
+    expect(ROLE_PERMISSIONS.administrator).not.toContain('price.edit');
+  });
+
+  it('matches on the stable KEY, never on an id', () => {
+    // The development database already had `price.edit` with a hand-generated
+    // id before this migration existed. Guarding on the key is what makes the
+    // migration correct there AND on a fresh deploy.
+    expect(backfill).toMatch(/p\.`key` = 'price\.edit'/);
+    expect(backfill).toMatch(/NOT EXISTS/);
+  });
+
+  it('every inserting statement is guarded, so a rerun cannot duplicate', () => {
+    const inserts = backfill.split('INSERT INTO').slice(1);
+    expect(inserts).toHaveLength(2); // the permission row, and the Owner mapping
+    for (const stmt of inserts) {
+      expect(stmt).toMatch(/NOT EXISTS/);
+    }
+  });
+
+  it('carries company_id from the role, preserving the tenant relationship', () => {
+    expect(backfill).toMatch(/SELECT r\.`company_id`, r\.`id`, p\.`id`/);
+  });
+
+  it('does not edit the already-applied 0021 migration', () => {
+    // 0021 is recorded in _prisma_migrations; changing it would break every
+    // database that already ran it. Corrections move forward.
+    const applied = sqlOf('0021_user_branch_permissions');
+    expect(applied).not.toContain("'price.edit'");
+    expect(applied).not.toContain('INSERT INTO `role_permissions`');
   });
 });
