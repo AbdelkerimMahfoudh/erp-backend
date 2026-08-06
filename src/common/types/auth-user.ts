@@ -2,6 +2,12 @@
 export interface AuthUser {
   userId: string;
   companyId: string;
+  /**
+   * The session this request is authenticated by (F1.1 binds tokens to it).
+   * Stage 3 needs it to answer "which device is this?" without trusting a
+   * client-supplied header.
+   */
+  sessionId: string;
 }
 
 /** JWT access-token payload. */

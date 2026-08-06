@@ -37,7 +37,9 @@ describe('JwtStrategy.validate', () => {
 
     const result = await strategy.validate(payload());
 
-    expect(result).toEqual({ userId: USER, companyId: COMPANY });
+    // Stage 3 added `sessionId`: device routes must be able to answer "which
+    // device is this request on?" from the token, never from a client header.
+    expect(result).toEqual({ userId: USER, companyId: COMPANY, sessionId: SID });
     expect(cls.set).toHaveBeenCalledWith('userId', USER);
     expect(cls.set).toHaveBeenCalledWith('companyId', expect.any(Buffer));
   });

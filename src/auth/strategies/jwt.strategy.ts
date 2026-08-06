@@ -52,6 +52,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     this.cls.set('userId', payload.sub);
     this.cls.set('companyId', uuidToBin(payload.companyId));
-    return { userId: payload.sub, companyId: payload.companyId };
+    return { userId: payload.sub, companyId: payload.companyId, sessionId: payload.sid };
   }
 }

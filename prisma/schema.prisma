@@ -205,6 +205,7 @@ model Company {
   syncDevices        SyncDevice[]
   outboxChanges      OutboxChange[]
   authSessions       AuthSession[]
+  userDevices        UserDevice[]
   userBranchPermissions UserBranchPermission[]
   branchCounters     BranchCounter[]
   productCategories  ProductCategory[]
@@ -296,6 +297,7 @@ model User {
   auditLogs         AuditLog[]
   syncDevices       SyncDevice[]
   authSessions      AuthSession[]
+  userDevices       UserDevice[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -1225,11 +1227,97 @@ model OutboxChange {
 // Auth sessions — one row per active login/device. Backs rotating refresh tokens
 // and per-device revocation (see docs/15_SECURITY_ARCHITECTURE.md §5, §7, §8).
 // Only the Argon2 hash of the refresh secret is stored, never the raw token.
+/// How a device came to be trusted. Recorded honestly — nothing here may claim
+/// a verification that did not happen.
+enum DeviceTrustMethod {
+  /// Adopted from a session that predates device identity (F1 Stage 3). We
+  /// cannot say how that session was authenticated, only that it was already
+  /// valid. **Never treat this as verified.**
+  legacy
+
+  /// Enrolled during a successful password login, before an OTP provider
+  /// exists. A password was genuinely verified; a phone was not.
+  password
+
+  /// Stage 4 only: confirmed by a one-time code sent to the user's phone.
+  /// **Nothing in Stage 3 may set this.**
+  otp
+}
+
+/// A device (really: one app installation) a user has signed in from.
+///
+/// Recognition needs BOTH the public `id` and a high-entropy secret that is
+/// returned exactly once and stored only as an Argon2id hash. The id alone
+/// authenticates nothing — that is the whole point of splitting them, and it is
+/// why a leaked device list cannot be replayed.
+///
+/// Scoped to one `(company, user)` pair. Two people sharing a handset get two
+/// rows with two secrets, so nothing here can correlate a device across users
+/// or companies.
+///
+/// Deliberately absent: IMEI, serial, advertising id, or any hardware
+/// fingerprint. `label`, `platform`, `model` and `appVersion` are **untrusted
+/// display metadata** the client sends for the user's benefit; no decision is
+/// ever made from them.
+model UserDevice {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  userId    Bytes @map("user_id") @db.Binary(16)
+
+  /// Argon2id hash of the server-issued credential. The raw secret exists only
+  /// on the device and in the one response that issued it.
+  secretHash String @map("secret_hash") @db.VarChar(255)
+
+  /// Untrusted display metadata. Never used for authorization or recognition.
+  label      String? @db.VarChar(120)
+  platform   String? @db.VarChar(40)
+  model      String? @db.VarChar(120)
+  appVersion String? @map("app_version") @db.VarChar(40)
+
+  trustMethod DeviceTrustMethod @map("trust_method")
+  trustedAt   DateTime          @default(now()) @map("trusted_at") @db.DateTime(6)
+
+  /// Set only when a real OTP is verified (Stage 4). Stage 3 never writes it,
+  /// so "was this phone-verified?" always has a truthful answer.
+  otpVerifiedAt DateTime? @map("otp_verified_at") @db.DateTime(6)
+
+  /// An explicit logout asks for OTP re-verification next time, even on this
+  /// same device. Stage 3 records the requirement; Stage 4 enforces it.
+  reverifyRequired Boolean @default(false) @map("reverify_required")
+
+  firstSeenAt DateTime  @default(now()) @map("first_seen_at") @db.DateTime(6)
+  /// Throttled — see DeviceService. Never written on every request.
+  lastSeenAt  DateTime? @map("last_seen_at") @db.DateTime(6)
+
+  /// Revoked devices are KEPT, not deleted: a security history that disappears
+  /// when someone revokes a stolen phone is not a security history.
+  revokedAt   DateTime? @map("revoked_at") @db.DateTime(6)
+  revokedById Bytes?    @map("revoked_by_id") @db.Binary(16)
+
+  company  Company @relation(fields: [companyId], references: [id])
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions AuthSession[]
+
+  @@index([companyId])
+  @@index([userId, revokedAt])
+  @@map("user_devices")
+}
+
 model AuthSession {
-  id               Bytes     @id @db.Binary(16)
-  companyId        Bytes     @map("company_id") @db.Binary(16)
-  userId           Bytes     @map("user_id") @db.Binary(16)
-  deviceId         String?   @map("device_id") @db.VarChar(120)
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  userId    Bytes @map("user_id") @db.Binary(16)
+
+  /// The device this session belongs to (F1 Stage 3). Nullable because
+  /// sessions created before Stage 3 have none and must keep working — they
+  /// adopt a legacy-trusted device on their next app launch.
+  deviceRecordId Bytes?      @map("device_record_id") @db.Binary(16)
+  device         UserDevice? @relation(fields: [deviceRecordId], references: [id])
+
+  /// LEGACY: the old client-supplied, unverified device string. Superseded by
+  /// `deviceRecordId` and kept only so existing rows stay readable. Nothing
+  /// authenticates from it.
+  deviceId String? @map("device_id") @db.VarChar(120)
   deviceName       String?   @map("device_name") @db.VarChar(120)
   platform         String?   @db.VarChar(40)
   appVersion       String?   @map("app_version") @db.VarChar(40)

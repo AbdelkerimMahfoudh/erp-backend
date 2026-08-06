@@ -105,6 +105,20 @@ export class SessionsService {
     return session.user.isActive && session.user.deletedAt === null;
   }
 
+  /**
+   * The device a session belongs to, or null for a pre-Stage-3 session that has
+   * not adopted one. Filtered by `userId` so one user cannot read another's
+   * session-to-device mapping.
+   */
+  async deviceOf(sessionId: Buffer, userId: Buffer): Promise<Buffer | null> {
+    const session = await this.prisma.authSession.findUnique({
+      where: { id: sessionId },
+      select: { userId: true, deviceRecordId: true },
+    });
+    if (!session || !session.userId.equals(userId)) return null;
+    return session.deviceRecordId;
+  }
+
   async revoke(userId: Buffer, sessionId: Buffer): Promise<void> {
     await this.prisma.authSession.updateMany({
       where: { id: sessionId, userId, revokedAt: null },
