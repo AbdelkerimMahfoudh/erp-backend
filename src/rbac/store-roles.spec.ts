@@ -31,7 +31,7 @@ describe('store-facing roles', () => {
   });
 
   it('leaves Owner with full access, now including price.edit', () => {
-    expect(ROLE_PERMISSIONS.owner.length).toBe(18);
+    expect(ROLE_PERMISSIONS.owner.length).toBe(19);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
@@ -174,6 +174,41 @@ describe('Store Manager', () => {
       (role) => ROLE_PERMISSIONS[role].includes('price.edit'),
     );
     expect(holders).toEqual(['owner']);
+  });
+});
+
+describe('catalog.manage (G1)', () => {
+  it('is held by Owner and Store Manager, never by Store Employee', () => {
+    // Final catalog administration is a manager decision. An employee may browse
+    // the catalog, but must not create or reshape product/category metadata —
+    // which they COULD before G1, because creation was guarded by `unit.add`.
+    expect(has('owner', 'catalog.manage')).toBe(true);
+    expect(has('store_manager', 'catalog.manage')).toBe(true);
+    expect(has('store_employee', 'catalog.manage')).toBe(false);
+  });
+
+  it('does not drag pricing or any other authority along with it', () => {
+    // The whole point of a narrow permission: holding it must not imply money,
+    // supplier, expense, report, user or settings authority.
+    expect(has('store_manager', 'catalog.manage')).toBe(true);
+    for (const perm of [
+      'price.edit',
+      'discount.override',
+      'expense.manage',
+      'user.manage',
+      'settings.manage',
+      'branch.manage',
+      'integrations.manage',
+    ]) {
+      expect(has('store_manager', perm)).toBe(false);
+    }
+  });
+
+  it('is not money-sensitive, so the Administrator convention keeps it', () => {
+    // ADMIN_KEYS excludes only cost/below-cost/price. Catalog metadata is setup
+    // work, which is exactly what the internal technical role is for.
+    expect(has('administrator', 'catalog.manage')).toBe(true);
+    expect(has('administrator', 'price.edit')).toBe(false);
   });
 });
 

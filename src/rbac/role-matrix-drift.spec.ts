@@ -41,13 +41,33 @@ function revokedInSql(sql: string, roleKey: string): string[] {
   return [...after.matchAll(/'([a-z.]+)'/g)].map((m) => m[1]).sort();
 }
 
+/**
+ * Permission keys a LATER, additive migration grants to a role. Those use the
+ * `JOIN permissions p ON p.key = '<key>' … WHERE r.key = '<role>'` shape rather
+ * than the backfill's `IN ( … )` list, so they need their own reader. Without
+ * this, every permission added after 0017 would look like drift.
+ */
+function grantedInKeyedSql(sql: string, roleKey: string): string[] {
+  const blocks = sql.split('INSERT INTO `role_permissions`').slice(1);
+  return blocks
+    .filter((b) => b.includes(`r.\`key\` = '${roleKey}'`))
+    .flatMap((b) => [...b.matchAll(/p\.`key` = '([a-z.]+)'/g)].map((m) => m[1]))
+    .sort();
+}
+
 describe('role matrix — SQL and TypeScript must agree', () => {
   const backfill = sqlOf('0017_store_role_backfill');
   const revoke = sqlOf('0018_store_role_revoke');
+  /** Additive permission migrations that grant to store-facing roles after 0017. */
+  const laterGrants = [sqlOf('0022_price_edit_permission_backfill'), sqlOf('0026_catalog_manage_permission')];
 
   for (const role of ['store_manager', 'store_employee'] as const) {
-    it(`${role}: backfill SQL grants exactly what the seed grants`, () => {
-      const fromSql = grantedInSql(backfill, role);
+    it(`${role}: migrations grant exactly what the seed grants`, () => {
+      // 0017 established the baseline; later migrations add to it. A deploy
+      // applies all of them, so the union is what a deployed system really has.
+      const fromSql = [
+        ...new Set([...grantedInSql(backfill, role), ...laterGrants.flatMap((sql) => grantedInKeyedSql(sql, role))]),
+      ].sort();
       const fromTs = [...ROLE_PERMISSIONS[role]].sort();
 
       expect(fromSql).toEqual(fromTs);

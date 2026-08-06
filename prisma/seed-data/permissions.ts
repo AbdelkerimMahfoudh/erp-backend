@@ -1,4 +1,4 @@
-// Reference data seeded in ALL environments: the 18-permission catalog (R7;
+// Reference data seeded in ALL environments: the 19-permission catalog (R7;
 // `price.edit` added in F1 Stage 2) and the role -> permission matrix (D11).
 
 export type RoleKey =
@@ -33,6 +33,10 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   // normal prices and never authorizes a below-cost sale, which stays gated on
   // `discount.override` (Owner-only, never delegatable).
   { key: 'price.edit',          label: 'Edit item prices' },
+  // G1. Final catalog administration: create/edit product + category METADATA.
+  // Deliberately NOT price, cost, supplier, expense, report, user or settings
+  // authority — and it must never imply `price.edit`.
+  { key: 'catalog.manage',      label: 'Manage the product catalog' },
 ];
 
 export const ALL_PERMISSION_KEYS = PERMISSIONS.map((p) => p.key);
@@ -71,6 +75,10 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
     'unit.add', 'unit.transfer', 'import.run',
     'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
+    // G1: final catalog administration. Granted by migration 0026 as well as
+    // here, and it carries no pricing authority — `price.edit` stays delegated
+    // per branch by an Owner.
+    'catalog.manage',
   ],
 
   /**

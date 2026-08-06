@@ -25,14 +25,14 @@ export class CategoriesController {
   }
 
   @Post()
-  @RequirePermissions('settings.manage')
+  @RequirePermissions('catalog.manage')
   @ApiOperation({ summary: 'Create a product category' })
   create(@Body() dto: CreateCategoryDto) {
     return this.categories.create(dto);
   }
 
   @Patch(':id')
-  @RequirePermissions('settings.manage')
+  @RequirePermissions('catalog.manage')
   @ApiOperation({ summary: 'Update a category (name, tracking type, attribute schema, or retire/restore)' })
   update(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     return this.categories.update(id, dto);
