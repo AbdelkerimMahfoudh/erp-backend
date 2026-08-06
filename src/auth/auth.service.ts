@@ -36,6 +36,50 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    /*
+     * Device identity (F1 Stage 3 / 3.1).
+     *
+     * The recognition decision is made BEFORE a session exists, so a rejected
+     * credential claim leaves nothing behind — no session, no device, no token,
+     * no `lastLogin` bump. Five cases, kept structurally distinct:
+     *
+     *   A. No credential at all → a genuinely new or locally reset install.
+     *      Enroll on the password-era path, trust recorded honestly as
+     *      `password` (a password was verified; a phone was not — distinct from
+     *      `otp`).
+     *   B. A valid, complete pair for this user → recognise and attach.
+     *   C. Known id, WRONG secret  ┐
+     *   D. Unknown id with a secret ├─ a failed/invalid/stale CLAIM. Fail CLOSED:
+     *   E. Revoked id + credential  ┘  no new device, no rotation, no secret, no
+     *      authorization — a controlled error. Enrolling here would mint a
+     *      trusted device from a bad claim and let repeated claims create
+     *      unlimited device rows. When OTP exists (Stage 4), this is exactly
+     *      where a verification challenge is issued instead of a hard refusal.
+     *
+     * A partially-supplied pair (id without secret, or secret without id) is a
+     * claim too, and fails closed the same way.
+     */
+    const presented = dto.deviceCredential;
+    const claimsCredential = Boolean(presented?.deviceId || presented?.deviceSecret);
+    let recognisedDeviceId: Buffer | null = null;
+
+    if (claimsCredential) {
+      const known =
+        presented!.deviceId && presented!.deviceSecret
+          ? await this.devices.recognise(user.id, presented!.deviceId, presented!.deviceSecret)
+          : null;
+      if (!known) {
+        // Fail closed. The message names no id and echoes no secret, so the
+        // failure cannot enumerate whether a device id exists or leak the claim.
+        throw new UnauthorizedException({
+          code: 'device_unrecognized',
+          message:
+            'This device could not be verified. Clear the saved device and sign in again to enroll it fresh.',
+        });
+      }
+      recognisedDeviceId = known.id;
+    }
+
     const secret = this.tokens.generateRefreshSecret();
     const sessionId = await this.sessions.create({
       companyId: user.companyId,
@@ -47,36 +91,9 @@ export class AuthService {
     });
     await this.users.setLastLogin(user.id);
 
-    /*
-     * Device identity (F1 Stage 3).
-     *
-     * A returning installation presents the pair it was issued; we recognise it
-     * and bind this session to the same device. An installation with no
-     * credential — a first sign-in, a reinstall, or a different phone — enrolls
-     * and receives a secret exactly once.
-     *
-     * The trust method is recorded as `password`, honestly: a password was
-     * verified, a phone was not. When the OTP provider exists, Stage 4 gates
-     * this branch instead of enrolling straight away.
-     */
     let enrollment: DeviceEnrollment | undefined;
-    const presented = dto.deviceCredential;
-    if (presented?.deviceId && presented.deviceSecret) {
-      const known = await this.devices.recognise(user.id, presented.deviceId, presented.deviceSecret);
-      if (known) {
-        await this.devices.attach(sessionId, known.id);
-      } else {
-        // A wrong, unknown or revoked credential is NOT a login failure — the
-        // password was right. It is simply an unrecognised installation, so it
-        // enrolls as a new device and the old one keeps its revoked history.
-        enrollment = await this.devices.enroll({
-          companyId: user.companyId,
-          userId: user.id,
-          sessionId,
-          trustMethod: 'password',
-          meta: presented,
-        });
-      }
+    if (recognisedDeviceId) {
+      await this.devices.attach(sessionId, recognisedDeviceId);
     } else if (presented) {
       enrollment = await this.devices.enroll({
         companyId: user.companyId,

@@ -67,6 +67,10 @@ import { ClosingModule } from './closing/closing.module';
               'req.body.password',
               'req.body.pin',
               'req.body.refreshToken',
+              // Device identity (F1 Stage 3): the enrollment secret the client
+              // presents at login. Redacted for parity with the password, so a
+              // future body log cannot leak it while the password stays safe.
+              'req.body.deviceCredential.deviceSecret',
               'res.headers["set-cookie"]',
             ],
             remove: true,

@@ -16,6 +16,8 @@ interface ErrorBody {
   statusCode: number;
   error: string;
   message: string | string[];
+  /** Optional machine-readable code (e.g. `device_unrecognized`) for clients to branch on. */
+  code?: string;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -38,12 +40,13 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
 
-    const { status, message } = this.resolve(exception);
+    const { status, message, code } = this.resolve(exception);
 
     const body: ErrorBody = {
       statusCode: status,
       error: HttpStatus[status] ?? 'ERROR',
       message,
+      ...(code ? { code } : {}),
       requestId: this.cls.getId?.() ?? this.cls.get('requestId'),
       path: request.url,
       timestamp: new Date().toISOString(),
@@ -58,14 +61,18 @@ export class AllExceptionsFilter implements ExceptionFilter {
     response.status(status).json(body);
   }
 
-  private resolve(exception: unknown): { status: number; message: string | string[] } {
+  private resolve(exception: unknown): { status: number; message: string | string[]; code?: string } {
     if (exception instanceof HttpException) {
       const res = exception.getResponse();
-      const message =
-        typeof res === 'string'
-          ? res
-          : ((res as { message?: string | string[] }).message ?? exception.message);
-      return { status: exception.getStatus(), message };
+      if (typeof res === 'string') {
+        return { status: exception.getStatus(), message: res };
+      }
+      const obj = res as { message?: string | string[]; code?: string };
+      return {
+        status: exception.getStatus(),
+        message: obj.message ?? exception.message,
+        code: typeof obj.code === 'string' ? obj.code : undefined,
+      };
     }
 
     if (exception instanceof MissingTenantContextError) {
