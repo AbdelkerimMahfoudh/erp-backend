@@ -15,6 +15,7 @@ import { config as loadEnv } from 'dotenv';
 import { PrismaClient, RoleKey } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { newUuidV7Bin, uuidToBin, binToUuid } from './lib/uuid';
+import { pruneGrantsForRole } from '../src/rbac/delegation-lifecycle';
 
 loadEnv();
 const prisma = new PrismaClient();
@@ -68,17 +69,28 @@ async function main() {
   const branches = await prisma.branch.findMany({ where: { companyId: company.id } });
   if (branches.length === 0) throw new Error('No branches found — run the seed first.');
 
+  // This utility doubles as a role changer (the upsert updates `roleId`), which
+  // makes it the ONLY code path in the project that can downgrade a Store
+  // Manager. A downgrade must take the assignment's delegated grants with it:
+  // the row survives the upsert, so re-promoting the same person later would
+  // otherwise silently restore an authority the Owner never re-approved.
+  // Same rule, same helper a future role-management API must use.
+  let prunedGrants = 0;
+
   for (const branch of branches) {
-    await prisma.userBranch.upsert({
-      where: { userId_branchId: { userId: user.id, branchId: branch.id } },
-      update: { roleId: role.id },
-      create: {
-        id: newUuidV7Bin(),
-        companyId: company.id,
-        userId: user.id,
-        branchId: branch.id,
-        roleId: role.id,
-      },
+    prunedGrants += await prisma.$transaction(async (tx) => {
+      const assignment = await tx.userBranch.upsert({
+        where: { userId_branchId: { userId: user.id, branchId: branch.id } },
+        update: { roleId: role.id },
+        create: {
+          id: newUuidV7Bin(),
+          companyId: company.id,
+          userId: user.id,
+          branchId: branch.id,
+          roleId: role.id,
+        },
+      });
+      return pruneGrantsForRole(tx, assignment.id, roleKey);
     });
   }
 
@@ -86,6 +98,12 @@ async function main() {
     `✓ User "${login}" (${binToUuid(user.id)}) — role ${roleKey}, ` +
       `${branches.length} branch(es): ${branches.map((b) => b.name).join(', ')}`,
   );
+  if (prunedGrants > 0) {
+    console.log(
+      `  ↳ removed ${prunedGrants} delegated grant(s): "${roleKey}" cannot hold them. ` +
+        'Re-delegation is a fresh Owner decision.',
+    );
+  }
 }
 
 main()
