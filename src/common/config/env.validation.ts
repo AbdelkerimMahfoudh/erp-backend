@@ -29,6 +29,28 @@ export const envValidationSchema = Joi.object({
     .valid('fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent')
     .default('info'),
 
+  // ── Messaging + OTP (F1 Stage 4A) ──────────────────────────────────────
+  // No provider adapter exists yet. "disabled" is the default AND the only
+  // value production accepts; MessagingModule fails startup otherwise.
+  WHATSAPP_CHANNEL: Joi.string().valid('disabled', 'development-log').default('disabled'),
+
+  // Server-side pepper for OTP code hashes. Deliberately NO default: a shared
+  // fallback would let anyone who reads this repository brute-force a 6-digit
+  // code offline from a stolen database. Absent = OTP challenges refuse to
+  // activate; the rest of the application still starts.
+  OTP_PEPPER: Joi.string().min(32).optional(),
+
+  // Security limits, not Owner-editable settings.
+  OTP_TTL_SECONDS: Joi.number().integer().min(60).max(900).default(300),
+  OTP_MAX_ATTEMPTS: Joi.number().integer().min(3).max(10).default(5),
+  OTP_RESEND_COOLDOWN_SECONDS: Joi.number().integer().min(30).max(600).default(60),
+  OTP_MAX_SENDS_PER_WINDOW: Joi.number().integer().min(1).max(10).default(3),
+  OTP_SEND_WINDOW_SECONDS: Joi.number().integer().min(60).default(900),
+  OTP_MAX_SENDS_PER_DAY: Joi.number().integer().min(1).max(50).default(10),
+
+  // Provider template identifiers, filled in at Stage 4B once approved.
+  WHATSAPP_TEMPLATE_AUTH_OTP: Joi.string().allow('').default(''),
+
   // File upload foundation.
   UPLOAD_MAX_BYTES: Joi.number().integer().min(1).default(10 * 1024 * 1024),
   UPLOAD_DIR: Joi.string().default('./uploads'),
