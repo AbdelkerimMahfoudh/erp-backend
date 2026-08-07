@@ -47,6 +47,37 @@ describe('CostGatingInterceptor', () => {
     expect(result).toEqual({ total: 100, items: [{ price: 50 }] });
   });
 
+  /**
+   * A restored session can still be carrying a branch the user was since
+   * removed from. Cost gating must not turn that into a failed request: guards
+   * have already rejected anything genuinely branch-scoped, and `GET
+   * /auth/branches` — the screen needed to choose a different branch — has no
+   * guard at all. Throwing here locked such a user out with no way back.
+   */
+  describe('when branch permissions cannot be resolved (stale restored branch)', () => {
+    const rejecting = () => ({
+      getEffectivePermissions: jest.fn().mockRejectedValue(new Error('No access to the requested branch')),
+    });
+
+    it('does not fail the request', async () => {
+      const int = new CostGatingInterceptor(makeCls({ userId }) as any, rejecting() as any);
+      await expect(lastValueFrom(await int.intercept(ctx, handlerOf(payload())))).resolves.toBeDefined();
+    });
+
+    it('gates as strictly as possible instead', async () => {
+      const int = new CostGatingInterceptor(makeCls({ userId }) as any, rejecting() as any);
+      const result = await lastValueFrom(await int.intercept(ctx, handlerOf(payload())));
+      expect(result).toEqual({ total: 100, items: [{ price: 50 }] });
+    });
+
+    it('does not cache the degraded set as the user’s real permissions', async () => {
+      const store: Record<string, unknown> = { userId };
+      const int = new CostGatingInterceptor(makeCls(store) as any, rejecting() as any);
+      await lastValueFrom(await int.intercept(ctx, handlerOf(payload())));
+      expect(store.permissions).toBeUndefined();
+    });
+  });
+
   it('passes through unauthenticated requests untouched', async () => {
     const cls = makeCls({});
     const access = { getEffectivePermissions: jest.fn() };
