@@ -22,8 +22,20 @@ export class NotificationsController {
 
   @Get()
   @ApiOperation({ summary: "List the current user's notifications (own + broadcast)" })
-  list(@CurrentUser() user: AuthUser, @Query('unread') unread?: string) {
-    return this.notifications.listForUser(uuidToBin(user.userId), unread === 'true');
+  list(
+    @CurrentUser() user: AuthUser,
+    @Query('unread') unread?: string,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (cursor && !isUuid(cursor)) {
+      throw new BadRequestException('Invalid cursor');
+    }
+    return this.notifications.listForUser(uuidToBin(user.userId), {
+      onlyUnread: unread === 'true',
+      cursor: cursor ? uuidToBin(cursor) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
   }
 
   @Post(':id/read')
