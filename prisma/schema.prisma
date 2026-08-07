@@ -214,6 +214,9 @@ model Company {
   otpChallenges       OtpChallenge[]
   verificationIntents VerificationIntent[]
   userBranchPermissions UserBranchPermission[]
+  branchVariantPrices   BranchVariantPrice[]
+  unitPriceOverrides    UnitPriceOverride[]
+  priceChangeEvents     PriceChangeEvent[]
   branchCounters     BranchCounter[]
   productCategories  ProductCategory[]
   productRecognitions ProductRecognition[]
@@ -251,6 +254,9 @@ model Branch {
   importBatches    ImportBatch[]
   settings         Setting[]
   branchCounters   BranchCounter[]
+  branchVariantPrices BranchVariantPrice[]
+  unitPriceOverrides  UnitPriceOverride[]
+  priceChangeEvents   PriceChangeEvent[]
 
   @@unique([companyId, name]) // company_id is the leftmost column → covers company scans
   @@map("branches")
@@ -287,6 +293,9 @@ model User {
 
   userBranches      UserBranch[]
   grantsMade        UserBranchPermission[] @relation("GrantsMade")
+  branchPricesSet   BranchVariantPrice[]   @relation("BranchPriceSetBy")
+  unitPricesSet     UnitPriceOverride[]    @relation("UnitPriceSetBy")
+  priceChanges      PriceChangeEvent[]     @relation("PriceChangeActor")
   unitsCreated      Unit[]             @relation("UnitCreatedBy")
   unitsUpdated      Unit[]             @relation("UnitUpdatedBy")
   purchases         Purchase[]
@@ -427,6 +436,8 @@ model Product {
   saleItems     SaleItem[]
   transferItems TransferItem[]
   recognitions  ProductRecognition[]
+  branchPrices  BranchVariantPrice[]
+  priceEvents   PriceChangeEvent[]
 
   @@unique([companyId, brand, model, variant]) // company_id leftmost → covers company scans
   @@unique([companyId, barcode])
@@ -521,6 +532,8 @@ model Unit {
   saleItems     SaleItem[]
   returns       Return[]
   transferItems TransferItem[]
+  priceOverride UnitPriceOverride?
+  priceEvents   PriceChangeEvent[]
 
   @@unique([imeiSecondary]) // MySQL allows multiple NULLs → unique-when-present
   @@index([companyId, branchId, status])
@@ -528,6 +541,118 @@ model Unit {
   @@index([supplierId])
   @@index([purchaseId])
   @@map("units")
+}
+
+/// The selling price of ONE exact product variant in ONE branch (G2A).
+///
+/// This is the middle rung of the serialized price ladder:
+/// `UnitPriceOverride` → `BranchVariantPrice` → `Product.defaultPrice` → unpriced.
+/// It exists because `Product.defaultPrice` is company-wide, so a Manager with
+/// branch-scoped `price.edit` must never change a price by mutating it.
+///
+/// **Serialized products only.** Quantity-tracked stock keeps `StockItem.price`
+/// as its authoritative branch price — G2A deliberately adds no second source
+/// for it. Absence of a row here means "fall back", so nothing is backfilled.
+model BranchVariantPrice {
+  id        Bytes    @id @db.Binary(16)
+  companyId Bytes    @map("company_id") @db.Binary(16)
+  branchId  Bytes    @map("branch_id") @db.Binary(16)
+  productId Bytes    @map("product_id") @db.Binary(16)
+  /// Same precision as every other monetary column. Never a formatted string.
+  price     Decimal  @db.Decimal(14, 2)
+  /// Compare-and-swap guard: a stale edit is a 409, never a silent overwrite.
+  version   Int      @default(0)
+  setById   Bytes?   @map("set_by") @db.Binary(16)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  branch  Branch  @relation(fields: [branchId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+  setBy   User?   @relation("BranchPriceSetBy", fields: [setById], references: [id])
+
+  @@unique([productId, branchId]) // exactly one current price per variant per branch
+  @@index([companyId])
+  @@index([branchId])
+  @@map("branch_variant_prices")
+}
+
+/// A price override for ONE exact serialized unit (G2A) — the top rung.
+///
+/// **`branchId` is the branch under whose authority the override was created**,
+/// and it is deliberately NOT redundant with the unit's current branch. A
+/// Manager holds `price.edit` per branch, so an override they set in Branch A
+/// must not follow the phone into Branch B and quietly take effect there.
+///
+/// CP3 therefore resolves an override as effective **only while
+/// `UnitPriceOverride.branchId == Unit.branchId`**, and a transfer must retire
+/// the row inside the transfer transaction (recording a `PriceChangeEvent`), so
+/// returning the unit later cannot silently reactivate an obsolete price.
+///
+/// A quantity-tracked product cannot acquire one: the row requires a real
+/// `Unit`, and quantity stock has none.
+model UnitPriceOverride {
+  id        Bytes    @id @db.Binary(16)
+  companyId Bytes    @map("company_id") @db.Binary(16)
+  /// The branch whose authority set this price — NOT necessarily where the unit is now.
+  branchId  Bytes    @map("branch_id") @db.Binary(16)
+  unitId    Bytes    @map("unit_id") @db.Binary(16)
+  price     Decimal  @db.Decimal(14, 2)
+  version   Int      @default(0)
+  setById   Bytes?   @map("set_by") @db.Binary(16)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  branch  Branch  @relation(fields: [branchId], references: [id])
+  unit    Unit    @relation(fields: [unitId], references: [id])
+  setBy   User?   @relation("UnitPriceSetBy", fields: [setById], references: [id])
+
+  @@unique([unitId]) // at most ONE authoritative current override per unit
+  @@index([companyId])
+  @@index([branchId])
+  @@map("unit_price_overrides")
+}
+
+/// Append-only history of every price change (G2A). Immutable financial record,
+/// not current state — `branch_variant_prices` and `unit_price_overrides` hold
+/// the current values.
+///
+/// Removing an override is recorded as an event with `newPrice = NULL`, never by
+/// deleting a row; a future transfer invalidation is the same shape with
+/// `initiator = 'system'`. UPDATE and DELETE are blocked by database triggers
+/// for the application account, following the `audit_logs` pattern.
+model PriceChangeEvent {
+  id        Bytes  @id @db.Binary(16)
+  companyId Bytes  @map("company_id") @db.Binary(16)
+  branchId  Bytes  @map("branch_id") @db.Binary(16)
+  productId Bytes  @map("product_id") @db.Binary(16)
+  /// Set for a unit-scoped change; null for a branch-variant change.
+  unitId    Bytes? @map("unit_id") @db.Binary(16)
+  /// `unit` | `branch_variant` — which rung of the ladder changed.
+  scope     String @db.VarChar(20)
+  /// `owner` | `manager` | `system` — distinguishes a person from an automatic
+  /// invalidation (e.g. a future transfer retiring an override).
+  initiator String @db.VarChar(20)
+  /// Null when the price is being set for the first time.
+  previousPrice Decimal? @map("previous_price") @db.Decimal(14, 2)
+  /// Null when the price is being removed and the row reverts to a fallback.
+  newPrice      Decimal? @map("new_price") @db.Decimal(14, 2)
+  /// Required by the service for a below-cost Owner change; free text otherwise.
+  reason    String?  @db.Text
+  actorId   Bytes?   @map("actor_id") @db.Binary(16)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company  @relation(fields: [companyId], references: [id])
+  branch  Branch   @relation(fields: [branchId], references: [id])
+  product Product  @relation(fields: [productId], references: [id])
+  unit    Unit?    @relation(fields: [unitId], references: [id])
+  actor   User?    @relation("PriceChangeActor", fields: [actorId], references: [id])
+
+  @@index([companyId, createdAt])
+  @@index([productId])
+  @@index([unitId])
+  @@map("price_change_events")
 }
 
 model StockItem {
