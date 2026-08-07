@@ -17,6 +17,7 @@ import { SpineEventBus } from '../common/events/spine-event-bus';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { canTransition } from '../inventory/unit-state-machine';
+import { PricingService } from '../pricing/pricing.service';
 import { SalesPolicyService } from './sales-policy.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ReturnSaleDto } from './dto/return-sale.dto';
@@ -37,6 +38,7 @@ export class SalesService {
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
     private readonly policy: SalesPolicyService,
+    private readonly pricing: PricingService,
     private readonly invoiceNumbers: InvoiceNumberService,
     private readonly events: SpineEventBus,
     private readonly cls: ClsService<AppClsStore>,
@@ -80,10 +82,27 @@ export class SalesService {
             });
             if (!unit) throw new NotFoundException(`Unit not found: ${l.identifier}`);
             this.policy.assertSellable(unit, branchId);
-            const price = this.policy.resolvePrice(
-              l.price,
-              unit.product.defaultPrice ? Number(unit.product.defaultPrice) : null,
+            /**
+             * The counter may still type the price actually agreed with the
+             * customer — that has always been allowed and stays allowed. What
+             * changed is the fallback: it is now the pricing ladder (this
+             * phone's own price, then the branch price for the model, then the
+             * company default) rather than the company default alone. Asking
+             * PricingService rather than repeating the ladder here is what stops
+             * Sell and the pricing screens from drifting apart.
+             */
+            const resolved = await this.pricing.resolveForSaleTx(
+              tx,
+              {
+                kind: 'unit',
+                unitId: unit.id,
+                productId: unit.productId,
+                unitBranchId: unit.branchId,
+                productDefault: unit.product.defaultPrice ? Number(unit.product.defaultPrice) : null,
+              },
+              branchId,
             );
+            const price = this.policy.resolvePrice(l.price, resolved.price);
             prepared.push({ unitId: unit.id, productId: unit.productId, quantity: 1, price, discount, cost: Number(unit.cost) });
           } else {
             const productId = uuidToBin(l.productId as string);
@@ -94,7 +113,19 @@ export class SalesService {
             if (!stock || stock.quantity < quantity) {
               throw new ConflictException('Insufficient accessory stock');
             }
-            const price = this.policy.resolvePrice(l.price, Number(stock.price));
+            // Quantity stock keeps its own branch price; the resolver returns it
+            // with an honest `stock_item` source rather than a second source.
+            const resolved = await this.pricing.resolveForSaleTx(
+              tx,
+              {
+                kind: 'quantity',
+                productId,
+                stock: { price: Number(stock.price), version: stock.version },
+                productDefault: null,
+              },
+              branchId,
+            );
+            const price = this.policy.resolvePrice(l.price, resolved.price);
             prepared.push({ productId, quantity, price, discount, cost: Number(stock.cost) });
           }
         }

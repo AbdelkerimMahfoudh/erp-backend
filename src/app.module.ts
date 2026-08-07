@@ -31,6 +31,7 @@ import { ScannerModule } from './scanner/scanner.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
 import { PurchasingModule } from './purchasing/purchasing.module';
+import { PricingModule } from './pricing/pricing.module';
 import { SalesModule } from './sales/sales.module';
 import { TransfersModule } from './transfers/transfers.module';
 import { AnalyticsModule } from './analytics/analytics.module';
@@ -110,6 +111,7 @@ import { ClosingModule } from './closing/closing.module';
     InventoryModule,
     SuppliersModule,
     PurchasingModule,
+    PricingModule,
     SalesModule,
     TransfersModule,
     AnalyticsModule,

@@ -629,10 +629,17 @@ model PriceChangeEvent {
   productId Bytes  @map("product_id") @db.Binary(16)
   /// Set for a unit-scoped change; null for a branch-variant change.
   unitId    Bytes? @map("unit_id") @db.Binary(16)
-  /// `unit` | `branch_variant` — which rung of the ladder changed.
+  /// `unit` | `branch_variant` | `stock_item` — which rung of the ladder changed.
+  /// `stock_item` covers a quantity product's branch price, which lives on
+  /// `stock_items.price` rather than in a pricing table (CP3).
   scope     String @db.VarChar(20)
-  /// `owner` | `manager` | `system` — distinguishes a person from an automatic
-  /// invalidation (e.g. a future transfer retiring an override).
+  /// `user` | `system` — a person, or an automatic change such as a transfer
+  /// retiring an override.
+  ///
+  /// CP2 sketched this as `owner` | `manager` | `system`. CP3 does not record a
+  /// role: `actorId` already says exactly who acted, a role can change
+  /// afterwards while history must not, and copying a role into every row would
+  /// be a second source of truth that drifts from the first.
   initiator String @db.VarChar(20)
   /// Null when the price is being set for the first time.
   previousPrice Decimal? @map("previous_price") @db.Decimal(14, 2)
@@ -663,6 +670,9 @@ model StockItem {
   quantity  Int      @default(0) // CHECK (>=0) in 0002
   cost      Decimal  @db.Decimal(14, 2)
   price     Decimal  @db.Decimal(14, 2)
+  /// Optimistic concurrency for branch price edits (0029). `updatedAt` cannot
+  /// serve: MySQL keeps microseconds, a JS Date only milliseconds.
+  version   Int      @default(0)
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 

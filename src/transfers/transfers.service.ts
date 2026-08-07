@@ -13,6 +13,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PricingService } from '../pricing/pricing.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { assertTransferTransition } from './transfer-state-machine';
 import { computeDiscrepancy, DiscrepancyReport } from './discrepancy.util';
@@ -27,6 +28,7 @@ export class TransfersService {
     private readonly audit: AuditService,
     private readonly invoiceNumbers: InvoiceNumberService,
     private readonly notifications: NotificationsService,
+    private readonly pricing: PricingService,
   ) {}
 
   // --- configurable per-branch prefix (stored in settings) -----------------
@@ -196,9 +198,16 @@ export class TransfersService {
     const matched = new Set(report.matched);
 
     await this.db.$transaction(async (tx) => {
+      const moved: { unitId: Buffer; productId: Buffer; fromBranchId: Buffer; toBranchId: Buffer }[] = [];
       for (const i of items) {
         if (matched.has(unitIdentifier(i.unit!))) {
           await tx.unit.update({ where: { id: i.unitId! }, data: { status: 'in_stock', branchId: toBranchId } });
+          moved.push({
+            unitId: i.unitId!,
+            productId: i.unit!.productId,
+            fromBranchId: i.unit!.branchId,
+            toBranchId,
+          });
           await this.audit.recordTx(tx, {
             entityType: 'Unit',
             entityId: i.unitId!,
@@ -210,6 +219,17 @@ export class TransfersService {
         }
         // missing units remain 'in_transit' (flagged by the discrepancy audit).
       }
+
+      /**
+       * A phone that changes branch loses the price it was given elsewhere.
+       *
+       * The price was set under one branch's authority; carrying it into another
+       * would apply a decision nobody made there. This runs in the same
+       * transaction as the move, so the two commit or roll back together — a
+       * failed receive must never leave a phone stripped of its price, and a
+       * successful one must never leave a stale price behind.
+       */
+      await this.pricing.invalidateOnBranchMoveTx(tx, moved);
       await tx.stockTransfer.update({
         where: { id: transfer.id },
         data: { status: 'received', receivedById: this.tenant.userId() ?? null, receivedAt: new Date() },
