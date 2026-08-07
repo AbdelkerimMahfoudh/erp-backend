@@ -362,6 +362,39 @@ describe('branch isolation', () => {
     await expect(service.setUnitOverride('111111111111111', { price: 17000 })).rejects.toThrow(ForbiddenException);
   });
 
+  it('refuses to price a phone that is not in stock', async () => {
+    // A sold phone is not on the shelf, so a price for it decides nothing — and
+    // the override would lie in wait for a return, resurrecting a price nobody
+    // re-approved.
+    const db = seed();
+    db.unit[0]!.status = 'sold';
+    const { service } = makeService({ db });
+    await expect(service.setUnitOverride('111111111111111', { price: 17000 })).rejects.toThrow(ConflictException);
+    expect(db.unitPriceOverride).toHaveLength(0);
+  });
+
+  it.each(['reserved', 'returned', 'faulty', 'in_transit', 'transferred_out'])(
+    'refuses a %s phone too',
+    async (status) => {
+      const db = seed();
+      db.unit[0]!.status = status;
+      const { service } = makeService({ db });
+      await expect(service.setUnitOverride('111111111111111', { price: 17000 })).rejects.toThrow(ConflictException);
+    },
+  );
+
+  it('still allows REMOVING an override from a phone that has left stock', async () => {
+    // Otherwise a stale price could never be cleared once the phone sold.
+    const db = seed();
+    const { service } = makeService({ db });
+    const set = await service.setUnitOverride('111111111111111', { price: 17000 });
+    db.unit[0]!.status = 'sold';
+    await expect(
+      service.removeUnitOverride('111111111111111', { expectedVersion: set.version! }),
+    ).resolves.toBeDefined();
+    expect(db.unitPriceOverride).toHaveLength(0);
+  });
+
   it('requires a branch context at all — no-branch writes fail closed', async () => {
     const { service } = makeService({ branchId: undefined });
     await expect(service.setBranchVariantPrice(binToUuid(PHONE), { price: 1 })).rejects.toThrow(BadRequestException);

@@ -106,7 +106,9 @@ export class PricingService {
    * an IMEI, and making the client translate that to an internal id first would
    * be a round trip and a chance to send someone else's id.
    */
-  async getUnitPricing(identifier: string): Promise<EffectivePrice & { unitId: string }> {
+  async getUnitPricing(
+    identifier: string,
+  ): Promise<EffectivePrice & { unitId: string; status: string; canPrice: boolean }> {
     const branchId = await this.activeBranch();
     const unit = await this.loadUnitByIdentifier(identifier);
 
@@ -129,6 +131,14 @@ export class PricingService {
     return {
       ...this.present(resolved, branchId, productDefault, row(variant)),
       unitId: binToUuid(unit.id),
+      status: unit.status,
+      /**
+       * Whether this phone may be given its own price at all. Returned so the
+       * app can explain instead of offering a control that is going to be
+       * refused — a button whose only outcome is an error teaches staff the app
+       * is unreliable.
+       */
+      canPrice: unit.status === 'in_stock' && unit.branchId.equals(branchId),
     };
   }
 
@@ -333,12 +343,13 @@ export class PricingService {
    * else would create precisely the cross-branch authority the override's
    * `branchId` exists to prevent.
    */
-  async setUnitOverride(identifier: string, dto: SetPriceDto): Promise<EffectivePrice & { unitId: string }> {
+  async setUnitOverride(identifier: string, dto: SetPriceDto) {
     const companyId = this.tenant.companyId();
     const branchId = await this.activeBranch();
     const actorId = this.tenant.requireUserId();
     const unit = await this.loadUnitByIdentifier(identifier);
     this.assertUnitInActiveBranch(unit.branchId, branchId);
+    this.assertUnitPriceable(unit.status, identifier);
     this.assertNotBelowCost(dto.price, Number(unit.cost), dto.reason, 'this phone');
 
     await this.db.$transaction(async (tx) => {
@@ -414,7 +425,7 @@ export class PricingService {
   }
 
   /** Remove a unit override, revealing the branch or default price beneath it. */
-  async removeUnitOverride(identifier: string, dto: RemovePriceDto): Promise<EffectivePrice & { unitId: string }> {
+  async removeUnitOverride(identifier: string, dto: RemovePriceDto) {
     const companyId = this.tenant.companyId();
     const branchId = await this.activeBranch();
     const actorId = this.tenant.requireUserId();
@@ -700,6 +711,25 @@ export class PricingService {
   private assertUnitInActiveBranch(unitBranchId: Buffer, activeBranchId: Buffer): void {
     if (!unitBranchId.equals(activeBranchId)) {
       throw new ForbiddenException('This item is not in your branch');
+    }
+  }
+
+  /**
+   * Only a unit that could actually be sold may be given its own price.
+   *
+   * A sold, returned, faulty or in-transit phone is not on the shelf, so a price
+   * for it is a decision about nothing — and worse, the override would sit there
+   * waiting: a returned phone put back into stock would silently resurrect a
+   * price nobody re-approved, which is exactly what transfer invalidation exists
+   * to prevent.
+   *
+   * `in_stock` mirrors `SalesPolicyService.assertSellable`, deliberately: the set
+   * of things you can price and the set you can sell should not drift apart.
+   * Removal is NOT gated — clearing a stale override must stay possible.
+   */
+  private assertUnitPriceable(status: string, identifier: string): void {
+    if (status !== 'in_stock') {
+      throw new ConflictException(`${identifier} is '${status}' and cannot be priced`);
     }
   }
 
