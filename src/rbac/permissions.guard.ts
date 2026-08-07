@@ -1,15 +1,14 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ClsService } from 'nestjs-cls';
-import { Request } from 'express';
 import { AppClsStore } from '../common/context/request-context';
-import { isUuid, uuidToBin } from '../common/utils/uuid.util';
+import { uuidToBin } from '../common/utils/uuid.util';
 import { AccessService } from './access.service';
 import { REQUIRE_PERMISSIONS_KEY } from './require-permissions.decorator';
 
 /**
  * Enforces `@RequirePermissions(...)`. Resolves the caller's effective
- * permissions (branch-scoped when `X-Branch-Id` is present, else the union
+ * permissions (branch-scoped when an active branch is present, else the union
  * across their branches), caches them in CLS, and checks the required set.
  * Runs after the global JwtAuthGuard, so `userId`/`companyId` are in context.
  */
@@ -36,15 +35,11 @@ export class PermissionsGuard implements CanActivate {
       throw new ForbiddenException();
     }
 
-    // Resolve branch context from the X-Branch-Id header (optional).
-    let branchId = this.cls.get('branchId');
-    if (!branchId) {
-      const header = context.switchToHttp().getRequest<Request>().headers['x-branch-id'];
-      if (typeof header === 'string' && isUuid(header)) {
-        branchId = uuidToBin(header);
-        this.cls.set('branchId', branchId);
-      }
-    }
+    // The active branch was resolved by the CLS middleware, which runs for
+    // EVERY request — including routes that require no permission and so never
+    // reach this guard. Parsing it here as well would give those routes no
+    // branch at all.
+    const branchId = this.cls.get('branchId');
 
     let permissions = this.cls.get('permissions');
     if (!permissions) {

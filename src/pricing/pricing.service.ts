@@ -82,7 +82,7 @@ export class PricingService {
    * `resolveProductLevel`.
    */
   async getProductPricing(productIdStr: string): Promise<EffectivePrice> {
-    const branchId = this.tenant.requireBranchId();
+    const branchId = await this.activeBranch();
     const product = await this.loadProduct(productIdStr);
 
     if (product.trackingType === 'quantity') {
@@ -107,7 +107,7 @@ export class PricingService {
    * be a round trip and a chance to send someone else's id.
    */
   async getUnitPricing(identifier: string): Promise<EffectivePrice & { unitId: string }> {
-    const branchId = this.tenant.requireBranchId();
+    const branchId = await this.activeBranch();
     const unit = await this.loadUnitByIdentifier(identifier);
 
     const [override, variant] = await Promise.all([
@@ -140,7 +140,7 @@ export class PricingService {
    * authority's business.
    */
   async history(query: PriceHistoryQueryDto) {
-    const branchId = this.tenant.requireBranchId();
+    const branchId = await this.activeBranch();
     const limit = query.limit ?? HISTORY_DEFAULT_LIMIT;
 
     const rows = await this.db.priceChangeEvent.findMany({
@@ -196,7 +196,7 @@ export class PricingService {
    */
   async setBranchVariantPrice(productIdStr: string, dto: SetPriceDto): Promise<EffectivePrice> {
     const companyId = this.tenant.companyId();
-    const branchId = this.tenant.requireBranchId();
+    const branchId = await this.activeBranch();
     const actorId = this.tenant.requireUserId();
     const product = await this.loadProduct(productIdStr);
     this.assertSerialized(product.trackingType, 'branch variant price');
@@ -278,7 +278,7 @@ export class PricingService {
   /** Remove the branch price, revealing whatever the fallback turns out to be. */
   async removeBranchVariantPrice(productIdStr: string, dto: RemovePriceDto): Promise<EffectivePrice> {
     const companyId = this.tenant.companyId();
-    const branchId = this.tenant.requireBranchId();
+    const branchId = await this.activeBranch();
     const actorId = this.tenant.requireUserId();
     const product = await this.loadProduct(productIdStr);
 
@@ -335,7 +335,7 @@ export class PricingService {
    */
   async setUnitOverride(identifier: string, dto: SetPriceDto): Promise<EffectivePrice & { unitId: string }> {
     const companyId = this.tenant.companyId();
-    const branchId = this.tenant.requireBranchId();
+    const branchId = await this.activeBranch();
     const actorId = this.tenant.requireUserId();
     const unit = await this.loadUnitByIdentifier(identifier);
     this.assertUnitInActiveBranch(unit.branchId, branchId);
@@ -416,7 +416,7 @@ export class PricingService {
   /** Remove a unit override, revealing the branch or default price beneath it. */
   async removeUnitOverride(identifier: string, dto: RemovePriceDto): Promise<EffectivePrice & { unitId: string }> {
     const companyId = this.tenant.companyId();
-    const branchId = this.tenant.requireBranchId();
+    const branchId = await this.activeBranch();
     const actorId = this.tenant.requireUserId();
     const unit = await this.loadUnitByIdentifier(identifier);
     this.assertUnitInActiveBranch(unit.branchId, branchId);
@@ -474,7 +474,7 @@ export class PricingService {
    */
   async setQuantityPrice(productIdStr: string, dto: SetPriceDto & { expectedVersion: number }): Promise<EffectivePrice> {
     const companyId = this.tenant.companyId();
-    const branchId = this.tenant.requireBranchId();
+    const branchId = await this.activeBranch();
     const actorId = this.tenant.requireUserId();
     const product = await this.loadProduct(productIdStr);
     if (product.trackingType !== 'quantity') {
@@ -627,6 +627,26 @@ export class PricingService {
   }
 
   // ───────────────────────────── internals ─────────────────────────────
+
+  /**
+   * The active branch, proven to be one the caller may act in.
+   *
+   * Writes are covered by `PermissionsGuard`, which 403s when the user is not
+   * assigned to the branch. Reads of the effective price require no permission —
+   * the counter needs them — so nothing else would check the branch, and an
+   * employee in one branch could read another branch's prices just by changing a
+   * header. The assignment lookup runs on the tenant client, so a branch from
+   * another company cannot match either.
+   */
+  private async activeBranch(): Promise<Buffer> {
+    const branchId = this.tenant.requireBranchId();
+    const assignment = await this.db.userBranch.findFirst({
+      where: { userId: this.tenant.requireUserId(), branchId },
+      select: { id: true },
+    });
+    if (!assignment) throw new ForbiddenException('No access to the requested branch');
+    return branchId;
+  }
 
   private async loadProduct(productIdStr: string) {
     const product = await this.db.product.findFirst({

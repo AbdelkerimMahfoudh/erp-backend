@@ -10,7 +10,7 @@ import { AppConfigService } from './common/config/app-config.service';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { BinaryUuidInterceptor } from './common/interceptors/binary-uuid.interceptor';
 import { CostGatingInterceptor } from './common/interceptors/cost-gating.interceptor';
-import { newUuidV7 } from './common/utils/uuid.util';
+import { isUuid, newUuidV7, uuidToBin } from './common/utils/uuid.util';
 import { HashingModule } from './common/security/hashing.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { AuditModule } from './common/audit/audit.module';
@@ -42,15 +42,32 @@ import { ClosingModule } from './closing/closing.module';
   imports: [
     AppConfigModule,
 
-    // AsyncLocalStorage per request. Sets `requestId`; auth/isolation guards
-    // (Phase 2/3) add userId/companyId/branchId/permissions to this store.
+    // AsyncLocalStorage per request. Sets `requestId` and the active branch;
+    // auth guards add userId/companyId/permissions to this store.
     ClsModule.forRoot({
       global: true,
       middleware: {
         mount: true,
         generateId: true,
         idGenerator: () => newUuidV7(),
-        setup: (cls) => cls.set('requestId', cls.getId()),
+        setup: (cls, req: IncomingMessage) => {
+          cls.set('requestId', cls.getId());
+          /**
+           * The active branch is REQUEST context, not an authorization result,
+           * so it is resolved here rather than inside `PermissionsGuard`. The
+           * guard exits early on routes that require no permission, which used
+           * to leave those routes with no branch at all — a signed-in employee
+           * reading a selling price got a 400 about a header they had sent.
+           *
+           * Setting it here grants nothing. Authority is still decided by
+           * `AccessService`, which 403s when the user is not assigned to the
+           * branch, and services verify branch access for open reads too.
+           */
+          const header = req.headers['x-branch-id'];
+          if (typeof header === 'string' && isUuid(header)) {
+            cls.set('branchId', uuidToBin(header));
+          }
+        },
       },
     }),
 

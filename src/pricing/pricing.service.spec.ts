@@ -326,16 +326,23 @@ describe('reading a price', () => {
 
 describe('branch isolation', () => {
   it('lets the same model carry different prices in different branches', async () => {
+    // The Owner is assigned to both branches; the Manager is not, which is the
+    // next test.
     const db = seed();
-    await makeService({ db, branchId: BRANCH_A }).service.setBranchVariantPrice(binToUuid(PHONE), { price: 17500 });
-    await makeService({ db, branchId: BRANCH_B }).service.setBranchVariantPrice(binToUuid(PHONE), { price: 19000 });
+    const inA = () => makeService({ db, actor: OWNER, branchId: BRANCH_A }).service;
+    const inB = () => makeService({ db, actor: OWNER, branchId: BRANCH_B }).service;
+    await inA().setBranchVariantPrice(binToUuid(PHONE), { price: 17500 });
+    await inB().setBranchVariantPrice(binToUuid(PHONE), { price: 19000 });
 
-    await expect(
-      makeService({ db, branchId: BRANCH_A }).service.getProductPricing(binToUuid(PHONE)),
-    ).resolves.toMatchObject({ price: 17500 });
-    await expect(
-      makeService({ db, branchId: BRANCH_B }).service.getProductPricing(binToUuid(PHONE)),
-    ).resolves.toMatchObject({ price: 19000 });
+    await expect(inA().getProductPricing(binToUuid(PHONE))).resolves.toMatchObject({ price: 17500 });
+    await expect(inB().getProductPricing(binToUuid(PHONE))).resolves.toMatchObject({ price: 19000 });
+  });
+
+  it('refuses a branch the caller is not assigned to, even for a read', async () => {
+    // Reads need no permission, so nothing else would check the branch: an
+    // employee could otherwise read another branch by changing a header.
+    const { service } = makeService({ actor: MANAGER, branchId: BRANCH_B });
+    await expect(service.getProductPricing(binToUuid(PHONE))).rejects.toThrow(ForbiddenException);
   });
 
   it('lets one phone differ from another of the same model', async () => {
