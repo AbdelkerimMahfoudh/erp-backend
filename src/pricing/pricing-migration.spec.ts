@@ -115,6 +115,44 @@ describe('price history is immutable', () => {
   });
 });
 
+describe('0028 puts the audit_logs guard in the migration chain', () => {
+  // Found in CP3: a clean database built from every migration had ZERO
+  // audit_logs triggers, because the guard lived in a manual init script. A
+  // fresh production deployment would have shipped a mutable audit log. Nothing
+  // fails when a guard is merely absent, so only this test notices.
+  const AUDIT = readFileSync(
+    join(
+      __dirname,
+      '..',
+      '..',
+      'prisma',
+      'migrations',
+      '0028_audit_append_only_triggers',
+      'migration.sql',
+    ),
+    'utf8',
+  );
+
+  it('creates both audit_logs guards', () => {
+    expect(AUDIT).toContain('CREATE TRIGGER `audit_logs_block_update` BEFORE UPDATE ON `audit_logs`');
+    expect(AUDIT).toContain('CREATE TRIGGER `audit_logs_block_delete` BEFORE DELETE ON `audit_logs`');
+  });
+
+  it('guards against the application account, not the definer', () => {
+    const guards = AUDIT.match(/USER\(\) LIKE 'phonestore\\_app@%'/g) ?? [];
+    expect(guards.length).toBe(2);
+  });
+
+  it('is idempotent, so it is safe where the init script already ran', () => {
+    expect(AUDIT).toContain('DROP TRIGGER IF EXISTS `audit_logs_block_update`');
+    expect(AUDIT).toContain('DROP TRIGGER IF EXISTS `audit_logs_block_delete`');
+  });
+
+  it('touches nothing but the triggers', () => {
+    expect(AUDIT).not.toMatch(/CREATE TABLE|ALTER TABLE|INSERT\s+INTO|DELETE\s+FROM/i);
+  });
+});
+
 describe('monetary sanity', () => {
   it('rejects negative prices at the database, on every money column', () => {
     for (const c of ['chk_bvp_price_nonneg', 'chk_upo_price_nonneg', 'chk_pce_prev_nonneg', 'chk_pce_new_nonneg']) {
