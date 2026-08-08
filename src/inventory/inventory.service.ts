@@ -111,6 +111,7 @@ type StockWithProduct = {
   id: Buffer;
   productId: Buffer;
   quantity: number;
+  reservedQuantity: number;
   cost: Prisma.Decimal;
   price: Prisma.Decimal;
   product: InventoryProduct | null;
@@ -140,6 +141,8 @@ function toStockRow(line: StockWithProduct): InventoryStockRow {
     id: line.id,
     productId: line.productId,
     quantity: line.quantity,
+    reservedQuantity: line.reservedQuantity,
+    availableQuantity: line.quantity - line.reservedQuantity,
     cost: line.cost,
     price: line.price,
     product: line.product,
@@ -177,7 +180,21 @@ export interface InventoryStockRow {
   kind: 'stock';
   id: Buffer;
   productId: Buffer;
+  /**
+   * PHYSICAL stock owned at this branch. Deliberately unchanged by reservations
+   * — the goods are still the company's, and inventory valuation counts them.
+   */
   quantity: number;
+  /** Promised to an open transfer and therefore not sellable (H1.1). */
+  reservedQuantity: number;
+  /**
+   * What may actually be sold: `quantity - reservedQuantity`.
+   *
+   * Named separately rather than overwriting `quantity`, so a screen cannot
+   * accidentally show "available" where it means "total owned" — the two
+   * matter to different people, and conflating them is how a shop miscounts.
+   */
+  availableQuantity: number;
   /** Stripped for callers without `cost.view`. */
   cost: Prisma.Decimal;
   price: Prisma.Decimal;

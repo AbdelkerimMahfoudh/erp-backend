@@ -6,17 +6,29 @@ import { UnitStatus } from '@prisma/client';
  * sold-once unique index is the final backstop.
  *
  * EXTENSIBILITY: this is a data-driven map, so new states are added with one
- * entry (plus references from/to them). Planned future states:
- *   - `reserved` — already in the enum; hold-for-customer flow (Sprint later).
+ * entry (plus references from/to them). Planned future state:
  *   - `scrapped` — NOT yet in the enum: adding it needs an enum migration +
  *     an entry here (e.g. `faulty: [..., 'scrapped']`, `scrapped: []`). No
  *     structural rework of the machine is required.
  * Terminal states (no outgoing transitions): `transferred_out` (and future
  * `scrapped`).
+ *
+ * `reserved` is live as of H1.1: a unit promised to an open transfer. It is
+ * reached at transfer **request** and released on cancellation before shipment.
  */
 const TRANSITIONS: Record<UnitStatus, UnitStatus[]> = {
   in_stock: ['reserved', 'sold', 'in_transit', 'faulty', 'transferred_out'],
-  reserved: ['sold', 'in_stock'], // future: hold-for-customer
+  /**
+   * **A reserved unit cannot be sold.** It used to list `sold` here, which
+   * contradicted `SalesPolicyService.assertSellable` — that requires `in_stock`
+   * and has always refused reserved stock. Two rules disagreeing about whether
+   * a promised phone may be sold is exactly the kind of gap that eventually
+   * gets resolved in the wrong direction, so the machine now matches Sell.
+   *
+   * Release the reservation first (`reserved → in_stock`) and the unit becomes
+   * sellable again. `in_transit` is the shipment step of its own transfer.
+   */
+  reserved: ['in_stock', 'in_transit'],
   sold: ['returned'],
   returned: ['in_stock', 'faulty'],
   in_transit: ['in_stock', 'transferred_out'],

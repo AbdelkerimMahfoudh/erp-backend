@@ -110,8 +110,19 @@ export class SalesService {
             const stock = await tx.stockItem.findUnique({
               where: { companyId_productId_branchId: { companyId, productId, branchId } },
             });
-            if (!stock || stock.quantity < quantity) {
-              throw new ConflictException('Insufficient accessory stock');
+            /**
+             * Only UNRESERVED stock is sellable (H1.1).
+             *
+             * `quantity` stays the physical total the branch owns; what is
+             * promised to an open transfer is held in `reservedQuantity`. Selling
+             * against the physical figure would sell the same cable twice --
+             * once at the counter and once into a branch expecting it.
+             */
+            const available = stock ? stock.quantity - stock.reservedQuantity : 0;
+            if (!stock || available < quantity) {
+              throw new ConflictException(
+                `Only ${Math.max(available, 0)} available to sell`,
+              );
             }
             // Quantity stock keeps its own branch price; the resolver returns it
             // with an honest `stock_item` source rather than a second source.
@@ -198,10 +209,36 @@ export class SalesService {
               branchId,
             });
           } else {
-            await tx.stockItem.update({
-              where: { companyId_productId_branchId: { companyId, productId: p.productId, branchId } },
+            /**
+             * Conditional decrement, not a blind one. Between the availability
+             * check above and this write another sale could have taken the same
+             * units, or a transfer request could have reserved them. The
+             * predicate makes the database arbitrate: if physical stock would
+             * drop below what is reserved, this matches no row and the sale
+             * fails instead of overselling.
+             *
+             * The CHECK constraint from 0030 is the last line of defence; this
+             * turns the violation into a clear refusal rather than a 500.
+             */
+            const taken = await tx.stockItem.updateMany({
+              where: {
+                companyId,
+                productId: p.productId,
+                branchId,
+                quantity: { gte: p.quantity },
+              },
               data: { quantity: { decrement: p.quantity } },
             });
+            if (taken.count === 0) {
+              throw new ConflictException('That stock was taken while you were selling');
+            }
+            const after = await tx.stockItem.findUnique({
+              where: { companyId_productId_branchId: { companyId, productId: p.productId, branchId } },
+              select: { quantity: true, reservedQuantity: true },
+            });
+            if (after && after.quantity < after.reservedQuantity) {
+              throw new ConflictException('That stock is reserved for a transfer');
+            }
           }
         }
 

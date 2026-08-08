@@ -2,6 +2,17 @@ import { ApiProperty } from '@nestjs/swagger';
 import { ArrayMinSize, IsArray, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
 
 export class CreateTransferDto {
+  /**
+   * Client-generated request id, **required** (H1.1).
+   *
+   * Without it a retried Send moves stock twice, which the H0 audit proved was
+   * possible. The client makes one id per attempt and reuses it for every retry
+   * of that same attempt, exactly as Sell and Purchase already do.
+   */
+  @ApiProperty({ format: 'uuid', description: 'One id per transfer attempt; reuse it when retrying.' })
+  @IsUUID()
+  clientUuid: string;
+
   @ApiProperty({ format: 'uuid' })
   @IsUUID()
   toBranchId: string;
