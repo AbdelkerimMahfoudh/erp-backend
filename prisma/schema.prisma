@@ -114,11 +114,16 @@ enum PaymentMethod {
 }
 
 enum TransferStatus {
-  ready_to_ship
+  /// An employee has asked; stock is already reserved but nobody has agreed yet.
+  pending_approval
+  /// Agreed and ready to leave. Replaces the old `ready_to_ship`, which meant
+  /// exactly this but without anyone having approved it.
+  approved
   in_transit
   received
+  /// Refused by an approver, with a reason. Terminal; reservations released.
+  rejected
   cancelled
-  // Future (design-only): draft, pending_approval, rejected
 }
 
 enum ExpenseRecurrence {
@@ -304,6 +309,9 @@ model User {
   returns           Return[]
   transfersSent     StockTransfer[]    @relation("TransferSentBy")
   transfersReceived StockTransfer[]    @relation("TransferReceivedBy")
+  transfersRequested StockTransfer[]   @relation("TransferRequestedBy")
+  transfersApproved StockTransfer[]    @relation("TransferApprovedBy")
+  transfersDecided  StockTransfer[]    @relation("TransferDecidedBy")
   expenses          Expense[]
   dailyClosings     DailyClosing[]
   digestLines       DigestLine[]
@@ -956,7 +964,9 @@ model StockTransfer {
   fromBranchId Bytes          @map("from_branch_id") @db.Binary(16)
   toBranchId   Bytes          @map("to_branch_id") @db.Binary(16)
   transferNo   String?        @map("transfer_no") @db.VarChar(24)
-  status       TransferStatus @default(ready_to_ship)
+  /// Defaults to the UNAPPROVED state deliberately: a row that somehow reaches
+  /// the database without the service choosing a status must not be shippable.
+  status       TransferStatus @default(pending_approval)
   sentById     Bytes?         @map("sent_by") @db.Binary(16)
   receivedById Bytes?         @map("received_by") @db.Binary(16)
   sentAt       DateTime       @default(now()) @map("sent_at") @db.DateTime(6)
@@ -968,11 +978,32 @@ model StockTransfer {
   /// request is a 409 rather than a silent no-op. Same pattern as Purchase.
   clientRequestHash String? @map("client_request_hash") @db.Char(64)
 
+  /// Optimistic concurrency for every lifecycle transition (H1.2). Two managers
+  /// acting on one request — approve vs reject, ship vs cancel — must not both
+  /// succeed, and the loser must be told rather than silently overwritten.
+  version      Int       @default(0)
+  /// Who created the request. `sentById` records who SHIPPED it, which is a
+  /// different person under the approval workflow.
+  requestedById Bytes?   @map("requested_by") @db.Binary(16)
+  approvedById Bytes?    @map("approved_by") @db.Binary(16)
+  approvedAt   DateTime? @map("approved_at") @db.DateTime(6)
+  /// True when the requester already held `transfer.approve` in the source
+  /// branch, so the request was born approved. Recorded because "approved with
+  /// no approver" would otherwise look like a gap in the audit trail.
+  autoApproved Boolean   @default(false) @map("auto_approved")
+  /// Why it was rejected or cancelled. Mandatory for both at the API.
+  decisionReason String? @map("decision_reason") @db.Text
+  decidedById  Bytes?    @map("decided_by") @db.Binary(16)
+  decidedAt    DateTime? @map("decided_at") @db.DateTime(6)
+
   company    Company        @relation(fields: [companyId], references: [id])
   fromBranch Branch         @relation("TransferFrom", fields: [fromBranchId], references: [id])
   toBranch   Branch         @relation("TransferTo", fields: [toBranchId], references: [id])
-  sentBy     User?          @relation("TransferSentBy", fields: [sentById], references: [id])
-  receivedBy User?          @relation("TransferReceivedBy", fields: [receivedById], references: [id])
+  sentBy      User?         @relation("TransferSentBy", fields: [sentById], references: [id])
+  receivedBy  User?         @relation("TransferReceivedBy", fields: [receivedById], references: [id])
+  requestedBy User?         @relation("TransferRequestedBy", fields: [requestedById], references: [id])
+  approvedBy  User?         @relation("TransferApprovedBy", fields: [approvedById], references: [id])
+  decidedBy   User?         @relation("TransferDecidedBy", fields: [decidedById], references: [id])
   items      TransferItem[]
 
   @@unique([fromBranchId, transferNo])

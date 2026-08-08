@@ -37,6 +37,27 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   // Deliberately NOT price, cost, supplier, expense, report, user or settings
   // authority — and it must never imply `price.edit`.
   { key: 'catalog.manage',      label: 'Manage the product catalog' },
+
+  /**
+   * H1.2 — the transfer split.
+   *
+   * `unit.transfer` used to guard request, ship, receive AND cancel alike, and
+   * all three roles held it, so one employee assigned to both branches could
+   * move stock end to end with nobody else involved. A workflow with one
+   * permission has no separation of duties: it has to be designed in.
+   *
+   * `transfer.cancel_own` is deliberately its own key rather than a condition
+   * layered on `transfer.cancel`. An employee may withdraw a request they made
+   * and nothing else; expressing that as "cancel, but only sometimes" is how a
+   * later refactor quietly widens it.
+   */
+  { key: 'transfer.view',       label: 'View stock transfers' },
+  { key: 'transfer.request',    label: 'Request a stock transfer' },
+  { key: 'transfer.approve',    label: 'Approve or reject a transfer request' },
+  { key: 'transfer.ship',       label: 'Ship an approved transfer' },
+  { key: 'transfer.receive',    label: 'Receive a transfer at the destination' },
+  { key: 'transfer.cancel',     label: 'Cancel any transfer before shipment' },
+  { key: 'transfer.cancel_own', label: 'Withdraw your own pending request' },
 ];
 
 export const ALL_PERMISSION_KEYS = PERMISSIONS.map((p) => p.key);
@@ -73,8 +94,12 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
    */
   store_manager: [
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
-    'unit.add', 'unit.transfer', 'import.run',
+    'unit.add', 'import.run',
     'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
+    // H1.2: the approval authority, branch-scoped like everything else. A
+    // manager approves and cancels within the branch they are managing.
+    'transfer.view', 'transfer.request', 'transfer.approve',
+    'transfer.ship', 'transfer.receive', 'transfer.cancel',
     // G1: final catalog administration. Granted by migration 0026 as well as
     // here, and it carries no pricing authority — `price.edit` stays delegated
     // per branch by an Owner.
@@ -108,7 +133,15 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
    */
   store_employee: [
     'sale.create', 'cost.view', 'discount.apply',
-    'unit.add', 'unit.transfer', 'purchase.manage',
+    'unit.add', 'purchase.manage',
+    /**
+     * H1.2. An employee does the daily stock movement — asks for a transfer,
+     * sends it once approved, receives one arriving — but never approves,
+     * rejects, or cancels somebody else's request. `transfer.cancel_own` lets
+     * them withdraw their own request before a manager has acted on it.
+     */
+    'transfer.view', 'transfer.request', 'transfer.ship',
+    'transfer.receive', 'transfer.cancel_own',
   ],
 
   administrator: ADMIN_KEYS,

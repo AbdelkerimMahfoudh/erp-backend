@@ -32,13 +32,27 @@ function grantedInSql(sql: string, roleKey: string): string[] {
   return [...list.matchAll(/'([a-z.]+)'/g)].map((m) => m[1]).sort();
 }
 
-/** Permission keys the revocation migration removes from a role. */
+/**
+ * Permission keys a revocation migration removes from a role.
+ *
+ * Handles both shapes in use: 0018 names one role per DELETE
+ * (`r.\`key\` = 'x'`), while 0031 revokes the same key from several at once
+ * (`r.\`key\` IN ('x','y')`).
+ */
 function revokedInSql(sql: string, roleKey: string): string[] {
   const blocks = sql.split('DELETE rp FROM').slice(1);
-  const block = blocks.find((b) => b.includes(`r.\`key\` = '${roleKey}'`));
-  if (!block) return [];
-  const after = block.slice(block.indexOf('p.`key`'));
-  return [...after.matchAll(/'([a-z.]+)'/g)].map((m) => m[1]).sort();
+  const mine = blocks.filter((b) => {
+    const scope = b.slice(0, b.indexOf('p.`key`') >= 0 ? b.indexOf('p.`key`') : b.length);
+    return new RegExp(`r\\.\`key\`\\s*(=\\s*'${roleKey}'|IN\\s*\\([^)]*'${roleKey}')`).test(scope);
+  });
+  return [
+    ...new Set(
+      mine.flatMap((b) => {
+        const after = b.slice(b.indexOf('p.`key`'));
+        return [...after.matchAll(/'([a-z._]+)'/g)].map((m) => m[1]);
+      }),
+    ),
+  ].sort();
 }
 
 /**
@@ -48,26 +62,51 @@ function revokedInSql(sql: string, roleKey: string): string[] {
  * this, every permission added after 0017 would look like drift.
  */
 function grantedInKeyedSql(sql: string, roleKey: string): string[] {
-  const blocks = sql.split('INSERT INTO `role_permissions`').slice(1);
-  return blocks
-    .filter((b) => b.includes(`r.\`key\` = '${roleKey}'`))
-    .flatMap((b) => [...b.matchAll(/p\.`key` = '([a-z.]+)'/g)].map((m) => m[1]))
-    .sort();
+  const blocks = sql
+    .split('INSERT INTO `role_permissions`')
+    .slice(1)
+    // A block runs until the next statement type. Without this the final INSERT
+    // swallows a trailing DELETE, and the key that DELETE revokes reads as a
+    // grant — which would have hidden exactly the revocation H1.2 depends on.
+    .map((b) => b.split('DELETE rp FROM')[0]);
+  return [
+    ...new Set(
+      blocks
+        .filter((b) => b.includes(`r.\`key\` = '${roleKey}'`))
+        // Underscores belong to a key: `transfer.cancel_own`.
+        .flatMap((b) => [...b.matchAll(/p\.`key` = '([a-z._]+)'/g)].map((m) => m[1])),
+    ),
+  ].sort();
 }
 
 describe('role matrix — SQL and TypeScript must agree', () => {
   const backfill = sqlOf('0017_store_role_backfill');
   const revoke = sqlOf('0018_store_role_revoke');
   /** Additive permission migrations that grant to store-facing roles after 0017. */
-  const laterGrants = [sqlOf('0022_price_edit_permission_backfill'), sqlOf('0026_catalog_manage_permission')];
+  const laterGrants = [
+    sqlOf('0022_price_edit_permission_backfill'),
+    sqlOf('0026_catalog_manage_permission'),
+    sqlOf('0031_transfer_permissions_and_lifecycle'),
+  ];
+  /**
+   * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from
+   * both store roles, so without subtracting these the SQL would look like it
+   * still grants a permission a deployed system no longer has.
+   */
+  const revocations = [revoke, sqlOf('0031_transfer_permissions_and_lifecycle')];
 
   for (const role of ['store_manager', 'store_employee'] as const) {
     it(`${role}: migrations grant exactly what the seed grants`, () => {
       // 0017 established the baseline; later migrations add to it. A deploy
       // applies all of them, so the union is what a deployed system really has.
-      const fromSql = [
-        ...new Set([...grantedInSql(backfill, role), ...laterGrants.flatMap((sql) => grantedInKeyedSql(sql, role))]),
-      ].sort();
+      const granted = new Set([
+        ...grantedInSql(backfill, role),
+        ...laterGrants.flatMap((sql) => grantedInKeyedSql(sql, role)),
+      ]);
+      for (const sql of revocations) {
+        for (const key of revokedInSql(sql, role)) granted.delete(key);
+      }
+      const fromSql = [...granted].sort();
       const fromTs = [...ROLE_PERMISSIONS[role]].sort();
 
       expect(fromSql).toEqual(fromTs);
@@ -75,13 +114,41 @@ describe('role matrix — SQL and TypeScript must agree', () => {
   }
 
   it('revocation removes exactly what the matrix no longer grants', () => {
-    // Anything the revocation deletes must be absent from the TS matrix,
+    // Anything a revocation deletes must be absent from the TS matrix,
     // otherwise a deploy would grant it and then immediately take it away.
     for (const role of ['store_employee', 'store_manager'] as const) {
-      for (const perm of revokedInSql(revoke, role)) {
-        expect(ROLE_PERMISSIONS[role]).not.toContain(perm);
+      for (const sql of revocations) {
+        for (const perm of revokedInSql(sql, role)) {
+          expect(ROLE_PERMISSIONS[role]).not.toContain(perm);
+        }
       }
     }
+  });
+
+  it('H1.2 takes the blanket unit.transfer away from both store roles', () => {
+    // The whole point of the split: one permission must no longer stand for
+    // request, ship, receive and cancel at once.
+    const h12 = sqlOf('0031_transfer_permissions_and_lifecycle');
+    expect(revokedInSql(h12, 'store_employee')).toContain('unit.transfer');
+    expect(revokedInSql(h12, 'store_manager')).toContain('unit.transfer');
+  });
+
+  it('an employee is granted no approval or general-cancel authority', () => {
+    // Separation of duties, asserted against the matrix a deploy actually gets.
+    const h12 = sqlOf('0031_transfer_permissions_and_lifecycle');
+    const employee = grantedInKeyedSql(h12, 'store_employee');
+    expect(employee).toContain('transfer.request');
+    expect(employee).toContain('transfer.cancel_own');
+    expect(employee).not.toContain('transfer.approve');
+    expect(employee).not.toContain('transfer.cancel');
+  });
+
+  it('a manager is granted approval but not the employee-only self-cancel', () => {
+    const h12 = sqlOf('0031_transfer_permissions_and_lifecycle');
+    const manager = grantedInKeyedSql(h12, 'store_manager');
+    expect(manager).toContain('transfer.approve');
+    expect(manager).toContain('transfer.cancel');
+    expect(manager).not.toContain('transfer.cancel_own');
   });
 
   it('revokes the specific over-grants the audit found', () => {
