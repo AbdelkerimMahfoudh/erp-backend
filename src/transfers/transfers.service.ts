@@ -198,11 +198,22 @@ export class TransfersService {
       });
     } catch (e) {
       /**
-       * Two identical requests racing: the unique key on (company, clientUuid)
-       * decides, and the loser reads back the winner's transfer rather than
-       * reporting a failure for work that did in fact happen.
+       * Two identical requests racing.
+       *
+       * The loser can fail in either of two ways, and a live race showed both:
+       * the unique key on (company, clientUuid) rejects it, OR the reservation
+       * compare-and-swap finds the unit already claimed — by the winner, which
+       * is running the very same request. Only checking for P2002 left that
+       * second case reporting a conflict for work that had in fact succeeded.
+       *
+       * So: on either failure, ask whether this request id already produced a
+       * transfer. If it did, return it. If it did not, the conflict is real and
+       * is rethrown untouched.
        */
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      const raced =
+        (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') ||
+        e instanceof ConflictException;
+      if (raced) {
         const winner = await this.findReplay(dto, companyId);
         if (winner) return winner;
       }

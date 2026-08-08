@@ -199,7 +199,27 @@ export class SalesService {
             },
           });
           if (p.unitId) {
-            await tx.unit.update({ where: { id: p.unitId }, data: { status: 'sold', dateSold: new Date() } });
+            /**
+             * CLAIM the unit; do not simply overwrite its status.
+             *
+             * This was a blind update, and a live race proved the cost: a
+             * transfer request reserved the phone between `assertSellable`
+             * reading it and this write, and the sale then stamped it `sold`
+             * anyway. Both operations reported success and the shop had a phone
+             * that was simultaneously sold and promised to another branch.
+             *
+             * The predicate makes the database arbitrate. Whoever gets the row
+             * lock first wins; the loser matches nothing and is told plainly.
+             */
+            const claimed = await tx.unit.updateMany({
+              where: { id: p.unitId, status: 'in_stock' },
+              data: { status: 'sold', dateSold: new Date() },
+            });
+            if (claimed.count === 0) {
+              throw new ConflictException(
+                'That item was taken while you were selling — it is no longer available',
+              );
+            }
             await this.audit.recordTx(tx, {
               entityType: 'Unit',
               entityId: p.unitId,
