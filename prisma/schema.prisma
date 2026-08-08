@@ -670,6 +670,11 @@ model StockItem {
   quantity  Int      @default(0) // CHECK (>=0) in 0002
   cost      Decimal  @db.Decimal(14, 2)
   price     Decimal  @db.Decimal(14, 2)
+  /// Physically owned at this branch. NEVER reduced to express unavailability —
+  /// reserved goods are still company property and still count in valuation.
+  /// Promised to an open transfer and therefore NOT sellable (0030).
+  /// Available to sell = `quantity - reservedQuantity`, enforced by CHECKs.
+  reservedQuantity Int @default(0) @map("reserved_quantity")
   /// Optimistic concurrency for branch price edits (0029). `updatedAt` cannot
   /// serve: MySQL keeps microseconds, a JS Date only milliseconds.
   version   Int      @default(0)
@@ -956,6 +961,12 @@ model StockTransfer {
   receivedById Bytes?         @map("received_by") @db.Binary(16)
   sentAt       DateTime       @default(now()) @map("sent_at") @db.DateTime(6)
   receivedAt   DateTime?      @map("received_at") @db.DateTime(6)
+  /// Client-generated request id (H1.1). Mandatory on create; nullable only so
+  /// the column can be added to a database that already holds transfers.
+  clientUuid        Bytes?  @map("client_uuid") @db.Binary(16)
+  /// Fingerprint of the create payload, so replaying a key with a DIFFERENT
+  /// request is a 409 rather than a silent no-op. Same pattern as Purchase.
+  clientRequestHash String? @map("client_request_hash") @db.Char(64)
 
   company    Company        @relation(fields: [companyId], references: [id])
   fromBranch Branch         @relation("TransferFrom", fields: [fromBranchId], references: [id])
@@ -965,6 +976,9 @@ model StockTransfer {
   items      TransferItem[]
 
   @@unique([fromBranchId, transferNo])
+  /// One request id per company. MySQL permits many NULLs, so pre-H1.1 rows are
+  /// unaffected, and two concurrent identical creates cannot both win.
+  @@unique([companyId, clientUuid])
   @@index([companyId])
   @@index([fromBranchId])
   @@index([toBranchId])
