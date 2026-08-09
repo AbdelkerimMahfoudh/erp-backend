@@ -87,6 +87,7 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0022_price_edit_permission_backfill'),
     sqlOf('0026_catalog_manage_permission'),
     sqlOf('0031_transfer_permissions_and_lifecycle'),
+    sqlOf('0032_manager_cancel_route_permission'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from
@@ -143,12 +144,21 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     expect(employee).not.toContain('transfer.cancel');
   });
 
-  it('a manager is granted approval but not the employee-only self-cancel', () => {
-    const h12 = sqlOf('0031_transfer_permissions_and_lifecycle');
-    const manager = grantedInKeyedSql(h12, 'store_manager');
+  it('a manager is granted approval and both cancel keys', () => {
+    /**
+     * The two keys do different jobs. `transfer.cancel` is BREADTH — may cancel
+     * somebody else's transfer. `transfer.cancel_own` is the ROUTE key, and
+     * `PermissionsGuard` requires ALL listed permissions, so without it a
+     * manager is refused before the service can decide anything. A live run
+     * proved exactly that: the manager could not cancel at all, which 0032
+     * repairs.
+     */
+    const manager = grantedInKeyedSql(sqlOf('0031_transfer_permissions_and_lifecycle'), 'store_manager');
     expect(manager).toContain('transfer.approve');
     expect(manager).toContain('transfer.cancel');
-    expect(manager).not.toContain('transfer.cancel_own');
+
+    const routeKey = grantedInKeyedSql(sqlOf('0032_manager_cancel_route_permission'), 'store_manager');
+    expect(routeKey).toContain('transfer.cancel_own');
   });
 
   it('revokes the specific over-grants the audit found', () => {

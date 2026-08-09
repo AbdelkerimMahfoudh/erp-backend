@@ -99,7 +99,16 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     // H1.2: the approval authority, branch-scoped like everything else. A
     // manager approves and cancels within the branch they are managing.
     'transfer.view', 'transfer.request', 'transfer.approve',
-    'transfer.ship', 'transfer.receive', 'transfer.cancel',
+    'transfer.ship', 'transfer.receive',
+    /**
+     * BOTH cancel keys, and they mean different things.
+     * `transfer.cancel_own` is the ROUTE key — may reach the cancel endpoint at
+     * all. `transfer.cancel` is the BREADTH key — may cancel anybody's transfer,
+     * not only their own. A manager needs the route key to get in and the
+     * breadth key to act broadly; an employee holds only the route key, so the
+     * service confines them to their own pending request.
+     */
+    'transfer.cancel', 'transfer.cancel_own',
     // G1: final catalog administration. Granted by migration 0026 as well as
     // here, and it carries no pricing authority — `price.edit` stays delegated
     // per branch by an Owner.

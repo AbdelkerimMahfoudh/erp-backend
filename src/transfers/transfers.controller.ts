@@ -76,10 +76,14 @@ export class TransfersController {
   }
 
   /**
-   * Either authority reaches this route; the service decides which applies.
-   * `transfer.cancel` covers anything in the branch, `transfer.cancel_own` only
-   * the caller's own request while it is still pending — and the service proves
-   * that, so holding the route permission alone cannot widen it.
+   * Guarded on the NARROWER key deliberately.
+   *
+   * `transfer.cancel_own` is the route key — everyone who may cancel anything
+   * holds it, so managers and owners get in too. Breadth is then decided by the
+   * service: only `transfer.cancel` may touch somebody else's transfer.
+   * Guarding on the broad key instead would have locked employees out of
+   * withdrawing their own request; guarding on both would lock managers out,
+   * because the guard requires ALL listed permissions.
    */
   @Post(':id/cancel')
   @RequirePermissions('transfer.cancel_own')

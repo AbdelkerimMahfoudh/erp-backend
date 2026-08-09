@@ -620,11 +620,11 @@ export class TransfersService {
   /**
    * Withdraw a transfer before it ships.
    *
-   * Two authorities reach this: `transfer.cancel` cancels anything in the
-   * branch, while `transfer.cancel_own` lets a requester withdraw only the
-   * request they raised, and only while nobody has acted on it. Keeping them as
-   * separate permissions rather than one permission with a condition is what
-   * stops a later change quietly widening the employee case.
+   * Two keys, two different jobs. `transfer.cancel_own` is the ROUTE key that
+   * lets a caller reach this endpoint at all; `transfer.cancel` is the BREADTH
+   * key that lets them cancel somebody else's transfer. Managers hold both,
+   * employees only the first — so the route permission alone can never widen
+   * into general cancellation, which is checked here rather than at the guard.
    */
   async cancel(idStr: string, dto: TransferDecisionDto) {
     const activeBranch = this.tenant.requireBranchId();

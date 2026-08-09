@@ -174,25 +174,23 @@ describe('Store Manager', () => {
   });
 
   it('includes everything a Store Employee can do', () => {
-    /**
-     * One deliberate exception: `transfer.cancel_own` is the EMPLOYEE-shaped
-     * key, meaning "withdraw the request you raised, while it is still pending".
-     * A manager holds `transfer.cancel`, which is strictly broader — the
-     * service short-circuits the ownership check for it — so the manager can
-     * cancel their own request too. The capability is a superset even though
-     * the key set is not, and granting both would imply the narrow key means
-     * something a manager lacks.
-     */
-    const SUPERSEDED = new Map([['transfer.cancel_own', 'transfer.cancel']]);
-
     for (const perm of ROLE_PERMISSIONS.store_employee) {
-      const broader = SUPERSEDED.get(perm);
-      if (broader) {
-        expect(has('store_manager', broader)).toBe(true);
-        continue;
-      }
       expect(has('store_manager', perm)).toBe(true);
     }
+  });
+
+  it('holds BOTH cancel keys, because they mean different things', () => {
+    /**
+     * `transfer.cancel_own` is the route key — without it the guard refuses
+     * before the service is ever consulted, and a live run proved a manager
+     * could not cancel at all. `transfer.cancel` is the breadth key that lets
+     * them cancel somebody else's transfer.
+     */
+    expect(has('store_manager', 'transfer.cancel_own')).toBe(true);
+    expect(has('store_manager', 'transfer.cancel')).toBe(true);
+    // The employee has the route key only, which is what confines them.
+    expect(has('store_employee', 'transfer.cancel_own')).toBe(true);
+    expect(has('store_employee', 'transfer.cancel')).toBe(false);
   });
 
   it('has no expense authority — narrower than the old branch_manager', () => {
