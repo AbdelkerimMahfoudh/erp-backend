@@ -31,7 +31,8 @@ describe('store-facing roles', () => {
   });
 
   it('leaves Owner with full access, now including price.edit', () => {
-    expect(ROLE_PERMISSIONS.owner.length).toBe(19);
+    // 19 before H1.2, plus the seven transfer keys that replaced the blanket one.
+    expect(ROLE_PERMISSIONS.owner.length).toBe(26);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
@@ -54,7 +55,25 @@ describe('Store Employee', () => {
     // The permission whose absence caused the receiving 403.
     expect(has('store_employee', 'purchase.manage')).toBe(true);
     expect(has('store_employee', 'unit.add')).toBe(true);
-    expect(has('store_employee', 'unit.transfer')).toBe(true);
+    // H1.2 split `unit.transfer` apart; the employee keeps the doing, not the
+    // deciding.
+    expect(has('store_employee', 'transfer.request')).toBe(true);
+    expect(has('store_employee', 'transfer.ship')).toBe(true);
+    expect(has('store_employee', 'transfer.receive')).toBe(true);
+    expect(has('store_employee', 'unit.transfer')).toBe(false);
+  });
+
+  it('cannot approve, reject, or cancel somebody else’s transfer', () => {
+    /**
+     * The H0 audit measured the old behaviour: one permission guarded request,
+     * ship, receive and cancel, and every role held it, so an employee assigned
+     * to both branches could move stock end to end with nobody else involved.
+     * This is the separation of duties that replaced it.
+     */
+    expect(has('store_employee', 'transfer.approve')).toBe(false);
+    expect(has('store_employee', 'transfer.cancel')).toBe(false);
+    // They may still withdraw their OWN pending request.
+    expect(has('store_employee', 'transfer.cancel_own')).toBe(true);
   });
 
   it('cannot COMPLETE a return — only a Manager or Owner may', () => {
@@ -110,7 +129,14 @@ describe('Store Employee', () => {
     // The merge must not quietly drop day-to-day abilities, or a migrated user
     // loses access to their own job. Two are withheld deliberately because
     // their real behaviour is final authority — see the tests above.
-    const AUDITED_OUT = new Set(['sale.return', 'import.run']);
+    /**
+     * `unit.transfer` joins them, for a different reason: the ABILITY is
+     * retained, it is just no longer one blanket key. H1.2 replaced it with
+     * `transfer.request` / `ship` / `receive` (plus `cancel_own`), which the
+     * employee holds — see the split tests above. Nothing was taken away here
+     * except the authority to approve and to cancel other people's work.
+     */
+    const AUDITED_OUT = new Set(['sale.return', 'import.run', 'unit.transfer']);
     const legacy = new Set([
       ...ROLE_PERMISSIONS.sales_employee,
       ...ROLE_PERMISSIONS.warehouse_employee,
@@ -130,7 +156,10 @@ describe('Store Manager', () => {
       'cost.view',
       'purchase.manage',
       'supplier.manage',
-      'unit.transfer',
+      'transfer.approve',
+      'transfer.ship',
+      'transfer.receive',
+      'transfer.cancel',
       'closing.perform',
       'report.view',
     ]) {
@@ -145,7 +174,23 @@ describe('Store Manager', () => {
   });
 
   it('includes everything a Store Employee can do', () => {
+    /**
+     * One deliberate exception: `transfer.cancel_own` is the EMPLOYEE-shaped
+     * key, meaning "withdraw the request you raised, while it is still pending".
+     * A manager holds `transfer.cancel`, which is strictly broader — the
+     * service short-circuits the ownership check for it — so the manager can
+     * cancel their own request too. The capability is a superset even though
+     * the key set is not, and granting both would imply the narrow key means
+     * something a manager lacks.
+     */
+    const SUPERSEDED = new Map([['transfer.cancel_own', 'transfer.cancel']]);
+
     for (const perm of ROLE_PERMISSIONS.store_employee) {
+      const broader = SUPERSEDED.get(perm);
+      if (broader) {
+        expect(has('store_manager', broader)).toBe(true);
+        continue;
+      }
       expect(has('store_manager', perm)).toBe(true);
     }
   });

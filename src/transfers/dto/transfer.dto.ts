@@ -1,5 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { ArrayMinSize, IsArray, IsString, IsUUID, Matches, MaxLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ArrayMinSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Min } from 'class-validator';
 
 export class CreateTransferDto {
   /**
@@ -39,4 +39,25 @@ export class SetTransferPrefixDto {
   @MaxLength(8)
   @Matches(/^[A-Z0-9]{0,8}$/, { message: 'prefix must be up to 8 uppercase letters/digits' })
   prefix: string;
+}
+
+/**
+ * Every lifecycle transition carries the version the caller last saw.
+ *
+ * Without it, two managers acting on one request would both succeed and the
+ * second would silently overwrite the first's decision. `expectedVersion` makes
+ * the database arbitrate: the loser matches no row and is told to refresh.
+ */
+export class TransferDecisionDto {
+  @ApiProperty({ minimum: 0, description: 'Version of the transfer as you last read it.' })
+  @IsInt()
+  @Min(0)
+  expectedVersion!: number;
+
+  /** Mandatory for reject and cancel; ignored elsewhere. */
+  @ApiPropertyOptional({ maxLength: 500 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }

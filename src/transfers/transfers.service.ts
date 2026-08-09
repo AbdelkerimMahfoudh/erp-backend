@@ -7,9 +7,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { ClsService } from 'nestjs-cls';
 import { Prisma, StockTransfer } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
+import { AppClsStore } from '../common/context/request-context';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
@@ -17,9 +19,10 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { PricingService } from '../pricing/pricing.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { assertTransferTransition } from './transfer-state-machine';
+import { TransferStatus } from '@prisma/client';
 import { computeDiscrepancy, DiscrepancyReport } from './discrepancy.util';
 import { unitIdentifier } from '../inventory/unit-identifier.util';
-import { CreateTransferDto, ReceiveTransferDto } from './dto/transfer.dto';
+import { CreateTransferDto, ReceiveTransferDto, TransferDecisionDto } from './dto/transfer.dto';
 
 /**
  * Stable fingerprint of what the client asked for, mirroring Purchase.
@@ -37,6 +40,13 @@ function transferFingerprint(dto: CreateTransferDto, fromBranchId: Buffer): stri
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
+/**
+ * The transaction client of the TENANT-scoped client, not the plain
+ * `Prisma.TransactionClient`. Using the extended type keeps company scoping in
+ * force inside transactions instead of silently dropping to an unscoped client.
+ */
+type TransferTx = Omit<TenantPrisma, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>;
+
 @Injectable()
 export class TransfersService {
   constructor(
@@ -46,6 +56,7 @@ export class TransfersService {
     private readonly invoiceNumbers: InvoiceNumberService,
     private readonly notifications: NotificationsService,
     private readonly pricing: PricingService,
+    private readonly cls: ClsService<AppClsStore>,
   ) {}
 
   // --- configurable per-branch prefix (stored in settings) -----------------
@@ -136,6 +147,14 @@ export class TransfersService {
     const prefix = await this.getPrefix(fromBranchId);
     const userId = this.tenant.userId();
 
+    /**
+     * A requester who already holds `transfer.approve` HERE has nothing to wait
+     * for: making a manager approve their own request would be ceremony, not
+     * control. The row records that the approval was automatic, so the audit
+     * trail never shows an approved transfer with no approver.
+     */
+    const selfApproves = this.has('transfer.approve');
+
     let created: { id: Buffer; transferNo: string | null };
     try {
       created = await this.db.$transaction(async (tx) => {
@@ -177,7 +196,11 @@ export class TransfersService {
         await tx.stockTransfer.create({
           data: {
             id, companyId, fromBranchId, toBranchId, transferNo,
-            status: 'ready_to_ship', sentById: userId ?? null,
+            status: selfApproves ? 'approved' : 'pending_approval',
+            requestedById: userId ?? null,
+            ...(selfApproves
+              ? { approvedById: userId ?? null, approvedAt: new Date(), autoApproved: true }
+              : {}),
             clientUuid: uuidToBin(dto.clientUuid),
             clientRequestHash: transferFingerprint(dto, fromBranchId),
           },
@@ -191,7 +214,14 @@ export class TransfersService {
           entityType: 'StockTransfer',
           entityId: id,
           action: 'create',
-          after: { transferNo, to: binToUuid(toBranchId), units: identifiers.length, reserved: identifiers.length },
+          after: {
+            transferNo,
+            to: binToUuid(toBranchId),
+            units: identifiers.length,
+            reserved: identifiers.length,
+            status: selfApproves ? 'approved' : 'pending_approval',
+            autoApproved: selfApproves,
+          },
           branchId: fromBranchId,
         });
         return { id, transferNo };
@@ -220,7 +250,14 @@ export class TransfersService {
       throw e;
     }
 
-    return { id: binToUuid(created.id), transferNo: created.transferNo, status: 'ready_to_ship', units: identifiers.length };
+    return {
+      id: binToUuid(created.id),
+      transferNo: created.transferNo,
+      status: selfApproves ? 'approved' : 'pending_approval',
+      autoApproved: selfApproves,
+      version: 0,
+      units: identifiers.length,
+    };
   }
 
   /**
@@ -246,11 +283,155 @@ export class TransfersService {
       id: binToUuid(prior.id),
       transferNo: prior.transferNo,
       status: prior.status,
+      autoApproved: prior.autoApproved,
+      version: prior.version,
       units: prior.items.length,
     };
   }
 
-  async ship(idStr: string) {
+  /** Does the caller hold this permission in the ACTIVE branch? */
+  private has(permission: string): boolean {
+    return this.cls.get('permissions')?.has(permission) ?? false;
+  }
+
+  /**
+   * Move a transfer to a new status, but only from the exact version the
+   * caller last saw.
+   *
+   * The compare-and-swap is the whole concurrency story: two managers acting on
+   * one request -- approve versus reject, ship versus cancel -- both read
+   * version N, and only the first UPDATE matches. The loser changes zero rows
+   * and is told to refresh rather than silently overwriting a decision somebody
+   * else just made.
+   */
+  private async transitionTx(
+    tx: TransferTx,
+    transfer: StockTransfer,
+    to: TransferStatus,
+    expectedVersion: number,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    assertTransferTransition(transfer.status, to);
+    const moved = await tx.stockTransfer.updateMany({
+      where: { id: transfer.id, companyId: this.tenant.companyId(), version: expectedVersion },
+      data: { status: to, version: { increment: 1 }, ...extra },
+    });
+    if (moved.count === 0) {
+      throw new ConflictException({
+        code: 'refresh_required',
+        message: 'Someone else acted on this transfer. Refresh and try again.',
+      });
+    }
+  }
+
+  /**
+   * Release every unit this transfer is holding, in the same transaction as the
+   * status change.
+   *
+   * Scoped to the status we expect to find, so a retry cannot free a unit that
+   * has since been legitimately claimed by something else: the second run
+   * matches nothing and changes nothing.
+   */
+  private async releaseReservationsTx(
+    tx: TransferTx,
+    transferId: Buffer,
+    fromBranchId: Buffer,
+    action: string,
+  ): Promise<number> {
+    const items = await tx.transferItem.findMany({ where: { transferId } });
+    let released = 0;
+    for (const i of items) {
+      if (!i.unitId) continue;
+      const done = await tx.unit.updateMany({
+        where: { id: i.unitId, status: 'reserved' },
+        data: { status: 'in_stock' },
+      });
+      if (done.count > 0) {
+        released += 1;
+        await this.audit.recordTx(tx, {
+          entityType: 'Unit',
+          entityId: i.unitId,
+          action: 'status_change',
+          before: { status: 'reserved' },
+          after: { status: 'in_stock' },
+          reason: action,
+          branchId: fromBranchId,
+        });
+      }
+    }
+    return released;
+  }
+
+  /**
+   * Approve a pending request.
+   *
+   * Units are ALREADY reserved from the request (H1.1), so approval must not
+   * reserve again -- it only records that somebody with the authority agreed.
+   */
+  async approve(idStr: string, dto: TransferDecisionDto) {
+    const fromBranchId = this.tenant.requireBranchId();
+    const transfer = await this.load(idStr);
+    if (!transfer.fromBranchId.equals(fromBranchId)) {
+      throw new ForbiddenException('Approve from the branch the stock is leaving');
+    }
+    const userId = this.tenant.userId();
+
+    await this.db.$transaction(async (tx) => {
+      await this.transitionTx(tx, transfer, 'approved', dto.expectedVersion, {
+        approvedById: userId ?? null,
+        approvedAt: new Date(),
+      });
+      await this.audit.recordTx(tx, {
+        entityType: 'StockTransfer',
+        entityId: transfer.id,
+        action: 'status_change',
+        before: { status: 'pending_approval' },
+        after: { status: 'approved', transferNo: transfer.transferNo },
+        branchId: fromBranchId,
+      });
+    });
+
+    return this.getById(idStr);
+  }
+
+  /**
+   * Refuse a pending request and hand the stock back.
+   *
+   * A reason is mandatory: the requester is being told no, and "no" without a
+   * reason is how the same request gets raised again next week.
+   */
+  async reject(idStr: string, dto: TransferDecisionDto) {
+    const fromBranchId = this.tenant.requireBranchId();
+    const transfer = await this.load(idStr);
+    if (!transfer.fromBranchId.equals(fromBranchId)) {
+      throw new ForbiddenException('Reject from the branch the stock is leaving');
+    }
+    const reason = (dto.reason ?? '').trim();
+    if (!reason) throw new BadRequestException('Say why the request is refused');
+    const userId = this.tenant.userId();
+
+    await this.db.$transaction(async (tx) => {
+      const t = tx;
+      await this.transitionTx(t, transfer, 'rejected', dto.expectedVersion, {
+        decisionReason: reason,
+        decidedById: userId ?? null,
+        decidedAt: new Date(),
+      });
+      const released = await this.releaseReservationsTx(t, transfer.id, fromBranchId, 'transfer rejected');
+      await this.audit.recordTx(tx, {
+        entityType: 'StockTransfer',
+        entityId: transfer.id,
+        action: 'status_change',
+        before: { status: 'pending_approval' },
+        after: { status: 'rejected', transferNo: transfer.transferNo, released },
+        reason,
+        branchId: fromBranchId,
+      });
+    });
+
+    return this.getById(idStr);
+  }
+  async ship(idStr: string, dto: TransferDecisionDto) {
     const fromBranchId = this.tenant.requireBranchId();
     const transfer = await this.load(idStr);
     if (!transfer.fromBranchId.equals(fromBranchId)) {
@@ -304,12 +485,15 @@ export class TransfersService {
           branchId: fromBranchId,
         });
       }
-      await tx.stockTransfer.update({ where: { id: transfer.id }, data: { status: 'in_transit', sentAt: new Date() } });
+      await this.transitionTx(tx, transfer, 'in_transit', dto.expectedVersion, {
+        sentAt: new Date(),
+        sentById: this.tenant.userId() ?? null,
+      });
       await this.audit.recordTx(tx, {
         entityType: 'StockTransfer',
         entityId: transfer.id,
         action: 'status_change',
-        before: { status: 'ready_to_ship' },
+        before: { status: 'approved' },
         after: { status: 'in_transit' },
         branchId: fromBranchId,
       });
@@ -339,7 +523,7 @@ export class TransfersService {
   }
 
   /** Step 2: explicit confirm → apply inventory, status, audit, notification. */
-  async receiveConfirm(idStr: string, dto: ReceiveTransferDto) {
+  async receiveConfirm(idStr: string, dto: ReceiveTransferDto & { expectedVersion: number }) {
     const toBranchId = this.tenant.requireBranchId();
     const transfer = await this.load(idStr);
     if (!transfer.toBranchId.equals(toBranchId)) {
@@ -397,9 +581,9 @@ export class TransfersService {
        * successful one must never leave a stale price behind.
        */
       await this.pricing.invalidateOnBranchMoveTx(tx, moved);
-      await tx.stockTransfer.update({
-        where: { id: transfer.id },
-        data: { status: 'received', receivedById: this.tenant.userId() ?? null, receivedAt: new Date() },
+      await this.transitionTx(tx, transfer, 'received', dto.expectedVersion, {
+        receivedById: this.tenant.userId() ?? null,
+        receivedAt: new Date(),
       });
       await this.audit.recordTx(tx, {
         entityType: 'StockTransfer',
@@ -433,58 +617,93 @@ export class TransfersService {
     return { received: report.matched.length, report };
   }
 
-  async cancel(idStr: string) {
+  /**
+   * Withdraw a transfer before it ships.
+   *
+   * Two authorities reach this: `transfer.cancel` cancels anything in the
+   * branch, while `transfer.cancel_own` lets a requester withdraw only the
+   * request they raised, and only while nobody has acted on it. Keeping them as
+   * separate permissions rather than one permission with a condition is what
+   * stops a later change quietly widening the employee case.
+   */
+  async cancel(idStr: string, dto: TransferDecisionDto) {
     const activeBranch = this.tenant.requireBranchId();
     const transfer = await this.load(idStr);
     if (!transfer.fromBranchId.equals(activeBranch)) {
-      throw new ForbiddenException('Cancel from the origin branch');
+      throw new ForbiddenException('Cancel from the branch the stock is leaving');
     }
-    assertTransferTransition(transfer.status, 'cancelled');
-    const wasInTransit = transfer.status === 'in_transit';
-    const items = await this.db.transferItem.findMany({ where: { transferId: transfer.id } });
+
+    const reason = (dto.reason ?? '').trim();
+    if (!reason) throw new BadRequestException('Say why the transfer is being cancelled');
+
+    const userId = this.tenant.userId();
+    const canCancelAny = this.has('transfer.cancel');
+    if (!canCancelAny) {
+      /**
+       * Employee path. Two conditions, both required: it must be THEIR request,
+       * and nobody must have approved it yet. Once a manager has agreed, undoing
+       * that is a manager decision.
+       */
+      const isRequester = transfer.requestedById?.equals(userId ?? Buffer.alloc(0)) ?? false;
+      if (!isRequester) {
+        throw new ForbiddenException('You can only withdraw a request you made yourself');
+      }
+      if (transfer.status !== 'pending_approval') {
+        throw new ForbiddenException(
+          'This request has already been acted on — ask a manager to cancel it',
+        );
+      }
+    }
+
+    /**
+     * After shipment there is no ordinary cancellation. The goods are physically
+     * in motion, and rewriting the unit back to the source branch would be a
+     * guess about where they are. Return-to-source is future work; refusing is
+     * the honest answer. (The state machine enforces this too.)
+     */
+    if (transfer.status === 'in_transit') {
+      throw new ConflictException(
+        'This transfer has already been shipped and cannot be cancelled',
+      );
+    }
 
     await this.db.$transaction(async (tx) => {
-      /**
-       * Release whatever this transfer was holding, in the same transaction as
-       * the status change -- a cancel that fails half way must leave the stock
-       * reserved rather than free it for a transfer that still exists.
-       *
-       * Scoped to `reserved`/`in_transit` so a retried cancel cannot touch a
-       * unit that has since been legitimately sold or claimed elsewhere: the
-       * second run matches nothing and changes nothing.
-       */
-      const releaseFrom = wasInTransit ? 'in_transit' : 'reserved';
-      for (const i of items) {
-        const released = await tx.unit.updateMany({
-          where: { id: i.unitId!, status: releaseFrom },
-          data: { status: 'in_stock', branchId: transfer.fromBranchId },
-        });
-        if (released.count > 0) {
-          await this.audit.recordTx(tx, {
-            entityType: 'Unit',
-            entityId: i.unitId!,
-            action: 'status_change',
-            before: { status: releaseFrom },
-            after: { status: 'in_stock' },
-            branchId: transfer.fromBranchId,
-          });
-        }
-      }
-      await tx.stockTransfer.update({ where: { id: transfer.id }, data: { status: 'cancelled' } });
+      const t = tx;
+      await this.transitionTx(t, transfer, 'cancelled', dto.expectedVersion, {
+        decisionReason: reason,
+        decidedById: userId ?? null,
+        decidedAt: new Date(),
+      });
+      const released = await this.releaseReservationsTx(t, transfer.id, transfer.fromBranchId, 'transfer cancelled');
       await this.audit.recordTx(tx, {
         entityType: 'StockTransfer',
         entityId: transfer.id,
         action: 'status_change',
         before: { status: transfer.status },
-        after: { status: 'cancelled' },
+        after: { status: 'cancelled', transferNo: transfer.transferNo, released },
+        reason,
         branchId: transfer.fromBranchId,
       });
     });
-    return { id: binToUuid(transfer.id), status: 'cancelled' };
-  }
 
+    return this.getById(idStr);
+  }
+  /**
+   * Transfers touching the active branch, newest first.
+   *
+   * Gated on `transfer.view` at the controller (H1.2) — it used to have no
+   * permission at all, so any signed-in user could browse every transfer in the
+   * company.
+   */
   list(): Promise<StockTransfer[]> {
-    return this.db.stockTransfer.findMany({ orderBy: { sentAt: 'desc' }, take: 100 });
+    const branchId = this.tenant.requireBranchId();
+    return this.db.stockTransfer.findMany({
+      // A branch sees what it is sending AND what is coming to it; those are the
+      // two ends that have work to do.
+      where: { OR: [{ fromBranchId: branchId }, { toBranchId: branchId }] },
+      orderBy: { id: 'desc' },
+      take: 100,
+    });
   }
 
   async getById(idStr: string) {
