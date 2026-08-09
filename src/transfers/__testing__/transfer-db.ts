@@ -157,6 +157,20 @@ function project(db: Db, model: keyof Db, row: Row, opts: { select?: unknown; in
   const out: Record<string, unknown> = opts.include ? { ...row } : {};
   for (const [key, value] of Object.entries(spec)) {
     if (!value) continue;
+
+    // `_count: { select: { items: true } }` — a relation tally, not a column.
+    if (key === '_count') {
+      const wanted = (value as { select?: Record<string, unknown> }).select ?? {};
+      const counts: Record<string, number> = {};
+      for (const relKey of Object.keys(wanted)) {
+        const rel = RELATIONS[`${String(model)}.${relKey}`];
+        const related = rel ? resolveRelation(db, row, rel) : null;
+        counts[relKey] = Array.isArray(related) ? related.length : related ? 1 : 0;
+      }
+      out._count = counts;
+      continue;
+    }
+
     const rel = RELATIONS[`${String(model)}.${key}`];
     if (rel) {
       const related = resolveRelation(db, row, rel);

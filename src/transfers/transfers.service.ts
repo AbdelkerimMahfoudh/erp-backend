@@ -22,7 +22,14 @@ import { assertTransferTransition } from './transfer-state-machine';
 import { TransferStatus } from '@prisma/client';
 import { computeDiscrepancy, DiscrepancyReport } from './discrepancy.util';
 import { unitIdentifier } from '../inventory/unit-identifier.util';
-import { CreateTransferDto, ReceiveTransferDto, TransferDecisionDto } from './dto/transfer.dto';
+import { computeActions, requestedAtOf } from './transfer-view';
+import {
+  CreateTransferDto,
+  ListTransfersDto,
+  ReceiveTransferDto,
+  TransferDecisionDto,
+  TRANSFER_STATUSES,
+} from './dto/transfer.dto';
 
 /**
  * Stable fingerprint of what the client asked for, mirroring Purchase.
@@ -743,30 +750,203 @@ export class TransfersService {
     return this.getById(idStr);
   }
   /**
-   * Transfers touching the active branch, newest first.
+   * Transfers touching the active branch, newest first, with search and paging.
    *
    * Gated on `transfer.view` at the controller (H1.2) — it used to have no
    * permission at all, so any signed-in user could browse every transfer in the
-   * company.
+   * company. It also used to return raw rows with `take: 100` and no filter, so
+   * a busy shop simply lost its older history.
    */
-  list(): Promise<StockTransfer[]> {
+  async list(query: ListTransfersDto) {
     const branchId = this.tenant.requireBranchId();
-    return this.db.stockTransfer.findMany({
-      // A branch sees what it is sending AND what is coming to it; those are the
-      // two ends that have work to do.
-      where: { OR: [{ fromBranchId: branchId }, { toBranchId: branchId }] },
+    const limit = Math.min(Math.max(query.limit ?? 20, 1), 50);
+
+    const statuses = (query.status ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s): s is TransferStatus => (TRANSFER_STATUSES as readonly string[]).includes(s));
+    if (query.status && statuses.length === 0) {
+      throw new BadRequestException('Unknown transfer status filter');
+    }
+
+    const rows = await this.db.stockTransfer.findMany({
+      where: {
+        // A branch sees what it is sending AND what is coming to it; those are
+        // the two ends that have work to do.
+        OR: [{ fromBranchId: branchId }, { toBranchId: branchId }],
+        ...(statuses.length > 0 ? { status: { in: statuses } } : {}),
+        ...this.searchWhere(query.search),
+      },
+      include: {
+        fromBranch: { select: { id: true, name: true } },
+        toBranch: { select: { id: true, name: true } },
+        requestedBy: { select: { name: true } },
+        _count: { select: { items: true } },
+      },
+      // The PK is a UUIDv7: unique, immutable and time-ordered, so `id desc` is
+      // "newest first" AND a total order. Keyset paging on it cannot skip or
+      // repeat a row when somebody creates a transfer mid-scroll, which
+      // skip/take would.
+      ...(query.cursor ? { cursor: { id: uuidToBin(query.cursor) }, skip: 1 } : {}),
       orderBy: { id: 'desc' },
-      take: 100,
+      take: limit + 1,
     });
+
+    const page = rows.slice(0, limit);
+    return {
+      rows: page.map((t) => ({
+        id: binToUuid(t.id),
+        transferNo: t.transferNo,
+        status: t.status,
+        // Which way the stock is moving, seen from where the user stands.
+        direction: t.fromBranchId.equals(branchId) ? 'outgoing' : 'incoming',
+        from: { id: binToUuid(t.fromBranch.id), name: t.fromBranch.name },
+        to: { id: binToUuid(t.toBranch.id), name: t.toBranch.name },
+        itemCount: t._count.items,
+        requestedBy: t.requestedBy?.name ?? null,
+        requestedAt: requestedAtOf(t.id),
+        approvedAt: t.approvedAt,
+        sentAt: t.status === 'pending_approval' || t.status === 'approved' ? null : t.sentAt,
+        receivedAt: t.receivedAt,
+        decidedAt: t.decidedAt,
+        decisionReason: t.decisionReason,
+        autoApproved: t.autoApproved,
+      })),
+      nextCursor: rows.length > limit ? binToUuid(page[page.length - 1]!.id) : null,
+    };
   }
 
+  /**
+   * Search in SQL, across everything a person might remember about a movement:
+   * the reference on the paperwork, either branch, what the thing was, or the
+   * number printed on it.
+   *
+   * MySQL's default collation is case-insensitive, so `contains` needs no
+   * lowering — and lowering would defeat the index anyway.
+   */
+  private searchWhere(search?: string): Prisma.StockTransferWhereInput {
+    const q = search?.trim();
+    if (!q) return {};
+    return {
+      OR: [
+        { transferNo: { contains: q } },
+        { fromBranch: { name: { contains: q } } },
+        { toBranch: { name: { contains: q } } },
+        { items: { some: { unit: { imeiPrimary: { contains: q } } } } },
+        { items: { some: { unit: { serialNo: { contains: q } } } } },
+        { items: { some: { unit: { product: { brand: { contains: q } } } } } },
+        { items: { some: { unit: { product: { model: { contains: q } } } } } },
+        { items: { some: { unit: { product: { variant: { contains: q } } } } } },
+      ],
+    };
+  }
+
+  /**
+   * How much work is waiting at this branch, in one grouped query.
+   *
+   * Three numbers for the navigation badge. Deliberately a COUNT rather than a
+   * page the client tallies: draining the list to colour a badge is how a shop
+   * with a year of history gets a slow home screen.
+   */
+  async counts() {
+    const branchId = this.tenant.requireBranchId();
+    const grouped = await this.db.stockTransfer.groupBy({
+      by: ['status'],
+      where: {
+        OR: [{ fromBranchId: branchId }, { toBranchId: branchId }],
+        status: { in: ['pending_approval', 'approved', 'in_transit'] },
+      },
+      _count: { _all: true },
+    });
+    const of = (status: TransferStatus) =>
+      grouped.find((g) => g.status === status)?._count._all ?? 0;
+    return {
+      pendingApproval: of('pending_approval'),
+      approved: of('approved'),
+      inTransit: of('in_transit'),
+    };
+  }
+
+  /**
+   * One transfer, with everything the detail screen shows and what may be done.
+   *
+   * Readable from ANY branch the caller is assigned to, deliberately: a
+   * notification must be able to open the transfer it is about even when the
+   * app is pointed at the other end. Every ACTION still names the branch it
+   * requires, so the screen can offer "Switch to Main Store" rather than a bare
+   * refusal. No cost, price or margin is returned at all.
+   */
   async getById(idStr: string) {
+    const activeBranchId = this.tenant.requireBranchId();
     const transfer = await this.db.stockTransfer.findUnique({
       where: { id: uuidToBin(idStr) },
-      include: { items: { include: { unit: { select: { imeiPrimary: true, status: true } } } } },
+      include: {
+        fromBranch: { select: { id: true, name: true } },
+        toBranch: { select: { id: true, name: true } },
+        requestedBy: { select: { name: true } },
+        approvedBy: { select: { name: true } },
+        decidedBy: { select: { name: true } },
+        sentBy: { select: { name: true } },
+        receivedBy: { select: { name: true } },
+        items: {
+          include: {
+            unit: {
+              select: {
+                imeiPrimary: true,
+                serialNo: true,
+                status: true,
+                product: { select: { brand: true, model: true, variant: true } },
+              },
+            },
+          },
+        },
+      },
     });
     if (!transfer) throw new NotFoundException('Transfer not found');
-    return transfer;
+
+    return {
+      id: binToUuid(transfer.id),
+      transferNo: transfer.transferNo,
+      status: transfer.status,
+      version: transfer.version,
+      direction: transfer.fromBranchId.equals(activeBranchId) ? 'outgoing' : 'incoming',
+      from: { id: binToUuid(transfer.fromBranch.id), name: transfer.fromBranch.name },
+      to: { id: binToUuid(transfer.toBranch.id), name: transfer.toBranch.name },
+      autoApproved: transfer.autoApproved,
+      decisionReason: transfer.decisionReason,
+      people: {
+        requestedBy: transfer.requestedBy?.name ?? null,
+        approvedBy: transfer.approvedBy?.name ?? null,
+        decidedBy: transfer.decidedBy?.name ?? null,
+        sentBy: transfer.sentBy?.name ?? null,
+        receivedBy: transfer.receivedBy?.name ?? null,
+      },
+      timestamps: {
+        requestedAt: requestedAtOf(transfer.id),
+        approvedAt: transfer.approvedAt,
+        // `sentAt` carries DEFAULT now() from the original schema, so it is only
+        // a shipping time once the transfer has actually shipped.
+        sentAt: transfer.status === 'pending_approval' || transfer.status === 'approved' ? null : transfer.sentAt,
+        receivedAt: transfer.receivedAt,
+        decidedAt: transfer.decidedAt,
+      },
+      items: transfer.items.map((i) => ({
+        id: binToUuid(i.id),
+        identifier: i.unit ? unitIdentifier(i.unit) : null,
+        product: i.unit?.product
+          ? [i.unit.product.brand, i.unit.product.model, i.unit.product.variant].filter(Boolean).join(' ')
+          : null,
+        unitStatus: i.unit?.status ?? null,
+      })),
+      actions: computeActions({
+        transfer,
+        from: transfer.fromBranch,
+        to: transfer.toBranch,
+        activeBranchId,
+        userId: this.tenant.userId() ?? null,
+        permissions: this.cls.get('permissions') ?? new Set<string>(),
+      }),
+    };
   }
 
   // --- helpers --------------------------------------------------------------

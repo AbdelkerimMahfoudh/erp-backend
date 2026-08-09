@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Param, Post, Put } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { TransfersService } from './transfers.service';
 import {
   CreateTransferDto,
+  ListTransfersDto,
   ReceiveTransferDto,
   SetTransferPrefixDto,
   TransferDecisionDto,
@@ -17,14 +18,33 @@ export class TransfersController {
 
   @Get()
   @RequirePermissions('transfer.view')
-  @ApiOperation({ summary: 'List transfers' })
-  list() {
-    return this.transfers.list();
+  @ApiOperation({
+    summary: 'Browse transfers: status filter, search and cursor pagination',
+    description:
+      'Scoped to the active branch (both ends). Search covers the transfer reference, both branch names, the product and the IMEI/serial.',
+  })
+  list(@Query() query: ListTransfersDto) {
+    return this.transfers.list(query);
+  }
+
+  /**
+   * Declared BEFORE `:id` on purpose. Nest matches routes in declaration order,
+   * so with `:id` first this would arrive as a transfer whose id is "counts".
+   */
+  @Get('counts')
+  @RequirePermissions('transfer.view')
+  @ApiOperation({ summary: 'How much transfer work is waiting at the active branch' })
+  counts() {
+    return this.transfers.counts();
   }
 
   @Get(':id')
   @RequirePermissions('transfer.view')
-  @ApiOperation({ summary: 'Transfer detail' })
+  @ApiOperation({
+    summary: 'Transfer detail, with the actions the caller may perform',
+    description:
+      'Each action reports whether it is allowed, why not, and the branch it must be performed from — so a notification opened in the wrong branch can offer to switch rather than simply refuse.',
+  })
   get(@Param('id') id: string) {
     return this.transfers.getById(id);
   }

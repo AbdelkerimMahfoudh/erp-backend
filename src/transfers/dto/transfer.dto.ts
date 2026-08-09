@@ -33,6 +33,52 @@ export class ReceiveTransferDto {
   identifiers: string[];
 }
 
+/** The six lifecycle states, as the history filter offers them. */
+export const TRANSFER_STATUSES = [
+  'pending_approval',
+  'approved',
+  'in_transit',
+  'received',
+  'rejected',
+  'cancelled',
+] as const;
+
+export class ListTransfersDto {
+  /**
+   * One or more statuses, comma-separated. Absent means every status — the
+   * history screen needs completed and refused transfers to stay reachable.
+   */
+  @ApiPropertyOptional({ example: 'pending_approval,approved' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  status?: string;
+
+  /**
+   * Free text across the transfer reference, both branch names, the product and
+   * the IMEI/serial. Matched in SQL, never in the app: a client that filters
+   * only the pages it happens to have loaded answers "not found" for something
+   * that exists.
+   */
+  @ApiPropertyOptional({ example: '356938035643809' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  search?: string;
+
+  /** Opaque keyset cursor from the previous page. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  cursor?: string;
+
+  @ApiPropertyOptional({ minimum: 1, maximum: 50, default: 20 })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  limit?: number;
+}
+
 export class SetTransferPrefixDto {
   @ApiProperty({ example: 'NKC', maxLength: 8, description: 'Uppercase alphanumeric; empty clears it' })
   @IsString()
