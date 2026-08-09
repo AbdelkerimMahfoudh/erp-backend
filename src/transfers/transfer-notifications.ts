@@ -259,7 +259,9 @@ export class TransferNotifier {
         companyId,
         branchId,
         user: { isActive: true, deletedAt: null },
-        role: { permissions: { some: { permission: { key: permission } } } },
+        // `rolePermissions` is the relation's real name on Role — the join
+        // table, not the permissions themselves.
+        role: { rolePermissions: { some: { permission: { key: permission } } } },
       },
       select: { userId: true },
     });

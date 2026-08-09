@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ArrayMinSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Matches, MaxLength, Min } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { ArrayMinSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min } from 'class-validator';
 
 export class CreateTransferDto {
   /**
@@ -72,10 +73,19 @@ export class ListTransfersDto {
   @IsUUID()
   cursor?: string;
 
+  /**
+   * A query parameter arrives as a STRING, and the global pipe runs with
+   * `enableImplicitConversion: false`, so `@IsInt()` alone rejects every value
+   * a client could actually send — `?limit=3` was a 400 until a live request
+   * proved it. The explicit transform is what makes the parameter usable, and
+   * matches how the catalog does it.
+   */
   @ApiPropertyOptional({ minimum: 1, maximum: 50, default: 20 })
   @IsOptional()
+  @Transform(({ value }) => (value === undefined || value === '' ? undefined : Number(value)))
   @IsInt()
   @Min(1)
+  @Max(50)
   limit?: number;
 }
 

@@ -1,6 +1,9 @@
 import { BadRequestException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { randomUUID } from 'node:crypto';
 import { binToUuid } from '../common/utils/uuid.util';
+import { ListTransfersDto } from './dto/transfer.dto';
 import { computeActions, requestedAtOf } from './transfer-view';
 import {
   DEST,
@@ -367,6 +370,33 @@ describe('action decisions, as a pure function', () => {
     expect(
       decide({ permissions: new Set(EMPLOYEE_PERMISSIONS), activeBranchId: DEST }).approve.reason,
     ).toBe('permission');
+  });
+
+  /**
+   * The service takes a typed object, so a service test never exercises the
+   * pipe — and `?limit=3` was a 400 for every client until a live request
+   * proved it. A query parameter arrives as a STRING, and the global pipe runs
+   * with `enableImplicitConversion: false`, so the DTO has to convert it.
+   */
+  it('accepts limit as the string a query parameter actually is', async () => {
+    const dto = plainToInstance(ListTransfersDto, { limit: '3' });
+    await expect(validate(dto)).resolves.toHaveLength(0);
+    expect(dto.limit).toBe(3);
+  });
+
+  it('still refuses a limit that is not a number, or is out of range', async () => {
+    for (const limit of ['abc', '0', '999']) {
+      const errors = await validate(plainToInstance(ListTransfersDto, { limit }));
+      expect(errors.some((e) => e.property === 'limit')).toBe(true);
+    }
+  });
+
+  it('treats an absent or empty limit as unset rather than as zero', async () => {
+    for (const value of [undefined, '']) {
+      const dto = plainToInstance(ListTransfersDto, { limit: value });
+      await expect(validate(dto)).resolves.toHaveLength(0);
+      expect(dto.limit).toBeUndefined();
+    }
   });
 
   it('derives the requested time from the UUIDv7 key, not from sent_at', () => {

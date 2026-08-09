@@ -107,15 +107,28 @@ export function matches(db: Db, model: keyof Db, row: Row, where: unknown): bool
      * `role` on a userBranch is stored denormalised: `roleKey` plus the set of
      * permission keys that role holds. Both shapes the code uses are supported —
      * `role: { key: 'owner' }` and the recipient lookup
-     * `role: { permissions: { some: { permission: { key: 'transfer.approve' } } } }`.
+     * `role: { rolePermissions: { some: { permission: { key: '…' } } } }`.
+     *
+     * The relation name is asserted, not guessed. An earlier version accepted
+     * `permissions` here, which is NOT what `Role` declares — so the double
+     * happily agreed with a query real Prisma rejected outright, and only a
+     * live request found it. A double that tolerates a shape the database does
+     * not is worse than no double at all.
      */
     if (key === 'role') {
       const c = cond as {
         key?: string;
-        permissions?: { some?: { permission?: { key?: string } } };
+        rolePermissions?: { some?: { permission?: { key?: string } } };
       };
+      for (const k of Object.keys(c)) {
+        if (k !== 'key' && k !== 'rolePermissions') {
+          throw new Error(
+            `role filter used '${k}', but Role declares only 'key' and 'rolePermissions'`,
+          );
+        }
+      }
       if (c.key !== undefined && !eq(row.roleKey, c.key)) return false;
-      const wanted = c.permissions?.some?.permission?.key;
+      const wanted = c.rolePermissions?.some?.permission?.key;
       if (wanted !== undefined) {
         const held = (row.rolePermissionKeys as string[] | undefined) ?? [];
         if (!held.includes(wanted)) return false;
