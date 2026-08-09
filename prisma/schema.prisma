@@ -1164,6 +1164,18 @@ model Notification {
   title        String   @db.VarChar(200)
   body         String?  @db.Text
   actionLink   String?  @map("action_link") @db.VarChar(255)
+  /// Natural identity of the event this notification reports, e.g.
+  /// `transfer:<hex>:approved` (H1.3). The unique index below makes a duplicate
+  /// an INSERT the database rejects rather than one the application tries to
+  /// avoid — an application-level pre-check is true when read and false when
+  /// acted on. NULL for notifications that have no natural identity; NULLs do
+  /// not collide in a MySQL unique index, so those behave as ordinary inserts.
+  dedupeKey    String?  @map("dedupe_key") @db.VarChar(120)
+  /// The FIELDS of the message (branch names, transfer reference, counts, actor,
+  /// reason) so the app can compose the sentence in the reader's language;
+  /// `title`/`body` stay as the fallback. Carries no cost, price or margin — a
+  /// notification is read outside the request that authorized it.
+  payload      Json?    @db.Json
   isRead       Boolean  @default(false) @map("is_read")
   createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
@@ -1171,6 +1183,7 @@ model Notification {
   branch     Branch? @relation(fields: [branchId], references: [id])
   targetUser User?   @relation(fields: [targetUserId], references: [id])
 
+  @@unique([companyId, targetUserId, dedupeKey], map: "notifications_company_target_dedupe_key")
   @@index([companyId, targetUserId, isRead, createdAt])
   @@index([branchId])
   @@map("notifications")

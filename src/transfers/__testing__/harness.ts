@@ -1,4 +1,5 @@
 import { TransfersService } from '../transfers.service';
+import { TransferNotifier } from '../transfer-notifications';
 import { TenantPrisma } from '../../prisma/tenant.extension';
 import { newUuidV7Bin } from '../../common/utils/uuid.util';
 import { COMPANY, Db, makeClient, SOURCE } from './transfer-db';
@@ -79,9 +80,9 @@ export function makeHarness(
     tenant as never,
     auditService as never,
     invoiceNumbers as never,
-    // The notifications SERVICE is not stubbed away: transfers write notification
-    // rows through the same tenant client, so recipients are really resolved.
-    { emit: async () => undefined } as never,
+    // The REAL notifier. Recipients, deduplication and the unique key are the
+    // production code — a stub here would prove only that the stub was called.
+    new TransferNotifier(),
     pricing as never,
     cls as never,
   );

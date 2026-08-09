@@ -103,9 +103,23 @@ export function matches(db: Db, model: keyof Db, row: Row, where: unknown): bool
       }
       continue;
     }
-    // `role: { key }` on userBranch is stored denormalised as `roleKey`.
+    /**
+     * `role` on a userBranch is stored denormalised: `roleKey` plus the set of
+     * permission keys that role holds. Both shapes the code uses are supported —
+     * `role: { key: 'owner' }` and the recipient lookup
+     * `role: { permissions: { some: { permission: { key: 'transfer.approve' } } } }`.
+     */
     if (key === 'role') {
-      if (!eq(row.roleKey, (cond as { key: string }).key)) return false;
+      const c = cond as {
+        key?: string;
+        permissions?: { some?: { permission?: { key?: string } } };
+      };
+      if (c.key !== undefined && !eq(row.roleKey, c.key)) return false;
+      const wanted = c.permissions?.some?.permission?.key;
+      if (wanted !== undefined) {
+        const held = (row.rolePermissionKeys as string[] | undefined) ?? [];
+        if (!held.includes(wanted)) return false;
+      }
       continue;
     }
 
@@ -169,6 +183,15 @@ function uniqueViolation(): Prisma.PrismaClientKnownRequestError {
 /** Unique keys the real schema enforces — the double enforces them too. */
 const UNIQUE: Partial<Record<keyof Db, (r: Row) => string | null>> = {
   stockTransfer: (r) => (r.clientUuid ? (r.clientUuid as Buffer).toString('hex') : null),
+  /**
+   * `notifications_company_target_dedupe_key` (migration 0033). Returning null
+   * for a row with no dedupe key mirrors MySQL, where NULLs never collide — so
+   * an ordinary notification is still an ordinary insert.
+   */
+  notification: (r) =>
+    r.dedupeKey
+      ? `${r.targetUserId ? (r.targetUserId as Buffer).toString('hex') : 'all'}:${String(r.dedupeKey)}`
+      : null,
 };
 
 /**
@@ -363,6 +386,13 @@ export const EMPLOYEE_PERMISSIONS = [
   'transfer.cancel_own',
 ];
 
+/** What each role holds, exactly as `0031`/`0032` grant it. */
+export const PERMISSIONS_BY_ROLE: Record<string, string[]> = {
+  owner: OWNER_PERMISSIONS,
+  store_manager: MANAGER_PERMISSIONS,
+  store_employee: EMPLOYEE_PERMISSIONS,
+};
+
 export function seedBranchesAndPeople(db: Db): void {
   db.branch.push(
     { id: SOURCE, companyId: COMPANY, name: 'Main Store' },
@@ -388,9 +418,23 @@ export function seedBranchesAndPeople(db: Db): void {
         userId: id,
         branchId,
         roleKey,
+        // Denormalised so the recipient lookup can ask "who holds this key
+        // here?" exactly as the real query does, through the role.
+        rolePermissionKeys: PERMISSIONS_BY_ROLE[roleKey],
         // The double reads relation filters through `user`, so mirror the row.
         user: { isActive: true, deletedAt: null },
       });
+    }
+  }
+}
+
+/** Deactivate a user, as `user.deletedAt`/`isActive` would. */
+export function deactivate(db: Db, userId: Buffer): void {
+  const user = db.user.find((u) => (u.id as Buffer).equals(userId));
+  if (user) user.isActive = false;
+  for (const ub of db.userBranch) {
+    if ((ub.userId as Buffer).equals(userId)) {
+      ub.user = { isActive: false, deletedAt: null };
     }
   }
 }

@@ -15,8 +15,8 @@ import { AppClsStore } from '../common/context/request-context';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
-import { NotificationsService } from '../notifications/notifications.service';
 import { PricingService } from '../pricing/pricing.service';
+import { TransferNotifier } from './transfer-notifications';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { assertTransferTransition } from './transfer-state-machine';
 import { TransferStatus } from '@prisma/client';
@@ -54,7 +54,7 @@ export class TransfersService {
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
     private readonly invoiceNumbers: InvoiceNumberService,
-    private readonly notifications: NotificationsService,
+    private readonly notifier: TransferNotifier,
     private readonly pricing: PricingService,
     private readonly cls: ClsService<AppClsStore>,
   ) {}
@@ -224,6 +224,25 @@ export class TransfersService {
           },
           branchId: fromBranchId,
         });
+
+        /**
+         * Tell the people who have to act next, in the same transaction. A
+         * pending request nobody is told about is the H1.2 gap: correct, and
+         * invisible until somebody happens to open the list.
+         *
+         * Which people depends on whether it still needs approving — an
+         * auto-approved transfer has nothing to wait for, so the news belongs
+         * to the destination rather than to an approver.
+         */
+        await this.notifier.notifyTx(tx, {
+          transfer: {
+            id, companyId, fromBranchId, toBranchId, transferNo,
+            requestedById: userId ?? null,
+          },
+          event: selfApproves ? 'created_approved' : 'requested',
+          actorId: userId ?? null,
+          units: identifiers.length,
+        });
         return { id, transferNo };
       });
     } catch (e) {
@@ -389,9 +408,20 @@ export class TransfersService {
         after: { status: 'approved', transferNo: transfer.transferNo },
         branchId: fromBranchId,
       });
+      await this.notifier.notifyTx(tx, {
+        transfer,
+        event: 'approved',
+        actorId: userId ?? null,
+        units: await this.countItemsTx(tx, transfer.id),
+      });
     });
 
     return this.getById(idStr);
+  }
+
+  /** How many items this transfer carries — the only number a notification quotes. */
+  private countItemsTx(tx: TransferTx, transferId: Buffer): Promise<number> {
+    return tx.transferItem.count({ where: { transferId } });
   }
 
   /**
@@ -426,6 +456,15 @@ export class TransfersService {
         after: { status: 'rejected', transferNo: transfer.transferNo, released },
         reason,
         branchId: fromBranchId,
+      });
+      // Only the person who asked. A refusal broadcast to the branch helps
+      // nobody and embarrasses somebody.
+      await this.notifier.notifyTx(tx, {
+        transfer,
+        event: 'rejected',
+        actorId: userId ?? null,
+        units: await this.countItemsTx(t, transfer.id),
+        reason,
       });
     });
 
@@ -497,14 +536,21 @@ export class TransfersService {
         after: { status: 'in_transit' },
         branchId: fromBranchId,
       });
+      /**
+       * Moved INSIDE the transaction (H1.3). It used to be emitted after the
+       * commit as a company-wide broadcast: every user of every branch saw
+       * "incoming transfer", and if the emit failed the shipment happened with
+       * nobody told. Now it is targeted at the people who must receive it, and
+       * it commits with the shipment or not at all.
+       */
+      await this.notifier.notifyTx(tx, {
+        transfer,
+        event: 'shipped',
+        actorId: this.tenant.userId() ?? null,
+        units: items.length,
+      });
     });
 
-    await this.notifications.emit({
-      type: 'transfer.incoming',
-      title: `Incoming transfer ${transfer.transferNo}`,
-      body: `${items.length} unit(s) on the way`,
-      branchId: transfer.toBranchId,
-    });
     return { id: binToUuid(transfer.id), transferNo: transfer.transferNo, status: 'in_transit' };
   }
 
@@ -603,15 +649,14 @@ export class TransfersService {
           branchId: toBranchId,
         });
       }
-    });
-
-    await this.notifications.emit({
-      type: 'transfer.received',
-      title: `Transfer ${transfer.transferNo} received`,
-      body: report.hasDiscrepancy
-        ? `With discrepancies — missing ${report.missing.length}, unexpected ${report.unexpected.length}`
-        : 'All units received',
-      branchId: toBranchId,
+      // Closes the loop for whoever asked and whoever let the stock go — in the
+      // same transaction as the arrival, and no longer broadcast to everyone.
+      await this.notifier.notifyTx(tx, {
+        transfer,
+        event: 'received',
+        actorId: this.tenant.userId() ?? null,
+        units: report.matched.length,
+      });
     });
 
     return { received: report.matched.length, report };
@@ -683,6 +728,15 @@ export class TransfersService {
         after: { status: 'cancelled', transferNo: transfer.transferNo, released },
         reason,
         branchId: transfer.fromBranchId,
+      });
+      // Everyone already involved: whoever asked, whoever could have approved
+      // it, and the destination that may have been expecting it.
+      await this.notifier.notifyTx(tx, {
+        transfer,
+        event: 'cancelled',
+        actorId: userId ?? null,
+        units: await this.countItemsTx(t, transfer.id),
+        reason,
       });
     });
 
