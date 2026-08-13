@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, TrackingType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
+import { heldValueRows } from './held-value';
 
 /** Coerce a raw SQL aggregate (Decimal string | bigint | null) to a number. */
 function toNum(v: unknown): number {
@@ -39,6 +40,7 @@ interface VelocityRow {
 }
 
 interface ValuationSourceRow {
+  kind: 'unit' | 'stock';
   product_id: Buffer;
   category_id: Buffer | null;
   tracking_type: TrackingType;
@@ -224,32 +226,12 @@ export class RollupService {
   async recomputeInventoryValuation(companyId: Buffer, branchId: Buffer): Promise<void> {
     const now = new Date();
 
-    const unitRows = await this.prisma.$queryRaw<ValuationSourceRow[]>(Prisma.sql`
-      SELECT p.id AS product_id, p.category_id, p.tracking_type,
-             COUNT(*)                          AS units_count,
-             SUM(u.cost)                       AS inv_value,
-             SUM(COALESCE(p.default_price, 0)) AS exp_rev
-      FROM units u
-      JOIN products p ON p.id = u.product_id
-      WHERE u.company_id = ${companyId} AND u.branch_id = ${branchId} AND u.status = 'in_stock'
-      GROUP BY p.id, p.category_id, p.tracking_type
-    `);
-    const stockRows = await this.prisma.$queryRaw<ValuationSourceRow[]>(Prisma.sql`
-      SELECT p.id AS product_id, p.category_id, p.tracking_type,
-             si.quantity                                      AS quantity,
-             si.quantity * si.cost                            AS inv_value,
-             -- si.price is nullable since 0034: stock a transfer delivered into
-             -- a branch that has never priced it. Without COALESCE the whole
-             -- product's expected revenue would go NULL and silently vanish
-             -- from the total. Falling back to the catalogue default and then
-             -- to 0 states the truth: no price set means no revenue can be
-             -- expected from it yet. Cost, and therefore inventory VALUE, is
-             -- unaffected -- the goods are owned and counted regardless.
-             si.quantity * COALESCE(si.price, p.default_price, 0) AS exp_rev
-      FROM stock_items si
-      JOIN products p ON p.id = si.product_id
-      WHERE si.company_id = ${companyId} AND si.branch_id = ${branchId} AND si.quantity > 0
-    `);
+    /**
+     * The same query the live report runs (H1.4.1). Both go through
+     * `heldValueRows` so the stored figure and the reported figure cannot drift
+     * into two different definitions of what stock is worth.
+     */
+    const rows = await heldValueRows(this.prisma, { companyId, branchId });
 
     const byProduct = new Map<string, ValuationAcc & { productId: Buffer }>();
     const merge = (r: ValuationSourceRow, isUnit: boolean) => {
@@ -271,8 +253,7 @@ export class RollupService {
       acc.expectedRevenue += toNum(r.exp_rev);
       byProduct.set(key, acc);
     };
-    unitRows.forEach((r) => merge(r, true));
-    stockRows.forEach((r) => merge(r, false));
+    rows.forEach((r) => merge(r, r.kind === 'unit'));
 
     await this.prisma.inventoryValuation.deleteMany({ where: { companyId, branchId } });
     if (byProduct.size > 0) {

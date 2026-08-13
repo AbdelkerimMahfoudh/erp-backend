@@ -6,6 +6,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { binToUuid } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { inTransitValue, summarizeInTransit } from './in-transit-value';
+import { heldValueRows, toNum } from './held-value';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -22,10 +23,35 @@ export class AnalyticsService {
     private readonly tenant: TenantContext,
   ) {}
 
-  /** Current $ invested + expected profit, split by tracking type and category. */
+  /**
+   * Current $ invested + expected profit, split by tracking type and category.
+   *
+   * Computed **live from the source tables** (H1.4.1), not from the
+   * `inventory_valuation` rollup it used to read. The rollup is rebuilt by a
+   * fire-and-forget queue whose failures are logged and swallowed, so the held
+   * figure could lag — or, if the refresh threw or the process died first, stay
+   * wrong indefinitely. That is tolerable for a ranking and not for a reported
+   * total: `totalStockValue` below is documented as the number that must not
+   * move when stock is merely travelling, and it was mixing this stale half
+   * with a live in-transit half, which is exactly how it moved anyway.
+   *
+   * Both halves now come from source, so the invariant holds at the instant the
+   * request is served rather than eventually.
+   */
   async inventoryValue() {
     const branchId = this.tenant.branchId();
-    const rows = await this.db.inventoryValuation.findMany({ where: branchId ? { branchId } : {} });
+    const rows = (
+      await heldValueRows(this.db, { companyId: this.tenant.companyId(), branchId })
+    ).map((r) => ({
+      productId: r.product_id,
+      categoryId: r.category_id,
+      trackingType: r.tracking_type,
+      unitsCount: toNum(r.units_count),
+      quantity: toNum(r.quantity),
+      inventoryValue: toNum(r.inv_value),
+      expectedRevenue: toNum(r.exp_rev),
+      expectedProfit: toNum(r.exp_rev) - toNum(r.inv_value),
+    }));
 
     const names = await this.categoryNames(rows.map((r) => r.categoryId));
     const totals = { inventoryValue: 0, expectedRevenue: 0, expectedProfit: 0, productCount: rows.length, unitsCount: 0, quantity: 0 };
