@@ -15,6 +15,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
 import { PricingService } from '../pricing/pricing.service';
+import { SpineEventBus } from '../common/events/spine-event-bus';
 import { TransferNotifier } from './transfer-notifications';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { assertTransferTransition } from './transfer-state-machine';
@@ -59,6 +60,7 @@ export class TransfersService {
     private readonly invoiceNumbers: InvoiceNumberService,
     private readonly notifier: TransferNotifier,
     private readonly pricing: PricingService,
+    private readonly events: SpineEventBus,
     private readonly cls: ClsService<AppClsStore>,
   ) {}
 
@@ -795,6 +797,18 @@ export class TransfersService {
       });
     });
 
+    /**
+     * After commit, never inside it. Valuation is a derived figure: a failure
+     * to refresh it must not roll back a shipment that physically happened.
+     */
+    this.events.emit('stock.moved', {
+      companyId: this.tenant.companyId(),
+      fromBranchId: transfer.fromBranchId,
+      toBranchId: transfer.toBranchId,
+      transferId: transfer.id,
+      phase: 'shipped',
+    });
+
     return { id: binToUuid(transfer.id), transferNo: transfer.transferNo, status: 'in_transit' };
   }
 
@@ -922,6 +936,14 @@ export class TransfersService {
         actorId: this.tenant.userId() ?? null,
         units: report.matched.length + countLines(quantityLines).totalQuantity,
       });
+    });
+
+    this.events.emit('stock.moved', {
+      companyId: this.tenant.companyId(),
+      fromBranchId: transfer.fromBranchId,
+      toBranchId: transfer.toBranchId,
+      transferId: transfer.id,
+      phase: 'received',
     });
 
     return { received: report.matched.length, report };

@@ -20,5 +20,19 @@ export class RollupListener implements OnModuleInit {
       // A sale changes stock + velocity → refresh the branch snapshots too.
       this.queue.enqueueBranchRefresh({ companyId: e.companyId, branchId: e.branchId });
     });
+
+    /**
+     * A transfer changes what BOTH branches hold, so both are refreshed.
+     *
+     * Nothing did this before: valuation was only ever recomputed by a sale, so
+     * after a shipment the source branch went on reporting stock it no longer
+     * had until something else happened to touch it. No daily recompute is
+     * enqueued — a transfer moves goods between branches of one company and
+     * sells nothing, so revenue, COGS and profit for the day are unchanged.
+     */
+    this.events.on('stock.moved', (e) => {
+      this.queue.enqueueBranchRefresh({ companyId: e.companyId, branchId: e.fromBranchId });
+      this.queue.enqueueBranchRefresh({ companyId: e.companyId, branchId: e.toBranchId });
+    });
   }
 }

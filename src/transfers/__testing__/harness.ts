@@ -19,6 +19,8 @@ export interface Harness {
   /** Change who is acting, and where, between calls — the mobile app does. */
   act(opts: { userId?: Buffer; branchId?: Buffer | undefined; permissions?: string[] }): void;
   audit: { entityType: string; action: string; reason?: string; after?: unknown }[];
+  /** `stock.moved` events emitted after commit — the valuation-refresh signal. */
+  moved: Record<string, unknown>[];
 }
 
 export function makeHarness(
@@ -75,6 +77,14 @@ export function makeHarness(
 
   const pricing = { invalidateOnBranchMoveTx: async () => undefined };
 
+  /**
+   * Captures `stock.moved` so a test can assert that a shipment or receipt
+   * asked for a valuation refresh — the thing that was missing entirely until
+   * H1.4-CP5, and that no unit test noticed because nothing looked for it.
+   */
+  const moved: Record<string, unknown>[] = [];
+  const events = { emit: (name: string, payload: Record<string, unknown>) => moved.push({ name, ...payload }) };
+
   const service = new TransfersService(
     client as unknown as TenantPrisma,
     tenant as never,
@@ -84,10 +94,12 @@ export function makeHarness(
     // production code — a stub here would prove only that the stub was called.
     new TransferNotifier(),
     pricing as never,
+    events as never,
     cls as never,
   );
 
   return {
+    moved,
     service,
     db,
     audit,

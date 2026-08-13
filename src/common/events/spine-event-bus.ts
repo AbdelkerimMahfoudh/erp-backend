@@ -16,8 +16,30 @@ export interface SaleRecordedEvent {
   margin: number;
 }
 
+/**
+ * Emitted immediately AFTER stock physically moves between two branches — a
+ * shipment or a receipt.
+ *
+ * It exists because valuation was only ever refreshed by a sale. A transfer
+ * changes what both branches hold and triggered nothing, so `inventory_valuation`
+ * stayed as it was until the next sale happened to touch that branch. The
+ * figure was quietly stale from the moment H1.3 shipped serialized transfers,
+ * and H1.4's in-transit total made it visible: held value had not fallen, so
+ * held + in-transit briefly counted the same goods twice.
+ *
+ * Carries both ends, because both changed.
+ */
+export interface StockMovedEvent {
+  companyId: Buffer;
+  fromBranchId: Buffer;
+  toBranchId: Buffer;
+  transferId: Buffer;
+  phase: 'shipped' | 'received';
+}
+
 export type SpineEventMap = {
   'sale.recorded': SaleRecordedEvent;
+  'stock.moved': StockMovedEvent;
 };
 
 /**
