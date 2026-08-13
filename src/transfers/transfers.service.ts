@@ -38,11 +38,11 @@ import {
   type NormalizedLines,
 } from './transfer-lines';
 import {
-  receiveIntoExisting,
   releaseQuantity,
   reserveQuantity,
   shipQuantity,
 } from './quantity-reservation';
+import { priceForNewStockRow, receiveQuantityAtCost } from '../inventory/stock-cost';
 
 /**
  * The transaction client of the TENANT-scoped client, not the plain
@@ -979,73 +979,36 @@ export class TransfersService {
       });
     }
 
-    const existing = await tx.stockItem.findFirst({
-      where: { companyId, productId, branchId: toBranchId },
-      select: { id: true },
-    });
-
-    if (existing) {
-      // Weighted average computed inside the UPDATE, against the row's own
-      // committed values — see `receiveIntoExisting` for why reading it into
-      // the application first would lose one of two concurrent receipts.
-      const merged = await receiveIntoExisting(tx, {
-        companyId,
-        productId,
-        branchId: toBranchId,
-        received: item.quantity,
-        unitCost: item.shippedUnitCost,
-      });
-      if (!merged) {
-        throw new ConflictException('The destination stock changed while receiving. Try again.');
-      }
-      await this.audit.recordTx(tx, {
-        entityType: 'StockItem',
-        entityId: productId,
-        action: 'update',
-        after: { received: item.quantity },
-        reason: 'received on transfer',
-        branchId: toBranchId,
-      });
-      return;
-    }
+    /**
+     * If this branch has never held the product, it must decide what the goods
+     * sell for — from its OWN sources, never the sender's. Branch variant price
+     * first, then the company default, and if neither exists the row is created
+     * **unpriced** rather than given an invented figure. Resolved before the
+     * write because the write is one statement; it is ignored when the row
+     * already exists, where the branch's own price stands untouched.
+     */
+    const priceIfNew = await priceForNewStockRow(tx, { companyId, productId, branchId: toBranchId });
 
     /**
-     * Nothing here yet, so this branch has to decide what the goods sell for —
-     * and it decides from its OWN sources, never the sender's. Branch variant
-     * price first, then the company default, and if neither exists the row is
-     * created **unpriced** rather than given an invented figure. Selling then
-     * asks for a price instead of quietly charging one nobody set.
+     * One statement covers both "first stock here" and "more of what we hold"
+     * (H1.4.1). It used to be a read, a branch, and then either a create or an
+     * update — which meant two concurrent receipts into a row that did not exist
+     * yet could both decide to create it. The unique key now arbitrates instead.
      */
-    const [variant, product] = await Promise.all([
-      tx.branchVariantPrice.findFirst({
-        where: { companyId, productId, branchId: toBranchId },
-        select: { price: true },
-      }),
-      tx.product.findUnique({ where: { id: productId }, select: { defaultPrice: true } }),
-    ]);
-    const price = variant?.price ?? product?.defaultPrice ?? null;
-
-    await tx.stockItem.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        productId,
-        branchId: toBranchId,
-        quantity: item.quantity,
-        // First stock here, so there is nothing to average against.
-        cost: item.shippedUnitCost,
-        price,
-        reservedQuantity: 0,
-      },
+    await receiveQuantityAtCost(tx, {
+      companyId,
+      productId,
+      branchId: toBranchId,
+      received: item.quantity,
+      unitCost: item.shippedUnitCost,
+      priceIfNew,
     });
+
     await this.audit.recordTx(tx, {
       entityType: 'StockItem',
       entityId: productId,
-      action: 'create',
-      after: {
-        received: item.quantity,
-        priceSource: variant ? 'branch_variant' : product?.defaultPrice != null ? 'product_default' : 'unpriced',
-      },
+      action: 'update',
+      after: { received: item.quantity, priceIfNew: priceIfNew === null ? 'unpriced' : String(priceIfNew) },
       reason: 'received on transfer',
       branchId: toBranchId,
     });

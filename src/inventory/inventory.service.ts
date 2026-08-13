@@ -21,6 +21,7 @@ import {
   type InventoryCursor,
 } from './inventory-cursor';
 import { unitIdentifier } from './unit-identifier.util';
+import { receiveQuantityAtCost } from './stock-cost';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
 
 /** Transaction client shape needed to create a unit (+ its audit row). */
@@ -304,7 +305,7 @@ export class InventoryService {
     if (!strategy.perUnit) {
       const quantity = dto.quantity ?? 0;
       if (quantity < 1) throw new BadRequestException(`${product.trackingType} products require a quantity`);
-      await this.upsertStock(product.id, branchId, quantity, dto.cost, dto.price ?? Number(product.defaultPrice ?? 0));
+      await this.upsertStock(product.id, branchId, quantity, dto.cost, dto.price ?? (product.defaultPrice === null ? null : Number(product.defaultPrice)));
       return { productId: binToUuid(product.id), quantity, tracking: 'quantity' };
     }
 
@@ -334,13 +335,33 @@ export class InventoryService {
     }
   }
 
-  /** Increment (or create) the branch quantity stock for a product. */
-  async upsertStock(productId: Buffer, branchId: Buffer, quantity: number, cost: number, price: number): Promise<void> {
-    const companyId = this.tenant.companyId();
-    await this.db.stockItem.upsert({
-      where: { companyId_productId_branchId: { companyId, productId, branchId } },
-      create: { id: newUuidV7Bin(), companyId, productId, branchId, quantity, cost, price },
-      update: { quantity: { increment: quantity } },
+  /**
+   * Increment (or create) the branch quantity stock for a product, re-averaging
+   * its cost (H1.4.1).
+   *
+   * This used to increment quantity and leave `cost` at whatever the first ever
+   * receipt paid, so adding more of the same accessory at a different price
+   * never changed the recorded cost. It now goes through the same single rule
+   * as purchase receiving and transfer receipt — see `stock-cost.ts` for why
+   * that has to be one statement rather than a read and a write.
+   *
+   * `price` is only consulted when the row does not exist yet; `null` leaves it
+   * unpriced rather than free.
+   */
+  async upsertStock(
+    productId: Buffer,
+    branchId: Buffer,
+    quantity: number,
+    cost: number,
+    price: number | null,
+  ): Promise<void> {
+    await receiveQuantityAtCost(this.db, {
+      companyId: this.tenant.companyId(),
+      productId,
+      branchId,
+      received: quantity,
+      unitCost: cost,
+      priceIfNew: price,
     });
   }
 

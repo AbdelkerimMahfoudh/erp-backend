@@ -13,6 +13,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { receiveQuantityAtCost } from '../inventory/stock-cost';
 import { TrackingStrategyRegistry } from '../tracking/tracking-strategy.registry';
 import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
@@ -63,7 +64,12 @@ interface PreparedStock {
   productId: Buffer;
   quantity: number;
   cost: number;
-  price: number;
+  /**
+   * Selling price for a branch that has never priced this product. `null` means
+   * genuinely unpriced — Sell then asks. It used to fall back to `0`, which
+   * reads as "sells for free" rather than "nobody has set a price yet".
+   */
+  price: number | null;
 }
 
 /** A confirmed receiving line to teach the scanner after commit. */
@@ -162,7 +168,7 @@ export class PurchasingService {
           productId: product.id,
           quantity,
           cost: item.unitCost,
-          price: item.price ?? Number(product.defaultPrice ?? 0),
+          price: item.price ?? (product.defaultPrice === null ? null : Number(product.defaultPrice)),
         });
       }
 
@@ -236,10 +242,23 @@ export class PurchasingService {
           await tx.purchaseItem.create({
             data: { id: newUuidV7Bin(), companyId, purchaseId: pid, productId: l.productId, quantity: l.quantity, unitCost: l.cost, taxAmount: 0 },
           });
-          await tx.stockItem.upsert({
-            where: { companyId_productId_branchId: { companyId, productId: l.productId, branchId } },
-            create: { id: newUuidV7Bin(), companyId, productId: l.productId, branchId, quantity: l.quantity, cost: l.cost, price: l.price },
-            update: { quantity: { increment: l.quantity } },
+          /**
+           * Re-average the branch cost (H1.4.1).
+           *
+           * This used to be `update: { quantity: { increment } }` — quantity
+           * moved and `cost` stayed at whatever the FIRST ever receipt paid, so
+           * buying the same cable again at a higher price never changed the
+           * recorded cost. The purchase line above keeps the ACTUAL price paid,
+           * which is what the supplier is owed; only the branch's running
+           * average moves.
+           */
+          await receiveQuantityAtCost(tx, {
+            companyId,
+            productId: l.productId,
+            branchId,
+            received: l.quantity,
+            unitCost: l.cost,
+            priceIfNew: l.price,
           });
         }
 
