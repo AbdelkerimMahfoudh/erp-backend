@@ -1141,7 +1141,10 @@ export class TransfersService {
         fromBranch: { select: { id: true, name: true } },
         toBranch: { select: { id: true, name: true } },
         requestedBy: { select: { name: true } },
-        _count: { select: { items: true } },
+        // The rows themselves, not a count of them: "10 chargers" is one row
+        // and ten things, and a list that says "1 item" is lying to whoever has
+        // to receive the box.
+        items: { select: { unitId: true, quantity: true } },
       },
       // The PK is a UUIDv7: unique, immutable and time-ordered, so `id desc` is
       // "newest first" AND a total order. Keyset paging on it cannot skip or
@@ -1162,7 +1165,8 @@ export class TransfersService {
         direction: t.fromBranchId.equals(branchId) ? 'outgoing' : 'incoming',
         from: { id: binToUuid(t.fromBranch.id), name: t.fromBranch.name },
         to: { id: binToUuid(t.toBranch.id), name: t.toBranch.name },
-        itemCount: t._count.items,
+        itemCount: t.items.length,
+        ...countLines(t.items),
         requestedBy: t.requestedBy?.name ?? null,
         requestedAt: requestedAtOf(t.id),
         approvedAt: t.approvedAt,
@@ -1197,6 +1201,13 @@ export class TransfersService {
         { items: { some: { unit: { product: { brand: { contains: q } } } } } },
         { items: { some: { unit: { product: { model: { contains: q } } } } } },
         { items: { some: { unit: { product: { variant: { contains: q } } } } } },
+        // Quantity lines name their product directly, with no unit in between.
+        // Barcode is included because it is what someone actually has in front
+        // of them when they go looking for "that box of cables".
+        { items: { some: { product: { brand: { contains: q } } } } },
+        { items: { some: { product: { model: { contains: q } } } } },
+        { items: { some: { product: { variant: { contains: q } } } } },
+        { items: { some: { product: { barcode: { contains: q } } } } },
       ],
     };
   }
@@ -1258,11 +1269,36 @@ export class TransfersService {
                 product: { select: { brand: true, model: true, variant: true } },
               },
             },
+            product: { select: { brand: true, model: true, variant: true, barcode: true } },
           },
         },
       },
     });
     if (!transfer) throw new NotFoundException('Transfer not found');
+
+    /**
+     * Live source availability, for quantity lines only and only while the
+     * transfer can still be acted on.
+     *
+     * Once shipped, the source row no longer describes this transfer at all —
+     * the goods have left it — so showing its numbers beside an in-transit line
+     * would answer a question nobody asked with a figure about something else.
+     */
+    const openAtSource =
+      transfer.status === 'pending_approval' || transfer.status === 'approved';
+    const quantityProductIds = transfer.items.filter((i) => i.productId).map((i) => i.productId!);
+    const sourceStock =
+      openAtSource && quantityProductIds.length > 0
+        ? await this.db.stockItem.findMany({
+            where: {
+              companyId: this.tenant.companyId(),
+              branchId: transfer.fromBranchId,
+              productId: { in: quantityProductIds },
+            },
+            select: { productId: true, quantity: true, reservedQuantity: true },
+          })
+        : [];
+    const stockByProduct = new Map(sourceStock.map((s) => [s.productId.toString('hex'), s]));
 
     return {
       id: binToUuid(transfer.id),
@@ -1290,14 +1326,45 @@ export class TransfersService {
         receivedAt: transfer.receivedAt,
         decidedAt: transfer.decidedAt,
       },
-      items: transfer.items.map((i) => ({
-        id: binToUuid(i.id),
-        identifier: i.unit ? unitIdentifier(i.unit) : null,
-        product: i.unit?.product
-          ? [i.unit.product.brand, i.unit.product.model, i.unit.product.variant].filter(Boolean).join(' ')
-          : null,
-        unitStatus: i.unit?.status ?? null,
-      })),
+      ...countLines(transfer.items),
+      /**
+       * Both kinds of line, each saying which it is.
+       *
+       * `kind` is returned rather than left to be inferred from which fields
+       * are null: a client guessing from absent fields is a client that will
+       * eventually guess wrong. No cost, price or margin appears here for
+       * anyone — this contract has never carried them and does not start now.
+       */
+      items: transfer.items.map((i) => {
+        if (i.unitId) {
+          return {
+            id: binToUuid(i.id),
+            kind: 'unit' as const,
+            identifier: i.unit ? unitIdentifier(i.unit) : null,
+            product: i.unit?.product ? label(i.unit.product) : null,
+            variant: i.unit?.product?.variant ?? null,
+            quantity: 1,
+            unitStatus: i.unit?.status ?? null,
+          };
+        }
+        const stock = i.productId ? stockByProduct.get(i.productId.toString('hex')) : undefined;
+        return {
+          id: binToUuid(i.id),
+          kind: 'stock' as const,
+          productId: i.productId ? binToUuid(i.productId) : null,
+          product: i.product ? label(i.product) : null,
+          variant: i.product?.variant ?? null,
+          barcode: i.product?.barcode ?? null,
+          /** How many were asked for. The only number that is about this line. */
+          quantity: i.quantity,
+          // Null once shipped — see `openAtSource` above.
+          physicalQuantity: stock?.quantity ?? null,
+          reservedQuantity: stock?.reservedQuantity ?? null,
+          availableQuantity: stock ? Math.max(stock.quantity - stock.reservedQuantity, 0) : null,
+          identifier: null,
+          unitStatus: null,
+        };
+      }),
       actions: computeActions({
         transfer,
         from: transfer.fromBranch,
@@ -1317,9 +1384,16 @@ export class TransfersService {
     return transfer;
   }
 
+  /**
+   * What the destination should be able to scan.
+   *
+   * Serialized lines only: a quantity line has no per-item number to scan, so
+   * including it would make the discrepancy report demand an identifier that
+   * does not exist and call every accessory transfer short.
+   */
   private async expectedIdentifiers(transferId: Buffer): Promise<string[]> {
     const items = await this.db.transferItem.findMany({
-      where: { transferId },
+      where: { transferId, unitId: { not: null } },
       include: { unit: { select: { imeiPrimary: true, serialNo: true } } },
     });
     return items.map((i) => unitIdentifier(i.unit!));

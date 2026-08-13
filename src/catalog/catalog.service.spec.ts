@@ -716,6 +716,19 @@ describe('metadata update', () => {
     await service.update(binToUuid(p.id), { model: 'Renamed' } as UpdateProductDto);
 
     const entry = audits.find((a) => a.action === 'update');
-    expect(JSON.stringify(entry)).not.toMatch(/defaultPrice|defaultCost|100|60/);
+
+    /**
+     * Checked against the RECORDED FIELDS, not the serialized entry.
+     *
+     * Matching bare numbers over `JSON.stringify(entry)` also searched the
+     * `entityId` buffer, whose bytes are a random UUIDv7 — so the assertion
+     * passed or failed depending on which digits that id happened to contain
+     * ("160" contains "60"). It failed roughly one run in three and had nothing
+     * to do with what it was testing. *(Found during H1.4-CP5; the leak it
+     * guards against is real, the way it looked for it was not.)*
+     */
+    const recorded = JSON.stringify({ before: entry?.before, after: entry?.after, reason: entry?.reason });
+    expect(recorded).not.toMatch(/defaultPrice|defaultCost/);
+    expect(recorded).not.toMatch(/\b100\b|\b60\b/);
   });
 });

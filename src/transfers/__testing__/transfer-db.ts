@@ -376,6 +376,30 @@ export function makeClient(db: Db, companyId: Buffer) {
     }
   };
 
+  /**
+   * Raw SQL is NOT emulated, and asking for it fails loudly.
+   *
+   * Quantity reservation, shipment and the weighted average are single
+   * conditional UPDATEs whose whole correctness lives in a WHERE clause MySQL
+   * evaluates while holding a row lock. Re-implementing that in JavaScript
+   * would test the re-implementation — the same mistake that let H1.3's
+   * recipient query stay green against a double while real Prisma rejected it.
+   *
+   * Those paths are proved against **real MySQL** in the H1.4 race suite
+   * instead. Throwing here means a future test that wanders into one gets an
+   * unmistakable failure rather than a quiet pass.
+   */
+  const rawNotEmulated = () => {
+    throw new Error(
+      'This double does not emulate raw SQL. Quantity reservation and the weighted ' +
+        'average are proved against real MySQL (H1.4 race suite), not here.',
+    );
+  };
+  client.$executeRaw = rawNotEmulated;
+  client.$executeRawUnsafe = rawNotEmulated;
+  client.$queryRaw = rawNotEmulated;
+  client.$queryRawUnsafe = rawNotEmulated;
+
   return client;
 }
 
