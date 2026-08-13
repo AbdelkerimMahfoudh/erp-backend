@@ -6,7 +6,6 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { ClsService } from 'nestjs-cls';
 import { Prisma, StockTransfer } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -31,21 +30,13 @@ import {
   TRANSFER_STATUSES,
 } from './dto/transfer.dto';
 
-/**
- * Stable fingerprint of what the client asked for, mirroring Purchase.
- *
- * Identifier ORDER is normalised: the same phones scanned in a different
- * sequence are the same request, not a conflict. The source branch is included
- * because the same key sent from a different branch is a different movement.
- */
-function transferFingerprint(dto: CreateTransferDto, fromBranchId: Buffer): string {
-  const canonical = {
-    fromBranchId: fromBranchId.toString('hex'),
-    toBranchId: dto.toBranchId,
-    identifiers: [...dto.identifiers].map((i) => i.trim()).sort(),
-  };
-  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
-}
+import {
+  countLines,
+  normalizeLines,
+  transferFingerprint,
+  type NormalizedLines,
+} from './transfer-lines';
+import { releaseQuantity, reserveQuantity } from './quantity-reservation';
 
 /**
  * The transaction client of the TENANT-scoped client, not the plain
@@ -104,36 +95,23 @@ export class TransfersService {
       throw new BadRequestException('Cannot transfer to the same branch');
     }
 
+    // Duplicates are refused here, before anything else, so an over-request
+    // hidden across two lines of the same product never reaches availability.
+    const lines = normalizeLines(dto);
+
     /**
      * A replay of the same request id returns the original transfer instead of
      * moving stock a second time. A flaky connection on Send is the normal
      * case, not an exotic one.
      */
-    const replay = await this.findReplay(dto, companyId);
+    const replay = await this.findReplay(dto, lines, companyId);
     if (replay) return replay;
 
     const toBranch = await this.db.branch.findUnique({ where: { id: toBranchId } });
     if (!toBranch) throw new NotFoundException('Destination branch not found');
 
-    /**
-     * Duplicates are REPORTED, not silently collapsed. The old code ran the list
-     * through a Set, so scanning the same phone twice looked like success and
-     * the user never learned their count was wrong.
-     */
-    const seen = new Set<string>();
-    const duplicates = new Set<string>();
-    for (const raw of dto.identifiers) {
-      const id = raw.trim();
-      if (seen.has(id)) duplicates.add(id);
-      seen.add(id);
-    }
-    if (duplicates.size > 0) {
-      throw new BadRequestException({
-        message: 'The same item was scanned more than once',
-        problems: [...duplicates].map((identifier) => ({ identifier, reason: 'scanned twice' })),
-      });
-    }
-    const identifiers = [...seen];
+    const identifiers = lines.identifiers;
+    const stockPlan = await this.planQuantityLines(lines, companyId, fromBranchId);
 
     const units = await this.db.unit.findMany({
       where: { OR: [{ imeiPrimary: { in: identifiers } }, { serialNo: { in: identifiers } }] },
@@ -161,6 +139,11 @@ export class TransfersService {
      * trail never shows an approved transfer with no approver.
      */
     const selfApproves = this.has('transfer.approve');
+
+    const counts = countLines([
+      ...identifiers.map(() => ({ unitId: Buffer.alloc(1), quantity: 1 })),
+      ...stockPlan.map((l) => ({ unitId: null, quantity: l.quantity })),
+    ]);
 
     let created: { id: Buffer; transferNo: string | null };
     try {
@@ -194,6 +177,28 @@ export class TransfersService {
           }
         }
 
+        /**
+         * Quantity lines, reserved by the same principle in one statement each.
+         *
+         * `reserveQuantity` only matches when `quantity - reserved_quantity` is
+         * still large enough, evaluated by MySQL against the committed row while
+         * it holds the lock. A competing request for the last of something
+         * blocks, re-checks against the winner's result, and matches nothing.
+         *
+         * A failure throws, which rolls the whole transaction back — so a mixed
+         * request whose last line cannot be met leaves **no** phone reserved and
+         * no transfer created. Partly-reserved is not a state this workflow has.
+         */
+        for (const line of stockPlan) {
+          const ok = await reserveQuantity(tx, {
+            companyId,
+            productId: line.productId,
+            branchId: fromBranchId,
+            wanted: line.quantity,
+          });
+          if (!ok) throw await this.unavailable(tx, line, companyId, fromBranchId);
+        }
+
         const transferNo = await this.invoiceNumbers.next(
           tx as unknown as Prisma.TransactionClient,
           fromBranchId,
@@ -209,12 +214,26 @@ export class TransfersService {
               ? { approvedById: userId ?? null, approvedAt: new Date(), autoApproved: true }
               : {}),
             clientUuid: uuidToBin(dto.clientUuid),
-            clientRequestHash: transferFingerprint(dto, fromBranchId),
+            clientRequestHash: transferFingerprint(lines, fromBranchId, dto.toBranchId),
           },
         });
         for (const identifier of identifiers) {
           await tx.transferItem.create({
             data: { id: newUuidV7Bin(), companyId, transferId: id, unitId: byIdentifier.get(identifier)!.id, quantity: 1 },
+          });
+        }
+        for (const line of stockPlan) {
+          // `shippedUnitCost` stays NULL: nothing has left yet, and a cost
+          // written now would be the cost at request time rather than the cost
+          // of the goods that actually go.
+          await tx.transferItem.create({
+            data: {
+              id: newUuidV7Bin(),
+              companyId,
+              transferId: id,
+              productId: line.productId,
+              quantity: line.quantity,
+            },
           });
         }
         await this.audit.recordTx(tx, {
@@ -225,7 +244,10 @@ export class TransfersService {
             transferNo,
             to: binToUuid(toBranchId),
             units: identifiers.length,
+            quantityLines: stockPlan.length,
+            totalQuantity: counts.totalQuantity,
             reserved: identifiers.length,
+            reservedQuantity: stockPlan.reduce((s, l) => s + l.quantity, 0),
             status: selfApproves ? 'approved' : 'pending_approval',
             autoApproved: selfApproves,
           },
@@ -248,7 +270,7 @@ export class TransfersService {
           },
           event: selfApproves ? 'created_approved' : 'requested',
           actorId: userId ?? null,
-          units: identifiers.length,
+          units: counts.totalQuantity,
         });
         return { id, transferNo };
       });
@@ -270,7 +292,7 @@ export class TransfersService {
         (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') ||
         e instanceof ConflictException;
       if (raced) {
-        const winner = await this.findReplay(dto, companyId);
+        const winner = await this.findReplay(dto, lines, companyId);
         if (winner) return winner;
       }
       throw e;
@@ -282,7 +304,9 @@ export class TransfersService {
       status: selfApproves ? 'approved' : 'pending_approval',
       autoApproved: selfApproves,
       version: 0,
-      units: identifiers.length,
+      units: counts.unitCount,
+      quantityLines: counts.quantityLineCount,
+      totalQuantity: counts.totalQuantity,
     };
   }
 
@@ -293,26 +317,132 @@ export class TransfersService {
    * transfer. A key reused for a DIFFERENT payload is a 409 rather than a
    * misleading success: the caller believes they sent something we did not do.
    */
-  private async findReplay(dto: CreateTransferDto, companyId: Buffer) {
+  private async findReplay(dto: CreateTransferDto, lines: NormalizedLines, companyId: Buffer) {
     const prior = await this.db.stockTransfer.findFirst({
       where: { companyId, clientUuid: uuidToBin(dto.clientUuid) },
       include: { items: true },
     });
     if (!prior) return null;
 
-    if (prior.clientRequestHash && prior.clientRequestHash !== transferFingerprint(dto, prior.fromBranchId)) {
+    const fingerprint = transferFingerprint(lines, prior.fromBranchId, dto.toBranchId);
+    if (prior.clientRequestHash && prior.clientRequestHash !== fingerprint) {
       throw new ConflictException(
         'This request id was already used for a different transfer. Start a new one.',
       );
     }
+    const counts = countLines(prior.items);
     return {
       id: binToUuid(prior.id),
       transferNo: prior.transferNo,
       status: prior.status,
       autoApproved: prior.autoApproved,
       version: prior.version,
-      units: prior.items.length,
+      units: counts.unitCount,
+      quantityLines: counts.quantityLineCount,
+      totalQuantity: counts.totalQuantity,
     };
+  }
+
+  /**
+   * Turn the requested quantity lines into source stock rows, refusing anything
+   * that is not this branch's quantity stock.
+   *
+   * Done BEFORE the transaction so the common refusals — unknown product, a
+   * phone sent as a quantity line, nothing of it here — cost nothing and read
+   * clearly. It is emphatically **not** an availability check: what is free now
+   * can be gone by the time the reservation runs, so availability is decided
+   * only by the conditional UPDATE inside the transaction.
+   */
+  private async planQuantityLines(
+    lines: NormalizedLines,
+    companyId: Buffer,
+    fromBranchId: Buffer,
+  ): Promise<{ productId: Buffer; quantity: number }[]> {
+    if (lines.quantities.length === 0) return [];
+
+    const ids = lines.quantities.map((q) => uuidToBin(q.productId));
+    const products = await this.db.product.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, trackingType: true, brand: true, model: true, variant: true },
+    });
+    const byId = new Map(products.map((p) => [p.id.toString('hex'), p]));
+
+    const stock = await this.db.stockItem.findMany({
+      where: { companyId, branchId: fromBranchId, productId: { in: ids } },
+      select: { productId: true, quantity: true, reservedQuantity: true },
+    });
+    const stockById = new Map(stock.map((s) => [s.productId.toString('hex'), s]));
+
+    const problems: Record<string, unknown>[] = [];
+    const plan: { productId: Buffer; quantity: number }[] = [];
+
+    for (const line of lines.quantities) {
+      const productId = uuidToBin(line.productId);
+      const key = productId.toString('hex');
+      const product = byId.get(key);
+      if (!product) {
+        problems.push({ productId: line.productId, reason: 'not found' });
+        continue;
+      }
+      if (product.trackingType !== 'quantity') {
+        // A phone must travel as itself, by its own number. Moving "3 of a
+        // model" would leave the destination with no idea which three arrived.
+        problems.push({
+          productId: line.productId,
+          product: label(product),
+          reason: 'is tracked individually — send its IMEI or serial instead',
+        });
+        continue;
+      }
+      const row = stockById.get(key);
+      if (!row) {
+        problems.push({ productId: line.productId, product: label(product), reason: 'none at this branch' });
+        continue;
+      }
+      plan.push({ productId, quantity: line.quantity });
+    }
+
+    if (problems.length > 0) {
+      throw new BadRequestException({ message: 'Some items cannot be transferred', problems });
+    }
+    return plan;
+  }
+
+  /**
+   * The refusal a lost reservation produces: what was asked for, against what
+   * the branch actually holds.
+   *
+   * Read after the failed UPDATE so the numbers describe the state that refused
+   * it rather than a stale snapshot. **No cost appears anywhere** — this is an
+   * availability answer, and cost is gated by `cost.view` elsewhere for a
+   * reason.
+   */
+  private async unavailable(
+    tx: TransferTx,
+    line: { productId: Buffer; quantity: number },
+    companyId: Buffer,
+    branchId: Buffer,
+  ): Promise<ConflictException> {
+    const row = await tx.stockItem.findFirst({
+      where: { companyId, productId: line.productId, branchId },
+      select: { quantity: true, reservedQuantity: true, product: { select: { brand: true, model: true, variant: true } } },
+    });
+    const quantity = row?.quantity ?? 0;
+    const reserved = row?.reservedQuantity ?? 0;
+    return new ConflictException({
+      message: 'There is not enough of that left to transfer',
+      problems: [
+        {
+          productId: binToUuid(line.productId),
+          product: row?.product ? label(row.product) : null,
+          requested: line.quantity,
+          physicalQuantity: quantity,
+          reservedQuantity: reserved,
+          availableQuantity: Math.max(quantity - reserved, 0),
+          reason: 'claimed by someone else',
+        },
+      ],
+    });
   }
 
   /** Does the caller hold this permission in the ACTIVE branch? */
@@ -385,7 +515,38 @@ export class TransfersService {
         });
       }
     }
-    return released;
+
+    /**
+     * Quantity lines hand their reservation back the same way, guarded on the
+     * reservation still being large enough. A repeated reject or a stale cancel
+     * therefore releases nothing twice: the second attempt matches no row.
+     *
+     * Physical quantity is untouched. Nothing ever left the shelf — that only
+     * happens at shipment.
+     */
+    let releasedQuantity = 0;
+    for (const i of items) {
+      if (!i.productId) continue;
+      const ok = await releaseQuantity(tx, {
+        companyId: this.tenant.companyId(),
+        productId: i.productId,
+        branchId: fromBranchId,
+        amount: i.quantity,
+      });
+      if (ok) {
+        releasedQuantity += i.quantity;
+        await this.audit.recordTx(tx, {
+          entityType: 'StockItem',
+          entityId: i.productId,
+          action: 'update',
+          before: { reserved: i.quantity },
+          after: { reserved: 0 },
+          reason: action,
+          branchId: fromBranchId,
+        });
+      }
+    }
+    return released + releasedQuantity;
   }
 
   /**
@@ -964,4 +1125,9 @@ export class TransfersService {
     });
     return items.map((i) => unitIdentifier(i.unit!));
   }
+}
+
+/** "Anker PowerCore 10000" — how a person names the thing, never a code. */
+function label(p: { brand: string; model: string; variant: string | null }): string {
+  return [p.brand, p.model, p.variant].filter(Boolean).join(" ");
 }

@@ -1,6 +1,66 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
-import { ArrayMinSize, IsArray, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import {
+  ArrayMinSize,
+  IsArray,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Matches,
+  Max,
+  MaxLength,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+
+/** The most one request may move, so a typo cannot promise the whole shop. */
+export const MAX_LINE_QUANTITY = 100_000;
+
+/**
+ * A serialized line: one specific phone, named by the number printed on it.
+ *
+ * There is no quantity here at all. One IMEI is one object, and offering a
+ * quantity beside it would invite "5 × this exact phone", which is not a thing
+ * that can exist.
+ */
+export class TransferUnitLineDto {
+  @ApiProperty({ enum: ['unit'] })
+  @IsIn(['unit'])
+  kind!: 'unit';
+
+  @ApiProperty({ maxLength: 64, example: '356938035643809', description: 'IMEI or serial number' })
+  @IsString()
+  @MaxLength(64)
+  identifier!: string;
+}
+
+/**
+ * A quantity line: some of what a branch holds of one accessory.
+ *
+ * The source stock row is not named directly. `stock_items` is UNIQUE on
+ * `(company, product, branch)` and the transfer already knows its own source
+ * branch, so the product identifies exactly one row — and a second id in the
+ * request would be a second source of truth a client could get wrong.
+ */
+export class TransferStockLineDto {
+  @ApiProperty({ enum: ['stock'] })
+  @IsIn(['stock'])
+  kind!: 'stock';
+
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  productId!: string;
+
+  @ApiProperty({ minimum: 1, maximum: MAX_LINE_QUANTITY, example: 10 })
+  @IsInt()
+  @Min(1)
+  @Max(MAX_LINE_QUANTITY)
+  quantity!: number;
+}
+
+export type TransferLineDto = TransferUnitLineDto | TransferStockLineDto;
 
 export class CreateTransferDto {
   /**
@@ -18,12 +78,55 @@ export class CreateTransferDto {
   @IsUUID()
   toBranchId: string;
 
-  @ApiProperty({ type: [String], description: 'Unit identifiers (IMEI or serial)', example: ['123456789012347'] })
+  /**
+   * What is being moved, one line per thing (H1.4).
+   *
+   * Discriminated on `kind` rather than inferred from which optional fields
+   * happen to be present: "a productId and no identifier" is a shape a client
+   * can arrive at by accident, and guessing what they meant is how a request
+   * moves something nobody asked for.
+   */
+  @ApiPropertyOptional({
+    type: 'array',
+    items: {
+      oneOf: [
+        { $ref: '#/components/schemas/TransferUnitLineDto' },
+        { $ref: '#/components/schemas/TransferStockLineDto' },
+      ],
+    },
+    description: 'Mixed serialized and quantity lines. Preferred over `identifiers`.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => Object, {
+    discriminator: {
+      property: 'kind',
+      subTypes: [
+        { value: TransferUnitLineDto, name: 'unit' },
+        { value: TransferStockLineDto, name: 'stock' },
+      ],
+    },
+    keepDiscriminatorProperty: true,
+  })
+  lines?: TransferLineDto[];
+
+  /**
+   * The serialized-only shape H1.1–H1.3 shipped.
+   *
+   * Kept accepted so a client built against the old contract keeps working
+   * while the app moves to `lines`; it is exactly equivalent to a `lines` array
+   * of `unit` entries. **Remove it once no client sends it** — two ways to say
+   * the same thing is a contract that will eventually disagree with itself.
+   */
+  @ApiPropertyOptional({ type: [String], description: 'Deprecated: use `lines`.', example: ['123456789012347'] })
+  @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
   @IsString({ each: true })
   @MaxLength(64, { each: true })
-  identifiers: string[];
+  identifiers?: string[];
 }
 
 export class ReceiveTransferDto {
