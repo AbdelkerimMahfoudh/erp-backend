@@ -677,7 +677,12 @@ model StockItem {
   branchId  Bytes    @map("branch_id") @db.Binary(16)
   quantity  Int      @default(0) // CHECK (>=0) in 0002
   cost      Decimal  @db.Decimal(14, 2)
-  price     Decimal  @db.Decimal(14, 2)
+  /// Branch selling price. NULLABLE since `0034`: a transfer can deliver stock
+  /// into a branch that has never priced it, and neither inventing a price nor
+  /// refusing the goods is acceptable. NULL means "unpriced" and falls through
+  /// to `Product.defaultPrice`, then to the `unpriced` state the price ladder
+  /// already models. It is never treated as zero.
+  price     Decimal? @db.Decimal(14, 2)
   /// Physically owned at this branch. NEVER reduced to express unavailability —
   /// reserved goods are still company property and still count in valuation.
   /// Promised to an open transfer and therefore NOT sellable (0030).
@@ -1018,6 +1023,17 @@ model StockTransfer {
   @@map("stock_transfers")
 }
 
+/// One line of a transfer, and exactly one KIND of line (`0034`).
+///
+/// - **Serialized:** `unitId` set, `productId` NULL, `quantity` 1.
+/// - **Quantity:** `productId` set, `unitId` NULL, `quantity` >= 1.
+///
+/// A CHECK enforces the exclusivity, so "both" and "neither" are states the
+/// database refuses rather than states the service is trusted to avoid. A
+/// quantity line names its source stock row through the parent transfer's
+/// `fromBranchId`: `stock_items` is UNIQUE on `(companyId, productId, branchId)`,
+/// so the pair resolves to exactly one row and a second id column would only be
+/// a second source of truth for the same fact.
 model TransferItem {
   id         Bytes  @id @db.Binary(16)
   companyId  Bytes  @map("company_id") @db.Binary(16)
@@ -1025,12 +1041,38 @@ model TransferItem {
   unitId     Bytes? @map("unit_id") @db.Binary(16)
   productId  Bytes? @map("product_id") @db.Binary(16)
   quantity   Int    @default(1)
+  /// Source cost captured AT SHIPMENT, on quantity lines only (`0034`).
+  ///
+  /// NULL until the transfer ships; set as part of the same transaction that
+  /// decrements the source. It is the value that travels: while the goods are
+  /// in transit they are worth `quantity * shippedUnitCost`, and it is what the
+  /// destination averages in on receipt. Cost is read at shipment rather than at
+  /// request because a cost that changed while the request waited for approval
+  /// is not the cost of the goods that actually left.
+  ///
+  /// **"NULL before shipment, set after" is a service invariant, not a CHECK** —
+  /// it depends on the parent transfer's status, and MySQL CHECK constraints
+  /// cannot see another table. Tests pin it.
+  shippedUnitCost Decimal? @map("shipped_unit_cost") @db.Decimal(14, 2)
 
   company  Company       @relation(fields: [companyId], references: [id])
   transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
-  unit     Unit?         @relation(fields: [unitId], references: [id])
-  product  Product?      @relation(fields: [productId], references: [id])
+  /// `Restrict`, not Prisma's default `SetNull` for an optional relation
+  /// (`0034`). Two reasons, and the first was observed rather than theorised:
+  /// deleting a unit used to silently NULL this column and leave a transfer line
+  /// pointing at nothing, which is a movement record that has forgotten what it
+  /// moved. Second, MySQL refuses a CHECK constraint on any column whose foreign
+  /// key carries a referential action, so the line-kind CHECK is only possible
+  /// with these two set to `Restrict`.
+  unit     Unit?         @relation(fields: [unitId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  product  Product?      @relation(fields: [productId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
+  /// One line per product per transfer. MySQL lets NULLs repeat under a unique
+  /// index, so serialized rows — all of which have `productId` NULL — are
+  /// untouched by it. This is what makes "the same accessory twice in one
+  /// request" a rejection the DATABASE makes, so no ordering of concurrent
+  /// inserts can slip a duplicate past an application check.
+  @@unique([transferId, productId])
   @@index([transferId])
   @@index([companyId])
   @@index([unitId])

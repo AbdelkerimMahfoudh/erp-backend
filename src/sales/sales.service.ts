@@ -109,6 +109,7 @@ export class SalesService {
             const quantity = l.quantity ?? 1;
             const stock = await tx.stockItem.findUnique({
               where: { companyId_productId_branchId: { companyId, productId, branchId } },
+              include: { product: { select: { defaultPrice: true } } },
             });
             /**
              * Only UNRESERVED stock is sellable (H1.1).
@@ -126,13 +127,24 @@ export class SalesService {
             }
             // Quantity stock keeps its own branch price; the resolver returns it
             // with an honest `stock_item` source rather than a second source.
+            /**
+             * A stock row can exist with NO price since `0034` — goods a
+             * transfer delivered into a branch that has never priced them.
+             * `Number(null)` is `0`, so passing it straight through would have
+             * offered the item free; `null` instead lets the resolver fall
+             * through to the product default and, failing that, refuse.
+             */
             const resolved = await this.pricing.resolveForSaleTx(
               tx,
               {
                 kind: 'quantity',
                 productId,
-                stock: { price: Number(stock.price), version: stock.version },
-                productDefault: null,
+                stock: stock.price === null ? null : { price: Number(stock.price), version: stock.version },
+                // Passed for real now that the rung above it can be empty. It
+                // used to be `null` because a stock row always had a price, so
+                // the fallback was unreachable; leaving it null would make an
+                // unpriced row refuse a sale the catalogue could have answered.
+                productDefault: stock.product?.defaultPrice != null ? Number(stock.product.defaultPrice) : null,
               },
               branchId,
             );

@@ -113,7 +113,7 @@ type StockWithProduct = {
   quantity: number;
   reservedQuantity: number;
   cost: Prisma.Decimal;
-  price: Prisma.Decimal;
+  price: Prisma.Decimal | null;
   product: InventoryProduct | null;
 };
 
@@ -197,7 +197,14 @@ export interface InventoryStockRow {
   availableQuantity: number;
   /** Stripped for callers without `cost.view`. */
   cost: Prisma.Decimal;
-  price: Prisma.Decimal;
+  /**
+   * `null` means **unpriced**, not free (`0034`).
+   *
+   * Stock delivered by a transfer into a branch that has never priced this
+   * product arrives without one, because a selling price is a decision made in
+   * one branch and must not travel with the goods.
+   */
+  price: Prisma.Decimal | null;
   product: InventoryProduct | null;
 }
 

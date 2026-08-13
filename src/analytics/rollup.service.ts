@@ -236,9 +236,16 @@ export class RollupService {
     `);
     const stockRows = await this.prisma.$queryRaw<ValuationSourceRow[]>(Prisma.sql`
       SELECT p.id AS product_id, p.category_id, p.tracking_type,
-             si.quantity                AS quantity,
-             si.quantity * si.cost      AS inv_value,
-             si.quantity * si.price     AS exp_rev
+             si.quantity                                      AS quantity,
+             si.quantity * si.cost                            AS inv_value,
+             -- si.price is nullable since 0034: stock a transfer delivered into
+             -- a branch that has never priced it. Without COALESCE the whole
+             -- product's expected revenue would go NULL and silently vanish
+             -- from the total. Falling back to the catalogue default and then
+             -- to 0 states the truth: no price set means no revenue can be
+             -- expected from it yet. Cost, and therefore inventory VALUE, is
+             -- unaffected -- the goods are owned and counted regardless.
+             si.quantity * COALESCE(si.price, p.default_price, 0) AS exp_rev
       FROM stock_items si
       JOIN products p ON p.id = si.product_id
       WHERE si.company_id = ${companyId} AND si.branch_id = ${branchId} AND si.quantity > 0

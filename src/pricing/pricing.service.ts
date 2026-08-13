@@ -945,8 +945,20 @@ function num(d: Prisma.Decimal | number | null | undefined): number | null {
   return d === null || d === undefined ? null : Number(d);
 }
 
-function row(r: { price: Prisma.Decimal | number; version: number } | null | undefined): CurrentRow | null {
-  return r ? { price: Number(r.price), version: r.version } : null;
+/**
+ * A price row for the ladder, or `null` if this rung has no answer.
+ *
+ * Since `0034` a `stock_items` row may exist with **no price** — stock a
+ * transfer delivered into a branch that has never priced it. A row whose price
+ * is NULL must behave exactly like no row at all, so the ladder falls through
+ * to the product default and then to `unpriced`. `Number(null)` is `0`, which
+ * would have quietly advertised free goods, so the check is explicit.
+ */
+function row(
+  r: { price: Prisma.Decimal | number | null; version: number } | null | undefined,
+): CurrentRow | null {
+  if (!r || r.price === null) return null;
+  return { price: Number(r.price), version: r.version };
 }
 
 function staleWrite(): ConflictException {
