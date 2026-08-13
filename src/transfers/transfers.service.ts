@@ -36,7 +36,12 @@ import {
   transferFingerprint,
   type NormalizedLines,
 } from './transfer-lines';
-import { releaseQuantity, reserveQuantity } from './quantity-reservation';
+import {
+  receiveIntoExisting,
+  releaseQuantity,
+  reserveQuantity,
+  shipQuantity,
+} from './quantity-reservation';
 
 /**
  * The transaction client of the TENANT-scoped client, not the plain
@@ -656,7 +661,10 @@ export class TransfersService {
      * transfer's control -- sold, moved, or released -- and shipping it would
      * move stock that is no longer ours to move.
      */
-    const notReady = items.filter(
+    const serialized = items.filter((i) => i.unitId);
+    const quantityLines = items.filter((i) => i.productId);
+
+    const notReady = serialized.filter(
       (i) => !i.unit || i.unit.status !== 'reserved' || !i.unit.branchId.equals(fromBranchId),
     );
     if (notReady.length > 0) {
@@ -667,7 +675,7 @@ export class TransfersService {
     }
 
     await this.db.$transaction(async (tx) => {
-      for (const i of items) {
+      for (const i of serialized) {
         /**
          * Compare-and-swap again rather than a blind update: between the check
          * above and this write the unit could have been released by a cancel.
@@ -692,6 +700,74 @@ export class TransfersService {
           branchId: fromBranchId,
         });
       }
+
+      /**
+       * Quantity lines leave the shelf here, and only here.
+       *
+       * The cost is read NOW, not at request time: a request may have sat
+       * waiting for approval while the branch received more of the same thing at
+       * a different price, and what travels is the cost of the goods that
+       * actually go. It is written onto the line, so the value in transit and
+       * the value the destination averages in are the same number, recorded
+       * once and never recomputed from a source row that has since moved on.
+       */
+      for (const i of quantityLines) {
+        const source = await tx.stockItem.findFirst({
+          where: { companyId: this.tenant.companyId(), productId: i.productId!, branchId: fromBranchId },
+          select: { cost: true, quantity: true, reservedQuantity: true },
+        });
+        /**
+         * Cost is `NOT NULL` in the schema, so this cannot normally fire — but
+         * it is checked rather than assumed, because the alternative to knowing
+         * the cost is inventing one, and a zero here would quietly turn into
+         * pure profit at the destination.
+         */
+        if (!source || source.cost === null || source.cost === undefined) {
+          throw new ConflictException({
+            message: 'That stock has no recorded cost, so it cannot be shipped',
+            problems: [{ productId: binToUuid(i.productId!), reason: 'no cost on the source stock' }],
+          });
+        }
+
+        const shipped = await shipQuantity(tx, {
+          companyId: this.tenant.companyId(),
+          productId: i.productId!,
+          branchId: fromBranchId,
+          amount: i.quantity,
+        });
+        if (!shipped) {
+          // The reservation is gone, or the shelf no longer holds what it
+          // promised. Aborting the whole shipment is the only honest option:
+          // a transfer ships entirely or not at all.
+          throw new ConflictException({
+            message: 'That stock is no longer reserved for this transfer',
+            problems: [
+              {
+                productId: binToUuid(i.productId!),
+                requested: i.quantity,
+                physicalQuantity: source.quantity,
+                reservedQuantity: source.reservedQuantity,
+                availableQuantity: Math.max(source.quantity - source.reservedQuantity, 0),
+              },
+            ],
+          });
+        }
+
+        await tx.transferItem.update({
+          where: { id: i.id },
+          data: { shippedUnitCost: source.cost },
+        });
+        await this.audit.recordTx(tx, {
+          entityType: 'StockItem',
+          entityId: i.productId!,
+          action: 'update',
+          before: { quantity: source.quantity, reserved: source.reservedQuantity },
+          after: { quantity: source.quantity - i.quantity, reserved: source.reservedQuantity - i.quantity },
+          reason: 'shipped on transfer',
+          branchId: fromBranchId,
+        });
+      }
+
       await this.transitionTx(tx, transfer, 'in_transit', dto.expectedVersion, {
         sentAt: new Date(),
         sentById: this.tenant.userId() ?? null,
@@ -715,7 +791,7 @@ export class TransfersService {
         transfer,
         event: 'shipped',
         actorId: this.tenant.userId() ?? null,
-        units: items.length,
+        units: countLines(items).totalQuantity,
       });
     });
 
@@ -749,13 +825,19 @@ export class TransfersService {
       where: { transferId: transfer.id },
       include: { unit: true },
     });
-    const expected = items.map((i) => unitIdentifier(i.unit!));
+    const serialized = items.filter((i) => i.unitId);
+    const quantityLines = items.filter((i) => i.productId);
+
+    // Only serialized goods are scanned in. Quantity lines have no per-item
+    // identifier to scan, so a carton of cables is confirmed by receiving the
+    // transfer, not by counting into the app — partial receipt is a later phase.
+    const expected = serialized.map((i) => unitIdentifier(i.unit!));
     const report = computeDiscrepancy(expected, dto.identifiers);
     const matched = new Set(report.matched);
 
     await this.db.$transaction(async (tx) => {
       const moved: { unitId: Buffer; productId: Buffer; fromBranchId: Buffer; toBranchId: Buffer }[] = [];
-      for (const i of items) {
+      for (const i of serialized) {
         if (matched.has(unitIdentifier(i.unit!))) {
           /**
            * Compare-and-swap on `in_transit`, so a retried receive moves the
@@ -795,6 +877,21 @@ export class TransfersService {
        * successful one must never leave a stale price behind.
        */
       await this.pricing.invalidateOnBranchMoveTx(tx, moved);
+
+      /**
+       * Quantity lines land at the destination, cost averaged, price untouched.
+       *
+       * Ordered deliberately: the transfer's own status change below is a
+       * compare-and-swap on `in_transit`, so a retried receive fails there and
+       * this block never runs a second time. That is what makes "receiving
+       * exactly once adds the quantity and cost exactly once" true — the
+       * arithmetic itself is not idempotent, and nothing here tries to make it
+       * so by inspection.
+       */
+      for (const i of quantityLines) {
+        await this.receiveQuantityLineTx(tx, i, toBranchId);
+      }
+
       await this.transitionTx(tx, transfer, 'received', dto.expectedVersion, {
         receivedById: this.tenant.userId() ?? null,
         receivedAt: new Date(),
@@ -823,11 +920,113 @@ export class TransfersService {
         transfer,
         event: 'received',
         actorId: this.tenant.userId() ?? null,
-        units: report.matched.length,
+        units: report.matched.length + countLines(quantityLines).totalQuantity,
       });
     });
 
     return { received: report.matched.length, report };
+  }
+
+  /**
+   * One quantity line arriving at the destination.
+   *
+   * **Cost is averaged; price is not touched.** Those two numbers answer
+   * different questions and belong to different people: cost is what the
+   * company paid and follows the goods everywhere, while a selling price is a
+   * decision somebody made with authority in one branch. Carrying the source's
+   * price across would apply a decision nobody at the destination made.
+   */
+  private async receiveQuantityLineTx(
+    tx: TransferTx,
+    item: { id: Buffer; productId: Buffer | null; quantity: number; shippedUnitCost: Prisma.Decimal | null },
+    toBranchId: Buffer,
+  ): Promise<void> {
+    const companyId = this.tenant.companyId();
+    const productId = item.productId!;
+
+    /**
+     * No snapshot means the line never shipped, so there is nothing to receive
+     * and no cost to average. Inventing one — a zero, or a re-read of the
+     * source's current cost — would put a number nobody recorded into the
+     * destination's valuation.
+     */
+    if (item.shippedUnitCost === null) {
+      throw new ConflictException({
+        message: 'That line has no shipped cost recorded, so it cannot be received',
+        problems: [{ productId: binToUuid(productId), reason: 'never shipped' }],
+      });
+    }
+
+    const existing = await tx.stockItem.findFirst({
+      where: { companyId, productId, branchId: toBranchId },
+      select: { id: true },
+    });
+
+    if (existing) {
+      // Weighted average computed inside the UPDATE, against the row's own
+      // committed values — see `receiveIntoExisting` for why reading it into
+      // the application first would lose one of two concurrent receipts.
+      const merged = await receiveIntoExisting(tx, {
+        companyId,
+        productId,
+        branchId: toBranchId,
+        received: item.quantity,
+        unitCost: item.shippedUnitCost,
+      });
+      if (!merged) {
+        throw new ConflictException('The destination stock changed while receiving. Try again.');
+      }
+      await this.audit.recordTx(tx, {
+        entityType: 'StockItem',
+        entityId: productId,
+        action: 'update',
+        after: { received: item.quantity },
+        reason: 'received on transfer',
+        branchId: toBranchId,
+      });
+      return;
+    }
+
+    /**
+     * Nothing here yet, so this branch has to decide what the goods sell for —
+     * and it decides from its OWN sources, never the sender's. Branch variant
+     * price first, then the company default, and if neither exists the row is
+     * created **unpriced** rather than given an invented figure. Selling then
+     * asks for a price instead of quietly charging one nobody set.
+     */
+    const [variant, product] = await Promise.all([
+      tx.branchVariantPrice.findFirst({
+        where: { companyId, productId, branchId: toBranchId },
+        select: { price: true },
+      }),
+      tx.product.findUnique({ where: { id: productId }, select: { defaultPrice: true } }),
+    ]);
+    const price = variant?.price ?? product?.defaultPrice ?? null;
+
+    await tx.stockItem.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId,
+        productId,
+        branchId: toBranchId,
+        quantity: item.quantity,
+        // First stock here, so there is nothing to average against.
+        cost: item.shippedUnitCost,
+        price,
+        reservedQuantity: 0,
+      },
+    });
+    await this.audit.recordTx(tx, {
+      entityType: 'StockItem',
+      entityId: productId,
+      action: 'create',
+      after: {
+        received: item.quantity,
+        priceSource: variant ? 'branch_variant' : product?.defaultPrice != null ? 'product_default' : 'unpriced',
+      },
+      reason: 'received on transfer',
+      branchId: toBranchId,
+    });
   }
 
   /**

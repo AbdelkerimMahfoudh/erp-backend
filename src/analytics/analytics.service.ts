@@ -5,6 +5,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { binToUuid } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
+import { inTransitValue, summarizeInTransit } from './in-transit-value';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -57,9 +58,40 @@ export class AnalyticsService {
       byCategory.set(key, c);
     }
 
+    /**
+     * Stock that has shipped and not yet arrived, added back.
+     *
+     * `inventory_valuation` counts what a branch physically holds, so goods in
+     * transit belong to no row in it — and were therefore worth nothing to this
+     * report between ship and receive. They are reported as their **own**
+     * figure, and `inventoryValue` (held) is left meaning exactly what it says,
+     * so a branch counting its shelves is never told it holds something that
+     * left the building.
+     */
+    const transit = summarizeInTransit(
+      await inTransitValue(this.db, this.tenant.companyId()),
+      branchId ?? null,
+    );
+
     return {
       totals: {
+        /** What this branch — or the company — physically holds. */
         inventoryValue: round2(totals.inventoryValue),
+        /** Shipped, not yet received. Counted against the branch that sent it. */
+        inTransitValue: round2(transit.value),
+        /**
+         * The number that must not move when stock is merely travelling:
+         * held + in transit. Shipment takes value out of `inventoryValue` and
+         * puts the same amount into `inTransitValue`; receipt does the reverse
+         * at the other end.
+         */
+        totalStockValue: round2(totals.inventoryValue + transit.value),
+        inTransit: {
+          outboundValue: round2(transit.outbound),
+          inboundValue: round2(transit.inbound),
+          unitsCount: transit.unitsCount,
+          quantity: transit.quantity,
+        },
         expectedRevenue: round2(totals.expectedRevenue),
         expectedProfit: round2(totals.expectedProfit),
         productCount: totals.productCount,

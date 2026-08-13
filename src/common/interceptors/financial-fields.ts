@@ -23,6 +23,16 @@ export const FINANCIAL_FIELDS: ReadonlySet<string> = new Set([
   'inventoryValue',
   'expectedProfit',
   'expectedRevenue',
+  // in-transit valuation (H1.4). These are cost-derived: the value of goods
+  // between two branches is the sum of what the company paid for them, so
+  // leaving them visible would reveal cost to exactly the people the gating
+  // above exists to keep it from. The transfer's own COUNTS stay visible —
+  // knowing that ten chargers are on their way is operational, not financial.
+  'inTransitValue',
+  'totalStockValue',
+  'outboundValue',
+  'inboundValue',
+  'shippedUnitCost',
 ]);
 
 /**
