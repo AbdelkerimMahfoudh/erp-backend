@@ -14,6 +14,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { receiveQuantityAtCost } from '../inventory/stock-cost';
+import { withLockRetry } from '../common/db/deadlock-retry';
 import { TrackingStrategyRegistry } from '../tracking/tracking-strategy.registry';
 import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
@@ -199,9 +200,26 @@ export class PurchasingService {
     const status = amountPaid >= total ? 'paid' : amountPaid > 0 ? 'partial' : 'unpaid';
 
     // 4. Commit — one atomic transaction (the Receiving Session "Finish").
+    /**
+     * Lock the stock rows in a deterministic order.
+     *
+     * Two concurrent multi-line purchases that touch the same two products in
+     * OPPOSITE orders will deadlock on each other. Sorting by product id gives
+     * every transaction the same order, which removes that class of conflict
+     * entirely rather than relying on the retry below to paper over it.
+     */
+    preparedStock.sort((a, b) => Buffer.compare(a.productId, b.productId));
+
     let purchaseId: Buffer;
     try {
-      purchaseId = await this.db.$transaction(async (tx) => {
+      /**
+       * Retried only if InnoDB rolled the whole transaction back for a lock
+       * conflict — see `deadlock-retry.ts`. Two simultaneous purchases of the
+       * same product insert the same unique key and can deadlock; the victim's
+       * work is gone entirely, so re-running it is the only correct response,
+       * and re-entering here re-enters the idempotency guard too.
+       */
+      purchaseId = await withLockRetry(() => this.db.$transaction(async (tx) => {
         const pid = newUuidV7Bin();
         await tx.purchase.create({
           data: {
@@ -298,9 +316,26 @@ export class PurchasingService {
         })));
 
         return pid;
-      });
+      }));
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        /**
+         * Two identical requests racing.
+         *
+         * The pre-flight replay check ran before either committed, so both got
+         * past it and the unique key on `(company_id, client_uuid)` rejected
+         * the loser. That loser is not a failure: the delivery it describes has
+         * just been received by its twin. Ask whether this request id already
+         * produced a purchase and, if so, return it — the same treatment
+         * transfers have given this race since H1.1.
+         *
+         * Without this, a client retrying on a flaky connection could receive
+         * "a duplicate identifier was detected" for a purchase that actually
+         * succeeded, which is both alarming and wrong: no identifier was
+         * duplicated, and there is nothing to retry.
+         */
+        const winner = await this.findReplay(dto, companyId);
+        if (winner) return winner;
         throw new ConflictException('A duplicate identifier was detected during commit — please retry');
       }
       throw e;

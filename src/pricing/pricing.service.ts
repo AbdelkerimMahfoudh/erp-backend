@@ -14,6 +14,7 @@ import { AppClsStore } from '../common/context/request-context';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { assertAssignedToBranch } from '../rbac/active-branch';
 import {
   CurrentRow,
   PriceSource,
@@ -651,12 +652,7 @@ export class PricingService {
    */
   private async activeBranch(): Promise<Buffer> {
     const branchId = this.tenant.requireBranchId();
-    const assignment = await this.db.userBranch.findFirst({
-      where: { userId: this.tenant.requireUserId(), branchId },
-      select: { id: true },
-    });
-    if (!assignment) throw new ForbiddenException('No access to the requested branch');
-    return branchId;
+    return assertAssignedToBranch(this.db, this.tenant.requireUserId(), branchId);
   }
 
   private async loadProduct(productIdStr: string) {

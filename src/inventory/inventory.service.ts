@@ -22,6 +22,7 @@ import {
 } from './inventory-cursor';
 import { unitIdentifier } from './unit-identifier.util';
 import { receiveQuantityAtCost } from './stock-cost';
+import { assertAssignedToBranch } from '../rbac/active-branch';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
 
 /** Transaction client shape needed to create a unit (+ its audit row). */
@@ -419,6 +420,17 @@ export class InventoryService {
    */
   async listStock(filter: InventoryFilter): Promise<InventoryPage> {
     const branchId = this.tenant.branchId();
+    /**
+     * This route carries no `@RequirePermissions`, so `PermissionsGuard` exits
+     * early and never checks that the caller belongs to the branch in the
+     * header — which means the list was scoped to whatever branch was CLAIMED.
+     * Any signed-in user could read another branch's stock, and with it its
+     * average cost. Found live in H1.4.1; the same defect G2A-CP3 fixed on the
+     * pricing reads.
+     */
+    if (branchId) {
+      await assertAssignedToBranch(this.db, this.tenant.requireUserId(), branchId);
+    }
     const productId = filter.productId ? uuidToBin(filter.productId) : undefined;
     const limit = Math.min(Math.max(filter.limit ?? DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
     const cursor = filter.cursor ? decodeCursor(filter.cursor) : null;

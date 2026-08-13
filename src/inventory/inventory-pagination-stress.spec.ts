@@ -93,11 +93,17 @@ async function drain(units: any[], limit: number): Promise<Stats> {
       count: jest.fn(async () => units.length),
     },
     stockItem: { findMany: jest.fn(async () => []), count: jest.fn(async () => 0) },
+    /**
+     * Listing confirms branch assignment since H1.4.1 — the route carries no
+     * `@RequirePermissions`, so the guard never did. Paging is what these tests
+     * are about; the refusal itself is asserted in inventory-listing.spec.ts.
+     */
+    userBranch: { findFirst: jest.fn(async () => ({ id: BRANCH })) },
   };
 
   const service = new InventoryService(
     db as never,
-    { branchId: () => BRANCH } as never,
+    { branchId: () => BRANCH, requireUserId: () => BRANCH } as never,
     {} as never,
     {} as never,
   );

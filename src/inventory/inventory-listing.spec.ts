@@ -19,6 +19,9 @@ import { uuidToBin, binToUuid } from '../common/utils/uuid.util';
  * interplay, so a stub that ignores them would assert nothing.
  */
 
+/** Any assigned user — identity is not what these tests are about. */
+const USER = Buffer.alloc(16, 9);
+
 const BRANCH = uuidToBin('018f0000-0000-7000-8000-0000000000b1');
 const OTHER_BRANCH = uuidToBin('018f0000-0000-7000-8000-0000000000b2');
 const PRODUCT = uuidToBin('018f0000-0000-7000-8000-0000000000p1'.replace(/p/g, 'a'));
@@ -131,7 +134,13 @@ function makeStore(units: any[], stock: any[], branchId: Buffer | null = BRANCH)
     count: jest.fn(async ({ where }: any) => rows.filter((r) => matches(r, where)).length),
   });
   const db = { unit: model(units), stockItem: model(stock) };
-  const tenant = { branchId: () => branchId };
+  /**
+   * Listing now confirms the caller belongs to the branch it is asked about
+   * (H1.4.1): the route has no `@RequirePermissions`, so the guard never did.
+   * The double models an assigned user; the refusal itself is asserted below.
+   */
+  const tenant = { branchId: () => branchId, requireUserId: () => USER };
+  (db as unknown as Record<string, unknown>).userBranch = { findFirst: async () => ({ id: USER }) };
   const service = new InventoryService(db as never, tenant as never, {} as never, {} as never);
   return { service, db };
 }
@@ -194,6 +203,51 @@ describe('listStock — shapes', () => {
     expect(db.stockItem.findMany).not.toHaveBeenCalled();
     expect(page.rows.every((r) => r.kind === 'unit')).toBe(true);
     expect(page.totals.stock).toBe(0);
+  });
+});
+
+describe('listStock — branch isolation', () => {
+  /**
+   * The defect this guards against, found live in H1.4.1.
+   *
+   * `GET /inventory` carries no `@RequirePermissions`, so `PermissionsGuard`
+   * exits early and never checks branch assignment — while the active branch
+   * comes from the `X-Branch-Id` header. Any signed-in user of the company
+   * could therefore list another branch's stock, and with it that branch's
+   * average cost, just by changing a header. Exactly the defect G2A-CP3 fixed
+   * on the pricing reads, recurring on a route nobody re-examined.
+   */
+  it('refuses a branch the caller is not assigned to', async () => {
+    const db = {
+      userBranch: { findFirst: async () => null }, // not assigned
+      unit: { findMany: async () => [], count: async () => 0 },
+      stockItem: { findMany: async () => [], count: async () => 0 },
+    };
+    const service = new InventoryService(
+      db as never,
+      { branchId: () => Buffer.alloc(16, 7), requireUserId: () => USER } as never,
+      {} as never,
+      {} as never,
+    );
+    await expect(service.listStock({})).rejects.toThrow(/No access to the requested branch/);
+  });
+
+  it('does not reveal whether the branch exists, only that it is not yours', async () => {
+    const db = {
+      userBranch: { findFirst: async () => null },
+      unit: { findMany: async () => [], count: async () => 0 },
+      stockItem: { findMany: async () => [], count: async () => 0 },
+    };
+    const service = new InventoryService(
+      db as never,
+      { branchId: () => Buffer.alloc(16, 7), requireUserId: () => USER } as never,
+      {} as never,
+      {} as never,
+    );
+    await expect(service.listStock({})).rejects.toThrow(
+      // Same wording the guard uses, so the two are indistinguishable.
+      /^No access to the requested branch$/,
+    );
   });
 });
 

@@ -43,6 +43,7 @@ import {
   shipQuantity,
 } from './quantity-reservation';
 import { priceForNewStockRow, receiveQuantityAtCost } from '../inventory/stock-cost';
+import { withLockRetry } from '../common/db/deadlock-retry';
 
 /**
  * The transaction client of the TENANT-scoped client, not the plain
@@ -849,7 +850,13 @@ export class TransfersService {
     const report = computeDiscrepancy(expected, dto.identifiers);
     const matched = new Set(report.matched);
 
-    await this.db.$transaction(async (tx) => {
+    /**
+     * Receiving inserts into the destination stock row, so two receipts landing
+     * at the same instant can deadlock on the same unique key. InnoDB rolls the
+     * victim back completely; re-running is the only correct response, and the
+     * version compare-and-swap keeps the retry from applying anything twice.
+     */
+    await withLockRetry(() => this.db.$transaction(async (tx) => {
       const moved: { unitId: Buffer; productId: Buffer; fromBranchId: Buffer; toBranchId: Buffer }[] = [];
       for (const i of serialized) {
         if (matched.has(unitIdentifier(i.unit!))) {
@@ -936,7 +943,7 @@ export class TransfersService {
         actorId: this.tenant.userId() ?? null,
         units: report.matched.length + countLines(quantityLines).totalQuantity,
       });
-    });
+    }));
 
     this.events.emit('stock.moved', {
       companyId: this.tenant.companyId(),
