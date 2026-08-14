@@ -89,8 +89,17 @@ describe('the unsafe implementation is gone, not commented out', () => {
     expect(controllerCode).not.toContain('refundAmount');
   });
 
-  it('nothing voids a sale line any more', () => {
-    expect(serviceCode).not.toMatch(/voided:\s*true/);
+  /**
+   * Stated as "no sale line is ever rewritten" rather than "the text
+   * `voided: true` does not appear". The narrower wording matched a Prisma
+   * `select` on the new history read, which asks for the column and writes
+   * nothing — and an assertion that fails on a read is one somebody will
+   * eventually weaken just to make it pass. Refusing every write API is also
+   * the stronger claim: voiding was only one of the things that method did.
+   */
+  it('nothing voids, updates or deletes a sale line any more', () => {
+    expect(serviceCode).not.toMatch(/saleItem\.(update|updateMany|delete|deleteMany|upsert)/);
+    expect(serviceCode).not.toMatch(/data:[^;]{0,200}voided:\s*true/);
   });
 
   it('nothing rewrites a sale total, cost or margin after the fact', () => {

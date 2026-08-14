@@ -1,8 +1,9 @@
-import { Body, Controller, Get, GoneException, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, GoneException, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { SalesService } from './sales.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
+import { ListSalesDto } from './dto/list-sales.dto';
 
 @ApiTags('sales')
 @ApiBearerAuth()
@@ -10,14 +11,31 @@ import { CreateSaleDto } from './dto/create-sale.dto';
 export class SalesController {
   constructor(private readonly sales: SalesService) {}
 
+  /**
+   * Both reads are gated on `sale.view` (I1). They previously required NO
+   * permission at all, so any signed-in user could read the company's sales.
+   * The permission is branch-scoped — it is absent from `COMPANY_PERMISSIONS` —
+   * so a caller sending another branch's header, or no header, is refused
+   * before the service runs.
+   */
   @Get()
-  @ApiOperation({ summary: 'List recent sales at the active branch' })
-  list() {
-    return this.sales.list();
+  @RequirePermissions('sale.view')
+  @ApiOperation({
+    summary: 'Sale history for the active branch — searched and paged in SQL',
+    description:
+      'Keyset paging on the UUIDv7 primary key. Every filter is applied in the database: a client that searched only the pages it had loaded would answer "not found" for a sale that exists.',
+  })
+  list(@Query() query: ListSalesDto) {
+    return this.sales.list(query);
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Sale detail (items, payments, returns)' })
+  @RequirePermissions('sale.view')
+  @ApiOperation({
+    summary: 'One sale in full — lines, identifiers, payments and its return policy',
+    description:
+      'Cost and margin are stripped for callers without cost.view by the global gating interceptor. Another company, another branch and an unknown id all answer the same 404.',
+  })
   get(@Param('id') id: string) {
     return this.sales.getById(id);
   }

@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, Sale } from '@prisma/client';
+import { PaymentMethod, Prisma, Sale, SalePayStatus } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -20,6 +20,13 @@ import { canTransition } from '../inventory/unit-state-machine';
 import { PricingService } from '../pricing/pricing.service';
 import { SalesPolicyService } from './sales-policy.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
+import { ListSalesDto } from './dto/list-sales.dto';
+import { evaluateEligibility } from './return-policy';
+import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
+
+/** Every value the filters accept, kept next to the enums they mirror. */
+const PAY_STATUSES = ['paid', 'partial', 'credit'] as const satisfies readonly SalePayStatus[];
+const PAYMENT_METHODS = ['cash', 'card', 'mobile', 'bank', 'other'] as const satisfies readonly PaymentMethod[];
 
 interface PreparedLine {
   unitId?: Buffer;
@@ -355,22 +362,260 @@ export class SalesService {
    * The replacement is the reviewed ReturnRequest lifecycle (I2); until then
    * the route answers 410 and writes nothing. See `docs/27`.
    */
-  list() {
-    const branchId = this.tenant.branchId();
-    return this.db.sale.findMany({
-      where: branchId ? { branchId } : {},
-      orderBy: { soldAt: 'desc' },
-      take: 100,
+  /**
+   * Sale history for the ACTIVE branch, newest first, searched and paged.
+   *
+   * ## What this used to be
+   *
+   * `list()` took no arguments, required no permission, and fell back to `{}`
+   * when no branch header was present — so any signed-in user could read every
+   * sale in the company, including cost and margin, by sending no header at
+   * all. It then returned raw rows with `take: 100`, which quietly amputates the
+   * history of any shop past its first few weeks.
+   *
+   * ## Why the branch is not re-checked here
+   *
+   * `sale.view` is absent from `COMPANY_PERMISSIONS`, so it is branch-scoped:
+   * `getEffectivePermissions` throws `No access to the requested branch` when
+   * the caller is not assigned to the branch in the header, and returns only
+   * company-wide keys when there is no header — which cannot contain
+   * `sale.view`. Both cases are a 403 before this method runs. Repeating the
+   * assignment lookup here would add a query per request and a second place to
+   * drift; `assertAssignedToBranch` exists for reads that require NO permission,
+   * which is not this one. `requireBranchId()` below is the assertion that the
+   * guard's guarantee actually held.
+   */
+  async list(query: ListSalesDto) {
+    const branchId = this.tenant.requireBranchId();
+    const limit = Math.min(Math.max(query.limit ?? 20, 1), 50);
+
+    const payStatuses = parseEnumList<SalePayStatus>(query.payStatus, PAY_STATUSES, 'payment status');
+    const methods = parseEnumList<PaymentMethod>(query.paymentMethod, PAYMENT_METHODS, 'payment method');
+    const soldAt = parseDateRange(query.from, query.to);
+
+    const rows = await this.db.sale.findMany({
+      where: {
+        branchId,
+        ...(payStatuses.length > 0 ? { payStatus: { in: payStatuses } } : {}),
+        ...(methods.length > 0 ? { payments: { some: { method: { in: methods } } } } : {}),
+        ...(soldAt ? { soldAt } : {}),
+        ...this.searchWhere(query.search),
+      },
+      include: {
+        user: { select: { name: true } },
+        customer: { select: { name: true } },
+        payments: { select: { method: true } },
+        items: { select: { unitId: true, quantity: true, voided: true } },
+        returns: { select: { id: true } },
+      },
+      /**
+       * The PK is a UUIDv7: unique, immutable and time-ordered, so `id desc` is
+       * both "newest first" and a total order. Keyset paging on it cannot skip
+       * or repeat a row when somebody completes a sale mid-scroll, which
+       * skip/take would. Verified against the live data: ordering the seven
+       * existing sales by id reproduces their `sold_at` order exactly.
+       */
+      ...(query.cursor ? { cursor: { id: uuidToBin(query.cursor) }, skip: 1 } : {}),
+      orderBy: { id: 'desc' },
+      take: limit + 1,
     });
+
+    const page = rows.slice(0, limit);
+    const now = new Date();
+    return {
+      rows: page.map((s) => {
+        const live = s.items.filter((i) => !i.voided);
+        return {
+          id: binToUuid(s.id),
+          invoiceNo: s.invoiceNo,
+          soldAt: s.soldAt,
+          total: Number(s.total),
+          totalCost: Number(s.totalCost),
+          margin: Number(s.margin),
+          amountPaid: Number(s.amountPaid),
+          balanceDue: Number(s.balanceDue),
+          payStatus: s.payStatus,
+          isReversed: s.isReversed,
+          // Rows and things are different numbers: "10 chargers" is one line
+          // and ten items, and a list that says "1 item" misleads whoever is
+          // trying to match it against what left the shop.
+          lineCount: live.length,
+          itemCount: live.reduce((n, i) => n + i.quantity, 0),
+          serializedCount: live.filter((i) => i.unitId !== null).length,
+          soldBy: s.user?.name ?? null,
+          customer: s.customer?.name ?? null,
+          // De-duplicated: a split payment of cash+cash is one method twice.
+          paymentMethods: [...new Set(s.payments.map((p) => p.method))],
+          returnPolicy: this.policySummary(s, live, now),
+        };
+      }),
+      nextCursor: rows.length > limit ? binToUuid(page[page.length - 1]!.id) : null,
+    };
   }
 
+  /**
+   * Search in SQL, across what someone actually remembers when they are holding
+   * a receipt or a phone: the number on the paperwork, the number printed on
+   * the device, what it was, or who sold it.
+   *
+   * MySQL's default collation is case-insensitive, so `contains` needs no
+   * lowering — and lowering would defeat the index anyway.
+   */
+  private searchWhere(search?: string): Prisma.SaleWhereInput {
+    const q = search?.trim();
+    if (!q) return {};
+    return {
+      OR: [
+        { invoiceNo: { contains: q } },
+        { user: { name: { contains: q } } },
+        { customer: { name: { contains: q } } },
+        { customer: { phone: { contains: q } } },
+        { items: { some: { unit: { imeiPrimary: { contains: q } } } } },
+        { items: { some: { unit: { imeiSecondary: { contains: q } } } } },
+        { items: { some: { unit: { serialNo: { contains: q } } } } },
+        { items: { some: { unit: { product: { brand: { contains: q } } } } } },
+        { items: { some: { unit: { product: { model: { contains: q } } } } } },
+        { items: { some: { unit: { product: { variant: { contains: q } } } } } },
+        // Quantity lines name their product directly, with no unit in between.
+        { items: { some: { product: { brand: { contains: q } } } } },
+        { items: { some: { product: { model: { contains: q } } } } },
+        { items: { some: { product: { variant: { contains: q } } } } },
+        { items: { some: { product: { barcode: { contains: q } } } } },
+      ],
+    };
+  }
+
+  /**
+   * The policy this sale was sold under, plus what the SERVER says about it now.
+   *
+   * The client is told the answer rather than asked for it: a phone's clock can
+   * be wrong, and "can this still be returned?" is not a question a device
+   * should get to answer about a promise the shop made.
+   */
+  private policySummary(
+    sale: { returnWindowHours: number; returnDeadlineAt: Date | null; isReversed: boolean },
+    liveItems: { unitId: Buffer | null }[],
+    now: Date,
+    hasReturn = false,
+  ) {
+    const eligibility = evaluateEligibility({
+      windowHours: sale.returnWindowHours,
+      deadlineAt: sale.returnDeadlineAt,
+      now,
+      isReversed: sale.isReversed,
+      hasReturn,
+      // Accessory-only sales have no serialized unit to take back and no
+      // reviewed path yet; saying which beats a vague refusal (I2).
+      quantityOnly: liveItems.length > 0 && liveItems.every((i) => i.unitId === null),
+    });
+    return {
+      windowHours: sale.returnWindowHours,
+      deadlineAt: eligibility.deadlineAt,
+      eligible: eligibility.eligibleByPolicy,
+      reason: eligibility.reason,
+      remainingMs: eligibility.remainingMs,
+      requiresOwnerException: eligibility.requiresOwnerException,
+    };
+  }
+
+  /**
+   * One sale in full.
+   *
+   * Fails closed three ways, and all three answer identically. The tenant
+   * extension injects `companyId` into the unique lookup, so another company's
+   * sale is simply not found; a sale belonging to a different branch of the same
+   * company is refused here; and an id nobody has ever used is not found either.
+   * A caller must not be able to tell which of the three happened — "no such
+   * sale" and "not yours" leak different facts, and the difference is enough to
+   * confirm that an invoice number exists elsewhere in the company.
+   *
+   * Cost and margin are named exactly as `FINANCIAL_FIELDS` expects, so the
+   * global cost-gating interceptor strips them for a caller without
+   * `cost.view` — the gating is not re-implemented here, deliberately.
+   */
   async getById(idStr: string) {
+    const branchId = this.tenant.requireBranchId();
     const sale = await this.db.sale.findUnique({
       where: { id: uuidToBin(idStr) },
-      include: { items: true, payments: true, returns: true },
+      include: {
+        user: { select: { name: true } },
+        customer: { select: { id: true, name: true, phone: true } },
+        branch: { select: { id: true, name: true } },
+        payments: { orderBy: { paidAt: 'asc' } },
+        returns: { select: { id: true } },
+        returnPolicyOverriddenBy: { select: { name: true } },
+        items: {
+          include: {
+            unit: {
+              select: {
+                id: true,
+                imeiPrimary: true,
+                imeiSecondary: true,
+                serialNo: true,
+                product: { select: { brand: true, model: true, variant: true, trackingType: true } },
+              },
+            },
+            product: { select: { brand: true, model: true, variant: true, barcode: true, trackingType: true } },
+          },
+        },
+      },
     });
-    if (!sale) throw new NotFoundException('Sale not found');
-    return sale;
+    if (!sale || !sale.branchId.equals(branchId)) throw new NotFoundException('Sale not found');
+
+    const live = sale.items.filter((i) => !i.voided);
+    return {
+      id: binToUuid(sale.id),
+      invoiceNo: sale.invoiceNo,
+      soldAt: sale.soldAt,
+      branch: { id: binToUuid(sale.branch.id), name: sale.branch.name },
+      soldBy: sale.user?.name ?? null,
+      customer: sale.customer
+        ? { id: binToUuid(sale.customer.id), name: sale.customer.name, phone: sale.customer.phone }
+        : null,
+      subtotal: Number(sale.subtotal),
+      discount: Number(sale.discount),
+      taxTotal: Number(sale.taxTotal),
+      total: Number(sale.total),
+      totalCost: Number(sale.totalCost),
+      margin: Number(sale.margin),
+      amountPaid: Number(sale.amountPaid),
+      balanceDue: Number(sale.balanceDue),
+      payStatus: sale.payStatus,
+      dueDate: sale.dueDate,
+      isReversed: sale.isReversed,
+      lines: sale.items.map((i) => ({
+        id: binToUuid(i.id),
+        // A serialized line names the unit and the number printed on it; a
+        // quantity line names the product and how many left the shelf.
+        unitId: i.unitId ? binToUuid(i.unitId) : null,
+        imei: i.unit?.imeiPrimary ?? null,
+        imeiSecondary: i.unit?.imeiSecondary ?? null,
+        serialNo: i.unit?.serialNo ?? null,
+        product: describeProduct(i.unit?.product ?? i.product),
+        barcode: i.product?.barcode ?? null,
+        trackingType: i.unit?.product?.trackingType ?? i.product?.trackingType ?? null,
+        quantity: i.quantity,
+        price: Number(i.price),
+        discount: Number(i.discount),
+        taxAmount: Number(i.taxAmount),
+        cost: Number(i.cost),
+        voided: i.voided,
+      })),
+      payments: sale.payments.map((p) => ({
+        id: binToUuid(p.id),
+        method: p.method,
+        amount: Number(p.amount),
+        paidAt: p.paidAt,
+      })),
+      returnPolicy: {
+        ...this.policySummary(sale, live, new Date(), sale.returns.length > 0),
+        // Recorded only when a manager or owner actually changed it, so the
+        // question "why was this sale different?" has an answer on the screen
+        // rather than in an audit table nobody opens.
+        overriddenBy: sale.returnPolicyOverriddenBy?.name ?? null,
+        overrideReason: sale.returnPolicyOverrideReason,
+      },
+    };
   }
 
   private toResponse(sale: Sale) {
