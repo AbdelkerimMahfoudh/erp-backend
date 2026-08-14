@@ -196,7 +196,10 @@ model Company {
   saleItems         SaleItem[]
   payments          Payment[]
   returns           Return[]
-  stockTransfers    StockTransfer[]
+  returnRequests    ReturnRequest[]
+  returnAdjustments ReturnAdjustment[]
+  returnReversals   ReturnReversal[]
+    stockTransfers    StockTransfer[]
   transferItems     TransferItem[]
   expenseTemplates  ExpenseTemplate[]
   expenses          Expense[]
@@ -244,7 +247,9 @@ model Branch {
 
   company Company @relation(fields: [companyId], references: [id])
 
-  userBranches     UserBranch[]
+  returnRequests   ReturnRequest[]
+  returnReversals  ReturnReversal[]
+    userBranches     UserBranch[]
   units            Unit[]
   stockItems       StockItem[]
   purchases        Purchase[]
@@ -306,7 +311,12 @@ model User {
   purchases         Purchase[]
   supplierPayments  SupplierPayment[]
   sales             Sale[]
-  returnPolicyOverrides Sale[] @relation("SaleReturnPolicyOverride")
+  returnsRequested      ReturnRequest[]    @relation("ReturnRequestedBy")
+  returnsReviewed       ReturnRequest[]    @relation("ReturnReviewedBy")
+  returnsDecided        ReturnRequest[]    @relation("ReturnDecidedBy")
+  returnsApproved       ReturnReversal[]   @relation("ReturnApprovedBy")
+  returnAdjustmentsMade ReturnAdjustment[] @relation("ReturnAdjustmentBy")
+    returnPolicyOverrides Sale[] @relation("SaleReturnPolicyOverride")
   returns           Return[]
   transfersSent     StockTransfer[]    @relation("TransferSentBy")
   transfersReceived StockTransfer[]    @relation("TransferReceivedBy")
@@ -443,7 +453,7 @@ model Product {
   stockItems    StockItem[]
   purchaseItems PurchaseItem[]
   saleItems     SaleItem[]
-  transferItems TransferItem[]
+    transferItems TransferItem[]
   recognitions  ProductRecognition[]
   branchPrices  BranchVariantPrice[]
   priceEvents   PriceChangeEvent[]
@@ -540,6 +550,8 @@ model Unit {
 
   saleItems     SaleItem[]
   returns       Return[]
+  returnRequests  ReturnRequest[]
+  returnReversals ReturnReversal[]
   transferItems TransferItem[]
   priceOverride UnitPriceOverride?
   priceEvents   PriceChangeEvent[]
@@ -901,7 +913,9 @@ model Sale {
   returnPolicyOverriddenBy User? @relation("SaleReturnPolicyOverride", fields: [returnPolicyOverriddenById], references: [id])
   items    SaleItem[]
   payments Payment[]
-  returns  Return[]
+  returnRequests  ReturnRequest[]
+  returnReversals ReturnReversal[]
+    returns  Return[]
 
   @@unique([branchId, invoiceNo])
   @@unique([companyId, clientUuid])
@@ -929,7 +943,9 @@ model SaleItem {
   sale    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
   unit    Unit?    @relation(fields: [unitId], references: [id], onDelete: Restrict)
   product Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
-  returns Return[]
+  returnRequests  ReturnRequest[]
+  returnReversal  ReturnReversal?
+    returns Return[]
 
   // sold-once: generated column `active_unit_id` + UNIQUE + CHECK added in 0002
   @@index([saleId])
@@ -1864,4 +1880,181 @@ model VerificationIntent {
   @@index([userId, purpose])
   @@index([expiresAt])
   @@map("verification_intents")
+}
+
+/// The lifecycle of a reviewed return (I2). Deliberately has no "refunded"
+/// state: I2 creates a refund OBLIGATION, and confirming that money actually
+/// moved is I3.
+enum ReturnStatus {
+  pending_investigation
+  under_review
+  approved_refund_due
+  rejected
+}
+
+/// Who is answerable for the fault. `pending_investigation` is the honest
+/// starting value — nobody has looked yet — rather than a default that quietly
+/// blames the shop or the customer.
+enum ReturnResponsibility {
+  pending_investigation
+  store_or_product_fault
+  customer_damage
+  other
+}
+
+/// Where the phone physically is. Approval requires `store_holds`.
+enum ReturnCustody {
+  customer_holds
+  store_holds
+  handed_back
+  retained_hold
+}
+
+enum ReturnAdjustmentKind {
+  screen_protector
+  accessory_retained
+  restocking_fee
+  other
+}
+
+/// A reviewed return request against exactly ONE serialized sale line.
+model ReturnRequest {
+  id           Bytes @id @db.Binary(16)
+  companyId    Bytes @map("company_id") @db.Binary(16)
+  branchId     Bytes @map("branch_id") @db.Binary(16)
+  saleId       Bytes @map("sale_id") @db.Binary(16)
+  saleItemId   Bytes @map("sale_item_id") @db.Binary(16)
+  unitId       Bytes @map("unit_id") @db.Binary(16)
+
+  status ReturnStatus @default(pending_investigation)
+
+  // NOTE: the database also carries `claim_key`, a VIRTUAL generated column
+  // (NULL when rejected, else 1) with UNIQUE (sale_item_id, claim_key). It
+  // enforces "one active claim per sale line" and is deliberately NOT declared
+  // here — Prisma does not manage generated columns, and the same is true of
+  // `sale_items.active_unit_id` from 0002.
+
+  /// Mandatory. Replaying the key with a DIFFERENT payload is a 409, not a
+  /// silent no-op.
+  clientUuid        Bytes  @map("client_uuid") @db.Binary(16)
+  clientRequestHash String @map("client_request_hash") @db.Char(64)
+
+  requestedById  Bytes?  @map("requested_by") @db.Binary(16)
+  requestReason  String  @map("request_reason") @db.VarChar(255)
+  conditionNotes String? @map("condition_notes") @db.Text
+
+  responsibility      ReturnResponsibility @default(pending_investigation)
+  responsibilityNotes String?              @map("responsibility_notes") @db.VarChar(255)
+
+  custody           ReturnCustody @default(customer_holds)
+  custodyReceivedAt DateTime?     @map("custody_received_at") @db.DateTime(6)
+  custodyReturnedAt DateTime?     @map("custody_returned_at") @db.DateTime(6)
+
+  /// The I1 policy snapshot as it stood when the request was raised, so a later
+  /// settings change cannot alter what this request was judged under.
+  policyWindowHours Int       @map("policy_window_hours")
+  policyDeadlineAt  DateTime? @map("policy_deadline_at") @db.DateTime(6)
+  policyReason      String    @map("policy_reason") @db.VarChar(40)
+  requiresException Boolean   @default(false) @map("requires_exception")
+
+  reviewedById    Bytes?    @map("reviewed_by") @db.Binary(16)
+  reviewedAt      DateTime? @map("reviewed_at") @db.DateTime(6)
+  decidedById     Bytes?    @map("decided_by") @db.Binary(16)
+  decidedAt       DateTime? @map("decided_at") @db.DateTime(6)
+  decisionReason  String?   @map("decision_reason") @db.Text
+  exceptionReason String?   @map("exception_reason") @db.VarChar(255)
+
+  /// Approve versus reject must have exactly one winner.
+  version   Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company     Company  @relation(fields: [companyId], references: [id])
+  branch      Branch   @relation(fields: [branchId], references: [id])
+  sale        Sale     @relation(fields: [saleId], references: [id])
+  saleItem    SaleItem @relation(fields: [saleItemId], references: [id])
+  unit        Unit     @relation(fields: [unitId], references: [id])
+  requestedBy User?    @relation("ReturnRequestedBy", fields: [requestedById], references: [id])
+  reviewedBy  User?    @relation("ReturnReviewedBy", fields: [reviewedById], references: [id])
+  decidedBy   User?    @relation("ReturnDecidedBy", fields: [decidedById], references: [id])
+
+  adjustments ReturnAdjustment[]
+  reversal    ReturnReversal?
+
+  @@unique([companyId, clientUuid])
+  @@index([companyId, status])
+  @@index([branchId, status])
+  @@index([saleId])
+  @@index([unitId])
+  @@index([requestedById])
+  @@map("return_requests")
+}
+
+/// An explicit charge withheld from the refund — a consumed screen protector, a
+/// retained accessory. Never inferred: accessory linkage cannot be derived from
+/// a sale carrying two phones and one accessory line (docs/27 §16.4).
+model ReturnAdjustment {
+  id              Bytes                @id @db.Binary(16)
+  companyId       Bytes                @map("company_id") @db.Binary(16)
+  returnRequestId Bytes                @map("return_request_id") @db.Binary(16)
+  kind            ReturnAdjustmentKind
+  label           String               @db.VarChar(160)
+  quantity        Int                  @default(1)
+  unitAmount      Decimal              @map("unit_amount") @db.Decimal(14, 2)
+  totalAmount     Decimal              @map("total_amount") @db.Decimal(14, 2)
+  createdById     Bytes?               @map("created_by") @db.Binary(16)
+  createdAt       DateTime             @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt       DateTime             @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company   Company       @relation(fields: [companyId], references: [id])
+  request   ReturnRequest @relation(fields: [returnRequestId], references: [id])
+  createdBy User?         @relation("ReturnAdjustmentBy", fields: [createdById], references: [id])
+
+  @@index([returnRequestId])
+  @@index([companyId])
+  @@map("return_adjustments")
+}
+
+/// The immutable money record, written once at approval.
+///
+/// Append-only for the application account, enforced by database triggers in
+/// the same shape as `audit_logs` (0028). Every figure is a SNAPSHOT of the
+/// original sale line, so the reversal stays true when catalogue prices and
+/// costs move afterwards.
+model ReturnReversal {
+  id              Bytes @id @db.Binary(16)
+  companyId       Bytes @map("company_id") @db.Binary(16)
+  branchId        Bytes @map("branch_id") @db.Binary(16)
+  saleId          Bytes @map("sale_id") @db.Binary(16)
+  saleItemId      Bytes @map("sale_item_id") @db.Binary(16)
+  unitId          Bytes @map("unit_id") @db.Binary(16)
+  returnRequestId Bytes @map("return_request_id") @db.Binary(16)
+
+  lineRevenue Decimal @map("line_revenue") @db.Decimal(14, 2)
+  lineCost    Decimal @map("line_cost") @db.Decimal(14, 2)
+  lineMargin  Decimal @map("line_margin") @db.Decimal(14, 2)
+
+  grossRefund     Decimal @map("gross_refund") @db.Decimal(14, 2)
+  adjustmentTotal Decimal @default(0) @map("adjustment_total") @db.Decimal(14, 2)
+  netRefundDue    Decimal @map("net_refund_due") @db.Decimal(14, 2)
+
+  /// The business date this reversal belongs to — the approval day, never the
+  /// sale's day. That is what lets the original day stay untouched.
+  approvalDate DateTime @map("approval_date") @db.Date
+  approvedById Bytes?   @map("approved_by") @db.Binary(16)
+  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  company    Company       @relation(fields: [companyId], references: [id])
+  branch     Branch        @relation(fields: [branchId], references: [id])
+  sale       Sale          @relation(fields: [saleId], references: [id])
+  saleItem   SaleItem      @relation(fields: [saleItemId], references: [id])
+  unit       Unit          @relation(fields: [unitId], references: [id])
+  request    ReturnRequest @relation(fields: [returnRequestId], references: [id])
+  approvedBy User?         @relation("ReturnApprovedBy", fields: [approvedById], references: [id])
+
+  @@unique([saleItemId])
+  @@unique([returnRequestId])
+  @@index([branchId, approvalDate])
+  @@index([companyId, approvalDate])
+  @@map("return_reversals")
 }

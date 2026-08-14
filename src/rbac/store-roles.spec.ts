@@ -32,8 +32,11 @@ describe('store-facing roles', () => {
 
   it('leaves Owner with full access, now including price.edit', () => {
     // 19 before H1.2, plus the seven transfer keys that replaced the blanket one.
-    // 26 → 28 in I1: `sale.view` and `return.policy.override`.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(28);
+    // 26 → 28 in I1 (`sale.view`, `return.policy.override`), 28 → 34 in I2:
+    // the six return-workflow keys. The Owner holds every permission by
+    // construction, so this number moving is the signal that a phase added
+    // authority — it should never move by accident.
+    expect(ROLE_PERMISSIONS.owner.length).toBe(34);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);

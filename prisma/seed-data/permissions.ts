@@ -15,6 +15,15 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'sale.return',         label: 'Process returns' },
   { key: 'sale.view',           label: 'View sales history' },
   { key: 'return.policy.override', label: 'Change the return policy at sale time' },
+  // I2 — the reviewed return workflow. Six narrow keys instead of one blunt
+  // `sale.return`: raising a complaint, investigating it and deciding it are
+  // three different authorities held by three different people.
+  { key: 'return.view',         label: 'View returns' },
+  { key: 'return.request',      label: 'Raise a return request' },
+  { key: 'return.review',       label: 'Investigate and assign responsibility' },
+  { key: 'return.approve',      label: 'Approve a return (creates a refund obligation)' },
+  { key: 'return.reject',       label: 'Reject a return' },
+  { key: 'return.exception',    label: 'Approve outside policy, or against customer damage' },
   { key: 'cost.view',           label: 'View cost & profit' },
   { key: 'discount.apply',      label: 'Apply discounts (within limit)' },
   { key: 'discount.override',   label: 'Override discount limits' },
@@ -102,6 +111,13 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      * authority and is deliberately not granted here.
      */
     'sale.view', 'return.policy.override',
+    /**
+     * I2: a manager runs the return workflow end to end — but NOT
+     * `return.exception`. Approving outside the window the shop promised, or
+     * overriding customer-caused damage, is the Owner's call. That is the whole
+     * point of splitting approval from exception.
+     */
+    'return.view', 'return.request', 'return.review', 'return.approve', 'return.reject',
     'unit.add', 'import.run',
     'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
@@ -162,7 +178,13 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     // I1: an employee may browse the branch's own sale history. Deliberately
     // NOT `report.view` — seeing what was sold is not seeing profit — and NOT
     // `return.policy.override`, which is authority rather than operation.
-    'sale.view'
+    'sale.view',
+    /**
+     * I2: the person who takes the complaint at the counter records it and can
+     * follow it. Deciding it is somebody else's job, deliberately — an employee
+     * holds neither review, approve, reject nor exception.
+     */
+    'return.view', 'return.request'
   ],
 
   administrator: ADMIN_KEYS,

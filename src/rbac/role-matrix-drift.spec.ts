@@ -103,6 +103,37 @@ function grantedInRoleListSql(sql: string, roleKey: string): string[] {
   ].sort();
 }
 
+/**
+ * Permission keys granted by a migration that names ONE role and SEVERAL
+ * permissions: `JOIN permissions p ON p.key IN ('a','b') … WHERE r.key = '<role>'`.
+ *
+ * The inverse of `grantedInRoleListSql`. `0036` grants six return keys to the
+ * Owner in one statement and five to the Store Manager in another, which no
+ * earlier reader could see — so the matrix looked like it had drifted when it
+ * had not. Four readers for four shapes is more code than one loose regex, and
+ * it is the reason this test can still be trusted: each reader knows exactly
+ * what it is looking at, so a shape nobody taught it fails loudly instead of
+ * silently returning nothing.
+ */
+function grantedInPermissionListSql(sql: string, roleKey: string): string[] {
+  const blocks = sql
+    .split('INSERT INTO \`role_permissions\`')
+    .slice(1)
+    .map((b) => b.split('DELETE rp FROM')[0]);
+  return [
+    ...new Set(
+      blocks
+        .filter((b) => new RegExp(`r\\.\`key\` = '${roleKey}'`).test(b))
+        .flatMap((b) => {
+          const start = b.indexOf('IN (');
+          if (start < 0) return [];
+          const list = b.slice(start, b.indexOf(')', start));
+          return [...list.matchAll(/'([a-z._]+)'/g)].map((m) => m[1]);
+        }),
+    ),
+  ].sort();
+}
+
 describe('role matrix — SQL and TypeScript must agree', () => {
   const backfill = sqlOf('0017_store_role_backfill');
   const revoke = sqlOf('0018_store_role_revoke');
@@ -113,6 +144,7 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0031_transfer_permissions_and_lifecycle'),
     sqlOf('0032_manager_cancel_route_permission'),
     sqlOf('0035_sale_return_policy_and_view_permissions'),
+    sqlOf('0036_returns_workflow'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from
@@ -129,6 +161,7 @@ describe('role matrix — SQL and TypeScript must agree', () => {
         ...grantedInSql(backfill, role),
         ...laterGrants.flatMap((sql) => grantedInKeyedSql(sql, role)),
         ...laterGrants.flatMap((sql) => grantedInRoleListSql(sql, role)),
+        ...laterGrants.flatMap((sql) => grantedInPermissionListSql(sql, role)),
       ]);
       for (const sql of revocations) {
         for (const key of revokedInSql(sql, role)) granted.delete(key);
