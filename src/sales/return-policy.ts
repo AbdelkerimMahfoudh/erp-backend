@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { RETURN_WINDOW_MAX_HOURS, RETURN_WINDOW_NONE } from '../settings/settings.constants';
 
 /**
  * The return policy a sale is sold under, and whether a return is still open.
@@ -20,10 +21,17 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
  * trust what a screen was showing.
  */
 
+/**
+ * The bounds come from the Settings module rather than being restated here.
+ * The same numbers already govern what an Owner may save, and
+ * `settings.constants` says why in its own header: a rule enforced in several
+ * places drifts, and a maximum that drifts is a maximum that is not enforced.
+ * A sale must never be able to carry a window the shop could not have set.
+ */
 /** `0` means the shop accepts no returns at all. */
-export const NO_RETURNS = 0;
+export const NO_RETURNS = RETURN_WINDOW_NONE;
 /** A year. Beyond this a "window" is not a policy, it is a liability. */
-export const MAX_WINDOW_HOURS = 8760;
+export const MAX_WINDOW_HOURS = RETURN_WINDOW_MAX_HOURS;
 
 export interface ReturnPolicySnapshot {
   windowHours: number;

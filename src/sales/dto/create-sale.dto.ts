@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentMethod } from '@prisma/client';
 import { Type } from 'class-transformer';
+import { RETURN_WINDOW_MAX_HOURS, RETURN_WINDOW_NONE } from '../../settings/settings.constants';
 import {
   ArrayMinSize,
   IsArray,
@@ -10,6 +11,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
@@ -93,6 +95,33 @@ export class CreateSaleDto {
   @IsString()
   @MaxLength(255)
   overrideReason?: string;
+
+  /**
+   * The return window THIS sale is sold under, in hours.
+   *
+   * Omitted, or equal to the shop's default, means the ordinary policy — the
+   * Sell screen echoes what it displayed, and that must not count as an
+   * override or every sale would need a reason. Anything else requires
+   * `return.policy.override` and `returnPolicyReason`, and is refused rather
+   * than quietly downgraded: an employee must never be told a sale succeeded
+   * under a policy it does not have.
+   */
+  @ApiPropertyOptional({
+    minimum: RETURN_WINDOW_NONE,
+    maximum: RETURN_WINDOW_MAX_HOURS,
+    description: 'Return window in hours for this sale. 0 = no returns. Manager/Owner only when it differs from the shop default.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(RETURN_WINDOW_NONE)
+  @Max(RETURN_WINDOW_MAX_HOURS)
+  returnWindowHours?: number;
+
+  @ApiPropertyOptional({ maxLength: 255, description: 'Why this sale has a different return policy' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  returnPolicyReason?: string;
 
   @ApiPropertyOptional({ format: 'uuid', description: 'Offline idempotency key' })
   @IsOptional()

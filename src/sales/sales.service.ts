@@ -21,7 +21,7 @@ import { PricingService } from '../pricing/pricing.service';
 import { SalesPolicyService } from './sales-policy.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
-import { evaluateEligibility } from './return-policy';
+import { evaluateEligibility, NO_RETURNS, resolveWindowForSale, snapshotPolicy } from './return-policy';
 import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
 
 /** Every value the filters accept, kept next to the enums they mirror. */
@@ -74,7 +74,16 @@ export class SalesService {
       }
     }
 
-    let result: { saleId: Buffer; invoiceNo: string; total: number; margin: number; balanceDue: number; payStatus: Sale['payStatus'] };
+    let result: {
+      saleId: Buffer;
+      invoiceNo: string;
+      total: number;
+      margin: number;
+      balanceDue: number;
+      payStatus: Sale['payStatus'];
+      returnWindowHours: number;
+      returnDeadlineAt: Date | null;
+    };
     try {
       result = await this.db.$transaction(async (tx) => {
         const prepared: PreparedLine[] = [];
@@ -177,6 +186,35 @@ export class SalesService {
           branchId,
         );
 
+        /**
+         * The return policy this sale is sold under, decided HERE and written
+         * once.
+         *
+         * `soldAt` and the deadline come from the same instant, so the two can
+         * never disagree, and both come from the server: a phone's clock
+         * deciding how long a customer has to bring something back is a promise
+         * made by the wrong machine.
+         *
+         * The company setting is read inside the transaction, so a sale cannot
+         * snapshot a window that was changed a moment earlier and half-applied.
+         */
+        const soldAt = new Date();
+        const settings = await tx.companySettings.findUnique({
+          where: { companyId },
+          select: { returnWindowHours: true },
+        });
+        const resolvedPolicy = resolveWindowForSale({
+          // A company with no settings row has never chosen a policy, and
+          // "no returns" is the schema default rather than an invented promise.
+          companyDefaultHours: settings?.returnWindowHours ?? NO_RETURNS,
+          requested:
+            dto.returnWindowHours === undefined
+              ? undefined
+              : { windowHours: dto.returnWindowHours, reason: dto.returnPolicyReason },
+          canOverride: this.cls.get('permissions')?.has('return.policy.override') ?? false,
+        });
+        const policySnapshot = snapshotPolicy(soldAt, resolvedPolicy.windowHours);
+
         const saleId = newUuidV7Bin();
         await tx.sale.create({
           data: {
@@ -186,7 +224,7 @@ export class SalesService {
             userId,
             customerId: dto.customerId ? uuidToBin(dto.customerId) : null,
             invoiceNo,
-            soldAt: new Date(),
+            soldAt,
             subtotal,
             discount: discountTotal,
             taxTotal: 0,
@@ -196,6 +234,13 @@ export class SalesService {
             amountPaid,
             balanceDue,
             payStatus,
+            returnWindowHours: policySnapshot.windowHours,
+            returnDeadlineAt: policySnapshot.deadlineAt,
+            // Recorded only for a real change, so the column answers "who
+            // decided this sale was different?" rather than naming whoever
+            // happened to serve an ordinary customer.
+            returnPolicyOverriddenById: resolvedPolicy.overridden ? userId : null,
+            returnPolicyOverrideReason: resolvedPolicy.overrideReason,
             clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
           },
         });
@@ -310,6 +355,34 @@ export class SalesService {
             branchId,
           });
         }
+        if (resolvedPolicy.overridden) {
+          /**
+           * A row of its own, not merged into the below-cost override above:
+           * they are different decisions, possibly by different people, and one
+           * row could answer "why was this sale different?" in only one of the
+           * two senses.
+           *
+           * `action` stays `override` — the existing enum value means exactly
+           * this, someone with authority departing from a default and saying
+           * why. Adding an enum member would be a schema change for a label,
+           * outside what this phase is authorised to migrate; `field` carries
+           * the distinction instead, explicitly rather than left to be inferred
+           * from the shape of the payload.
+           */
+          await this.audit.recordTx(tx, {
+            entityType: 'Sale',
+            entityId: saleId,
+            action: 'override',
+            reason: resolvedPolicy.overrideReason ?? undefined,
+            before: { field: 'returnPolicy', returnWindowHours: settings?.returnWindowHours ?? NO_RETURNS },
+            after: {
+              field: 'returnPolicy',
+              returnWindowHours: policySnapshot.windowHours,
+              returnDeadlineAt: policySnapshot.deadlineAt,
+            },
+            branchId,
+          });
+        }
 
         // In-app notification, atomic with the sale.
         await tx.notification.create({
@@ -325,7 +398,16 @@ export class SalesService {
           },
         });
 
-        return { saleId, invoiceNo, total, margin, balanceDue, payStatus };
+        return {
+          saleId,
+          invoiceNo,
+          total,
+          margin,
+          balanceDue,
+          payStatus,
+          returnWindowHours: policySnapshot.windowHours,
+          returnDeadlineAt: policySnapshot.deadlineAt,
+        };
       });
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
@@ -351,6 +433,12 @@ export class SalesService {
       margin: result.margin,
       balanceDue: result.balanceDue,
       payStatus: result.payStatus,
+      // The receipt is printed from this response, and a receipt that does not
+      // state the return policy is how a shop ends up arguing about one.
+      returnPolicy: {
+        windowHours: result.returnWindowHours,
+        deadlineAt: result.returnDeadlineAt,
+      },
     };
   }
 
@@ -618,6 +706,12 @@ export class SalesService {
     };
   }
 
+  /**
+   * The idempotent replay of an offline retry. It must answer with the SAME
+   * policy the original sale carried — re-deriving it from today's setting
+   * would let a retry print a different promise from the one already given to
+   * the customer.
+   */
   private toResponse(sale: Sale) {
     return {
       id: binToUuid(sale.id),
@@ -626,6 +720,10 @@ export class SalesService {
       margin: Number(sale.margin),
       balanceDue: Number(sale.balanceDue),
       payStatus: sale.payStatus,
+      returnPolicy: {
+        windowHours: sale.returnWindowHours,
+        deadlineAt: sale.returnDeadlineAt,
+      },
     };
   }
 }
