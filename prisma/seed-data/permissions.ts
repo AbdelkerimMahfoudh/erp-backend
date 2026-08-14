@@ -13,6 +13,8 @@ export type RoleKey =
 export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'sale.create',         label: 'Create sales' },
   { key: 'sale.return',         label: 'Process returns' },
+  { key: 'sale.view',           label: 'View sales history' },
+  { key: 'return.policy.override', label: 'Change the return policy at sale time' },
   { key: 'cost.view',           label: 'View cost & profit' },
   { key: 'discount.apply',      label: 'Apply discounts (within limit)' },
   { key: 'discount.override',   label: 'Override discount limits' },
@@ -94,6 +96,12 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
    */
   store_manager: [
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
+    /**
+     * I1: reading sale history, and changing the return policy AT SALE TIME.
+     * Overriding an EXPIRED deadline after the fact is a different, Owner-only
+     * authority and is deliberately not granted here.
+     */
+    'sale.view', 'return.policy.override',
     'unit.add', 'import.run',
     'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
@@ -151,6 +159,10 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      */
     'transfer.view', 'transfer.request', 'transfer.ship',
     'transfer.receive', 'transfer.cancel_own',
+    // I1: an employee may browse the branch's own sale history. Deliberately
+    // NOT `report.view` — seeing what was sold is not seeing profit — and NOT
+    // `return.policy.override`, which is authority rather than operation.
+    'sale.view'
   ],
 
   administrator: ADMIN_KEYS,

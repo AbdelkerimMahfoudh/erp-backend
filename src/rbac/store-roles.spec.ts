@@ -32,7 +32,8 @@ describe('store-facing roles', () => {
 
   it('leaves Owner with full access, now including price.edit', () => {
     // 19 before H1.2, plus the seven transfer keys that replaced the blanket one.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(26);
+    // 26 → 28 in I1: `sale.view` and `return.policy.override`.
+    expect(ROLE_PERMISSIONS.owner.length).toBe(28);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);

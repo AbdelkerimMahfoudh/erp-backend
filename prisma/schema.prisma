@@ -306,6 +306,7 @@ model User {
   purchases         Purchase[]
   supplierPayments  SupplierPayment[]
   sales             Sale[]
+  returnPolicyOverrides Sale[] @relation("SaleReturnPolicyOverride")
   returns           Return[]
   transfersSent     StockTransfer[]    @relation("TransferSentBy")
   transfersReceived StockTransfer[]    @relation("TransferReceivedBy")
@@ -873,6 +874,22 @@ model Sale {
   payStatus  SalePayStatus @default(paid) @map("pay_status")
   dueDate    DateTime?     @map("due_date") @db.Date
   isReversed Boolean       @default(false) @map("is_reversed")
+
+  /// The return policy THIS sale was sold under, snapshotted at completion
+  /// (I1). `0` means no returns. Deliberately not read from
+  /// `company_settings` at return time: an Owner shortening the window
+  /// tomorrow must not retroactively cancel a right already promised, and
+  /// lengthening it must not silently grant one nobody offered.
+  returnWindowHours Int @default(0) @map("return_window_hours")
+  /// `soldAt + returnWindowHours`, computed by the SERVER in UTC and never
+  /// updated. NULL when the window is 0 — "no deadline" and "deadline passed"
+  /// are different facts and must not share a representation. A CHECK keeps
+  /// the pair consistent.
+  returnDeadlineAt DateTime? @map("return_deadline_at") @db.DateTime(6)
+  /// Set only when a Manager or Owner changed the policy at sale time.
+  returnPolicyOverriddenById Bytes?  @map("return_policy_overridden_by") @db.Binary(16)
+  returnPolicyOverrideReason String? @map("return_policy_override_reason") @db.VarChar(255)
+
   clientUuid Bytes?        @map("client_uuid") @db.Binary(16)
   createdAt  DateTime      @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt  DateTime      @updatedAt @map("updated_at") @db.DateTime(6)
@@ -881,12 +898,14 @@ model Sale {
   branch   Branch    @relation(fields: [branchId], references: [id])
   user     User      @relation(fields: [userId], references: [id])
   customer Customer? @relation(fields: [customerId], references: [id])
+  returnPolicyOverriddenBy User? @relation("SaleReturnPolicyOverride", fields: [returnPolicyOverriddenById], references: [id])
   items    SaleItem[]
   payments Payment[]
   returns  Return[]
 
   @@unique([branchId, invoiceNo])
   @@unique([companyId, clientUuid])
+  @@index([companyId, returnDeadlineAt], map: "sales_return_deadline_idx")
   @@index([companyId, branchId, soldAt])
   @@index([companyId, userId, soldAt])
   @@index([customerId])

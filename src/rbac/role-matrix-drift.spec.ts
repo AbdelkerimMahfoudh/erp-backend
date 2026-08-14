@@ -79,6 +79,30 @@ function grantedInKeyedSql(sql: string, roleKey: string): string[] {
   ].sort();
 }
 
+/**
+ * Permission keys granted by a migration that names SEVERAL roles at once:
+ * `JOIN permissions p ON p.key = '<key>' … WHERE r.key IN ('a','b')`.
+ *
+ * `0035` grants `sale.view` to three roles in one statement, which neither
+ * earlier reader could see — so the matrix looked like it had drifted when it
+ * had not. Extending the reader is the fix; loosening the assertion would throw
+ * away the guarantee this test exists for.
+ */
+function grantedInRoleListSql(sql: string, roleKey: string): string[] {
+  const blocks = sql
+    .split('INSERT INTO `role_permissions`')
+    .slice(1)
+    .map((b) => b.split('DELETE rp FROM')[0]);
+  const namesRole = new RegExp(`r\\.\`key\`\\s+IN\\s*\\([^)]*'${roleKey}'`);
+  return [
+    ...new Set(
+      blocks
+        .filter((b) => namesRole.test(b))
+        .flatMap((b) => [...b.matchAll(/p\.`key` = '([a-z._]+)'/g)].map((m) => m[1])),
+    ),
+  ].sort();
+}
+
 describe('role matrix — SQL and TypeScript must agree', () => {
   const backfill = sqlOf('0017_store_role_backfill');
   const revoke = sqlOf('0018_store_role_revoke');
@@ -88,6 +112,7 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0026_catalog_manage_permission'),
     sqlOf('0031_transfer_permissions_and_lifecycle'),
     sqlOf('0032_manager_cancel_route_permission'),
+    sqlOf('0035_sale_return_policy_and_view_permissions'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from
@@ -103,6 +128,7 @@ describe('role matrix — SQL and TypeScript must agree', () => {
       const granted = new Set([
         ...grantedInSql(backfill, role),
         ...laterGrants.flatMap((sql) => grantedInKeyedSql(sql, role)),
+        ...laterGrants.flatMap((sql) => grantedInRoleListSql(sql, role)),
       ]);
       for (const sql of revocations) {
         for (const key of revokedInSql(sql, role)) granted.delete(key);
