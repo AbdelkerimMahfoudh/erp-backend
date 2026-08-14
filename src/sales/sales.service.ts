@@ -20,7 +20,6 @@ import { canTransition } from '../inventory/unit-state-machine';
 import { PricingService } from '../pricing/pricing.service';
 import { SalesPolicyService } from './sales-policy.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
-import { ReturnSaleDto } from './dto/return-sale.dto';
 
 interface PreparedLine {
   unitId?: Buffer;
@@ -348,81 +347,14 @@ export class SalesService {
     };
   }
 
-  async returnUnit(saleIdStr: string, dto: ReturnSaleDto) {
-    const companyId = this.tenant.companyId();
-    const branchId = this.tenant.branchId() ?? undefined;
-    const saleId = uuidToBin(saleIdStr);
-
-    const sale = await this.db.sale.findUnique({ where: { id: saleId } });
-    if (!sale) throw new NotFoundException('Sale not found');
-    const unit = await this.db.unit.findFirst({
-      where: { OR: [{ imeiPrimary: dto.identifier }, { serialNo: dto.identifier }] },
-    });
-    if (!unit) throw new NotFoundException('Unit not found');
-    const item = await this.db.saleItem.findFirst({
-      where: { saleId, unitId: unit.id, voided: false },
-    });
-    if (!item) throw new NotFoundException('This unit is not on an active line of this sale');
-
-    const restock = dto.restock ?? true;
-    const finalStatus = restock ? 'in_stock' : 'faulty';
-    if (!canTransition(unit.status, 'returned') || !canTransition('returned', finalStatus)) {
-      throw new ConflictException(`Cannot return a unit that is '${unit.status}'`);
-    }
-    const refund = dto.refundAmount ?? this.policy.round(Number(item.price) * item.quantity - Number(item.discount));
-
-    return this.db.$transaction(async (tx) => {
-      await tx.saleItem.update({ where: { id: item.id }, data: { voided: true } });
-      await tx.unit.update({ where: { id: unit.id }, data: { status: finalStatus, dateSold: null } });
-
-      await tx.return.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId,
-          saleId,
-          saleItemId: item.id,
-          unitId: unit.id,
-          reason: dto.reason ?? null,
-          refundAmount: refund,
-          restock,
-        },
-      });
-
-      const newTotal = this.policy.round(
-        Number(sale.total) - (Number(item.price) * item.quantity - Number(item.discount)),
-      );
-      const newTotalCost = this.policy.round(Number(sale.totalCost) - Number(item.cost) * item.quantity);
-      const remaining = await tx.saleItem.count({ where: { saleId, voided: false } });
-      await tx.sale.update({
-        where: { id: saleId },
-        data: {
-          total: newTotal,
-          totalCost: newTotalCost,
-          margin: this.policy.round(newTotal - newTotalCost),
-          isReversed: remaining === 0,
-        },
-      });
-
-      await this.audit.recordTx(tx, {
-        entityType: 'Return',
-        entityId: unit.id,
-        action: 'create',
-        after: { identifier: dto.identifier, refund },
-        branchId,
-      });
-      await this.audit.recordTx(tx, {
-        entityType: 'Unit',
-        entityId: unit.id,
-        action: 'status_change',
-        before: { status: 'sold' },
-        after: { status: finalStatus },
-        branchId,
-      });
-
-      return { returned: dto.identifier, refund, saleReversed: remaining === 0 };
-    });
-  }
-
+  /**
+   * `returnUnit` was removed in I1.
+   *
+   * It voided the sale line, rewrote the original sale's totals, restocked a
+   * defective phone by default and accepted any refund amount the caller sent.
+   * The replacement is the reviewed ReturnRequest lifecycle (I2); until then
+   * the route answers 410 and writes nothing. See `docs/27`.
+   */
   list() {
     const branchId = this.tenant.branchId();
     return this.db.sale.findMany({
