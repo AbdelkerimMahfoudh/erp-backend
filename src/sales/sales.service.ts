@@ -81,6 +81,7 @@ export class SalesService {
       margin: number;
       balanceDue: number;
       payStatus: Sale['payStatus'];
+      soldAt: Date;
       returnWindowHours: number;
       returnDeadlineAt: Date | null;
     };
@@ -405,6 +406,7 @@ export class SalesService {
           margin,
           balanceDue,
           payStatus,
+          soldAt,
           returnWindowHours: policySnapshot.windowHours,
           returnDeadlineAt: policySnapshot.deadlineAt,
         };
@@ -433,8 +435,12 @@ export class SalesService {
       margin: result.margin,
       balanceDue: result.balanceDue,
       payStatus: result.payStatus,
-      // The receipt is printed from this response, and a receipt that does not
-      // state the return policy is how a shop ends up arguing about one.
+      // The receipt used to timestamp itself with the phone's clock. The sale
+      // time and the deadline measured from it must come from the same machine,
+      // and it is not the one in the customer's hand.
+      soldAt: result.soldAt,
+      // A receipt that does not state the return policy is how a shop ends up
+      // arguing about one.
       returnPolicy: {
         windowHours: result.returnWindowHours,
         deadlineAt: result.returnDeadlineAt,
@@ -720,6 +726,7 @@ export class SalesService {
       margin: Number(sale.margin),
       balanceDue: Number(sale.balanceDue),
       payStatus: sale.payStatus,
+      soldAt: sale.soldAt,
       returnPolicy: {
         windowHours: sale.returnWindowHours,
         deadlineAt: sale.returnDeadlineAt,
