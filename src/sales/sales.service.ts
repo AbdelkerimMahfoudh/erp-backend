@@ -14,7 +14,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
 import { SpineEventBus } from '../common/events/spine-event-bus';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { canTransition } from '../inventory/unit-state-machine';
 import { PricingService } from '../pricing/pricing.service';
@@ -629,6 +629,16 @@ export class SalesService {
    */
   async getById(idStr: string) {
     const branchId = this.tenant.requireBranchId();
+    /**
+     * A malformed id is a FOURTH way in, and it must answer like the other
+     * three. `uuidToBin` throws a plain Error on anything that is not a UUID,
+     * which Nest turns into a 500 — found by live verification, not by the
+     * suite. That is worse than untidy: a 500 tells a caller "that id was
+     * structurally invalid" while a real-but-not-yours id says 404, and the
+     * difference is exactly the signal the identical-404 rule below exists to
+     * withhold. Same guard as `devices.service`.
+     */
+    if (!isUuid(idStr)) throw new NotFoundException('Sale not found');
     const sale = await this.db.sale.findUnique({
       where: { id: uuidToBin(idStr) },
       include: {

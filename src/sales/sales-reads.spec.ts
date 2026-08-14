@@ -353,6 +353,28 @@ describe('the detail read fails closed, and identically', () => {
   });
 
   /**
+   * A FOURTH way in, and the one the test suite missed entirely: `uuidToBin`
+   * throws a plain Error on anything that is not a UUID, which Nest turns into
+   * a 500. Live verification found it — 62 suites had not.
+   *
+   * A 500 here is not merely untidy. It tells the caller "that id was
+   * structurally invalid" where a real-but-not-yours id says 404, and that
+   * difference is exactly the signal the identical-404 rule exists to withhold.
+   */
+  it('answers the same 404 for a malformed id, never a 500', async () => {
+    const { service, recorded } = makeService({ unique: detailRow() });
+    const unknown = makeService({ unique: null });
+
+    for (const bad of ['not-a-uuid', '', '123', '019fc5c9-0000-7000-8000', "'; DROP TABLE sales;--"]) {
+      const e = await service.getById(bad).catch((err) => err);
+      expect(e).toBeInstanceOf(NotFoundException);
+      expect(e.message).toBe((await unknown.service.getById(id).catch((err) => err)).message);
+    }
+    // And it never reaches the database at all.
+    expect(recorded.findUnique).toHaveLength(0);
+  });
+
+  /**
    * Cross-company is handled one layer down: the tenant extension injects
    * `companyId` into the unique lookup, so another company's sale is simply not
    * found. What this asserts is that the service does not defeat that by
