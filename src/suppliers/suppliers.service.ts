@@ -13,7 +13,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { AppClsStore } from '../common/context/request-context';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import {
   allocateOldestFirst,
   assertAllocationFits,
@@ -674,6 +674,7 @@ export class SuppliersService {
   }
 
   async settlement(idStr: string) {
+    if (!isUuid(idStr)) throw new NotFoundException('Payment not found');
     const s = await this.db.supplierSettlement.findUnique({
       where: { id: uuidToBin(idStr) },
       include: {
@@ -715,6 +716,10 @@ export class SuppliersService {
   // ──────────────────────────────── helpers ──────────────────────────────────
 
   private async load(idStr: string) {
+    // A malformed id cannot name anything, so it is a 404 — not the 500 that
+    // `uuidToBin` throwing would otherwise produce. The returns module already
+    // guards this way; suppliers did not, and a live probe found it.
+    if (!isUuid(idStr)) throw new NotFoundException('Supplier not found');
     const supplier = await this.db.supplier.findUnique({ where: { id: uuidToBin(idStr) } });
     // Unknown, another company's and a malformed id all answer the same 404.
     if (!supplier) throw new NotFoundException('Supplier not found');
@@ -722,6 +727,7 @@ export class SuppliersService {
   }
 
   private async loadSettlement(idStr: string) {
+    if (!isUuid(idStr)) throw new NotFoundException('Payment not found');
     const s = await this.db.supplierSettlement.findUnique({ where: { id: uuidToBin(idStr) } });
     if (!s) throw new NotFoundException('Payment not found');
     return s;
