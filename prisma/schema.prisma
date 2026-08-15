@@ -232,6 +232,8 @@ model Company {
   recognitionOutbox RecognitionOutbox[]
 
   @@map("companies")
+  supplierSettlements SupplierSettlement[]
+  supplierSettlementAllocations SupplierSettlementAllocation[]
 }
 
 model Branch {
@@ -272,6 +274,7 @@ model Branch {
 
   @@unique([companyId, name]) // company_id is the leftmost column → covers company scans
   @@map("branches")
+  supplierSettlements SupplierSettlement[]
 }
 
 model User {
@@ -343,6 +346,8 @@ model User {
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
   @@map("users")
+  settlementsReported  SupplierSettlement[] @relation("SettlementReportedBy")
+  settlementsConfirmed SupplierSettlement[] @relation("SettlementConfirmedBy")
 }
 
 model Role {
@@ -729,6 +734,13 @@ model Supplier {
   name      String    @db.VarChar(160)
   phone     String?   @db.VarChar(40)
   notes     String?   @db.Text
+  /// A CACHE, not the truth (`0039`).
+  ///
+  /// Outstanding payable is derived from immutable rows: purchase totals minus
+  /// confirmed payment allocations. This counter is maintained for
+  /// compatibility and compared against the derived figure by a drift test, but
+  /// nothing decides anything from it — a debt that lives in a mutable counter
+  /// is a debt that can silently disappear.
   balance   Decimal   @default(0) @db.Decimal(14, 2)
   createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
@@ -738,6 +750,7 @@ model Supplier {
   purchases Purchase[]
   units     Unit[]
   payments  SupplierPayment[]
+  settlements SupplierSettlement[]
 
   @@unique([companyId, name]) // company_id leftmost → covers company scans
   @@map("suppliers")
@@ -772,6 +785,7 @@ model Purchase {
   items    PurchaseItem[]
   units    Unit[]
   payments SupplierPayment[]
+  allocations SupplierSettlementAllocation[]
 
   @@index([companyId, branchId, date])
   @@index([supplierId])
@@ -1484,6 +1498,7 @@ model ReceivingAccount {
   @@unique([companyId, label])
   @@index([companyId, isActive, sortOrder])
   @@map("receiving_accounts")
+  supplierSettlements SupplierSettlement[]
 }
 
 model SyncDevice {
@@ -2167,7 +2182,7 @@ model RefundPayout {
   branch           Branch            @relation(fields: [branchId], references: [id])
   request          ReturnRequest     @relation(fields: [returnRequestId], references: [id])
   reversal         ReturnReversal    @relation(fields: [returnReversalId], references: [id])
-  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
+  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   reportedBy       User?             @relation("RefundReportedBy", fields: [reportedById], references: [id])
   confirmedBy      User?             @relation("RefundConfirmedBy", fields: [confirmedById], references: [id])
 
@@ -2178,4 +2193,104 @@ model RefundPayout {
   @@index([branchId, confirmationDate])
   @@index([companyId, status])
   @@map("refund_payouts")
+}
+
+// ───────────────────────── Supplier settlement (J1) ─────────────────────────
+
+/// Where a settlement is in the two-person workflow.
+///
+/// `reported` is a CLAIM by whoever handed the money over. Only `confirmed`
+/// moves cash, settles liability and reaches reconciliation. There is no third
+/// state: a rejected report is deleted while it is still only a claim, and a
+/// confirmed one is never edited (see `docs/28` §4).
+enum SupplierSettlementStatus {
+  reported
+  confirmed
+}
+
+/// Money paid to a supplier — reported by one person, confirmed by another.
+///
+/// Deliberately NOT the existing `SupplierPayment`, and deliberately not the
+/// I3 `RefundPayout` generalised. A refund is one per return with a locked
+/// amount and no allocation; this is many per supplier, partial, and split
+/// across several purchases. One table for both would make the amount rule
+/// conditional on a type column, which is how invariants stop being enforced.
+///
+/// The app RECORDS a payment. It moves no money, calls no provider and holds no
+/// credential.
+model SupplierSettlement {
+  id         Bytes  @id @db.Binary(16)
+  companyId  Bytes  @map("company_id") @db.Binary(16)
+  /// The branch that paid. The debt is company-wide; the till is not.
+  branchId   Bytes  @map("branch_id") @db.Binary(16)
+  supplierId Bytes  @map("supplier_id") @db.Binary(16)
+
+  status SupplierSettlementStatus @default(reported)
+  /// Total handed over. Must equal the sum of its allocations, and may never
+  /// exceed what is outstanding — checked against committed rows at confirmation.
+  amount Decimal @db.Decimal(14, 2)
+  method RefundMethod
+
+  receivingAccountId Bytes? @map("receiving_account_id") @db.Binary(16)
+  /// The account label as it read when the settlement was REPORTED, frozen at
+  /// confirmation. A later rename must not retitle a movement that happened.
+  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+
+  transactionReference String? @map("transaction_reference") @db.VarChar(120)
+  note                 String? @db.VarChar(255)
+
+  /// Optimistic concurrency: two managers confirming one report, one winner.
+  version Int @default(0)
+
+  /// Mandatory. An offline retry must not record two payments.
+  clientUuid        Bytes  @map("client_uuid") @db.Binary(16)
+  clientRequestHash String @map("client_request_hash") @db.Char(64)
+
+  reportedById Bytes?    @map("reported_by") @db.Binary(16)
+  reportedAt   DateTime  @default(now()) @map("reported_at") @db.DateTime(6)
+  confirmedById Bytes?   @map("confirmed_by") @db.Binary(16)
+  confirmedAt   DateTime? @map("confirmed_at") @db.DateTime(6)
+  /// The business date the cash movement belongs to — the CONFIRMATION day,
+  /// never the report day. That is what reconciliation reads.
+  confirmationDate DateTime? @map("confirmation_date") @db.Date
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company         Company          @relation(fields: [companyId], references: [id])
+  branch          Branch           @relation(fields: [branchId], references: [id])
+  supplier        Supplier         @relation(fields: [supplierId], references: [id])
+  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
+  reportedBy      User?            @relation("SettlementReportedBy", fields: [reportedById], references: [id])
+  confirmedBy     User?            @relation("SettlementConfirmedBy", fields: [confirmedById], references: [id])
+
+  allocations SupplierSettlementAllocation[]
+
+  @@unique([companyId, clientUuid])
+  @@index([companyId, supplierId, status])
+  @@index([companyId, branchId, confirmationDate])
+  @@map("supplier_settlements")
+}
+
+/// How much of one settlement paid down one purchase.
+///
+/// Money is never silently spread: the allocation is explicit, returned to the
+/// caller, and the only thing that reduces a purchase's outstanding balance.
+/// Purchase totals are never rewritten to express payment.
+model SupplierSettlementAllocation {
+  id           Bytes   @id @db.Binary(16)
+  companyId    Bytes   @map("company_id") @db.Binary(16)
+  settlementId Bytes   @map("settlement_id") @db.Binary(16)
+  purchaseId   Bytes   @map("purchase_id") @db.Binary(16)
+  amount       Decimal @db.Decimal(14, 2)
+
+  company    Company            @relation(fields: [companyId], references: [id])
+  settlement SupplierSettlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+  purchase   Purchase           @relation(fields: [purchaseId], references: [id])
+
+  /// One line per purchase per settlement. Two lines for the same purchase
+  /// would let a duplicate slip past an application-level check.
+  @@unique([settlementId, purchaseId])
+  @@index([companyId, purchaseId])
+  @@map("supplier_settlement_allocations")
 }
