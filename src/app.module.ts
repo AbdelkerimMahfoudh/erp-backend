@@ -34,6 +34,7 @@ import { PurchasingModule } from './purchasing/purchasing.module';
 import { PricingModule } from './pricing/pricing.module';
 import { SalesModule } from './sales/sales.module';
 import { TransfersModule } from './transfers/transfers.module';
+import { ReturnsModule } from './returns/returns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { ClosingModule } from './closing/closing.module';
@@ -131,6 +132,7 @@ import { ClosingModule } from './closing/closing.module';
     PricingModule,
     SalesModule,
     TransfersModule,
+    ReturnsModule,
     AnalyticsModule,
     ExpensesModule,
     ClosingModule,
