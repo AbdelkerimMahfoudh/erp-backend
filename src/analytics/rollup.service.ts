@@ -200,6 +200,34 @@ export class RollupService {
     const refundsPaidCash = round2(toNum(refundRows[0].paid_cash));
     const refundsPaidCount = toNum(refundRows[0].paid_count);
 
+    /**
+     * Money that came BACK because a confirmed payment was corrected
+     * (Milestone B), keyed on the correction day — never on the day of the
+     * payment it reverses.
+     *
+     * Note what is deliberately absent: the refund query above is NOT filtered
+     * to exclude corrected payouts. The original payment genuinely happened on
+     * its own day and that day's figures stand; the correction is a separate
+     * movement on a separate day. Filtering both would remove the money twice.
+     *
+     * Like a refund, this has **no profit component**. Profit was reversed at
+     * return approval and a supplier payment never had one — this moves cash
+     * and liability only.
+     */
+    const correctionRows = await this.prisma.$queryRaw<RefundPaidRow[]>(Prisma.sql`
+      SELECT COALESCE(SUM(amount), 0)                                     AS paid_total,
+             COALESCE(SUM(CASE WHEN method = 'cash' THEN amount END), 0)  AS paid_cash,
+             COUNT(*)                                                     AS paid_count
+      FROM financial_corrections
+      WHERE company_id = ${companyId}
+        AND branch_id = ${branchId}
+        AND status = 'approved'
+        AND correction_date = ${day}
+    `);
+    const correctionsTotal = round2(toNum(correctionRows[0].paid_total));
+    const correctionsCash = round2(toNum(correctionRows[0].paid_cash));
+    const correctionsCount = toNum(correctionRows[0].paid_count);
+
     const revenue = round2(toNum(totals[0].revenue));
     const cogs = round2(toNum(totals[0].cogs));
     const grossProfit = round2(revenue - cogs);
@@ -230,6 +258,9 @@ export class RollupService {
         refundsPaidTotal,
         refundsPaidCash,
         refundsPaidCount,
+        correctionsTotal,
+        correctionsCash,
+        correctionsCount,
         refreshedAt: now,
       },
       update: {
@@ -248,6 +279,9 @@ export class RollupService {
         refundsPaidTotal,
         refundsPaidCash,
         refundsPaidCount,
+        correctionsTotal,
+        correctionsCash,
+        correctionsCount,
         refreshedAt: now,
       },
     });

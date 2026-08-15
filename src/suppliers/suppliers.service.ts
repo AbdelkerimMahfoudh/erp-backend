@@ -14,6 +14,7 @@ import { AppClsStore } from '../common/context/request-context';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { settlementNotCorrected } from '../corrections/correction-sql';
 import {
   allocateOldestFirst,
   assertAllocationFits,
@@ -132,6 +133,9 @@ export class SuppliersService {
         JOIN supplier_settlement_allocations a ON a.settlement_id = s.id
        WHERE s.company_id = ${this.tenant.companyId()}
          AND s.status = 'confirmed'
+         -- A corrected payment no longer settles anything: the debt is owed
+         -- again, so it must not count as paid here (Milestone B).
+         ${settlementNotCorrected('s')}
        GROUP BY s.supplier_id`);
     const paidBy = new Map(paid.map((p) => [p.supplier_id.toString('hex'), num(p.paid)]));
 
@@ -355,6 +359,9 @@ export class SuppliersService {
        WHERE s.company_id = ${this.tenant.companyId()}
          AND s.supplier_id = ${supplierId}
          AND s.status = 'confirmed'
+         -- Per-delivery outstanding. A corrected payment stops covering the
+         -- purchases it was allocated to, exactly once (Milestone B).
+         ${settlementNotCorrected('s')}
        GROUP BY a.purchase_id`);
     const paidBy = new Map(rows.map((r) => [r.purchase_id.toString('hex'), num(r.paid)]));
 
@@ -646,6 +653,10 @@ export class SuppliersService {
             JOIN supplier_settlements st ON st.id = al.settlement_id
            WHERE st.company_id = ${companyId}
              AND st.status = 'confirmed'
+             -- Recomputing the purchase's paid status. Without this a delivery
+             -- would stay marked paid after the payment covering it was
+             -- corrected (Milestone B).
+             ${settlementNotCorrected('st')}
              AND al.purchase_id = ${a.purchaseId}`);
         const paid = num(paidRows[0]?.paid);
         await tx.purchase.update({

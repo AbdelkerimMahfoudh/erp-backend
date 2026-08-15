@@ -1209,6 +1209,10 @@ model DailyClosing {
   /// Refunds confirmed on the day this closing locked. Cash movement only.
   refundsPaidTotal         Decimal @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
   refundsPaidCash          Decimal @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
+  /// Money returned to the till because a confirmed payment was corrected
+  /// (Milestone B), keyed on the CORRECTION day — never the original payment's.
+  correctionsTotal         Decimal @default(0) @map("corrections_total") @db.Decimal(14, 2)
+  correctionsCash          Decimal @default(0) @map("corrections_cash") @db.Decimal(14, 2)
   /// Supplier payments CONFIRMED on this day (0039). A balance-sheet
   /// movement, never an expense and never COGS - it appears in no profit
   /// figure. Only the cash part left the drawer.
@@ -1722,6 +1726,11 @@ model DailyRollup {
   refundsPaidTotal Decimal @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
   refundsPaidCash  Decimal @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
   refundsPaidCount Int     @default(0) @map("refunds_paid_count")
+  /// Corrections approved on this day. No profit component: a correction moves
+  /// cash and liability only.
+  correctionsTotal Decimal @default(0) @map("corrections_total") @db.Decimal(14, 2)
+  correctionsCash  Decimal @default(0) @map("corrections_cash") @db.Decimal(14, 2)
+  correctionsCount Int     @default(0) @map("corrections_count")
   refreshedAt DateTime @map("refreshed_at") @db.DateTime(6)
 
   @@unique([branchId, day])

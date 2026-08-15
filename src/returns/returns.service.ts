@@ -18,6 +18,7 @@ import { evaluateEligibility } from '../sales/return-policy';
 import { RollupService } from '../analytics/rollup.service';
 import { dayKey } from '../common/utils/date.util';
 import { parseDateRange, parseEnumList } from '../sales/sale-query';
+import { payoutNotCorrected } from '../corrections/correction-sql';
 import { toNum } from '../analytics/held-value';
 import { ReturnNotifier } from './return-notifications';
 import {
@@ -1143,6 +1144,13 @@ export class ReturnsService {
       FROM return_reversals rv
       LEFT JOIN refund_payouts p
         ON p.return_reversal_id = rv.id AND p.status = 'confirmed'
+        /*
+         * A corrected payout stops settling its reversal, so the reversal
+         * rejoins the outstanding set (Milestone B). Placed in the JOIN rather
+         * than the WHERE deliberately: in the WHERE it would filter out the
+         * whole row and the liability would vanish instead of returning.
+         */
+        ${payoutNotCorrected('p')}
       WHERE rv.company_id = ${companyId} AND rv.branch_id = ${branchId}
         AND p.id IS NULL`);
 

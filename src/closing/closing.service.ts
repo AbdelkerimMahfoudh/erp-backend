@@ -94,7 +94,24 @@ export class ClosingService {
      */
     const supplierPaid = await this.suppliers.paidOn(branchId, dayDate);
 
-    const expectedCash = round2(num(cash._sum.amount) - refundedCash - supplierPaid.cash);
+    /**
+     * Money that came BACK today because a confirmed payment was corrected
+     * (Milestone B). It is ADDED, not subtracted: a correction is the opposite
+     * movement to the payment it reverses, so on the correction day the drawer
+     * holds more than the day's sales alone would explain.
+     *
+     * Only the cash part. An account correction never touched the drawer, the
+     * same rule refunds and supplier payments already follow.
+     *
+     * Added once, from the rollup, for the same reason `refundedCash` is: the
+     * rollup is the single place these components are computed, so a figure
+     * cannot drift between the closing and the day's analytics.
+     */
+    const correctedCash = round2(num(rollup?.correctionsCash ?? 0));
+
+    const expectedCash = round2(
+      num(cash._sum.amount) - refundedCash - supplierPaid.cash + correctedCash,
+    );
     const difference = round2(dto.countedCash - expectedCash);
 
     const lines = await this.buildDigestLines(companyId, branchId, start, end);
@@ -120,6 +137,10 @@ export class ClosingService {
           refundsPaidCash,
           supplierPaidTotal: supplierPaid.total,
           supplierPaidCash: supplierPaid.cash,
+          // Snapshotted like every other component, so the closed day can
+          // explain its own expected cash without recomputing anything.
+          correctionsTotal: round2(num(rollup?.correctionsTotal ?? 0)),
+          correctionsCash: correctedCash,
           isLocked: true,
           closedById: this.tenant.userId() ?? null,
         },

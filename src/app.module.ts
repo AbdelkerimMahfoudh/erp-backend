@@ -30,6 +30,7 @@ import { MessagingModule } from './messaging/messaging.module';
 import { ScannerModule } from './scanner/scanner.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
+import { CorrectionsModule } from './corrections/corrections.module';
 import { PurchasingModule } from './purchasing/purchasing.module';
 import { PricingModule } from './pricing/pricing.module';
 import { SalesModule } from './sales/sales.module';
@@ -128,6 +129,7 @@ import { ClosingModule } from './closing/closing.module';
     ScannerModule,
     InventoryModule,
     SuppliersModule,
+    CorrectionsModule,
     PurchasingModule,
     PricingModule,
     SalesModule,
