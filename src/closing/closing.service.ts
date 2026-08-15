@@ -58,6 +58,8 @@ export class ClosingService {
     // rollup has already subtracted them from netProfit.
     const totalReturns = round2(num(rollup?.returnsRevenue ?? 0));
     const totalReturnsProfitImpact = round2(num(rollup?.returnsGrossProfit ?? 0));
+    const totalReturnAdjustments = round2(num(rollup?.returnsAdjustments ?? 0));
+    const totalReturnsCogsCredited = round2(num(rollup?.returnsCogs ?? 0));
 
     // Expected cash = cash payments taken on the day at this branch.
     const cash = await this.db.payment.aggregate({
@@ -84,6 +86,8 @@ export class ClosingService {
           totalProfit: netProfit,
           totalReturns,
           totalReturnsProfitImpact,
+          totalReturnAdjustments,
+          totalReturnsCogsCredited,
           isLocked: true,
           closedById: this.tenant.userId() ?? null,
         },

@@ -156,19 +156,27 @@ describe('reporting', () => {
     expect(rollupCode).toMatch(/grossProfit - returnsGrossProfit - expenses/);
   });
 
-  it('reverses the NET refund, not the gross', () => {
-    // Anything withheld as an adjustment is money the shop kept.
-    expect(rollupCode).toMatch(/SUM\(net_refund_due\)/);
+  /**
+   * CP4.1 replaced the CP4 treatment. The rollup now reads the components —
+   * gross, adjustments and the COGS credit — rather than the single net figure,
+   * so each can be reported separately and the formula can be checked by a
+   * reader rather than trusted.
+   */
+  it('reads gross, adjustments and the COGS credit as separate components', () => {
+    expect(rollupCode).toMatch(/SUM\(gross_refund\)/);
+    expect(rollupCode).toMatch(/SUM\(adjustment_total\)/);
+    expect(rollupCode).toMatch(/SUM\(line_cost\)/);
   });
 
   /**
-   * The returned phone is held as `faulty` and `held-value` counts only
-   * `in_stock`, so crediting its cost back while the asset is absent from
-   * inventory would book the same benefit twice.
+   * CP4.1: the cost IS credited back, and the same amount is reinstated as
+   * faulty/return-held inventory value. CP4 credited nothing while the asset
+   * was excluded from every inventory figure, which is a full write-off of a
+   * phone nobody has inspected — never an approved decision.
    */
-  it('does not credit COGS back, and says why', () => {
-    expect(rollupCode).toMatch(/const returnsCogs = 0;/);
-    expect(rollup).toMatch(/COGS is NOT credited back/);
+  it('credits the original cost back rather than writing the asset off', () => {
+    expect(rollupCode).not.toMatch(/const returnsCogs = 0;/);
+    expect(rollupCode).toMatch(/returnsRevenue - returnsAdjustments - returnsCogs/);
   });
 
   it('snapshots the day’s returns into the locked closing', () => {

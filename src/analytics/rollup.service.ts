@@ -17,7 +17,9 @@ function toNum(v: unknown): number {
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
 interface ReturnTotalsRow {
-  refunded: unknown;
+  gross: unknown;
+  adjustments: unknown;
+  cogs_credited: unknown;
   returns_count: unknown;
 }
 
@@ -130,17 +132,40 @@ export class RollupService {
      * the conservative reading, and the one that cannot flatter a month.
      */
     const returnRows = await this.prisma.$queryRaw<ReturnTotalsRow[]>(Prisma.sql`
-      SELECT COALESCE(SUM(net_refund_due), 0) AS refunded,
-             COUNT(*)                         AS returns_count
+      SELECT COALESCE(SUM(gross_refund), 0)     AS gross,
+             COALESCE(SUM(adjustment_total), 0) AS adjustments,
+             COALESCE(SUM(line_cost), 0)        AS cogs_credited,
+             COUNT(*)                           AS returns_count
       FROM return_reversals
       WHERE company_id = ${companyId}
         AND branch_id = ${branchId}
         AND approval_date = ${day}
     `);
-    const returnsRevenue = round2(toNum(returnRows[0].refunded));
+    // Components, all POSITIVE magnitudes; each consumer applies its own sign.
+    const returnsRevenue = round2(toNum(returnRows[0].gross));
+    const returnsAdjustments = round2(toNum(returnRows[0].adjustments));
+    const returnsCogs = round2(toNum(returnRows[0].cogs_credited));
     const returnsCount = toNum(returnRows[0].returns_count);
-    const returnsCogs = 0;
-    const returnsGrossProfit = round2(returnsRevenue - returnsCogs);
+    /**
+     * The profit effect of the day's returns, as a positive REDUCTION:
+     *
+     *   effect = gross refund − adjustments kept − COGS credited back
+     *
+     * so net profit subtracts it. Across a sale and its return this leaves
+     * cumulative profit equal to the adjustments alone:
+     *
+     *   sale    + gross − cost
+     *   return  − gross + adjustments + cost
+     *   ------------------------------------
+     *   total   + adjustments
+     *
+     * The COGS credit is what makes that true. The phone is unsellable but the
+     * shop still owns it, and its cost is reinstated as faulty/return-held
+     * inventory value (see `faultyHeldValue`). Writing the asset to zero here
+     * would be a full impairment decided before anyone inspected the phone —
+     * which is the LATER milestone's call, not this one's.
+     */
+    const returnsGrossProfit = round2(returnsRevenue - returnsAdjustments - returnsCogs);
 
     const revenue = round2(toNum(totals[0].revenue));
     const cogs = round2(toNum(totals[0].cogs));
@@ -166,6 +191,7 @@ export class RollupService {
         netProfit,
         returnsRevenue,
         returnsCogs,
+        returnsAdjustments,
         returnsGrossProfit,
         returnsCount,
         refreshedAt: now,
@@ -180,6 +206,7 @@ export class RollupService {
         netProfit,
         returnsRevenue,
         returnsCogs,
+        returnsAdjustments,
         returnsGrossProfit,
         returnsCount,
         refreshedAt: now,

@@ -1178,6 +1178,8 @@ model DailyClosing {
   /// written.
   totalReturns             Decimal @default(0) @map("total_returns") @db.Decimal(14, 2)
   totalReturnsProfitImpact Decimal @default(0) @map("total_returns_profit_impact") @db.Decimal(14, 2)
+  totalReturnAdjustments   Decimal @default(0) @map("total_return_adjustments") @db.Decimal(14, 2)
+  totalReturnsCogsCredited Decimal @default(0) @map("total_returns_cogs_credited") @db.Decimal(14, 2)
   isLocked     Boolean  @default(true) @map("is_locked")
   notes        String?  @db.Text
   closedById   Bytes?   @map("closed_by") @db.Binary(16)
@@ -1667,11 +1669,15 @@ model DailyRollup {
   /// subtracted explicitly by every consumer. Keyed on the approval date, never
   /// the sale's day, which is what lets the original day recompute unchanged.
   ///
-  /// `returnsCogs` is 0 today and exists for the later inspection milestone: a
-  /// returned phone is held as `faulty` and is not counted in stock value, so
-  /// crediting its cost back now would book the same benefit twice.
+  /// `returnsCogs` is the original line's IMMUTABLE cost, credited back at
+  /// approval — the phone is unsellable but still owned, and its cost is
+  /// reinstated as faulty/return-held inventory value. Writing it to zero here
+  /// would be a full write-off before anyone has inspected the phone.
   returnsRevenue     Decimal @default(0) @map("returns_revenue") @db.Decimal(14, 2)
   returnsCogs        Decimal @default(0) @map("returns_cogs") @db.Decimal(14, 2)
+  /// What the shop kept back (screen protector, retained accessory). Its own
+  /// component so "the refund" and "what we kept" can be reported separately.
+  returnsAdjustments Decimal @default(0) @map("returns_adjustments") @db.Decimal(14, 2)
   returnsGrossProfit Decimal @default(0) @map("returns_gross_profit") @db.Decimal(14, 2)
   returnsCount       Int     @default(0) @map("returns_count")
   refreshedAt DateTime @map("refreshed_at") @db.DateTime(6)

@@ -6,7 +6,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { binToUuid } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { inTransitValue, summarizeInTransit } from './in-transit-value';
-import { heldValueRows, toNum } from './held-value';
+import { faultyHeldValue, heldValueRows, toNum } from './held-value';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -40,6 +40,16 @@ export class AnalyticsService {
    */
   async inventoryValue() {
     const branchId = this.tenant.branchId();
+    /**
+     * Owned but unsellable: phones held after an approved return, awaiting
+     * inspection (I2-CP4.1). Fetched separately and reported separately —
+     * "what can I sell?" must never include one, and "what do I own?" must
+     * never exclude one.
+     */
+    const faulty = await faultyHeldValue(this.db, {
+      companyId: this.tenant.companyId(),
+      branchId,
+    });
     const rows = (
       await heldValueRows(this.db, { companyId: this.tenant.companyId(), branchId })
     ).map((r) => ({
@@ -112,6 +122,28 @@ export class AnalyticsService {
          * at the other end.
          */
         totalStockValue: round2(totals.inventoryValue + transit.value),
+        /**
+         * The same figure under the name that says what it is. `inventoryValue`
+         * has always meant SELLABLE stock; a returned phone must never inflate
+         * it, or a dead-stock report would offer a faulty device for sale.
+         */
+        sellableInventoryValue: round2(totals.inventoryValue),
+        /**
+         * Held after a return, unsellable, still owned. This is the cost that
+         * was credited back to COGS when the return was approved — the same
+         * money, counted once, reinstated as an asset rather than written off
+         * before anyone inspected the phone.
+         */
+        faultyHeldValue: round2(faulty.inventoryValue),
+        faultyHeldUnits: faulty.unitsCount,
+        /**
+         * Everything the shop owns: sellable + travelling + held faulty. The
+         * one figure an owner asking "what are my goods worth?" wants, and the
+         * one nobody should use to decide what can be sold.
+         */
+        totalOwnedInventoryValue: round2(
+          totals.inventoryValue + transit.value + faulty.inventoryValue,
+        ),
         inTransit: {
           outboundValue: round2(transit.outbound),
           inboundValue: round2(transit.inbound),

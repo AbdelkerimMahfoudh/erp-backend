@@ -106,3 +106,34 @@ export async function heldValueRows(
 
   return [...units, ...stock];
 }
+
+/**
+ * What the shop owns but cannot sell: phones held after a return, awaiting
+ * inspection (I2-CP4.1).
+ *
+ * Kept as a SEPARATE figure rather than folded into held value, because the two
+ * answer different questions. "What can I sell?" must never include a faulty
+ * phone; "what do I own?" must never exclude it. Reporting one number for both
+ * is how a returned phone becomes either sellable stock or a silent write-off,
+ * and both are wrong.
+ *
+ * The cost is the unit's own — the same immutable figure credited back to COGS
+ * when the return was approved, so the asset reinstated here and the credit
+ * given there are the same money, counted once.
+ */
+export async function faultyHeldValue(
+  db: { $queryRaw<T>(q: Prisma.Sql): Promise<T> },
+  args: { companyId: Buffer; branchId?: Buffer },
+): Promise<{ unitsCount: number; inventoryValue: number }> {
+  const branch = args.branchId ? Prisma.sql`AND u.branch_id = ${args.branchId}` : Prisma.empty;
+  const rows = await db.$queryRaw<{ units_count: unknown; inv_value: unknown }[]>(Prisma.sql`
+    SELECT COUNT(*) AS units_count, COALESCE(SUM(u.cost), 0) AS inv_value
+      FROM units u
+     WHERE u.company_id = ${args.companyId}
+       AND u.status IN ('returned', 'faulty')
+       ${branch}`);
+  return {
+    unitsCount: toNum(rows[0]?.units_count),
+    inventoryValue: toNum(rows[0]?.inv_value),
+  };
+}
