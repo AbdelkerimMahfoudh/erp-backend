@@ -1074,6 +1074,15 @@ export class ReturnsService {
 
     const reversal = await this.db.returnReversal.findFirst({ where: { returnRequestId: request.id } });
 
+    /**
+     * An APPROVED correction against this payout, if one exists. Only approved
+     * counts: a request that was raised and rejected changed nothing, and a
+     * receipt should not imply otherwise.
+     */
+    const corrected = await this.db.financialCorrection.findFirst({
+      where: { targetRefundPayoutId: payout.id, status: 'approved' },
+    });
+
     return {
       store: { name: branch?.company?.name ?? '', branch: branch?.name ?? '', phone: branch?.phone ?? null },
       // Stable and meaningful to a customer: their original invoice, plus this
@@ -1098,6 +1107,18 @@ export class ReturnsService {
       status: 'confirmed' as const,
       reportedBy: payout.reportedBy?.name ?? null,
       confirmedBy: payout.confirmedBy?.name ?? null,
+      /**
+       * Whether this refund was later corrected (Milestone B).
+       *
+       * **The receipt payload is never rewritten.** Every figure above still
+       * says exactly what it said the day it was issued, because that is what
+       * the customer was handed and history does not get to change. This is an
+       * ADDITIONAL field, so a receipt retrieved after a correction can say so
+       * rather than quietly presenting a payment that has since been reversed.
+       *
+       * A replacement payout gets its own receipt with its own reference.
+       */
+      correctedAt: corrected?.correctionDate ? dayKey(corrected.correctionDate) : null,
     };
   }
 

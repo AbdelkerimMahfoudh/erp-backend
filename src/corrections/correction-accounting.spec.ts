@@ -77,17 +77,53 @@ describe('the original transaction is never rewritten', () => {
    * The core safety property. If any of these ever appear, the correction has
    * stopped being append-only and has started editing settled money.
    */
-  it('never updates a refund payout or a supplier settlement', () => {
+  /**
+   * The payout DOES take one write, and this pins exactly which.
+   *
+   * `0041` added `correctedById`, a back-reference set at approval so a
+   * replacement payout can exist while "one live payout per return" stays a
+   * database guarantee. It is a link, not a financial edit — and this test is
+   * what stops that distinction eroding into a general licence to update the
+   * payout.
+   */
+  it('writes ONLY the supersession back-reference onto the payout', () => {
     const c = code(service);
-    expect(c).not.toMatch(/refundPayout\.update/);
-    expect(c).not.toMatch(/supplierSettlement\.update/);
+    const payoutWrite = c.slice(c.indexOf('refundPayout.updateMany'));
+    const dataBlock = payoutWrite.slice(payoutWrite.indexOf('data:'), payoutWrite.indexOf('});'));
+    expect(dataBlock).toMatch(/correctedById: correction\.id/);
+    // Not one financial field among them.
+    for (const field of [
+      'status',
+      'reportedAmount',
+      'netAmountDue',
+      'method',
+      'confirmedAt',
+      'confirmedById',
+      'accountLabelSnapshot',
+    ]) {
+      expect(dataBlock).not.toMatch(new RegExp(`${field}\\s*:`));
+    }
+  });
+
+  it('never touches a supplier settlement at all', () => {
+    // Settlements need no supersession marker: a supplier may always have
+    // several, so nothing blocks a replacement there.
+    expect(code(service)).not.toMatch(/supplierSettlement\.(update|create|delete)/);
+  });
+
+  it('deletes nothing, ever', () => {
+    const c = code(service);
     expect(c).not.toMatch(/\.delete\(/);
     expect(c).not.toMatch(/deleteMany/);
   });
 
-  it('writes only to financialCorrection', () => {
-    const writes = code(service).match(/this\.db\.(\w+)\.(create|update|updateMany|upsert)/g) ?? [];
-    for (const w of writes) expect(w).toMatch(/financialCorrection/);
+  it('creates rows only in financialCorrection', () => {
+    const creates = code(service).match(/this\.db\.(\w+)\.(create|upsert)/g) ?? [];
+    for (const w of creates) expect(w).toMatch(/financialCorrection/);
+  });
+
+  it('the supersession write is guarded, so it cannot fire twice', () => {
+    expect(code(service)).toMatch(/correctedById: null/);
   });
 
   it('the correction row itself is append-only in the database', () => {
@@ -146,6 +182,17 @@ describe('the original day stays exactly as it was', () => {
 
   it('approval refuses a locked day rather than reopening it', () => {
     expect(code(service)).toMatch(/assertDayOpen\(closing, day\)/);
+  });
+
+  /**
+   * The live test found this missing: without the recompute the correction
+   * restored the liability and left the till reporting a shortage that no
+   * longer existed, because the compensating movement never reached the day's
+   * figures at all.
+   */
+  it('recomputes the correction day, or the movement reaches nothing', () => {
+    // `[^)]*` would stop at the `)` inside `companyId()`.
+    expect(code(service)).toMatch(/rollups\.recomputeDaily\(.*correction\.branchId, day\)/);
   });
 
   it('the correction day is today, never the payment’s day', () => {

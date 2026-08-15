@@ -8,6 +8,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
+import { RollupService } from '../analytics/rollup.service';
 import {
   assertDayOpen,
   assertDecidable,
@@ -54,6 +55,7 @@ export class CorrectionsService {
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
+    private readonly rollups: RollupService,
     private readonly cls: ClsService<AppClsStore>,
   ) {}
 
@@ -212,6 +214,37 @@ export class CorrectionsService {
         message: 'This correction changed while you were looking at it. Open it again.',
       });
     }
+
+    /**
+     * Mark the payout as superseded, so a REPLACEMENT can be reported.
+     *
+     * Found by the live lifecycle test: `0038` made `return_request_id` unique
+     * because a return is settled once or not at all, which meant a corrected
+     * refund could never be paid again — the brief requires that it can.
+     *
+     * This writes ONE back-reference and no financial field. Status, amount,
+     * method, who reported and confirmed it, and the receipt this payout
+     * produces are all untouched. The unique index now sits on a generated
+     * column that is the return id while this is NULL, so "one LIVE payout per
+     * return" remains a database guarantee.
+     *
+     * Settlements need no equivalent: a supplier may always have several, so
+     * nothing blocks a replacement there.
+     */
+    if (correction.targetRefundPayoutId) {
+      await this.db.refundPayout.updateMany({
+        where: { id: correction.targetRefundPayoutId, correctedById: null },
+        data: { correctedById: correction.id },
+      });
+    }
+
+    /**
+     * Recompute the day's figures. Without this the compensating movement never
+     * reaches the rollup or expected cash — the correction would restore the
+     * liability and leave the till reporting a shortage that no longer exists.
+     * The live test caught exactly that.
+     */
+    await this.rollups.recomputeDaily(this.tenant.companyId(), correction.branchId, day);
 
     await this.audit.record({
       entityType: 'FinancialCorrection',

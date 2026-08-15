@@ -2196,6 +2196,16 @@ model RefundPayout {
   clientUuid        Bytes  @map("client_uuid") @db.Binary(16)
   clientRequestHash String @map("client_request_hash") @db.Char(64)
 
+  /// Set when a correction supersedes this payout (Milestone B, `0041`).
+  ///
+  /// A back-reference ONLY. No financial field is ever rewritten — status,
+  /// amount, method, who reported and confirmed it, and the receipt it produces
+  /// are all unchanged. This exists so a REPLACEMENT payout can be reported
+  /// while "one live payout per return" stays a database guarantee rather than
+  /// an application check: the unique index sits on a generated column that is
+  /// the return id while this is NULL, and NULL once it is set.
+  correctedById Bytes? @map("corrected_by_id") @db.Binary(16)
+
   version   Int      @default(0)
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
@@ -2207,6 +2217,8 @@ model RefundPayout {
   receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   reportedBy       User?             @relation("RefundReportedBy", fields: [reportedById], references: [id])
   confirmedBy      User?             @relation("RefundConfirmedBy", fields: [confirmedById], references: [id])
+
+  correctedBy      FinancialCorrection? @relation("PayoutSupersededBy", fields: [correctedById], references: [id])
 
   @@unique([returnRequestId])
   @@unique([returnReversalId])
@@ -2394,6 +2406,8 @@ model FinancialCorrection {
   targetSettlement SupplierSettlement? @relation(fields: [targetSupplierSettlementId], references: [id])
   requestedBy User?               @relation("CorrectionRequestedBy", fields: [requestedById], references: [id])
   decidedBy   User?               @relation("CorrectionDecidedBy", fields: [decidedById], references: [id])
+
+  supersededPayouts RefundPayout[] @relation("PayoutSupersededBy")
 
   @@unique([companyId, clientUuid])
   @@index([companyId, status])
