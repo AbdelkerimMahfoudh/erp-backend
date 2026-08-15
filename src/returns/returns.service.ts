@@ -1052,9 +1052,18 @@ export class ReturnsService {
       });
     }
 
-    const [company, branch, adjustments] = await Promise.all([
-      this.db.company.findFirst({ select: { name: true, currency: true } }),
-      this.db.branch.findFirst({ where: { id: branchId }, select: { name: true, phone: true } }),
+    const [branch, adjustments] = await Promise.all([
+      /**
+       * The company is read THROUGH the branch, not directly. The tenant
+       * extension injects `companyId` into every tenant model's `where`, and
+       * `companies` has no such column — a direct read is a Prisma validation
+       * error, which the global filter reports as "Invalid query parameters".
+       * Found by the CP4.5 smoke test, before any screen depended on it.
+       */
+      this.db.branch.findFirst({
+        where: { id: branchId },
+        select: { name: true, phone: true, company: { select: { name: true, currency: true } } },
+      }),
       this.db.returnAdjustment.findMany({
         where: { returnRequestId: request.id },
         orderBy: { id: 'asc' },
@@ -1064,7 +1073,7 @@ export class ReturnsService {
     const reversal = await this.db.returnReversal.findFirst({ where: { returnRequestId: request.id } });
 
     return {
-      store: { name: company?.name ?? '', branch: branch?.name ?? '', phone: branch?.phone ?? null },
+      store: { name: branch?.company?.name ?? '', branch: branch?.name ?? '', phone: branch?.phone ?? null },
       // Stable and meaningful to a customer: their original invoice, plus this
       // return's own reference.
       reference: `R-${request.sale.invoiceNo}-${binToUuid(request.id).slice(0, 8).toUpperCase()}`,
