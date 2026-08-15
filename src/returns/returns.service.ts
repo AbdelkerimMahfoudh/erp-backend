@@ -42,6 +42,7 @@ import {
   custodyIntakeNeeded,
   fingerprintRequest,
   grossRefundOf,
+  isProvisionalMoney,
   priceAdjustment,
   settleRefund,
 } from './return-workflow';
@@ -1341,9 +1342,17 @@ export class ReturnsService {
         reason: r.policyReason,
         requiresException: r.requiresException,
       },
-      /** Explicitly provisional: nothing here is owed until CP4 approves it. */
+      /**
+       * Provisional until the return is APPROVED, and agreed afterwards.
+       *
+       * This was hardcoded `true`, so an approved return still described its
+       * own immutable, already-reversed figures as provisional. The detail
+       * screen happened to derive the wording from `status` instead and so was
+       * never wrong on screen — but the field was, and I3's refund screens read
+       * the money block directly. Found by the CP7 lifecycle run.
+       */
       money: {
-        provisional: true,
+        provisional: isProvisionalMoney(r.status),
         grossRefund: gross,
         adjustmentTotal,
         netRefundDue: Math.round((gross - adjustmentTotal) * 100) / 100,

@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import {
+  isProvisionalMoney,
   assertEditable,
   assertMayApprove,
   assertTransition,
@@ -279,5 +280,29 @@ describe('who may approve', () => {
         exceptionReason: 'goodwill for a regular customer',
       }),
     ).toEqual({ isException: true });
+  });
+});
+
+describe('isProvisionalMoney', () => {
+  /**
+   * These figures are provisional until approval writes an immutable reversal.
+   * The detail view used to hardcode `true`, so an approved return described
+   * its own agreed amount as provisional — harmless on the I2 screen, which
+   * read `status` instead, and actively wrong for the I3 refund screens that
+   * read the money block. Caught by the CP7 lifecycle run.
+   */
+  it.each(['requested', 'pending_investigation', 'under_review'])(
+    'is provisional while %s',
+    (status) => {
+      expect(isProvisionalMoney(status)).toBe(true);
+    },
+  );
+
+  it('is AGREED once approved and a refund is due', () => {
+    expect(isProvisionalMoney('approved_refund_due')).toBe(false);
+  });
+
+  it('stays provisional for a rejected return — nothing was ever agreed', () => {
+    expect(isProvisionalMoney('rejected')).toBe(true);
   });
 });
