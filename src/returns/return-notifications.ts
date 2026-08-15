@@ -27,7 +27,7 @@ type Tx = {
   user: { findFirst(args: unknown): Promise<{ name: string } | null> };
 };
 
-export type ReturnEvent = 'requested' | 'custody_received' | 'under_review' | 'approved' | 'rejected';
+export type ReturnEvent = 'requested' | 'custody_received' | 'under_review' | 'approved' | 'rejected' | 'refund_reported' | 'refund_corrected' | 'refund_confirmed';
 
 export interface ReturnNotificationContext {
   event: ReturnEvent;
@@ -63,6 +63,26 @@ const COPY: Record<
   approved: (p) => ({
     title: `Return approved — refund due`,
     body: `The return for invoice ${p.invoiceNo} was approved. The refund is due and has NOT yet been paid. The phone is held and is not for sale.`,
+  }),
+  /**
+   * No amount in any refund notification body. A notification is read outside
+   * the request that authorised it, so it must never carry a figure that cost
+   * gating would otherwise withhold.
+   *
+   * The reported wording says "NOT confirmed yet" out loud, because a manager
+   * glancing at a list must not read a report as a settlement.
+   */
+  refund_reported: (p) => ({
+    title: `Refund reported — needs confirmation`,
+    body: `${p.actor} reported handing back the refund for invoice ${p.invoiceNo}. It is NOT confirmed yet.`,
+  }),
+  refund_corrected: (p) => ({
+    title: `Refund report corrected`,
+    body: `${p.actor} corrected the refund details for invoice ${p.invoiceNo} before confirming.`,
+  }),
+  refund_confirmed: (p) => ({
+    title: `Refund confirmed as paid`,
+    body: `${p.actor} confirmed the refund for invoice ${p.invoiceNo} was returned to the customer.`,
   }),
   rejected: (p) => ({
     title: `Return rejected`,
@@ -157,6 +177,18 @@ export class ReturnNotifier {
       case 'rejected':
         // Only the person who raised it. Broadcasting a refusal helps nobody.
         add(ctx.request.requestedById ? [ctx.request.requestedById] : []);
+        break;
+      case 'refund_reported':
+        // The people who can actually confirm it.
+        add(await this.holdersOf(tx, ctx.request.companyId, ctx.request.branchId, 'refund.confirm'));
+        break;
+      case 'refund_corrected':
+        // Only the reporter: their report was changed before being confirmed.
+        add(ctx.request.requestedById ? [ctx.request.requestedById] : []);
+        break;
+      case 'refund_confirmed':
+        add(ctx.request.requestedById ? [ctx.request.requestedById] : []);
+        add(await this.holdersOf(tx, ctx.request.companyId, ctx.request.branchId, 'refund.confirm'));
         break;
       case 'approved':
         // The requester learns the answer, and whoever can settle the refund

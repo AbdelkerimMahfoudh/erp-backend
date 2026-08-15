@@ -242,3 +242,74 @@ export class RejectReturnDto {
   @MaxLength(500)
   reason: string;
 }
+
+export class ReportRefundDto {
+  /** Must equal the immutable net refund due. There is no partial payout. */
+  @ApiProperty({ minimum: 0 })
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  reportedAmount: number;
+
+  @ApiProperty({ enum: ['cash', 'account'] })
+  @IsEnum({ cash: 'cash', account: 'account' })
+  method: 'cash' | 'account';
+
+  /** Required for `account`, forbidden for `cash`. */
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  receivingAccountId?: string;
+
+  @ApiPropertyOptional({ maxLength: 120 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  transactionReference?: string;
+
+  @ApiPropertyOptional({ maxLength: 255 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  note?: string;
+
+  /** Mandatory. An offline retry must not record two payouts. */
+  @ApiProperty({ format: 'uuid' })
+  @IsUUID()
+  clientUuid: string;
+}
+
+export class CorrectRefundDto {
+  @ApiProperty()
+  @IsInt()
+  @Min(0)
+  expectedVersion: number;
+
+  @ApiPropertyOptional({ enum: ['cash', 'account'] })
+  @IsOptional()
+  @IsEnum({ cash: 'cash', account: 'account' })
+  method?: 'cash' | 'account';
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  receivingAccountId?: string;
+
+  @ApiPropertyOptional({ maxLength: 120 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  transactionReference?: string;
+
+  @ApiPropertyOptional({ maxLength: 255 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  note?: string;
+}
+
+export class ConfirmRefundDto {
+  @ApiProperty({ description: 'The version last seen. Two confirmations, one winner.' })
+  @IsInt()
+  @Min(0)
+  expectedVersion: number;
+}

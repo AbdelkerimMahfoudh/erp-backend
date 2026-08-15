@@ -27,6 +27,14 @@ import {
   ReceiveCustodyDto,
 } from './dto/return.dto';
 import {
+  assertAmountMatchesDue,
+  assertCorrectable,
+  assertMethodAndAccount,
+  assertReportable,
+  assertWorthSettling,
+  fingerprintPayout,
+} from './refund-payout';
+import {
   assertEditable,
   assertMayApprove,
   assertTransition,
@@ -704,6 +712,369 @@ export class ReturnsService {
     return this.detail(idStr);
   }
 
+  // ────────────────────────────── refunds (I3) ──────────────────────────────
+
+  /**
+   * Report that the refund was handed to the customer.
+   *
+   * This is a CLAIM, not the record. It creates no cash movement, settles no
+   * liability, and is worded everywhere as pending — a manager or owner has to
+   * agree before any of that happens.
+   */
+  async reportRefund(idStr: string, dto: {
+    reportedAmount: number;
+    method: 'cash' | 'account';
+    receivingAccountId?: string;
+    transactionReference?: string;
+    note?: string;
+    clientUuid: string;
+  }) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const userId = this.tenant.userId();
+    const request = await this.load(idStr, branchId);
+
+    const reversal = await this.db.returnReversal.findFirst({
+      where: { returnRequestId: request.id },
+    });
+    assertReportable(request.status, Boolean(reversal));
+
+    const netAmountDue = num(reversal!.netRefundDue);
+    assertWorthSettling(netAmountDue);
+    // The shop's own immutable figure decides the amount, never the request.
+    assertAmountMatchesDue(dto.reportedAmount, netAmountDue);
+    assertMethodAndAccount(dto.method, dto.receivingAccountId);
+
+    const fingerprint = fingerprintPayout({
+      returnRequestId: idStr,
+      method: dto.method,
+      receivingAccountId: dto.receivingAccountId,
+      reportedAmount: dto.reportedAmount,
+      transactionReference: dto.transactionReference,
+      note: dto.note,
+    });
+
+    // The idempotent replay, before any work.
+    const replay = await this.db.refundPayout.findFirst({
+      where: { companyId, clientUuid: uuidToBin(dto.clientUuid) },
+    });
+    if (replay) {
+      if (replay.clientRequestHash !== fingerprint) {
+        throw new ConflictException({
+          code: 'idempotency_conflict',
+          message: 'That request id was already used for a different refund report.',
+        });
+      }
+      return this.detail(idStr);
+    }
+
+    /**
+     * The account must be this company's and still active. A deactivated
+     * account is deliberately still readable for HISTORY, but must not be
+     * chosen for a new movement.
+     */
+    let account: { id: Buffer; label: string } | null = null;
+    if (dto.receivingAccountId) {
+      account = await this.db.receivingAccount.findFirst({
+        where: { id: uuidToBin(dto.receivingAccountId), isActive: true },
+        select: { id: true, label: true },
+      });
+      if (!account) throw new NotFoundException('Account not found');
+    }
+
+    const id = newUuidV7Bin();
+    try {
+      await this.db.$transaction(async (tx) => {
+        await tx.refundPayout.create({
+          data: {
+            id,
+            companyId,
+            branchId,
+            returnRequestId: request.id,
+            returnReversalId: reversal!.id,
+            status: 'reported_pending_confirmation',
+            netAmountDue,
+            reportedAmount: dto.reportedAmount,
+            method: dto.method,
+            receivingAccountId: account?.id ?? null,
+            transactionReference: dto.transactionReference?.trim() || null,
+            note: dto.note?.trim() || null,
+            reportedById: userId ?? null,
+            clientUuid: uuidToBin(dto.clientUuid),
+            clientRequestHash: fingerprint,
+          },
+        });
+
+        await this.audit.recordTx(tx, {
+          entityType: 'RefundPayout',
+          entityId: id,
+          action: 'create',
+          after: {
+            amount: dto.reportedAmount,
+            method: dto.method,
+            account: account?.label ?? null,
+            reference: dto.transactionReference?.trim() || null,
+          },
+          branchId,
+        });
+
+        await this.notifier.emit(tx, {
+          event: 'refund_reported',
+          request: { id: request.id, companyId, branchId, requestedById: request.requestedById },
+          invoiceNo: request.sale.invoiceNo,
+          actorId: userId ?? null,
+        });
+      });
+    } catch (e) {
+      // One payout per return, decided by the database.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException({
+          code: 'refund_already_reported',
+          message: 'A refund has already been reported for this return.',
+        });
+      }
+      throw e;
+    }
+
+    return this.detail(idStr);
+  }
+
+  /**
+   * A manager or owner correcting what was reported, before confirming it.
+   *
+   * The AMOUNT is never correctable: it is locked to the immutable net refund
+   * due, and a different amount would be a different decision rather than a
+   * typo. Method, account, reference and note are all fair game.
+   */
+  async correctRefund(idStr: string, dto: {
+    expectedVersion: number;
+    method?: 'cash' | 'account';
+    receivingAccountId?: string;
+    transactionReference?: string;
+    note?: string;
+  }) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const userId = this.tenant.userId();
+    const request = await this.load(idStr, branchId);
+
+    const payout = await this.db.refundPayout.findFirst({ where: { returnRequestId: request.id } });
+    if (!payout) throw new NotFoundException('Refund not found');
+    assertCorrectable(payout.status);
+
+    const method = dto.method ?? payout.method;
+    const accountId =
+      dto.receivingAccountId !== undefined
+        ? dto.receivingAccountId
+        : payout.receivingAccountId
+          ? binToUuid(payout.receivingAccountId)
+          : undefined;
+    assertMethodAndAccount(method, method === 'cash' ? null : accountId);
+
+    let account: { id: Buffer; label: string } | null = null;
+    if (method === 'account' && accountId) {
+      account = await this.db.receivingAccount.findFirst({
+        where: { id: uuidToBin(accountId), isActive: true },
+        select: { id: true, label: true },
+      });
+      if (!account) throw new NotFoundException('Account not found');
+    }
+
+    await this.db.$transaction(async (tx) => {
+      const moved = await tx.refundPayout.updateMany({
+        where: { id: payout.id, companyId, version: dto.expectedVersion, status: 'reported_pending_confirmation' },
+        data: {
+          method,
+          receivingAccountId: method === 'cash' ? null : (account?.id ?? null),
+          ...(dto.transactionReference !== undefined
+            ? { transactionReference: dto.transactionReference.trim() || null }
+            : {}),
+          ...(dto.note !== undefined ? { note: dto.note.trim() || null } : {}),
+          version: { increment: 1 },
+        },
+      });
+      if (moved.count === 0) throw this.staleWrite();
+
+      await this.audit.recordTx(tx, {
+        entityType: 'RefundPayout',
+        entityId: payout.id,
+        action: 'update',
+        before: { method: payout.method, reference: payout.transactionReference },
+        after: { method, account: account?.label ?? null, reference: dto.transactionReference ?? payout.transactionReference },
+        branchId,
+      });
+
+      // The reporter learns their report was adjusted before being confirmed.
+      await this.notifier.emit(tx, {
+        event: 'refund_corrected',
+        request: { id: request.id, companyId, branchId, requestedById: payout.reportedById },
+        invoiceNo: request.sale.invoiceNo,
+        actorId: userId ?? null,
+      });
+    });
+
+    return this.detail(idStr);
+  }
+
+  /**
+   * Confirm the refund was actually paid. THIS is the record.
+   *
+   * It settles the liability and books the cash movement on today's date — and
+   * creates no second profit effect, because profit was already reversed when
+   * the return was approved. Subtracting it again here is the double-count this
+   * phase exists to avoid.
+   */
+  async confirmRefund(idStr: string, dto: { expectedVersion: number }) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const userId = this.tenant.userId();
+    const request = await this.load(idStr, branchId);
+
+    const payout = await this.db.refundPayout.findFirst({
+      where: { returnRequestId: request.id },
+      include: { receivingAccount: { select: { label: true } } },
+    });
+    if (!payout) throw new NotFoundException('Refund not found');
+
+    // A replay of the confirmation that already succeeded is safe: return what
+    // happened rather than refusing somebody who simply lost the response.
+    if (payout.status === 'confirmed') return this.detail(idStr);
+
+    const confirmationDay = dayKey(new Date());
+    const confirmationDate = new Date(`${confirmationDay}T00:00:00.000Z`);
+
+    /**
+     * The same rule approval already obeys: a locked day's snapshot must never
+     * disagree with a recomputed one, so the confirmation is refused rather
+     * than the closing reopened.
+     */
+    const closing = await this.db.dailyClosing.findUnique({
+      where: { branchId_closingDate: { branchId, closingDate: confirmationDate } },
+    });
+    if (closing?.isLocked) {
+      throw new ConflictException({
+        code: 'day_already_closed',
+        message: `${confirmationDay} is already closed for this branch. Confirm this refund tomorrow, or ask the owner to review the closing.`,
+      });
+    }
+
+    await this.db.$transaction(async (tx) => {
+      const moved = await tx.refundPayout.updateMany({
+        where: {
+          id: payout.id,
+          companyId,
+          version: dto.expectedVersion,
+          status: 'reported_pending_confirmation',
+        },
+        data: {
+          status: 'confirmed',
+          confirmedById: userId ?? null,
+          confirmedAt: new Date(),
+          confirmationDate,
+          // Frozen here, so a receipt printed months later still reads what was
+          // chosen even if the account is later renamed or deactivated.
+          accountLabelSnapshot: payout.receivingAccount?.label ?? null,
+          version: { increment: 1 },
+        },
+      });
+      if (moved.count === 0) throw this.staleWrite();
+
+      await this.audit.recordTx(tx, {
+        entityType: 'RefundPayout',
+        entityId: payout.id,
+        action: 'update',
+        before: { status: 'reported_pending_confirmation' },
+        after: {
+          status: 'confirmed',
+          amount: num(payout.reportedAmount),
+          method: payout.method,
+          account: payout.receivingAccount?.label ?? null,
+          confirmationDate: confirmationDay,
+        },
+        branchId,
+      });
+
+      await this.notifier.emit(tx, {
+        event: 'refund_confirmed',
+        request: { id: request.id, companyId, branchId, requestedById: payout.reportedById },
+        invoiceNo: request.sale.invoiceNo,
+        actorId: userId ?? null,
+      });
+    });
+
+    /**
+     * After commit. The rollup is derived, so recomputing the CONFIRMATION day
+     * adds the cash movement without touching the approval day's profit — the
+     * two dates stay separate, which is the whole point.
+     */
+    await this.rollups.recomputeDaily(companyId, branchId, confirmationDay);
+
+    return this.detail(idStr);
+  }
+
+  /**
+   * The customer's refund receipt, as data.
+   *
+   * Only a CONFIRMED payout produces one: a receipt for money nobody has agreed
+   * left the till would be a document asserting something untrue. Nothing is
+   * persisted — the receipt is a projection of the payout, so it can always be
+   * regenerated and can never drift from the record.
+   *
+   * Carries no cost, no margin and no internal id.
+   */
+  async refundReceipt(idStr: string) {
+    const branchId = this.tenant.requireBranchId();
+    const request = await this.load(idStr, branchId);
+
+    const payout = await this.db.refundPayout.findFirst({
+      where: { returnRequestId: request.id, status: 'confirmed' },
+      include: { confirmedBy: { select: { name: true } }, reportedBy: { select: { name: true } } },
+    });
+    if (!payout) {
+      throw new ConflictException({
+        code: 'not_confirmed',
+        message: 'A receipt is available once the refund has been confirmed.',
+      });
+    }
+
+    const [company, branch, adjustments] = await Promise.all([
+      this.db.company.findFirst({ select: { name: true, currency: true } }),
+      this.db.branch.findFirst({ where: { id: branchId }, select: { name: true, phone: true } }),
+      this.db.returnAdjustment.findMany({
+        where: { returnRequestId: request.id },
+        orderBy: { id: 'asc' },
+      }),
+    ]);
+
+    const reversal = await this.db.returnReversal.findFirst({ where: { returnRequestId: request.id } });
+
+    return {
+      store: { name: company?.name ?? '', branch: branch?.name ?? '', phone: branch?.phone ?? null },
+      // Stable and meaningful to a customer: their original invoice, plus this
+      // return's own reference.
+      reference: `R-${request.sale.invoiceNo}-${binToUuid(request.id).slice(0, 8).toUpperCase()}`,
+      originalInvoiceNo: request.sale.invoiceNo,
+      confirmedAt: payout.confirmedAt,
+      product: [request.unit.product?.brand, request.unit.product?.model, request.unit.product?.variant]
+        .filter(Boolean)
+        .join(' '),
+      identifier: request.unit.imeiPrimary ?? request.unit.serialNo,
+      grossRefund: num(reversal?.grossRefund),
+      adjustments: adjustments.map((a) => ({
+        label: a.label,
+        quantity: a.quantity,
+        amount: num(a.totalAmount),
+      })),
+      netAmountReturned: num(payout.reportedAmount),
+      method: payout.method,
+      accountLabel: payout.accountLabelSnapshot,
+      transactionReference: payout.transactionReference,
+      status: 'confirmed' as const,
+      reportedBy: payout.reportedBy?.name ?? null,
+      confirmedBy: payout.confirmedBy?.name ?? null,
+    };
+  }
+
   // ─────────────────────────────── reads ───────────────────────────────
 
   async list(query: ListReturnsDto) {
@@ -787,6 +1158,14 @@ export class ReturnsService {
       orderBy: { id: 'asc' },
       include: { createdBy: { select: { name: true } } },
     });
+    const payout = await this.db.refundPayout.findFirst({
+      where: { returnRequestId: r.id },
+      include: {
+        receivingAccount: { select: { label: true } },
+        reportedBy: { select: { name: true } },
+        confirmedBy: { select: { name: true } },
+      },
+    });
     const adjustmentTotal =
       Math.round(adjustments.reduce((s, a) => s + num(a.totalAmount), 0) * 100) / 100;
 
@@ -851,6 +1230,27 @@ export class ReturnsService {
       ],
       requestedBy: r.requestedBy?.name ?? null,
       requestedAt: r.createdAt,
+      /**
+       * The settlement, when one exists. `null` means nobody has reported the
+       * refund yet — which is different from reported-and-unconfirmed, and the
+       * screen must not blur the two.
+       */
+      payout: payout
+        ? {
+            status: payout.status,
+            version: payout.version,
+            netAmountDue: num(payout.netAmountDue),
+            reportedAmount: num(payout.reportedAmount),
+            method: payout.method,
+            accountLabel: payout.accountLabelSnapshot ?? payout.receivingAccount?.label ?? null,
+            transactionReference: payout.transactionReference,
+            note: payout.note,
+            reportedBy: payout.reportedBy?.name ?? null,
+            reportedAt: payout.reportedAt,
+            confirmedBy: payout.confirmedBy?.name ?? null,
+            confirmedAt: payout.confirmedAt,
+          }
+        : null,
     };
   }
 

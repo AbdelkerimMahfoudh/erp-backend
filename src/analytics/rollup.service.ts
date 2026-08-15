@@ -16,6 +16,12 @@ function toNum(v: unknown): number {
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
+interface RefundPaidRow {
+  paid_total: unknown;
+  paid_cash: unknown;
+  paid_count: unknown;
+}
+
 interface ReturnTotalsRow {
   gross: unknown;
   adjustments: unknown;
@@ -167,6 +173,33 @@ export class RollupService {
      */
     const returnsGrossProfit = round2(returnsRevenue - returnsAdjustments - returnsCogs);
 
+    /**
+     * Refunds CONFIRMED on this day (I3) — money leaving the till.
+     *
+     * Keyed on `confirmation_date`, which is a different day from the approval
+     * that reversed the profit. That separation is the whole point:
+     *
+     *   approval day     profit reverses, a liability appears
+     *   confirmation day cash moves, the liability settles
+     *
+     * There is deliberately NO profit component here. Profit was already
+     * reversed at approval, and subtracting it again at payout would count the
+     * same loss twice — the single easiest mistake to make in this phase.
+     */
+    const refundRows = await this.prisma.$queryRaw<RefundPaidRow[]>(Prisma.sql`
+      SELECT COALESCE(SUM(reported_amount), 0)                                     AS paid_total,
+             COALESCE(SUM(CASE WHEN method = 'cash' THEN reported_amount END), 0)   AS paid_cash,
+             COUNT(*)                                                              AS paid_count
+      FROM refund_payouts
+      WHERE company_id = ${companyId}
+        AND branch_id = ${branchId}
+        AND status = 'confirmed'
+        AND confirmation_date = ${day}
+    `);
+    const refundsPaidTotal = round2(toNum(refundRows[0].paid_total));
+    const refundsPaidCash = round2(toNum(refundRows[0].paid_cash));
+    const refundsPaidCount = toNum(refundRows[0].paid_count);
+
     const revenue = round2(toNum(totals[0].revenue));
     const cogs = round2(toNum(totals[0].cogs));
     const grossProfit = round2(revenue - cogs);
@@ -194,6 +227,9 @@ export class RollupService {
         returnsAdjustments,
         returnsGrossProfit,
         returnsCount,
+        refundsPaidTotal,
+        refundsPaidCash,
+        refundsPaidCount,
         refreshedAt: now,
       },
       update: {
@@ -209,6 +245,9 @@ export class RollupService {
         returnsAdjustments,
         returnsGrossProfit,
         returnsCount,
+        refundsPaidTotal,
+        refundsPaidCash,
+        refundsPaidCount,
         refreshedAt: now,
       },
     });

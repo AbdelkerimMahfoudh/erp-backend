@@ -60,13 +60,26 @@ export class ClosingService {
     const totalReturnsProfitImpact = round2(num(rollup?.returnsGrossProfit ?? 0));
     const totalReturnAdjustments = round2(num(rollup?.returnsAdjustments ?? 0));
     const totalReturnsCogsCredited = round2(num(rollup?.returnsCogs ?? 0));
+    // Refunds settled on the day this closing locks. Cash movement, not profit.
+    const refundsPaidTotal = round2(num(rollup?.refundsPaidTotal ?? 0));
+    const refundsPaidCash = round2(num(rollup?.refundsPaidCash ?? 0));
 
     // Expected cash = cash payments taken on the day at this branch.
     const cash = await this.db.payment.aggregate({
       _sum: { amount: true },
       where: { method: 'cash', sale: { branchId, soldAt: { gte: start, lt: end } } },
     });
-    const expectedCash = round2(num(cash._sum.amount));
+    /**
+     * Cash refunds CONFIRMED today left the till, so the drawer should hold
+     * less. Before I3 this was cash in only, and a day with a confirmed cash
+     * refund would have reported a shortage that was not a shortage — the
+     * money was handed back on purpose.
+     *
+     * Taken from the payout record rather than from `payments`, because a
+     * refund is not a sale payment (docs/27 §17).
+     */
+    const refundedCash = round2(num(rollup?.refundsPaidCash ?? 0));
+    const expectedCash = round2(num(cash._sum.amount) - refundedCash);
     const difference = round2(dto.countedCash - expectedCash);
 
     const lines = await this.buildDigestLines(companyId, branchId, start, end);
@@ -88,6 +101,8 @@ export class ClosingService {
           totalReturnsProfitImpact,
           totalReturnAdjustments,
           totalReturnsCogsCredited,
+          refundsPaidTotal,
+          refundsPaidCash,
           isLocked: true,
           closedById: this.tenant.userId() ?? null,
         },

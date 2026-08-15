@@ -5,11 +5,14 @@ import { ReturnsService } from './returns.service';
 import {
   AdjustmentDto,
   ApproveReturnDto,
+  ConfirmRefundDto,
+  CorrectRefundDto,
   CreateReturnRequestDto,
   InvestigateDto,
   ListReturnsDto,
   ReceiveCustodyDto,
   RejectReturnDto,
+  ReportRefundDto,
 } from './dto/return.dto';
 
 /**
@@ -108,6 +111,46 @@ export class ReturnsController {
   @ApiOperation({ summary: 'Reject a return, with a mandatory reason, handing the phone back if held' })
   reject(@Param('id') id: string, @Body() dto: RejectReturnDto) {
     return this.returns.reject(id, dto);
+  }
+
+  /**
+   * Reporting is available to the person who handed the money over — every
+   * store role. Confirming is not: the separation IS the control.
+   */
+  @Post(':id/refund/report')
+  @RequirePermissions('refund.report')
+  @ApiOperation({
+    summary: 'Report that the refund was handed to the customer — a claim, not the record',
+    description:
+      'Creates no cash movement and settles nothing. The amount must equal the immutable net refund due; there is no partial payout.',
+  })
+  reportRefund(@Param('id') id: string, @Body() dto: ReportRefundDto) {
+    return this.returns.reportRefund(id, dto);
+  }
+
+  @Patch(':id/refund')
+  @RequirePermissions('refund.confirm')
+  @ApiOperation({ summary: 'Correct the reported method, account, reference or note before confirming' })
+  correctRefund(@Param('id') id: string, @Body() dto: CorrectRefundDto) {
+    return this.returns.correctRefund(id, dto);
+  }
+
+  @Post(':id/refund/confirm')
+  @RequirePermissions('refund.confirm')
+  @ApiOperation({
+    summary: 'Confirm the refund was paid — this is the authoritative record',
+    description:
+      'Settles the liability and books the cash movement on today. Creates NO second profit effect: profit was reversed at approval. Refused with 409 if today is already closed.',
+  })
+  confirmRefund(@Param('id') id: string, @Body() dto: ConfirmRefundDto) {
+    return this.returns.confirmRefund(id, dto);
+  }
+
+  @Get(':id/refund/receipt')
+  @RequirePermissions('return.view')
+  @ApiOperation({ summary: 'The customer refund receipt. Available only once confirmed.' })
+  refundReceipt(@Param('id') id: string) {
+    return this.returns.refundReceipt(id);
   }
 
   @Delete(':id/adjustments/:adjustmentId')
