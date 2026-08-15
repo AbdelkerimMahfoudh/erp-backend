@@ -196,7 +196,8 @@ model Company {
   saleItems         SaleItem[]
   payments          Payment[]
   returns           Return[]
-  returnRequests    ReturnRequest[]
+  refundPayouts     RefundPayout[]
+    returnRequests    ReturnRequest[]
   returnAdjustments ReturnAdjustment[]
   returnReversals   ReturnReversal[]
     stockTransfers    StockTransfer[]
@@ -247,7 +248,8 @@ model Branch {
 
   company Company @relation(fields: [companyId], references: [id])
 
-  returnRequests   ReturnRequest[]
+  refundPayouts    RefundPayout[]
+    returnRequests   ReturnRequest[]
   returnReversals  ReturnReversal[]
     userBranches     UserBranch[]
   units            Unit[]
@@ -315,6 +317,8 @@ model User {
   returnsReviewed       ReturnRequest[]    @relation("ReturnReviewedBy")
   returnsDecided        ReturnRequest[]    @relation("ReturnDecidedBy")
   returnsApproved       ReturnReversal[]   @relation("ReturnApprovedBy")
+  refundsReported       RefundPayout[]     @relation("RefundReportedBy")
+  refundsConfirmed      RefundPayout[]     @relation("RefundConfirmedBy")
   returnAdjustmentsMade ReturnAdjustment[] @relation("ReturnAdjustmentBy")
     returnPolicyOverrides Sale[] @relation("SaleReturnPolicyOverride")
   returns           Return[]
@@ -1180,6 +1184,9 @@ model DailyClosing {
   totalReturnsProfitImpact Decimal @default(0) @map("total_returns_profit_impact") @db.Decimal(14, 2)
   totalReturnAdjustments   Decimal @default(0) @map("total_return_adjustments") @db.Decimal(14, 2)
   totalReturnsCogsCredited Decimal @default(0) @map("total_returns_cogs_credited") @db.Decimal(14, 2)
+  /// Refunds confirmed on the day this closing locked. Cash movement only.
+  refundsPaidTotal         Decimal @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
+  refundsPaidCash          Decimal @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
   isLocked     Boolean  @default(true) @map("is_locked")
   notes        String?  @db.Text
   closedById   Bytes?   @map("closed_by") @db.Binary(16)
@@ -1472,6 +1479,7 @@ model ReceivingAccount {
   createdById Bytes?   @map("created_by") @db.Binary(16)
 
   company Company @relation(fields: [companyId], references: [id])
+  refundPayouts RefundPayout[]
 
   @@unique([companyId, label])
   @@index([companyId, isActive, sortOrder])
@@ -1680,6 +1688,12 @@ model DailyRollup {
   returnsAdjustments Decimal @default(0) @map("returns_adjustments") @db.Decimal(14, 2)
   returnsGrossProfit Decimal @default(0) @map("returns_gross_profit") @db.Decimal(14, 2)
   returnsCount       Int     @default(0) @map("returns_count")
+
+  /// Refunds CONFIRMED on this day — cash and account movement, not profit.
+  /// Profit was reversed at approval; taking it again here would double-count.
+  refundsPaidTotal Decimal @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
+  refundsPaidCash  Decimal @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
+  refundsPaidCount Int     @default(0) @map("refunds_paid_count")
   refreshedAt DateTime @map("refreshed_at") @db.DateTime(6)
 
   @@unique([branchId, day])
@@ -2006,6 +2020,7 @@ model ReturnRequest {
 
   adjustments ReturnAdjustment[]
   reversal    ReturnReversal?
+  payout      RefundPayout?
 
   @@unique([companyId, clientUuid])
   @@index([companyId, status])
@@ -2077,10 +2092,90 @@ model ReturnReversal {
   unit       Unit          @relation(fields: [unitId], references: [id])
   request    ReturnRequest @relation(fields: [returnRequestId], references: [id])
   approvedBy User?         @relation("ReturnApprovedBy", fields: [approvedById], references: [id])
+  payout     RefundPayout?
 
   @@unique([saleItemId])
   @@unique([returnRequestId])
   @@index([branchId, approvalDate])
   @@index([companyId, approvalDate])
   @@map("return_reversals")
+}
+
+/// How a refund left the till. `account` means one of the shop's configured
+/// receiving accounts — the same channel labels a sale can be taken through.
+enum RefundMethod {
+  cash
+  account
+}
+
+/// Two words, deliberately. There is no `paid` or `settled` reachable before a
+/// manager or owner confirms, because a state that does not exist cannot be
+/// shown by mistake.
+enum RefundPayoutStatus {
+  reported_pending_confirmation
+  confirmed
+}
+
+/// One settlement of one approved return (I3).
+///
+/// The application never moves money: this records what the shop says happened.
+/// The REPORT is a claim by whoever handed the cash over; the CONFIRMATION by a
+/// manager or owner is the record.
+///
+/// Deliberately NOT a `Payment`: that model is incoming sale money, its
+/// `saleId` is required, and its only consumer counts it as cash received
+/// (docs/27 §17).
+model RefundPayout {
+  id               Bytes @id @db.Binary(16)
+  companyId        Bytes @map("company_id") @db.Binary(16)
+  branchId         Bytes @map("branch_id") @db.Binary(16)
+  returnRequestId  Bytes @map("return_request_id") @db.Binary(16)
+  returnReversalId Bytes @map("return_reversal_id") @db.Binary(16)
+
+  status RefundPayoutStatus @default(reported_pending_confirmation)
+
+  /// Copied from the reversal so the payout reads on its own and cannot drift.
+  netAmountDue   Decimal @map("net_amount_due") @db.Decimal(14, 2)
+  /// What the reporter says was handed over. A CHECK requires it to equal the
+  /// amount due — there is no partial payout in I3.
+  reportedAmount Decimal @map("reported_amount") @db.Decimal(14, 2)
+
+  method               RefundMethod
+  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  /// Snapshotted at confirmation, so a receipt printed months later still reads
+  /// what the employee chose even if the account was later renamed.
+  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+
+  transactionReference String? @map("transaction_reference") @db.VarChar(120)
+  note                 String? @db.VarChar(255)
+
+  reportedById  Bytes?    @map("reported_by_id") @db.Binary(16)
+  reportedAt    DateTime  @default(now()) @map("reported_at") @db.DateTime(6)
+  confirmedById Bytes?    @map("confirmed_by_id") @db.Binary(16)
+  confirmedAt   DateTime? @map("confirmed_at") @db.DateTime(6)
+  /// The business date the cash movement belongs to — the confirmation day.
+  confirmationDate DateTime? @map("confirmation_date") @db.Date
+
+  clientUuid        Bytes  @map("client_uuid") @db.Binary(16)
+  clientRequestHash String @map("client_request_hash") @db.Char(64)
+
+  version   Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company          Company           @relation(fields: [companyId], references: [id])
+  branch           Branch            @relation(fields: [branchId], references: [id])
+  request          ReturnRequest     @relation(fields: [returnRequestId], references: [id])
+  reversal         ReturnReversal    @relation(fields: [returnReversalId], references: [id])
+  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
+  reportedBy       User?             @relation("RefundReportedBy", fields: [reportedById], references: [id])
+  confirmedBy      User?             @relation("RefundConfirmedBy", fields: [confirmedById], references: [id])
+
+  @@unique([returnRequestId])
+  @@unique([returnReversalId])
+  @@unique([companyId, clientUuid])
+  @@index([branchId, status])
+  @@index([branchId, confirmationDate])
+  @@index([companyId, status])
+  @@map("refund_payouts")
 }

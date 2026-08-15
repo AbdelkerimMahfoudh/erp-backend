@@ -24,6 +24,11 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'return.approve',      label: 'Approve a return (creates a refund obligation)' },
   { key: 'return.reject',       label: 'Reject a return' },
   { key: 'return.exception',    label: 'Approve outside policy, or against customer damage' },
+  // I3 — refund settlement. Reporting and confirming are deliberately separate
+  // authorities: the person who says money left the till must not be the person
+  // who certifies it.
+  { key: 'refund.report',       label: 'Report that a refund was handed to the customer' },
+  { key: 'refund.confirm',      label: 'Confirm a refund was actually paid' },
   { key: 'cost.view',           label: 'View cost & profit' },
   { key: 'discount.apply',      label: 'Apply discounts (within limit)' },
   { key: 'discount.override',   label: 'Override discount limits' },
@@ -118,6 +123,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      * point of splitting approval from exception.
      */
     'return.view', 'return.request', 'return.review', 'return.approve', 'return.reject',
+    // I3: a manager may both report and confirm a refund.
+    'refund.report', 'refund.confirm',
     'unit.add', 'import.run',
     'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
@@ -184,7 +191,10 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      * follow it. Deciding it is somebody else's job, deliberately — an employee
      * holds neither review, approve, reject nor exception.
      */
-    'return.view', 'return.request'
+    'return.view', 'return.request',
+    // I3: an employee reports the payout. Confirming it is somebody else's job,
+    // which is the whole reason the settlement has two steps.
+    'refund.report'
   ],
 
   administrator: ADMIN_KEYS,

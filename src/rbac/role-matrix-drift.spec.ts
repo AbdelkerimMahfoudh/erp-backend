@@ -145,6 +145,7 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0032_manager_cancel_route_permission'),
     sqlOf('0035_sale_return_policy_and_view_permissions'),
     sqlOf('0036_returns_workflow'),
+    sqlOf('0038_refund_payout'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from
