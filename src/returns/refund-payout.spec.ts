@@ -203,8 +203,17 @@ describe('confirmation moves cash, and only cash', () => {
     expect(confirm).toMatch(/day_already_closed/);
   });
 
-  it('snapshots the account label so a later rename cannot rewrite a receipt', () => {
-    expect(service).toMatch(/accountLabelSnapshot: payout\.receivingAccount\?\.label/);
+  /**
+   * CP4 moved the snapshot EARLIER, to the moment the money moved. Confirmation
+   * now freezes what is already there rather than re-reading a live account —
+   * otherwise a rename between report and confirmation would retitle a movement
+   * that had already happened.
+   */
+  it('freezes the label captured when the money moved, rather than re-reading it', () => {
+    expect(service).toMatch(/accountLabelSnapshot: payout\.accountLabelSnapshot \?\? payout\.receivingAccount\?\.label/);
+    // And it was captured at report time in the first place.
+    const report = service.slice(service.indexOf('async reportRefund('), service.indexOf('async correctRefund('));
+    expect(report).toMatch(/accountLabelSnapshot: account\?\.label/);
   });
 
   it('replays a successful confirmation safely instead of refusing', () => {

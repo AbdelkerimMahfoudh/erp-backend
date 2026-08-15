@@ -43,6 +43,21 @@ export class ReturnsController {
     return this.returns.list(query);
   }
 
+  /**
+   * Declared BEFORE `:id`, or Nest matches "refunds" as a return id and every
+   * request answers 404.
+   */
+  @Get('refunds/summary')
+  @RequirePermissions('return.view')
+  @ApiOperation({
+    summary: 'What the branch owes and has paid — approval, liability and confirmed outflow',
+    description:
+      'Outstanding liability is DERIVED from immutable approved reversals minus confirmed payouts, so no mutable workflow state can move it. Cost figures ride the standard cost.view gating.',
+  })
+  refundSummary(@Query() query: ListReturnsDto) {
+    return this.returns.refundSummary({ from: query.from, to: query.to });
+  }
+
   @Get(':id')
   @RequirePermissions('return.view')
   @ApiOperation({

@@ -18,6 +18,7 @@ import { evaluateEligibility } from '../sales/return-policy';
 import { RollupService } from '../analytics/rollup.service';
 import { dayKey } from '../common/utils/date.util';
 import { parseDateRange, parseEnumList } from '../sales/sale-query';
+import { toNum } from '../analytics/held-value';
 import { ReturnNotifier } from './return-notifications';
 import {
   AdjustmentDto,
@@ -797,6 +798,13 @@ export class ReturnsService {
             reportedAmount: dto.reportedAmount,
             method: dto.method,
             receivingAccountId: account?.id ?? null,
+            /**
+             * Snapshotted HERE, when the money actually moved — not only at
+             * confirmation. If the Owner renames or deactivates the account in
+             * between, confirmation must not be stranded, and the record must
+             * still say what the employee chose at the counter.
+             */
+            accountLabelSnapshot: account?.label ?? null,
             transactionReference: dto.transactionReference?.trim() || null,
             note: dto.note?.trim() || null,
             reportedById: userId ?? null,
@@ -886,6 +894,9 @@ export class ReturnsService {
         data: {
           method,
           receivingAccountId: method === 'cash' ? null : (account?.id ?? null),
+          // Re-snapshotted: a correction changes which account the money went
+          // out of, so the label recorded against it must change too.
+          accountLabelSnapshot: method === 'cash' ? null : (account?.label ?? null),
           ...(dto.transactionReference !== undefined
             ? { transactionReference: dto.transactionReference.trim() || null }
             : {}),
@@ -971,9 +982,13 @@ export class ReturnsService {
           confirmedById: userId ?? null,
           confirmedAt: new Date(),
           confirmationDate,
-          // Frozen here, so a receipt printed months later still reads what was
-          // chosen even if the account is later renamed or deactivated.
-          accountLabelSnapshot: payout.receivingAccount?.label ?? null,
+          /**
+           * Frozen, not re-read. The label was snapshotted when the money moved;
+           * re-reading the live account here would let a rename between report
+           * and confirmation rewrite history. Falls back to the live label only
+           * for a payout written before this rule existed.
+           */
+          accountLabelSnapshot: payout.accountLabelSnapshot ?? payout.receivingAccount?.label ?? null,
           version: { increment: 1 },
         },
       });
@@ -1072,6 +1087,121 @@ export class ReturnsService {
       status: 'confirmed' as const,
       reportedBy: payout.reportedBy?.name ?? null,
       confirmedBy: payout.confirmedBy?.name ?? null,
+    };
+  }
+
+  /**
+   * What the shop owes, what it has paid, and when each happened (I3-CP4).
+   *
+   * Three timings are kept apart deliberately, because collapsing them is how a
+   * refund gets counted twice:
+   *
+   *   approval date      profit reverses, a liability appears
+   *   report date        a workflow event only — no money, no liability change
+   *   confirmation date  cash leaves, the liability settles
+   *
+   * **Outstanding liability is derived**, never stored: it is the sum of
+   * immutable approved reversals minus confirmed payouts. Anything mutable in
+   * between — a report, a correction — cannot move it, which is exactly the
+   * property that makes it trustworthy.
+   */
+  async refundSummary(query: { from?: string; to?: string }) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const range = parseDateRange(query.from, query.to);
+    const from = range?.gte ?? new Date('1970-01-01T00:00:00.000Z');
+    const to = range?.lt ?? new Date('2999-01-01T00:00:00.000Z');
+
+    const [approved] = await this.db.$queryRaw<
+      { n: unknown; gross: unknown; adjustments: unknown; cogs: unknown }[]
+    >(Prisma.sql`
+      SELECT COUNT(*) n,
+             COALESCE(SUM(gross_refund), 0)     gross,
+             COALESCE(SUM(adjustment_total), 0) adjustments,
+             COALESCE(SUM(line_cost), 0)        cogs
+      FROM return_reversals
+      WHERE company_id = ${companyId} AND branch_id = ${branchId}
+        AND approval_date >= ${from} AND approval_date < ${to}`);
+
+    /**
+     * Everything approved and not yet CONFIRMED, over all time — a liability
+     * does not expire because a reporting period ended. A pending report is
+     * still outstanding: nobody has agreed the money left.
+     */
+    const [outstanding] = await this.db.$queryRaw<{ n: unknown; amount: unknown }[]>(Prisma.sql`
+      SELECT COUNT(*) n, COALESCE(SUM(rv.net_refund_due), 0) amount
+      FROM return_reversals rv
+      LEFT JOIN refund_payouts p
+        ON p.return_reversal_id = rv.id AND p.status = 'confirmed'
+      WHERE rv.company_id = ${companyId} AND rv.branch_id = ${branchId}
+        AND p.id IS NULL`);
+
+    const [awaiting] = await this.db.$queryRaw<{ n: unknown; amount: unknown }[]>(Prisma.sql`
+      SELECT COUNT(*) n, COALESCE(SUM(reported_amount), 0) amount
+      FROM refund_payouts
+      WHERE company_id = ${companyId} AND branch_id = ${branchId}
+        AND status = 'reported_pending_confirmation'`);
+
+    const [confirmed] = await this.db.$queryRaw<
+      { n: unknown; total: unknown; cash: unknown }[]
+    >(Prisma.sql`
+      SELECT COUNT(*) n,
+             COALESCE(SUM(reported_amount), 0) total,
+             COALESCE(SUM(CASE WHEN method = 'cash' THEN reported_amount END), 0) cash
+      FROM refund_payouts
+      WHERE company_id = ${companyId} AND branch_id = ${branchId}
+        AND status = 'confirmed'
+        AND confirmation_date >= ${from} AND confirmation_date < ${to}`);
+
+    // By channel, using the label frozen on the payout so a later rename cannot
+    // retitle a movement that already happened.
+    const byAccount = await this.db.$queryRaw<{ label: unknown; amount: unknown; n: unknown }[]>(Prisma.sql`
+      SELECT COALESCE(account_label_snapshot, 'Unnamed account') label,
+             COALESCE(SUM(reported_amount), 0) amount,
+             COUNT(*) n
+      FROM refund_payouts
+      WHERE company_id = ${companyId} AND branch_id = ${branchId}
+        AND status = 'confirmed' AND method = 'account'
+        AND confirmation_date >= ${from} AND confirmation_date < ${to}
+      GROUP BY account_label_snapshot`);
+
+    const gross = toNum(approved.gross);
+    const adjustments = toNum(approved.adjustments);
+    const cogs = toNum(approved.cogs);
+
+    return {
+      approved: {
+        count: toNum(approved.n),
+        grossRefund: gross,
+        adjustments,
+        // Named for the gating interceptor: cost is cost, wherever it appears.
+        cogsCredited: cogs,
+        /**
+         * The approval-date profit effect, as a positive reduction:
+         * gross − adjustments − COGS credit (docs/27 §16.11).
+         */
+        profitEffect: Math.round((gross - adjustments - cogs) * 100) / 100,
+      },
+      /** Approved and not confirmed, all time. Derived from immutable rows. */
+      outstandingLiability: {
+        count: toNum(outstanding.n),
+        amount: toNum(outstanding.amount),
+      },
+      /** Reported, waiting on a manager or owner. NOT a cash movement. */
+      awaitingConfirmation: {
+        count: toNum(awaiting.n),
+        amount: toNum(awaiting.amount),
+      },
+      confirmed: {
+        count: toNum(confirmed.n),
+        total: toNum(confirmed.total),
+        cash: toNum(confirmed.cash),
+        byAccount: byAccount.map((r) => ({
+          label: String(r.label),
+          amount: toNum(r.amount),
+          count: toNum(r.n),
+        })),
+      },
     };
   }
 
