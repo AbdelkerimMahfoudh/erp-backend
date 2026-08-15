@@ -29,6 +29,22 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   // who certifies it.
   { key: 'refund.report',       label: 'Report that a refund was handed to the customer' },
   { key: 'refund.confirm',      label: 'Confirm a refund was actually paid' },
+  /**
+   * J1 — paying a supplier. These were granted by migration `0039` but never
+   * added here, so a freshly SEEDED company could not report or confirm a
+   * supplier payment while a MIGRATED one could. The drift test did not catch
+   * it because `0039` was missing from its own list of later grants; both are
+   * fixed together.
+   */
+  { key: 'supplier.payment.report',  label: 'Report that a supplier was paid' },
+  { key: 'supplier.payment.confirm', label: 'Confirm a supplier payment was actually made' },
+  /**
+   * Milestone B — correcting a CONFIRMED payment. Two keys, because asking for
+   * a correction and authorising one are different authorities: approval is
+   * what actually puts money back into a settled liability.
+   */
+  { key: 'financial.correction.request', label: 'Request a correction to a confirmed payment' },
+  { key: 'financial.correction.approve', label: 'Approve a correction to a confirmed payment' },
   { key: 'cost.view',           label: 'View cost & profit' },
   { key: 'discount.apply',      label: 'Apply discounts (within limit)' },
   { key: 'discount.override',   label: 'Override discount limits' },
@@ -125,6 +141,15 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'return.view', 'return.request', 'return.review', 'return.approve', 'return.reject',
     // I3: a manager may both report and confirm a refund.
     'refund.report', 'refund.confirm',
+    // J1: a manager may both report and confirm a supplier payment.
+    'supplier.payment.report', 'supplier.payment.confirm',
+    /**
+     * Milestone B: a manager may ASK for a confirmed payment to be corrected,
+     * and may never approve one. Approval is Owner-only — it restores a
+     * liability that was already settled, which is the most consequential
+     * action in the application.
+     */
+    'financial.correction.request',
     'unit.add', 'import.run',
     'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
@@ -174,6 +199,14 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
   store_employee: [
     'sale.create', 'cost.view', 'discount.apply',
     'unit.add', 'purchase.manage',
+    /**
+     * J1: the person at the counter who hands the money over is the one who
+     * knows it happened, so they REPORT — and never confirm their own payout.
+     *
+     * Neither correction key is here, deliberately. An employee who reported a
+     * payment must not be able to open the process that unwinds it.
+     */
+    'supplier.payment.report',
     /**
      * H1.2. An employee does the daily stock movement — asks for a transfer,
      * sends it once approved, receives one arriving — but never approves,

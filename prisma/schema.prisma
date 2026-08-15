@@ -197,6 +197,7 @@ model Company {
   payments          Payment[]
   returns           Return[]
   refundPayouts     RefundPayout[]
+  financialCorrections FinancialCorrection[]
     returnRequests    ReturnRequest[]
   returnAdjustments ReturnAdjustment[]
   returnReversals   ReturnReversal[]
@@ -251,6 +252,7 @@ model Branch {
   company Company @relation(fields: [companyId], references: [id])
 
   refundPayouts    RefundPayout[]
+  financialCorrections FinancialCorrection[]
     returnRequests   ReturnRequest[]
   returnReversals  ReturnReversal[]
     userBranches     UserBranch[]
@@ -278,6 +280,12 @@ model Branch {
 }
 
 model User {
+  /// Corrections this user asked for, and corrections they decided. Two
+  /// relations rather than one, because who requested and who approved must
+  /// stay distinguishable even when an owner does both.
+  correctionsRequested FinancialCorrection[] @relation("CorrectionRequestedBy")
+  correctionsDecided   FinancialCorrection[] @relation("CorrectionDecidedBy")
+
   id           Bytes     @id @db.Binary(16)
   companyId    Bytes     @map("company_id") @db.Binary(16)
   name         String    @db.VarChar(160)
@@ -2198,6 +2206,7 @@ model RefundPayout {
   @@index([branchId, confirmationDate])
   @@index([companyId, status])
   @@map("refund_payouts")
+  corrections FinancialCorrection[]
 }
 
 // ───────────────────────── Supplier settlement (J1) ─────────────────────────
@@ -2275,6 +2284,7 @@ model SupplierSettlement {
   @@index([companyId, supplierId, status])
   @@index([companyId, branchId, confirmationDate])
   @@map("supplier_settlements")
+  corrections FinancialCorrection[]
 }
 
 /// How much of one settlement paid down one purchase.
@@ -2298,4 +2308,86 @@ model SupplierSettlementAllocation {
   @@unique([settlementId, purchaseId])
   @@index([companyId, purchaseId])
   @@map("supplier_settlement_allocations")
+}
+
+// ───────────────────────────── Financial corrections ─────────────────────────
+
+enum FinancialCorrectionKind {
+  refund_payout
+  supplier_settlement
+}
+
+enum FinancialCorrectionStatus {
+  requested
+  approved
+  rejected
+}
+
+/// Undoing a CONFIRMED payment, without rewriting it (Milestone B).
+///
+/// A confirmed refund payout and a confirmed supplier settlement are both
+/// immutable, and nothing financial is hard-deleted — so correcting one cannot
+/// mean editing it. It means appending a compensating record here.
+///
+/// **Nothing is written back to the corrected row.** Both liabilities are
+/// already derived from rows whose status is `confirmed`, so an approved
+/// correction restores the liability simply by existing: the derivation queries
+/// exclude any target that has one. "Restored exactly once" is therefore a
+/// property of the schema — enforced by `activeTargetPayoutId` /
+/// `activeTargetSettlementId`, the partial-unique trick from `0002` — rather
+/// than something the application has to remember to do.
+model FinancialCorrection {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  /// The branch whose till the compensating movement lands in — copied from the
+  /// original payment, so a correction cannot post against a different drawer.
+  branchId  Bytes @map("branch_id") @db.Binary(16)
+
+  targetKind FinancialCorrectionKind @map("target_kind")
+  /// Exactly one is set, matching `targetKind`. Two nullable columns rather
+  /// than one polymorphic id, so both keep a real foreign key.
+  targetRefundPayoutId       Bytes? @map("target_refund_payout_id") @db.Binary(16)
+  targetSupplierSettlementId Bytes? @map("target_supplier_settlement_id") @db.Binary(16)
+
+  status FinancialCorrectionStatus @default(requested)
+
+  /// Mandatory. A correction to confirmed money with no stated reason is
+  /// indistinguishable from a mistake, months later.
+  reason              String  @db.VarChar(255)
+  supportingReference String? @map("supporting_reference") @db.VarChar(120)
+
+  /// Copied from the target, never typed. The compensating movement is exactly
+  /// the opposite of what was paid, so it cannot disagree with it.
+  amount Decimal     @db.Decimal(14, 2)
+  method RefundMethod
+  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+
+  requestedById Bytes?    @map("requested_by_id") @db.Binary(16)
+  requestedAt   DateTime  @default(now()) @map("requested_at") @db.DateTime(6)
+  decidedById   Bytes?    @map("decided_by_id") @db.Binary(16)
+  decidedAt     DateTime? @map("decided_at") @db.DateTime(6)
+  /// The CURRENT open business day at approval — never the original payment's
+  /// day. Old closings stay shut.
+  correctionDate DateTime? @map("correction_date") @db.Date
+
+  clientUuid        Bytes  @map("client_uuid") @db.Binary(16)
+  clientRequestHash String @map("client_request_hash") @db.Char(64)
+
+  /// Optimistic concurrency: two owners approving one request, one winner.
+  version Int @default(0)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company     Company             @relation(fields: [companyId], references: [id])
+  branch      Branch              @relation(fields: [branchId], references: [id])
+  targetPayout     RefundPayout?       @relation(fields: [targetRefundPayoutId], references: [id])
+  targetSettlement SupplierSettlement? @relation(fields: [targetSupplierSettlementId], references: [id])
+  requestedBy User?               @relation("CorrectionRequestedBy", fields: [requestedById], references: [id])
+  decidedBy   User?               @relation("CorrectionDecidedBy", fields: [decidedById], references: [id])
+
+  @@unique([companyId, clientUuid])
+  @@index([companyId, status])
+  @@index([companyId, branchId, correctionDate])
+  @@map("financial_corrections")
 }

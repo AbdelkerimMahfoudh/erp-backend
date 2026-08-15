@@ -146,6 +146,18 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0035_sale_return_policy_and_view_permissions'),
     sqlOf('0036_returns_workflow'),
     sqlOf('0038_refund_payout'),
+    /**
+     * `0039` was missing here, and that omission hid a real drift: it grants
+     * `supplier.payment.*` to the store roles, the seed matrix did not, and the
+     * test compared two sets that were both silently short. A migrated company
+     * could report a supplier payment and a freshly seeded one could not.
+     *
+     * Any migration that grants to a store role belongs in this list. The list
+     * being hand-maintained is the weakness; until it is derived, adding to it
+     * is part of writing a permission migration.
+     */
+    sqlOf('0039_supplier_settlement'),
+    sqlOf('0040_financial_correction'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from

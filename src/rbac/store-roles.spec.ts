@@ -33,11 +33,18 @@ describe('store-facing roles', () => {
   it('leaves Owner with full access, now including price.edit', () => {
     // 19 before H1.2, plus the seven transfer keys that replaced the blanket one.
     // 26 → 28 in I1, 28 → 34 in I2, 34 → 36 in I3 (`refund.report`,
-    // `refund.confirm`):
-    // the six return-workflow keys. The Owner holds every permission by
-    // construction, so this number moving is the signal that a phase added
-    // authority — it should never move by accident.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(36);
+    // `refund.confirm`): the six return-workflow keys.
+    //
+    // 36 → 38 in J1 — `supplier.payment.report` / `.confirm`. These were LATE:
+    // migration 0039 granted them and the seed matrix never did, so this count
+    // did not move when it should have. Corrected in Milestone B.
+    //
+    // 38 → 40 in Milestone B — `financial.correction.request` / `.approve`.
+    //
+    // The Owner holds every permission by construction, so this number moving
+    // is the signal that a phase added authority — it should never move by
+    // accident, and it moving LATE means a phase shipped a drift.
+    expect(ROLE_PERMISSIONS.owner.length).toBe(40);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
