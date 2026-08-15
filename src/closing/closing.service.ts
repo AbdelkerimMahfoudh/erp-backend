@@ -6,6 +6,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RollupService } from '../analytics/rollup.service';
+import { SuppliersService } from '../suppliers/suppliers.service';
 import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { CreateClosingDto } from './dto/create-closing.dto';
@@ -28,6 +29,7 @@ export class ClosingService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly rollups: RollupService,
+    private readonly suppliers: SuppliersService,
   ) {}
 
   async close(dto: CreateClosingDto) {
@@ -79,7 +81,20 @@ export class ClosingService {
      * refund is not a sale payment (docs/27 §17).
      */
     const refundedCash = round2(num(rollup?.refundsPaidCash ?? 0));
-    const expectedCash = round2(num(cash._sum.amount) - refundedCash);
+
+    /**
+     * Supplier payments CONFIRMED today also left the till, and had no
+     * figure here before J1 — so a day where the shop paid a supplier
+     * reported a shortage that was not a shortage. Only the cash part is
+     * subtracted: an account transfer never touched the drawer.
+     *
+     * This is a balance-sheet movement, not an expense and not COGS. It
+     * appears nowhere in the profit figures below, deliberately — inventory
+     * cost reaches profit through COGS when the goods sell.
+     */
+    const supplierPaid = await this.suppliers.paidOn(branchId, dayDate);
+
+    const expectedCash = round2(num(cash._sum.amount) - refundedCash - supplierPaid.cash);
     const difference = round2(dto.countedCash - expectedCash);
 
     const lines = await this.buildDigestLines(companyId, branchId, start, end);
@@ -103,6 +118,8 @@ export class ClosingService {
           totalReturnsCogsCredited,
           refundsPaidTotal,
           refundsPaidCash,
+          supplierPaidTotal: supplierPaid.total,
+          supplierPaidCash: supplierPaid.cash,
           isLocked: true,
           closedById: this.tenant.userId() ?? null,
         },
@@ -148,6 +165,16 @@ export class ClosingService {
       date: day,
       digest: { revenue, costOfGoodsSold: cogs, grossProfit, expenses, netProfit, lineCount: lines.length },
       cash: { expected: expectedCash, counted: round2(dto.countedCash), difference },
+      /**
+       * What left the till today and why. Reported separately from profit,
+       * because neither a refund nor a supplier payment is an expense.
+       */
+      paidOut: {
+        refundsTotal: refundsPaidTotal,
+        refundsCash: refundsPaidCash,
+        supplierTotal: supplierPaid.total,
+        supplierCash: supplierPaid.cash,
+      },
       comparison,
     };
   }

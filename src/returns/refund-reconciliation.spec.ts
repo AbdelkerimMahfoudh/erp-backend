@@ -104,8 +104,42 @@ describe('reconciliation', () => {
   });
 
   it('never treats a refund as an expense', () => {
-    const cashBlock = closing.slice(closing.indexOf('const refundedCash'), closing.indexOf('const lines'));
+    /**
+     * Checked against the CODE, not the prose.
+     *
+     * Comments in this block now explain that a refund and a supplier payment
+     * are balance-sheet movements rather than expenses, and a naive text search
+     * read that documentation as a violation of the rule it documents.
+     */
+    const cashBlock = closing
+      .slice(closing.indexOf('const refundedCash'), closing.indexOf('const lines'))
+      .replace(/\/\*\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
     expect(cashBlock).not.toMatch(/expense/i);
+  });
+
+  it('subtracts confirmed cash SUPPLIER payments from expected cash, once', () => {
+    // The other thing that leaves the till. Before J1 it had no figure here at
+    // all, so a day the shop paid a supplier reported a shortage.
+    expect(closing).toMatch(/- supplierPaid\.cash/);
+    expect(closing.match(/- supplierPaid\.cash/g) ?? []).toHaveLength(1);
+  });
+
+  it('keeps the supplier payment out of every profit figure', () => {
+    /**
+     * Aimed at the profit EXPRESSIONS, not at a region of the file — the
+     * closing legitimately persists the supplier figures a few lines later,
+     * and a text region catches that storage and calls it an accounting error.
+     *
+     * Paying a supplier is a balance-sheet movement. Inventory cost reaches
+     * profit through COGS when the goods sell, so it must appear in none of
+     * these three.
+     */
+    for (const figure of ['grossProfit', 'expenses', 'netProfit']) {
+      const line = closing.split('\n').find((l) => l.includes(`const ${figure} =`));
+      expect(line).toBeDefined();
+      expect(line).not.toMatch(/supplierPaid/);
+    }
   });
 
   it('groups confirmed outflow by the frozen account label', () => {
