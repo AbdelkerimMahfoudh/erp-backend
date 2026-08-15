@@ -240,6 +240,19 @@ export class SuppliersService {
           reportedBy: { select: { name: true } },
           confirmedBy: { select: { name: true } },
           branch: { select: { name: true } },
+          /**
+           * Any correction raised against this settlement (Milestone B).
+           * Included rather than fetched separately so the ledger reads in one
+           * round trip; the settlement row itself is never modified by one.
+           */
+          corrections: {
+            orderBy: { id: 'desc' },
+            take: 1,
+            include: {
+              requestedBy: { select: { name: true } },
+              decidedBy: { select: { name: true } },
+            },
+          },
         },
         orderBy: { id: 'desc' },
       }),
@@ -297,7 +310,18 @@ export class SuppliersService {
     reportedBy?: { name: string } | null; confirmedBy?: { name: string } | null;
     branch?: { name: string } | null;
     allocations: { purchaseId: Buffer; amount: Prisma.Decimal }[];
+    corrections?: {
+      id: Buffer;
+      status: string;
+      reason: string;
+      requestedAt: Date;
+      correctionDate: Date | null;
+      version: number;
+      requestedBy?: { name: string } | null;
+      decidedBy?: { name: string } | null;
+    }[];
   }) {
+    const correction = s.corrections?.[0] ?? null;
     return {
       id: binToUuid(s.id),
       status: s.status,
@@ -317,6 +341,24 @@ export class SuppliersService {
         purchaseId: binToUuid(a.purchaseId),
         amount: num(a.amount),
       })),
+      /**
+       * A correction raised against this settlement (Milestone B). `null` means
+       * none — different from a rejected one, and different again from an
+       * approved one that restored the debt. The settlement is unchanged in
+       * every case; this is a sibling record.
+       */
+      correction: correction
+        ? {
+            id: binToUuid(correction.id),
+            status: correction.status,
+            reason: correction.reason,
+            requestedBy: correction.requestedBy?.name ?? null,
+            requestedAt: correction.requestedAt,
+            decidedBy: correction.decidedBy?.name ?? null,
+            correctionDate: correction.correctionDate,
+            version: correction.version,
+          }
+        : null,
     };
   }
 

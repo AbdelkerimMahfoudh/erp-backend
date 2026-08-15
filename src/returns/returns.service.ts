@@ -1314,6 +1314,25 @@ export class ReturnsService {
         confirmedBy: { select: { name: true } },
       },
     });
+    /**
+     * The correction raised against this payout, if any (Milestone B). Read as
+     * a sibling rather than joined onto the payout, because the payout row is
+     * never touched by a correction — that separation is the whole design.
+     *
+     * Ordered newest first: earlier rejected requests may exist, and the one
+     * that matters is the latest.
+     */
+    const correction = payout
+      ? await this.db.financialCorrection.findFirst({
+          where: { targetRefundPayoutId: payout.id },
+          orderBy: { id: 'desc' },
+          include: {
+            requestedBy: { select: { name: true } },
+            decidedBy: { select: { name: true } },
+          },
+        })
+      : null;
+
     const adjustmentTotal =
       Math.round(adjustments.reduce((s, a) => s + num(a.totalAmount), 0) * 100) / 100;
 
@@ -1393,6 +1412,12 @@ export class ReturnsService {
        */
       payout: payout
         ? {
+            /**
+             * Exposed so a confirmed payout can be named as a correction's
+             * target (Milestone B). It was not needed before, because nothing
+             * outside the return referred to a payout.
+             */
+            id: binToUuid(payout.id),
             status: payout.status,
             version: payout.version,
             netAmountDue: num(payout.netAmountDue),
@@ -1405,6 +1430,28 @@ export class ReturnsService {
             reportedAt: payout.reportedAt,
             confirmedBy: payout.confirmedBy?.name ?? null,
             confirmedAt: payout.confirmedAt,
+            /**
+             * Any correction raised against this payout (Milestone B). `null`
+             * means none — which is different from one that was rejected, and
+             * different again from an approved one that put the money back.
+             *
+             * The payout itself is unchanged in every case: this is a sibling
+             * record, not a field written back onto it.
+             */
+            correction: correction
+              ? {
+                  id: binToUuid(correction.id),
+                  status: correction.status,
+                  reason: correction.reason,
+                  requestedBy: correction.requestedBy?.name ?? null,
+                  requestedAt: correction.requestedAt,
+                  decidedBy: correction.decidedBy?.name ?? null,
+                  correctionDate: correction.correctionDate
+                    ? dayKey(correction.correctionDate)
+                    : null,
+                  version: correction.version,
+                }
+              : null,
           }
         : null,
     };
