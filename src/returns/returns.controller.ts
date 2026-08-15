@@ -4,10 +4,12 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { ReturnsService } from './returns.service';
 import {
   AdjustmentDto,
+  ApproveReturnDto,
   CreateReturnRequestDto,
   InvestigateDto,
   ListReturnsDto,
   ReceiveCustodyDto,
+  RejectReturnDto,
 } from './dto/return.dto';
 
 /**
@@ -88,6 +90,24 @@ export class ReturnsController {
   })
   addAdjustment(@Param('id') id: string, @Body() dto: AdjustmentDto) {
     return this.returns.addAdjustment(id, dto);
+  }
+
+  @Post(':id/approve')
+  @RequirePermissions('return.approve')
+  @ApiOperation({
+    summary: 'Approve a return — creates a refund OBLIGATION, not a payment',
+    description:
+      'Requires store custody, a decided responsibility and the current version. An out-of-policy return or customer-caused damage additionally requires return.exception and a written reason. Refused with 409 if the approval day is already closed.',
+  })
+  approve(@Param('id') id: string, @Body() dto: ApproveReturnDto) {
+    return this.returns.approve(id, dto);
+  }
+
+  @Post(':id/reject')
+  @RequirePermissions('return.reject')
+  @ApiOperation({ summary: 'Reject a return, with a mandatory reason, handing the phone back if held' })
+  reject(@Param('id') id: string, @Body() dto: RejectReturnDto) {
+    return this.returns.reject(id, dto);
   }
 
   @Delete(':id/adjustments/:adjustmentId')

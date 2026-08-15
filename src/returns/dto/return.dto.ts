@@ -209,3 +209,36 @@ export class ListReturnsDto {
   @Max(50)
   limit?: number;
 }
+
+export class ApproveReturnDto {
+  @ApiProperty({ description: 'The version last seen. Approve and reject race; one wins.' })
+  @IsInt()
+  @Min(0)
+  expectedVersion: number;
+
+  /**
+   * Mandatory when the return is outside the policy the sale was sold under, or
+   * when the investigation found the damage was the customer's. Both are Owner
+   * decisions, and both are departures from what was promised — so the reason
+   * is recorded while somebody still remembers it.
+   */
+  @ApiPropertyOptional({ maxLength: 255 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  exceptionReason?: string;
+}
+
+export class RejectReturnDto {
+  @ApiProperty()
+  @IsInt()
+  @Min(0)
+  expectedVersion: number;
+
+  /** Mandatory. A refusal nobody can explain is the one a customer argues with. */
+  @ApiProperty({ maxLength: 500 })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(500)
+  reason: string;
+}

@@ -27,16 +27,21 @@ type Tx = {
   user: { findFirst(args: unknown): Promise<{ name: string } | null> };
 };
 
-export type ReturnEvent = 'requested' | 'custody_received' | 'under_review';
+export type ReturnEvent = 'requested' | 'custody_received' | 'under_review' | 'approved' | 'rejected';
 
 export interface ReturnNotificationContext {
   event: ReturnEvent;
   request: { id: Buffer; companyId: Buffer; branchId: Buffer; requestedById: Buffer | null };
   invoiceNo: string;
   actorId: Buffer | null;
+  /** Shown verbatim on a rejection. Never contains money or defect detail. */
+  reason?: string;
 }
 
-const COPY: Record<ReturnEvent, (p: { invoiceNo: string; actor: string }) => { title: string; body: string }> = {
+const COPY: Record<
+  ReturnEvent,
+  (p: { invoiceNo: string; actor: string; reason?: string }) => { title: string; body: string }
+> = {
   requested: (p) => ({
     title: `Return request awaiting review`,
     body: `${p.actor} raised a return against invoice ${p.invoiceNo}.`,
@@ -48,6 +53,20 @@ const COPY: Record<ReturnEvent, (p: { invoiceNo: string; actor: string }) => { t
   under_review: (p) => ({
     title: `Your return is being reviewed`,
     body: `${p.actor} started investigating the return for invoice ${p.invoiceNo}.`,
+  }),
+  /**
+   * The wording is the point. "Refund due" and "not yet paid" appear together
+   * so nobody reads an approval as money already handed over — and no amount
+   * appears at all, because a notification is read outside the request that
+   * authorised it and must never route around cost gating.
+   */
+  approved: (p) => ({
+    title: `Return approved — refund due`,
+    body: `The return for invoice ${p.invoiceNo} was approved. The refund is due and has NOT yet been paid. The phone is held and is not for sale.`,
+  }),
+  rejected: (p) => ({
+    title: `Return rejected`,
+    body: `The return for invoice ${p.invoiceNo} was refused${p.reason ? `: ${p.reason}` : '.'}`,
   }),
 };
 
@@ -61,24 +80,53 @@ export class ReturnNotifier {
       ? await tx.user.findFirst({ where: { id: ctx.actorId }, select: { name: true } })
       : null;
 
-    const copy = COPY[ctx.event]({ invoiceNo: ctx.invoiceNo, actor: actor?.name ?? 'Someone' });
+    const copy = COPY[ctx.event]({
+      invoiceNo: ctx.invoiceNo,
+      actor: actor?.name ?? 'Someone',
+      reason: ctx.reason,
+    });
 
     for (const targetUserId of recipients) {
-      await tx.notification.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId: ctx.request.companyId,
-          branchId: ctx.request.branchId,
-          targetUserId,
-          type: `return.${ctx.event}`,
-          title: copy.title,
-          body: copy.body,
-          isRead: false,
-          // Where to go when tapped. The mobile detail route is built in CP5;
-          // the link is stable regardless.
-          data: { returnId: binToUuid(ctx.request.id), invoiceNo: ctx.invoiceNo },
-        } as Prisma.NotificationUncheckedCreateInput,
-      });
+      /**
+       * `dedupeKey` is the existing deduplication mechanism (H1.3): a UNIQUE
+       * index makes a duplicate an INSERT the database rejects, rather than one
+       * the application tries to avoid. An application-level pre-check is true
+       * when it is read and false when it is acted on; this is not.
+       *
+       * The key is the natural identity of the event — this return, this
+       * transition, this recipient — so a retried request delivers the same
+       * notification once.
+       */
+      const dedupeKey = `return:${ctx.request.id.toString('hex')}:${ctx.event}:${targetUserId.toString('hex').slice(0, 12)}`;
+      try {
+        await tx.notification.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId: ctx.request.companyId,
+            branchId: ctx.request.branchId,
+            targetUserId,
+            type: `return.${ctx.event}`,
+            title: copy.title,
+            body: copy.body,
+            // Where to go when tapped. The mobile route lands in CP5; the link
+            // is stable regardless.
+            actionLink: `/returns/${binToUuid(ctx.request.id)}`,
+            dedupeKey,
+            /**
+             * The FIELDS, so the app can compose the sentence in the reader's
+             * language while `title`/`body` stay the fallback. Carries an
+             * invoice number and nothing financial.
+             */
+            payload: { returnId: binToUuid(ctx.request.id), invoiceNo: ctx.invoiceNo },
+            isRead: false,
+          },
+        });
+      } catch (e) {
+        // The duplicate the unique index just refused. That is the mechanism
+        // working, not a failure — and it must not roll back the transition it
+        // was reporting.
+        if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== 'P2002') throw e;
+      }
     }
     return recipients.length;
   }
@@ -106,8 +154,15 @@ export class ReturnNotifier {
         add(await this.holdersOf(tx, ctx.request.companyId, ctx.request.branchId, 'return.review'));
         break;
       case 'under_review':
-        // Only the person who raised it. Broadcasting progress helps nobody.
+      case 'rejected':
+        // Only the person who raised it. Broadcasting a refusal helps nobody.
         add(ctx.request.requestedById ? [ctx.request.requestedById] : []);
+        break;
+      case 'approved':
+        // The requester learns the answer, and whoever can settle the refund
+        // needs to know one is now owed.
+        add(ctx.request.requestedById ? [ctx.request.requestedById] : []);
+        add(await this.holdersOf(tx, ctx.request.companyId, ctx.request.branchId, 'return.approve'));
         break;
     }
     return [...out.values()];

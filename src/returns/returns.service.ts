@@ -15,6 +15,8 @@ import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { assertTransition as assertUnitTransition } from '../inventory/unit-state-machine';
 import { evaluateEligibility } from '../sales/return-policy';
+import { RollupService } from '../analytics/rollup.service';
+import { dayKey } from '../common/utils/date.util';
 import { parseDateRange, parseEnumList } from '../sales/sale-query';
 import { ReturnNotifier } from './return-notifications';
 import {
@@ -26,6 +28,7 @@ import {
 } from './dto/return.dto';
 import {
   assertEditable,
+  assertMayApprove,
   assertTransition,
   custodyIntakeNeeded,
   fingerprintRequest,
@@ -74,6 +77,7 @@ export class ReturnsService {
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
     private readonly notifier: ReturnNotifier,
+    private readonly rollups: RollupService,
     private readonly cls: ClsService<AppClsStore>,
   ) {}
 
@@ -449,6 +453,251 @@ export class ReturnsService {
         action: 'delete',
         before: { label: adjustment.label, totalAmount: num(adjustment.totalAmount) },
         branchId,
+      });
+    });
+
+    return this.detail(idStr);
+  }
+
+  // ────────────────────────────── decisions ──────────────────────────────
+
+  /**
+   * Approve a return: create the refund OBLIGATION, and nothing more.
+   *
+   * The word "obligation" is load-bearing. Approval says the shop owes this
+   * money; it does not say a note left the till. Confirming that is I3, and
+   * every message here is worded so nobody reads it as payment.
+   *
+   * Six things must hold, and the order is deliberate — cheapest refusals and
+   * the ones a person can act on come first.
+   */
+  async approve(idStr: string, dto: { expectedVersion: number; exceptionReason?: string }) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const userId = this.tenant.userId();
+    const request = await this.load(idStr, branchId);
+
+    assertEditable(request.status);
+    assertTransition(request.status, 'approved_refund_due');
+
+    /**
+     * The phone must be here. Approving a refund for a device nobody has seen
+     * is the exact failure the custody model exists to prevent.
+     */
+    if (request.custody !== 'store_holds') {
+      throw new ConflictException({
+        code: 'custody_required',
+        message: 'Receive the phone before approving this return.',
+      });
+    }
+
+    const { isException } = assertMayApprove({
+      requiresException: request.requiresException,
+      responsibility: request.responsibility,
+      permissions: this.cls.get('permissions') ?? new Set<string>(),
+      exceptionReason: dto.exceptionReason,
+    });
+
+    // Money, from the immutable line and the drafted adjustments. Never from
+    // the request.
+    const gross = grossRefundOf({
+      price: num(request.saleItem.price),
+      quantity: request.saleItem.quantity,
+      discount: num(request.saleItem.discount),
+    });
+    const adjustments = await this.db.returnAdjustment.findMany({
+      where: { returnRequestId: request.id },
+      select: { totalAmount: true },
+    });
+    const { adjustmentTotal, netRefundDue } = settleRefund(
+      gross,
+      adjustments.map((a) => ({ totalAmount: num(a.totalAmount) })),
+    );
+
+    /**
+     * The reversal belongs to TODAY, the approval day — never the sale's day.
+     * If today is already closed for this branch, its locked snapshot would
+     * permanently disagree with a recomputed rollup, so the approval is refused
+     * rather than reopening a closing. That refusal is the single accounting
+     * rule this phase must not get wrong.
+     */
+    const approvalDay = dayKey(new Date());
+    const approvalDate = new Date(`${approvalDay}T00:00:00.000Z`);
+    const closing = await this.db.dailyClosing.findUnique({
+      where: { branchId_closingDate: { branchId, closingDate: approvalDate } },
+    });
+    if (closing?.isLocked) {
+      throw new ConflictException({
+        code: 'day_already_closed',
+        message: `${approvalDay} is already closed for this branch. Approve this return tomorrow, or ask the owner to review the closing.`,
+      });
+    }
+
+    const reversalId = newUuidV7Bin();
+    await this.db.$transaction(async (tx) => {
+      // Compare-and-swap on the version: approve and reject race, and exactly
+      // one of them wins.
+      const moved = await tx.returnRequest.updateMany({
+        where: { id: request.id, companyId, version: dto.expectedVersion, status: request.status },
+        data: {
+          status: 'approved_refund_due',
+          custody: 'retained_hold',
+          decidedById: userId ?? null,
+          decidedAt: new Date(),
+          exceptionReason: isException ? dto.exceptionReason!.trim() : null,
+          version: { increment: 1 },
+        },
+      });
+      if (moved.count === 0) throw this.staleWrite();
+
+      /**
+       * The immutable record. Every figure is a SNAPSHOT of the original line,
+       * so it stays true when the catalogue, the price or the cost move later.
+       * The table is append-only for the application account.
+       */
+      await tx.returnReversal.create({
+        data: {
+          id: reversalId,
+          companyId,
+          branchId,
+          saleId: request.saleId,
+          saleItemId: request.saleItemId,
+          unitId: request.unitId,
+          returnRequestId: request.id,
+          lineRevenue: gross,
+          lineCost: num(request.saleItem.cost) * request.saleItem.quantity,
+          lineMargin: gross - num(request.saleItem.cost) * request.saleItem.quantity,
+          grossRefund: gross,
+          adjustmentTotal,
+          netRefundDue,
+          approvalDate,
+          approvedById: userId ?? null,
+        },
+      });
+
+      // Unsellable, and staying that way until somebody inspects it.
+      await this.moveUnitForCustody(tx, request.unitId, 'returned', 'faulty');
+
+      await this.audit.recordTx(tx, {
+        entityType: 'ReturnRequest',
+        entityId: request.id,
+        action: 'update',
+        before: { status: request.status, custody: request.custody },
+        after: {
+          status: 'approved_refund_due',
+          custody: 'retained_hold',
+          netRefundDue,
+          isException,
+        },
+        reason: isException ? dto.exceptionReason?.trim() : undefined,
+        branchId,
+      });
+      await this.audit.recordTx(tx, {
+        entityType: 'ReturnReversal',
+        entityId: reversalId,
+        action: 'create',
+        after: { grossRefund: gross, adjustmentTotal, netRefundDue, approvalDate: approvalDay },
+        branchId,
+      });
+      await this.audit.recordTx(tx, {
+        entityType: 'Unit',
+        entityId: request.unitId,
+        action: 'status_change',
+        before: { status: 'returned' },
+        after: { status: 'faulty', reason: 'return approved — held, not sellable' },
+        branchId,
+      });
+
+      await this.notifier.emit(tx, {
+        event: 'approved',
+        request: {
+          id: request.id,
+          companyId,
+          branchId,
+          requestedById: request.requestedById,
+        },
+        invoiceNo: request.sale.invoiceNo,
+        actorId: userId ?? null,
+      });
+    });
+
+    /**
+     * After commit, so a rolled-back approval never leaves a rollup claiming a
+     * refund that did not happen. The rollup is derived, so recomputing the
+     * approval day is additive and touches no sale row.
+     */
+    await this.rollups.recomputeDaily(companyId, branchId, approvalDay);
+
+    return this.detail(idStr);
+  }
+
+  /**
+   * Reject a return, with a reason the customer can be told.
+   *
+   * If the shop is holding the phone it goes back, and the unit returns to
+   * `sold` — the only route by which that transition is reachable, and only
+   * together with a recorded hand-back.
+   */
+  async reject(idStr: string, dto: { expectedVersion: number; reason: string }) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const userId = this.tenant.userId();
+    const request = await this.load(idStr, branchId);
+
+    assertEditable(request.status);
+    assertTransition(request.status, 'rejected');
+
+    const reason = dto.reason?.trim();
+    if (!reason) {
+      // A refusal nobody can explain is the one a customer argues with.
+      throw new BadRequestException('Say why this return is being refused');
+    }
+
+    const handingBack = request.custody === 'store_holds';
+
+    await this.db.$transaction(async (tx) => {
+      const moved = await tx.returnRequest.updateMany({
+        where: { id: request.id, companyId, version: dto.expectedVersion, status: request.status },
+        data: {
+          status: 'rejected',
+          custody: handingBack ? 'handed_back' : request.custody,
+          custodyReturnedAt: handingBack ? new Date() : null,
+          decidedById: userId ?? null,
+          decidedAt: new Date(),
+          decisionReason: reason,
+          version: { increment: 1 },
+        },
+      });
+      if (moved.count === 0) throw this.staleWrite();
+
+      if (handingBack) {
+        await this.moveUnitForCustody(tx, request.unitId, 'returned', 'sold');
+        await this.audit.recordTx(tx, {
+          entityType: 'Unit',
+          entityId: request.unitId,
+          action: 'status_change',
+          before: { status: 'returned' },
+          after: { status: 'sold', reason: 'return rejected — handed back to the customer' },
+          branchId,
+        });
+      }
+
+      await this.audit.recordTx(tx, {
+        entityType: 'ReturnRequest',
+        entityId: request.id,
+        action: 'update',
+        before: { status: request.status, custody: request.custody },
+        after: { status: 'rejected', custody: handingBack ? 'handed_back' : request.custody },
+        reason,
+        branchId,
+      });
+
+      await this.notifier.emit(tx, {
+        event: 'rejected',
+        request: { id: request.id, companyId, branchId, requestedById: request.requestedById },
+        invoiceNo: request.sale.invoiceNo,
+        actorId: userId ?? null,
+        reason,
       });
     });
 

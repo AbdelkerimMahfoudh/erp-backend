@@ -16,6 +16,11 @@ function toNum(v: unknown): number {
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
+interface ReturnTotalsRow {
+  refunded: unknown;
+  returns_count: unknown;
+}
+
 interface StoreTotalsRow {
   revenue: unknown;
   cogs: unknown;
@@ -98,11 +103,52 @@ export class RollupService {
       WHERE company_id = ${companyId} AND branch_id = ${branchId} AND spent_on = ${day}
     `);
 
+    /**
+     * Returns approved ON THIS DAY (I2).
+     *
+     * Keyed on `approval_date`, never on the sale's day — that is precisely what
+     * lets the original day recompute byte-identically and keeps a closed day
+     * closed. The legacy endpoint did the opposite: it set `voided = true`, and
+     * because the query above filters `si.voided = 0`, every return silently
+     * rewrote a past day's revenue and profit.
+     *
+     * ## What is reversed, and what is deliberately not
+     *
+     * Revenue falls by the NET refund due — the money actually going back.
+     * Anything withheld as an adjustment (a consumed screen protector) is money
+     * the shop keeps, so it stays as revenue.
+     *
+     * COGS is NOT credited back. The returned phone is held as `faulty` and is
+     * unsellable, and `held-value` counts only `in_stock`, so the goods are not
+     * an asset again. Crediting the cost here while the asset is absent from
+     * inventory would book the benefit twice and overstate profit. Cost recovery
+     * belongs to the later inspection milestone, when the phone either returns
+     * to sellable stock or is written off — and `returns_cogs` exists for that
+     * day.
+     *
+     * So the profit impact of an approved return is the full net refund. That is
+     * the conservative reading, and the one that cannot flatter a month.
+     */
+    const returnRows = await this.prisma.$queryRaw<ReturnTotalsRow[]>(Prisma.sql`
+      SELECT COALESCE(SUM(net_refund_due), 0) AS refunded,
+             COUNT(*)                         AS returns_count
+      FROM return_reversals
+      WHERE company_id = ${companyId}
+        AND branch_id = ${branchId}
+        AND approval_date = ${day}
+    `);
+    const returnsRevenue = round2(toNum(returnRows[0].refunded));
+    const returnsCount = toNum(returnRows[0].returns_count);
+    const returnsCogs = 0;
+    const returnsGrossProfit = round2(returnsRevenue - returnsCogs);
+
     const revenue = round2(toNum(totals[0].revenue));
     const cogs = round2(toNum(totals[0].cogs));
     const grossProfit = round2(revenue - cogs);
     const expenses = round2(toNum(expRows[0].expenses));
-    const netProfit = round2(grossProfit - expenses);
+    // Positive magnitudes, subtracted explicitly. A negative stored revenue
+    // would leave every reader guessing whether the sign was already applied.
+    const netProfit = round2(grossProfit - returnsGrossProfit - expenses);
 
     await this.prisma.dailyRollup.upsert({
       where: { branchId_day: { branchId, day: dayDate } },
@@ -118,6 +164,10 @@ export class RollupService {
         qtySold: toNum(totals[0].qty_sold),
         expenses,
         netProfit,
+        returnsRevenue,
+        returnsCogs,
+        returnsGrossProfit,
+        returnsCount,
         refreshedAt: now,
       },
       update: {
@@ -128,6 +178,10 @@ export class RollupService {
         qtySold: toNum(totals[0].qty_sold),
         expenses,
         netProfit,
+        returnsRevenue,
+        returnsCogs,
+        returnsGrossProfit,
+        returnsCount,
         refreshedAt: now,
       },
     });

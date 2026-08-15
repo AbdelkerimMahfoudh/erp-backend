@@ -53,6 +53,11 @@ export class ClosingService {
     const grossProfit = round2(num(rollup?.grossProfit ?? 0));
     const expenses = round2(num(rollup?.expenses ?? 0));
     const netProfit = round2(num(rollup?.netProfit ?? 0));
+    // Returns approved on THIS day, snapshotted into the locked record so a
+    // closing written after an approval carries it. Positive magnitudes; the
+    // rollup has already subtracted them from netProfit.
+    const totalReturns = round2(num(rollup?.returnsRevenue ?? 0));
+    const totalReturnsProfitImpact = round2(num(rollup?.returnsGrossProfit ?? 0));
 
     // Expected cash = cash payments taken on the day at this branch.
     const cash = await this.db.payment.aggregate({
@@ -77,6 +82,8 @@ export class ClosingService {
           difference,
           totalSales: revenue,
           totalProfit: netProfit,
+          totalReturns,
+          totalReturnsProfitImpact,
           isLocked: true,
           closedById: this.tenant.userId() ?? null,
         },
