@@ -1,0 +1,158 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * **The authoritative reconciliation equation** (Milestone E0).
+ *
+ * Five milestones have now each added a movement to expected cash, and each
+ * one arrived as a separate fix for a separate reported shortage:
+ *
+ *   I3  refunds paid in cash          — a refunded day looked short
+ *   J1  supplier payments in cash     — a day the shop paid a supplier looked short
+ *   B   corrections returned in cash  — money came back and nothing said so
+ *   D   expenses paid in cash         — a day the shop bought electricity looked short
+ *
+ * That history is the reason this file exists. Each addition was individually
+ * correct and nobody was ever looking at the whole equation, so the next
+ * omission was only ever found by somebody noticing their till did not balance.
+ *
+ * This pins the WHOLE equation in one place:
+ *
+ *   expected = cash taken in
+ *            − refunds(cash) − supplier(cash) − expenses(cash)
+ *            + corrections(cash)
+ *
+ * Two properties are asserted, and both matter:
+ *
+ *   1. **Every movement appears exactly once.** Twice would double-count.
+ *   2. **Only CONFIRMED movements appear.** A pending report must change no
+ *      figure anybody reconciles against.
+ *
+ * Milestone E builds the progressive closing on top of this. It must not create
+ * a second equation — if a term is added, it is added here.
+ */
+
+const SRC = __dirname;
+const closing = readFileSync(join(SRC, 'closing.service.ts'), 'utf8');
+const rollup = readFileSync(join(SRC, '..', 'analytics', 'rollup.service.ts'), 'utf8');
+const suppliers = readFileSync(join(SRC, '..', 'suppliers', 'suppliers.service.ts'), 'utf8');
+
+/** The expected-cash expression, comments stripped. */
+const equation = closing
+  .slice(closing.indexOf('const expectedCash'), closing.indexOf('const difference'))
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '');
+
+/** Every term the equation is allowed to contain, and its sign. */
+const TERMS = [
+  { name: 'cash._sum.amount', sign: '+', why: 'cash taken in from sales' },
+  { name: 'refundedCash', sign: '-', why: 'refunds handed back in cash (I3)' },
+  { name: 'supplierPaid.cash', sign: '-', why: 'supplier payments in cash (J1)' },
+  { name: 'expensesCash', sign: '-', why: 'expenses paid in cash (D)' },
+  { name: 'correctedCash', sign: '+', why: 'corrections returned in cash (B)' },
+] as const;
+
+describe('the reconciliation equation', () => {
+  for (const term of TERMS) {
+    it(`includes ${term.name} exactly once — ${term.why}`, () => {
+      const escaped = term.name.replace(/\./g, '\\.');
+      const hits = equation.match(new RegExp(escaped, 'g')) ?? [];
+      expect(hits).toHaveLength(1);
+    });
+
+    it(`applies the right sign to ${term.name}`, () => {
+      const escaped = term.name.replace(/\./g, '\\.');
+      if (term.sign === '-') {
+        expect(equation).toMatch(new RegExp(`-\\s*${escaped}`));
+      } else {
+        // The first term has no leading operator; the rest are added.
+        expect(equation).toMatch(new RegExp(`[+(]\\s*${escaped}|${escaped}`));
+        expect(equation).not.toMatch(new RegExp(`-\\s*${escaped}`));
+      }
+    });
+  }
+
+  it('contains NOTHING but those five terms', () => {
+    /**
+     * The assertion that actually catches a sixth movement being bolted on
+     * without being reasoned about. If a term is genuinely needed, it is added
+     * to `TERMS` above with its sign and its reason — which forces somebody to
+     * say why.
+     */
+    const identifiers = [...equation.matchAll(/[A-Za-z_][A-Za-z0-9_.]*/g)].map((m) => m[0]);
+    const allowed = new Set([
+      ...TERMS.map((t) => t.name),
+      'const',
+      'expectedCash',
+      'round2',
+      'num',
+      'cash',
+      '_sum',
+      'amount',
+      'cash._sum',
+    ]);
+    const unexpected = identifiers.filter(
+      (id) => !allowed.has(id) && !TERMS.some((t) => t.name.startsWith(id) || id.startsWith(t.name)),
+    );
+    expect(unexpected).toEqual([]);
+  });
+});
+
+describe('only CONFIRMED movements reach the equation', () => {
+  it('refunds: the rollup component counts confirmed payouts only', () => {
+    const block = rollup.slice(rollup.indexOf('FROM refund_payouts'), rollup.indexOf('FROM refund_payouts') + 300);
+    expect(block).toMatch(/status = 'confirmed'/);
+  });
+
+  it('supplier payments: confirmed settlements only', () => {
+    const paidOn = suppliers.slice(suppliers.indexOf('async paidOn('), suppliers.indexOf('async paidOn(') + 600);
+    expect(paidOn).toMatch(/status = 'confirmed'/);
+  });
+
+  it('expenses: confirmed only', () => {
+    const block = rollup.slice(rollup.indexOf('FROM expenses'), rollup.indexOf('FROM expenses') + 400);
+    expect(block).toMatch(/status = 'confirmed'/);
+  });
+
+  it('corrections: approved only', () => {
+    const block = rollup.slice(
+      rollup.indexOf('FROM financial_corrections'),
+      rollup.indexOf('FROM financial_corrections') + 300,
+    );
+    expect(block).toMatch(/status = 'approved'/);
+  });
+});
+
+describe('only CASH reaches the till figure', () => {
+  /**
+   * An account transfer never touched the drawer. Every component therefore
+   * separates its cash half, and the equation uses only that half — the reason
+   * each of these `CASE WHEN method = 'cash'` sums exists.
+   */
+  it('each component separates its cash part', () => {
+    expect(rollup).toMatch(/method = 'cash' THEN reported_amount END\), 0\)\s+AS paid_cash/);
+    expect(rollup).toMatch(/method = 'cash' THEN amount END\), 0\)\s+AS paid_cash|method = 'cash' THEN amount END\), 0\)\s+AS expenses_cash/);
+    expect(suppliers).toMatch(/GROUP BY method/);
+  });
+
+  it('the equation reads the cash figures, never the totals', () => {
+    for (const total of ['refundsPaidTotal', 'supplierPaid.total', 'correctionsTotal']) {
+      expect(equation).not.toContain(total);
+    }
+  });
+});
+
+describe('a locked closing is a snapshot, not a view', () => {
+  /**
+   * Once written, the figures are stored on the closing row. Nothing recomputes
+   * and rewrites them later — a correction posts to the current open day
+   * instead, which is what keeps a signed-off day signed off.
+   */
+  it('the closing stores its own expected and counted figures', () => {
+    expect(closing).toMatch(/expectedCash,\s*\n\s*countedCash: dto\.countedCash/);
+  });
+
+  it('closing the same day twice is refused', () => {
+    expect(closing).toMatch(/already closed for this branch/);
+  });
+});
