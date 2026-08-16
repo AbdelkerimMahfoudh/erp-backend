@@ -77,6 +77,12 @@ enum TrackingType {
   quantity
 }
 
+enum RecognitionStatus {
+  proposed
+  confirmed
+  superseded
+}
+
 enum CodeType {
   tac
   barcode
@@ -280,6 +286,11 @@ model Branch {
 }
 
 model User {
+  /// TAC mappings this user proposed, and those they confirmed. Two relations,
+  /// because who suggested and who decided must stay distinguishable.
+  recognitionsProposed  ProductRecognition[] @relation("RecognitionProposedBy")
+  recognitionsConfirmed ProductRecognition[] @relation("RecognitionConfirmedBy")
+
   /// Corrections this user asked for, and corrections they decided. Two
   /// relations rather than one, because who requested and who approved must
   /// stay distinguishable even when an owner does both.
@@ -514,12 +525,27 @@ model ProductRecognition {
   lastConfirmedAt DateTime? @map("last_confirmed_at") @db.DateTime(6)
   lastCorrectedAt DateTime? @map("last_corrected_at") @db.DateTime(6)
   sourceStats     Json?     @map("source_stats") @db.Json // {receiving,scan,sale,manual} counts
+  /// The authority distinction (Milestone C). `proposed` is an Employee's
+  /// suggestion and is NEVER authoritative; `confirmed` is an Owner's or
+  /// Manager's decision; `superseded` is a replaced mapping, kept rather than
+  /// deleted so what a shop once believed about a code survives.
+  status          RecognitionStatus @default(confirmed)
+  proposedById    Bytes?    @map("proposed_by_id") @db.Binary(16)
+  confirmedById   Bytes?    @map("confirmed_by_id") @db.Binary(16)
+  confirmedAt     DateTime? @map("confirmed_at") @db.DateTime(6)
+  /// Where the evidence came from: receiving, scan, sale, manual.
+  evidenceSource  String?   @map("evidence_source") @db.VarChar(24)
+  /// Optimistic concurrency: two managers confirming one TAC, one winner.
+  version         Int       @default(0)
   createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  proposedBy  User? @relation("RecognitionProposedBy", fields: [proposedById], references: [id])
+  confirmedBy User? @relation("RecognitionConfirmedBy", fields: [confirmedById], references: [id])
 
-  @@unique([companyId, codeType, code])
+  @@index([companyId, codeType, code, status])
   @@index([companyId, productId])
   @@index([productId])
   @@map("product_recognition")

@@ -64,9 +64,35 @@ export class RecognitionService {
     @Inject(CONFIDENCE_SCORER) private readonly scorer: ConfidenceScorer,
   ) {}
 
+  /**
+   * The authoritative mapping for a code, if this company has one.
+   *
+   * **Confirmed only.** A pending Employee proposal is evidence, not a
+   * decision, and must never be returned here — anything reading `resolve()`
+   * treats the answer as authoritative, so a proposal reaching it would be
+   * auto-selected somewhere. Proposals are surfaced through
+   * `mappingsForCode()`, which the caller must handle deliberately.
+   */
   async resolve(codeType: CodeType, code: string): Promise<RecognitionMatch | null> {
-    const row = await this.db.productRecognition.findFirst({ where: { codeType, code } });
+    const row = await this.db.productRecognition.findFirst({
+      where: { codeType, code, status: 'confirmed' },
+    });
     return row ? { productId: row.productId, signals: this.signalsOf(row) } : null;
+  }
+
+  /**
+   * Every mapping this company holds for a code — confirmed, proposed and
+   * superseded alike. For the TAC resolution ladder, which has to distinguish
+   * "nobody has said" from "somebody suggested, nobody agreed".
+   *
+   * Tenant-scoped by the extension, so another company's mappings are not
+   * merely filtered out — they are unreachable.
+   */
+  async mappingsForCode(codeType: CodeType, code: string) {
+    return this.db.productRecognition.findMany({
+      where: { codeType, code },
+      orderBy: { id: 'desc' },
+    });
   }
 
   confidenceOf(signals: RecognitionSignals): number {
