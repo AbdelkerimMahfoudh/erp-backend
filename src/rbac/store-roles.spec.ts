@@ -45,10 +45,16 @@ describe('store-facing roles', () => {
     // the seed comment above used to say the model could not express.
     // `expense.manage` is unchanged and still Owner-only.
     //
+    // 42 → 44 in Milestone E — `closing.count` and `debt.manage`. The first is
+    // the E0 audit's finding: `closing.perform` both recorded the count and
+    // locked the day, so an Employee could not report a count at all. The
+    // second is deliberately NOT part of `closing.perform`, which a Manager
+    // holds — deciding a named person owes the business money is Owner-only.
+    //
     // The Owner holds every permission by construction, so this number moving
     // is the signal that a phase added authority — it should never move by
     // accident, and it moving LATE means a phase shipped a drift.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(42);
+    expect(ROLE_PERMISSIONS.owner.length).toBe(44);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
@@ -135,6 +141,28 @@ describe('Store Employee', () => {
     expect(has('store_employee', 'expense.submit')).toBe(true);
     expect(has('store_employee', 'expense.review')).toBe(false);
     expect(has('store_employee', 'expense.manage')).toBe(false);
+  });
+
+  it('may COUNT the drawer and may not sign the day off', () => {
+    /**
+     * The E0 audit's first finding, pinned. `closing.perform` recorded the
+     * count AND locked the day, and the employee held neither — so the person
+     * physically holding the drawer could not report what was in it without
+     * somebody senior standing there.
+     *
+     * If these two ever end up in the same permission again, the employee
+     * either loses the ability to count or gains the authority to close.
+     */
+    expect(has('store_employee', 'closing.count')).toBe(true);
+    expect(has('store_employee', 'closing.perform')).toBe(false);
+  });
+
+  it('is never able to decide who owes the shop money', () => {
+    // Being the person a shortage is attributed to and being the person who
+    // decides that attribution must never be the same permission.
+    expect(has('store_employee', 'debt.manage')).toBe(false);
+    expect(has('store_manager', 'debt.manage')).toBe(false);
+    expect(has('owner', 'debt.manage')).toBe(true);
   });
 
   it('has no administrative or approval authority', () => {

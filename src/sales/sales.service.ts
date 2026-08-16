@@ -327,8 +327,36 @@ export class SalesService {
         }
 
         for (const pay of dto.payments) {
+          /**
+           * Attribute the money to the account it landed in (E-CP1), so that
+           * account has an expected balance somebody can reconcile against.
+           *
+           * Cash is forced to no account — the drawer belongs to no account,
+           * and `ck_payments_cash_no_account` refuses the alternative anyway.
+           * A non-cash payment naming no account stays NULL and is reported as
+           * unattributed; guessing would fabricate a financial record.
+           *
+           * The label is frozen here, because renaming the account later must
+           * not retitle money that already came in.
+           */
+          const accountBin =
+            pay.method === 'cash' || !pay.receivingAccountId ? null : uuidToBin(pay.receivingAccountId);
+          const account = accountBin
+            ? await tx.receivingAccount.findFirst({ where: { id: accountBin }, select: { label: true } })
+            : null;
+          if (accountBin && !account) {
+            throw new BadRequestException('That receiving account does not exist');
+          }
           await tx.payment.create({
-            data: { id: newUuidV7Bin(), companyId, saleId, method: pay.method, amount: pay.amount },
+            data: {
+              id: newUuidV7Bin(),
+              companyId,
+              saleId,
+              method: pay.method,
+              amount: pay.amount,
+              receivingAccountId: accountBin,
+              accountLabelSnapshot: account?.label ?? null,
+            },
           });
         }
 

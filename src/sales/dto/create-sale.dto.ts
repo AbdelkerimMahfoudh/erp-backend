@@ -62,6 +62,22 @@ export class PaymentInputDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
   amount: number;
+
+  /**
+   * Which receiving account the money landed in (E-CP1).
+   *
+   * Money going OUT was already attributed — refunds, supplier payments and
+   * expenses all name an account — but money coming IN was not, so no account
+   * could have an expected balance and none could be reconciled.
+   *
+   * Optional, and never guessed: a non-cash payment that names no account is
+   * reported honestly as unattributed rather than being assigned to whichever
+   * account looks likely. Must be absent for cash, which belongs to the drawer.
+   */
+  @ApiPropertyOptional({ format: 'uuid', description: 'Receiving account; omit for cash' })
+  @IsOptional()
+  @IsUUID()
+  receivingAccountId?: string;
 }
 
 export class CreateSaleDto {

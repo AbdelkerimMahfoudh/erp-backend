@@ -223,6 +223,9 @@ model Company {
   expenseTemplates  ExpenseTemplate[]
   expenses          Expense[]
   dailyClosings     DailyClosing[]
+  closingChannelCounts ClosingChannelCount[]
+  closingDiscrepancies ClosingDiscrepancy[]
+  employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests      DailyDigest[]
   digestLines       DigestLine[]
   notifications     Notification[]
@@ -282,6 +285,8 @@ model Branch {
   expenseTemplates ExpenseTemplate[]
   expenses         Expense[]
   dailyClosings    DailyClosing[]
+  closingDiscrepancies ClosingDiscrepancy[]
+  employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests     DailyDigest[]
   notifications    Notification[]
   importBatches    ImportBatch[]
@@ -310,6 +315,23 @@ model User {
   /// stay distinguishable even when an owner does both.
   correctionsRequested FinancialCorrection[] @relation("CorrectionRequestedBy")
   correctionsDecided   FinancialCorrection[] @relation("CorrectionDecidedBy")
+
+  /// Closings this user COUNTED, kept apart from `closedBy` on `DailyClosing`.
+  /// Separating the two is the point of `closing.count` — an Employee counts
+  /// the drawer, somebody senior signs the day off, and the record says which
+  /// of them did what.
+  closingsCounted DailyClosing[]        @relation("ClosingCountedBy")
+  channelCounts   ClosingChannelCount[] @relation("ChannelCountedBy")
+
+  /// Discrepancies this user was held responsible for, and discrepancies they
+  /// resolved. Never the same relation: the Owner deciding and the person
+  /// carrying the shortage must stay distinguishable.
+  discrepanciesResponsible ClosingDiscrepancy[] @relation("DiscrepancyResponsible")
+  discrepanciesResolved    ClosingDiscrepancy[] @relation("DiscrepancyResolvedBy")
+
+  /// Ledger rows ABOUT this user, and ledger rows this user wrote.
+  debtEntries        EmployeeDebtEntry[] @relation("DebtSubject")
+  debtEntriesCreated EmployeeDebtEntry[] @relation("DebtCreatedBy")
 
   id           Bytes     @id @db.Binary(16)
   companyId    Bytes     @map("company_id") @db.Binary(16)
@@ -1029,11 +1051,29 @@ model Payment {
   amount    Decimal       @db.Decimal(14, 2)
   paidAt    DateTime      @default(now()) @map("paid_at") @db.DateTime(6)
 
-  company Company @relation(fields: [companyId], references: [id])
-  sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  /// Which account the money landed in (0045). Money going OUT was already
+  /// attributed — `refund_payouts`, `supplier_settlements` and `expenses` all
+  /// carry this — but money coming IN was not, so no account could have an
+  /// expected balance of its own.
+  ///
+  /// NULL means unattributed: every payment taken before 0045, and any non-cash
+  /// payment where the till did not identify an account. Unattributed money is
+  /// reported as its own line and is never folded into a real account's
+  /// expected figure — guessing which account an old sale reached would be
+  /// inventing a financial record.
+  ///
+  /// Always NULL for cash, enforced by `ck_payments_cash_no_account`.
+  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  /// Frozen at the moment of payment, like every other account reference here.
+  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+
+  company          Company           @relation(fields: [companyId], references: [id])
+  sale             Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
 
   @@index([saleId])
   @@index([companyId])
+  @@index([companyId, receivingAccountId], map: "ix_payments_account")
   @@map("payments")
 }
 
@@ -1295,20 +1335,238 @@ model DailyClosing {
   /// figure. Only the cash part left the drawer.
   supplierPaidTotal Decimal @default(0) @map("supplier_paid_total") @db.Decimal(14, 2)
   supplierPaidCash  Decimal @default(0) @map("supplier_paid_cash") @db.Decimal(14, 2)
+  /// The closing lifecycle (0045). Counting and signing off became two acts,
+  /// because `closing.perform` did both and the Employee holding the drawer
+  /// held neither — so nobody junior could report what was in the till.
+  ///
+  /// `locked` is the DEFAULT so every closing written before 0045 keeps exactly
+  /// the meaning it had: counted and signed off in one step.
+  status      ClosingStatus @default(locked)
+  countedById Bytes?        @map("counted_by_id") @db.Binary(16)
+  countedAt   DateTime?     @map("counted_at") @db.DateTime(6)
+  /// Optimistic concurrency: two people finishing one day, one winner.
+  version     Int           @default(0)
+
   isLocked     Boolean  @default(true) @map("is_locked")
   notes        String?  @db.Text
   closedById   Bytes?   @map("closed_by") @db.Binary(16)
   closedAt     DateTime @default(now()) @map("closed_at") @db.DateTime(6)
 
-  company  Company      @relation(fields: [companyId], references: [id])
-  branch   Branch       @relation(fields: [branchId], references: [id])
-  closedBy User?        @relation(fields: [closedById], references: [id])
-  digest   DailyDigest?
+  company   Company      @relation(fields: [companyId], references: [id])
+  branch    Branch       @relation(fields: [branchId], references: [id])
+  closedBy  User?        @relation(fields: [closedById], references: [id])
+  countedBy User?        @relation("ClosingCountedBy", fields: [countedById], references: [id])
+  digest    DailyDigest?
+
+  channelCounts ClosingChannelCount[]
+  discrepancies ClosingDiscrepancy[]
 
   @@unique([branchId, closingDate])
   @@index([companyId])
   @@index([closedById])
   @@map("daily_closings")
+}
+
+/// Where a closing is in its lifecycle (0045).
+enum ClosingStatus {
+  /// Open. Figures still move as the day's work is confirmed.
+  counting
+  /// A count has been entered. Not signed off — the day is still correctable.
+  counted
+  /// Signed off. The figures are a snapshot and never move again.
+  locked
+}
+
+enum ClosingChannel {
+  cash
+  account
+}
+
+/// One channel's expected and counted figures on a closing (0045).
+///
+/// Before this, the closing was a single cash figure, so a shop taking Bankily
+/// had no expected balance for it and an account could drift indefinitely with
+/// nothing noticing.
+model ClosingChannelCount {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  closingId Bytes @map("closing_id") @db.Binary(16)
+
+  channel ClosingChannel
+  /// NULL for cash, and NULL for the unattributed bucket of a method whose
+  /// payments never named an account.
+  receivingAccountId Bytes? @map("receiving_account_id") @db.Binary(16)
+  /// Frozen. Renaming an account must not retitle a movement already recorded.
+  labelSnapshot      String @map("label_snapshot") @db.VarChar(80)
+
+  /// The same five movements the cash equation is built from, per channel:
+  ///   expected = salesIn − refundsOut − supplierOut − expensesOut + correctionsIn
+  /// Stored individually so a channel can answer for its own figure rather than
+  /// merely assert it.
+  salesIn       Decimal @default(0) @map("sales_in") @db.Decimal(14, 2)
+  refundsOut    Decimal @default(0) @map("refunds_out") @db.Decimal(14, 2)
+  supplierOut   Decimal @default(0) @map("supplier_out") @db.Decimal(14, 2)
+  expensesOut   Decimal @default(0) @map("expenses_out") @db.Decimal(14, 2)
+  correctionsIn Decimal @default(0) @map("corrections_in") @db.Decimal(14, 2)
+
+  expected Decimal @default(0) @db.Decimal(14, 2)
+  /// NULL means genuinely not counted yet, which is not the same as counted as
+  /// zero. A shop that has not checked its Bankily balance must not read as
+  /// balanced.
+  counted    Decimal? @db.Decimal(14, 2)
+  difference Decimal? @db.Decimal(14, 2)
+
+  /// An account balance is a running total, not a till. It is reconcilable only
+  /// when the shop can actually read the figure, so a channel may be skipped
+  /// WITH a reason — skipping is recorded, never inferred from a missing count.
+  isSkipped  Boolean @default(false) @map("is_skipped")
+  skipReason String? @map("skip_reason") @db.VarChar(255)
+
+  countedById Bytes?    @map("counted_by_id") @db.Binary(16)
+  countedAt   DateTime? @map("counted_at") @db.DateTime(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company          Company              @relation(fields: [companyId], references: [id])
+  closing          DailyClosing         @relation(fields: [closingId], references: [id])
+  receivingAccount ReceivingAccount?    @relation(fields: [receivingAccountId], references: [id])
+  countedBy        User?                @relation("ChannelCountedBy", fields: [countedById], references: [id])
+  discrepancies    ClosingDiscrepancy[]
+
+  // Uniqueness is on the generated `channel_key` (0045), because MySQL has no
+  // partial unique index and a NULL account would let one channel appear twice.
+  @@index([companyId])
+  @@index([receivingAccountId])
+  @@map("closing_channel_counts")
+}
+
+enum DiscrepancyStatus {
+  /// Where every discrepancy opens. Never auto-assigned to anybody — the system
+  /// observes that the drawer is short, it does not accuse whoever was counting.
+  pending_investigation
+  resolved
+}
+
+enum DiscrepancyResolution {
+  /// A person accepted responsibility. Writes a ledger row.
+  employee_debt
+  /// The business takes the loss.
+  store_absorbed
+  /// The money was never missing; a record was wrong.
+  error_corrected
+  /// Responsibility identified, then waived.
+  forgiven
+}
+
+/// A difference that somebody has to answer for (0045).
+///
+/// Before this, `difference` was a number on a locked row: no investigation, no
+/// decision, no record of who was held responsible. So a shortage was either
+/// silently absorbed or settled verbally.
+model ClosingDiscrepancy {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  branchId  Bytes @map("branch_id") @db.Binary(16)
+  closingId Bytes @map("closing_id") @db.Binary(16)
+  /// Which channel was out. NULL only for a legacy cash-only closing.
+  channelCountId Bytes? @map("channel_count_id") @db.Binary(16)
+
+  /// Signed: negative is a shortage, positive is a surplus. A surplus is
+  /// investigated too — unexplained extra money is a mis-recorded sale until
+  /// somebody shows otherwise.
+  amount Decimal @db.Decimal(14, 2)
+
+  status            DiscrepancyStatus      @default(pending_investigation)
+  resolution        DiscrepancyResolution?
+  responsibleUserId Bytes?                 @map("responsible_user_id") @db.Binary(16)
+  /// Mandatory on resolution. There is no resolving a shortage silently.
+  resolutionReason  String?                @map("resolution_reason") @db.VarChar(255)
+
+  openedAt     DateTime  @default(now()) @map("opened_at") @db.DateTime(6)
+  resolvedById Bytes?    @map("resolved_by_id") @db.Binary(16)
+  resolvedAt   DateTime? @map("resolved_at") @db.DateTime(6)
+
+  version Int @default(0)
+
+  company         Company              @relation(fields: [companyId], references: [id])
+  branch          Branch               @relation(fields: [branchId], references: [id])
+  closing         DailyClosing         @relation(fields: [closingId], references: [id])
+  channelCount    ClosingChannelCount? @relation(fields: [channelCountId], references: [id])
+  responsibleUser User?                @relation("DiscrepancyResponsible", fields: [responsibleUserId], references: [id])
+  resolvedBy      User?                @relation("DiscrepancyResolvedBy", fields: [resolvedById], references: [id])
+  debtEntries     EmployeeDebtEntry[]
+
+  @@index([companyId, branchId, status])
+  @@index([closingId])
+  @@index([responsibleUserId])
+  @@index([channelCountId])
+  @@index([resolvedById])
+  @@map("closing_discrepancies")
+}
+
+enum DebtEntryKind {
+  /// A shortage the person accepted. Increases what is owed.
+  charge
+  /// Money handed back. Decreases it.
+  repayment
+  /// Withheld from pay. Decreases it.
+  deduction
+  /// Written off. Decreases it, and the business bears it.
+  forgiveness
+}
+
+enum DebtRepaymentMethod {
+  cash
+  account
+  payroll
+}
+
+/// The employee debt ledger (0045) — append-only, like every other financial
+/// record here.
+///
+/// What somebody owes is DERIVED from these rows and stored nowhere:
+///   balance = charges − repayments − deductions − forgiveness
+/// A stored balance can disagree with its own history. A derived one cannot.
+model EmployeeDebtEntry {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  branchId  Bytes @map("branch_id") @db.Binary(16)
+  userId    Bytes @map("user_id") @db.Binary(16)
+  /// Where it came from. NULL for a repayment against an older balance.
+  discrepancyId Bytes? @map("discrepancy_id") @db.Binary(16)
+
+  kind DebtEntryKind
+  /// Always a positive magnitude — `kind` carries the direction, so no row can
+  /// be ambiguous about which way the money went.
+  amount Decimal @db.Decimal(14, 2)
+
+  /// Mandatory, every kind, no exception. A ledger row nobody can explain is
+  /// worse than no ledger at all.
+  reason    String               @db.VarChar(255)
+  /// How a repayment arrived. NULL for the other kinds.
+  method    DebtRepaymentMethod?
+  reference String?              @db.VarChar(120)
+
+  entryDate   DateTime @map("entry_date") @db.Date
+  createdById Bytes    @map("created_by_id") @db.Binary(16)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  /// An offline retry must not charge somebody twice.
+  clientUuid Bytes? @map("client_uuid") @db.Binary(16)
+
+  company     Company             @relation(fields: [companyId], references: [id])
+  branch      Branch              @relation(fields: [branchId], references: [id])
+  user        User                @relation("DebtSubject", fields: [userId], references: [id])
+  createdBy   User                @relation("DebtCreatedBy", fields: [createdById], references: [id])
+  discrepancy ClosingDiscrepancy? @relation(fields: [discrepancyId], references: [id])
+
+  @@unique([companyId, clientUuid], map: "ux_debt_client_uuid")
+  @@index([companyId, userId, entryDate])
+  @@index([discrepancyId])
+  @@index([branchId])
+  @@index([createdById])
+  @@map("employee_debt_entries")
 }
 
 model DailyDigest {
@@ -1565,7 +1823,9 @@ model CompanySettings {
 ///
 /// Cash is not represented: it is always available and needs no configuration.
 model ReceivingAccount {
-  expenses Expense[]
+  expenses      Expense[]
+  payments      Payment[]
+  channelCounts ClosingChannelCount[]
 
   id        Bytes             @id @db.Binary(16)
   companyId Bytes             @map("company_id") @db.Binary(16)

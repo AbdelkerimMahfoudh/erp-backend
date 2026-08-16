@@ -37,9 +37,17 @@ const closing = readFileSync(join(SRC, 'closing.service.ts'), 'utf8');
 const rollup = readFileSync(join(SRC, '..', 'analytics', 'rollup.service.ts'), 'utf8');
 const suppliers = readFileSync(join(SRC, '..', 'suppliers', 'suppliers.service.ts'), 'utf8');
 
-/** The expected-cash expression, comments stripped. */
+/**
+ * The expected-cash expression, comments stripped.
+ *
+ * Bounded by the statement's own terminator rather than by whatever line
+ * happens to follow it — E-CP1 inserted the counted-cash resolution between
+ * this statement and `const difference`, and an equation that silently absorbs
+ * its neighbours stops being an equation.
+ */
+const expectedCashStart = closing.indexOf('const expectedCash');
 const equation = closing
-  .slice(closing.indexOf('const expectedCash'), closing.indexOf('const difference'))
+  .slice(expectedCashStart, closing.indexOf(';', expectedCashStart))
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^\s*\/\/.*$/gm, '');
 
@@ -149,10 +157,54 @@ describe('a locked closing is a snapshot, not a view', () => {
    * instead, which is what keeps a signed-off day signed off.
    */
   it('the closing stores its own expected and counted figures', () => {
-    expect(closing).toMatch(/expectedCash,\s*\n\s*countedCash: dto\.countedCash/);
+    expect(closing).toMatch(/const snapshot = \{[\s\S]{0,120}expectedCash,\s*\n\s*countedCash,/);
   });
 
   it('closing the same day twice is refused', () => {
     expect(closing).toMatch(/already closed for this branch/);
+  });
+
+  it('only a LOCKED day refuses to be closed again', () => {
+    /**
+     * E-CP1 made a counting day have a closing row of its own, so existence
+     * stopped being the test. If this reverts to refusing on existence, the
+     * whole progressive flow becomes unreachable — the first count would block
+     * the sign-off that follows it.
+     */
+    expect(closing).toMatch(/already\?\.status === 'locked'/);
+  });
+});
+
+describe('the per-channel path is the same equation, not a second one', () => {
+  /**
+   * E-CP1 added expected/counted per receiving account. The danger is obvious
+   * in hindsight: a second place computing "what should be here" is exactly how
+   * the five separate cash fixes happened, each correct on its own and nobody
+   * looking at the whole thing.
+   *
+   * So the channel builder owns the signs, `channels.spec.ts` pins them, and
+   * these assert the closing does not quietly grow a private copy.
+   */
+  const channels = readFileSync(join(SRC, 'channels.ts'), 'utf8');
+
+  it('the signs live in exactly one table', () => {
+    expect(channels).toMatch(/COMPONENT_SIGN: Record<Component, 1 \| -1>/);
+    expect(channels.match(/COMPONENT_SIGN\.\w+/g) ?? []).toHaveLength(TERMS.length);
+  });
+
+  it('every cash term has a per-channel counterpart', () => {
+    for (const component of ['salesIn', 'refundsOut', 'supplierOut', 'expensesOut', 'correctionsIn']) {
+      expect(channels).toContain(`${component}:`);
+      expect(closing).toContain(`'${component}'`);
+    }
+  });
+
+  it('the closing computes no expected figure of its own per channel', () => {
+    /**
+     * `expectedChannels` must delegate. If somebody inlines the arithmetic here
+     * instead, the channel figure and the till figure can disagree about the
+     * same movement without any test noticing.
+     */
+    expect(closing).toMatch(/return buildChannels\(/);
   });
 });

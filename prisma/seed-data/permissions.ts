@@ -60,7 +60,21 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'expense.submit',      label: 'Submit an expense for review' },
   { key: 'expense.review',      label: 'Confirm or reject a submitted expense' },
   { key: 'expense.manage',      label: 'Manage expenses' },
+  /**
+   * Milestone E — the E0 audit's first finding. `closing.perform` recorded the
+   * count AND locked the day, and only Owner and Manager held it, so the
+   * Employee actually holding the drawer could not report what was in it
+   * without somebody senior standing there. Counting and signing off are now
+   * two separate acts with two separate keys.
+   */
+  { key: 'closing.count',       label: 'Enter an end-of-day count' },
   { key: 'closing.perform',     label: 'Perform & lock daily closing' },
+  /**
+   * Deliberately NOT folded into `closing.perform`, which a Manager holds.
+   * Deciding that a named person owes the business money, or writing that debt
+   * off, is the Owner's call and nobody else's.
+   */
+  { key: 'debt.manage',         label: 'Assign, collect or forgive a cash discrepancy' },
   { key: 'report.view',         label: 'View reports' },
   { key: 'branch.manage',       label: 'Manage branches' },
   { key: 'user.manage',         label: 'Manage users' },
@@ -159,7 +173,9 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      */
     'financial.correction.request',
     'unit.add', 'import.run',
-    'purchase.manage', 'supplier.manage', 'closing.perform', 'report.view',
+    // E: a manager may count as well as sign off. `debt.manage` is NOT here —
+    // holding a named person responsible for a shortage is the Owner's call.
+    'purchase.manage', 'supplier.manage', 'closing.count', 'closing.perform', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
     // manager approves and cancels within the branch they are managing.
     'transfer.view', 'transfer.request', 'transfer.approve',
@@ -217,6 +233,14 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'supplier.payment.report',
     // D: the person who spent the money reports it. Reviewing is the Owner's.
     'expense.submit',
+    /**
+     * E: the person holding the drawer counts it. That is the whole reason
+     * `closing.count` exists — before it, the only closing permission also
+     * LOCKED the day, so an employee could not report a count at all.
+     *
+     * Signing the day off stays with `closing.perform`, which they do not hold.
+     */
+    'closing.count',
     /**
      * H1.2. An employee does the daily stock movement — asks for a transfer,
      * sends it once approved, receives one arriving — but never approves,
