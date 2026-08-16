@@ -158,6 +158,7 @@ describe('role matrix — SQL and TypeScript must agree', () => {
      */
     sqlOf('0039_supplier_settlement'),
     sqlOf('0040_financial_correction'),
+    sqlOf('0044_expense_workflow'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from

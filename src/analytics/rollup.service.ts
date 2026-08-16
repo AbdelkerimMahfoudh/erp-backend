@@ -105,11 +105,48 @@ export class RollupService {
         AND si.voided = 0
         AND s.sold_at >= ${start} AND s.sold_at < ${end}
     `);
-    const expRows = await this.prisma.$queryRaw<Array<{ expenses: unknown }>>(Prisma.sql`
-      SELECT COALESCE(SUM(amount), 0) AS expenses
+    /**
+     * Expenses for this day (Milestone D). Three things changed here, and each
+     * was a defect:
+     *
+     * **Only CONFIRMED expenses count.** The old query summed every row, so a
+     * report that nobody had agreed to already reduced the day's profit.
+     *
+     * **The date depends on the class.** A `variable` expense belongs to the
+     * day it was CONFIRMED; a `fixed` one to its DUE date. Keying both on
+     * `spent_on` put rent in whatever day somebody happened to type it.
+     *
+     * **Cash is separated.** Only cash left the drawer, so only cash may be
+     * subtracted from expected cash — an account transfer never touched it.
+     * The old schema could not express the difference at all.
+     */
+    const expRows = await this.prisma.$queryRaw<
+      Array<{
+        expenses: unknown;
+        expenses_cash: unknown;
+        expenses_count: unknown;
+        expenses_fixed: unknown;
+        expenses_salary: unknown;
+      }>
+    >(Prisma.sql`
+      SELECT COALESCE(SUM(amount), 0)                                          AS expenses,
+             COALESCE(SUM(CASE WHEN method = 'cash' THEN amount END), 0)       AS expenses_cash,
+             COUNT(*)                                                          AS expenses_count,
+             COALESCE(SUM(CASE WHEN expense_class = 'fixed' THEN amount END), 0) AS expenses_fixed,
+             COALESCE(SUM(CASE WHEN is_salary = 1 THEN amount END), 0)         AS expenses_salary
       FROM expenses
-      WHERE company_id = ${companyId} AND branch_id = ${branchId} AND spent_on = ${day}
+      WHERE company_id = ${companyId}
+        AND branch_id = ${branchId}
+        AND status = 'confirmed'
+        AND (
+          (expense_class = 'variable' AND confirmation_date = ${day})
+          OR (expense_class = 'fixed' AND due_date = ${day})
+        )
     `);
+    const expensesCash = round2(toNum(expRows[0].expenses_cash));
+    const expensesCount = toNum(expRows[0].expenses_count);
+    const expensesFixed = round2(toNum(expRows[0].expenses_fixed));
+    const expensesSalary = round2(toNum(expRows[0].expenses_salary));
 
     /**
      * Returns approved ON THIS DAY (I2).
@@ -261,6 +298,10 @@ export class RollupService {
         correctionsTotal,
         correctionsCash,
         correctionsCount,
+        expensesCash,
+        expensesCount,
+        expensesFixed,
+        expensesSalary,
         refreshedAt: now,
       },
       update: {
@@ -282,6 +323,10 @@ export class RollupService {
         correctionsTotal,
         correctionsCash,
         correctionsCount,
+        expensesCash,
+        expensesCount,
+        expensesFixed,
+        expensesSalary,
         refreshedAt: now,
       },
     });

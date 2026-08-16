@@ -53,6 +53,12 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'import.run',          label: 'Run Excel/CSV inventory import' },
   { key: 'purchase.manage',     label: 'Manage purchases' },
   { key: 'supplier.manage',     label: 'Manage suppliers' },
+  /**
+   * Milestone D — the split the model could not previously express. The note
+   * below used to say so; now it can, so it does.
+   */
+  { key: 'expense.submit',      label: 'Submit an expense for review' },
+  { key: 'expense.review',      label: 'Confirm or reject a submitted expense' },
   { key: 'expense.manage',      label: 'Manage expenses' },
   { key: 'closing.perform',     label: 'Perform & lock daily closing' },
   { key: 'report.view',         label: 'View reports' },
@@ -143,6 +149,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'refund.report', 'refund.confirm',
     // J1: a manager may both report and confirm a supplier payment.
     'supplier.payment.report', 'supplier.payment.confirm',
+    // D: a manager may report what they spent, and never confirm it.
+    'expense.submit',
     /**
      * Milestone B: a manager may ASK for a confirmed payment to be corrected,
      * and may never approve one. Approval is Owner-only — it restores a
@@ -207,6 +215,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      * payment must not be able to open the process that unwinds it.
      */
     'supplier.payment.report',
+    // D: the person who spent the money reports it. Reviewing is the Owner's.
+    'expense.submit',
     /**
      * H1.2. An employee does the daily stock movement — asks for a transfer,
      * sends it once approved, receives one arriving — but never approves,

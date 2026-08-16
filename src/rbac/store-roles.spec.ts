@@ -41,10 +41,14 @@ describe('store-facing roles', () => {
     //
     // 38 → 40 in Milestone B — `financial.correction.request` / `.approve`.
     //
+    // 40 → 42 in Milestone D — `expense.submit` / `expense.review`. The split
+    // the seed comment above used to say the model could not express.
+    // `expense.manage` is unchanged and still Owner-only.
+    //
     // The Owner holds every permission by construction, so this number moving
     // is the signal that a phase added authority — it should never move by
     // accident, and it moving LATE means a phase shipped a drift.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(40);
+    expect(ROLE_PERMISSIONS.owner.length).toBe(42);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
@@ -118,9 +122,18 @@ describe('Store Employee', () => {
     expect(has('store_employee', 'report.view')).toBe(false);
   });
 
-  it('has no expense authority', () => {
-    // The model cannot yet distinguish "submit an expense" from "manage
-    // expenses", so the narrower reading wins. See docs/21.
+  it('may SUBMIT an expense, and neither review nor manage one', () => {
+    /**
+     * This comment used to say the model could not distinguish "submit an
+     * expense" from "manage expenses", so the narrower reading won. Milestone D
+     * made the model able to express it, so the employee gains exactly the
+     * narrow half: they report what they spent.
+     *
+     * Submitting does NOT reveal the shop's other expenses — the list scopes a
+     * submitter to their own rows. Reviewing stays Owner-only.
+     */
+    expect(has('store_employee', 'expense.submit')).toBe(true);
+    expect(has('store_employee', 'expense.review')).toBe(false);
     expect(has('store_employee', 'expense.manage')).toBe(false);
   });
 

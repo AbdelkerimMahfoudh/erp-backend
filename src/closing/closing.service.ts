@@ -109,8 +109,34 @@ export class ClosingService {
      */
     const correctedCash = round2(num(rollup?.correctionsCash ?? 0));
 
+    /**
+     * Cash expenses CONFIRMED today (Milestone D). The D0 audit's second
+     * finding: expenses fed net profit but never reached this figure, so a shop
+     * that paid for electricity out of the drawer reported a shortage that was
+     * not a shortage — the same defect J1 fixed for supplier payments, still
+     * present here.
+     *
+     * Cash only. An account transfer never touched the till, which is why the
+     * rollup separates the two.
+     *
+     * From the rollup, like every other component, so a figure cannot drift
+     * between the closing and the day's analytics.
+     */
+    const expensesCash = round2(num(rollup?.expensesCash ?? 0));
+
+    /**
+     * **The reconciliation equation.** Every movement appears exactly once:
+     *
+     *   expected = cash taken in
+     *            − refunds paid in cash
+     *            − supplier payments in cash
+     *            − expenses paid in cash
+     *            + corrections returned in cash
+     *
+     * Pending reports appear nowhere — only confirmed movements are here.
+     */
     const expectedCash = round2(
-      num(cash._sum.amount) - refundedCash - supplierPaid.cash + correctedCash,
+      num(cash._sum.amount) - refundedCash - supplierPaid.cash - expensesCash + correctedCash,
     );
     const difference = round2(dto.countedCash - expectedCash);
 
@@ -141,6 +167,7 @@ export class ClosingService {
           // explain its own expected cash without recomputing anything.
           correctionsTotal: round2(num(rollup?.correctionsTotal ?? 0)),
           correctionsCash: correctedCash,
+          expensesCash,
           isLocked: true,
           closedById: this.tenant.userId() ?? null,
         },

@@ -132,6 +132,17 @@ enum TransferStatus {
   cancelled
 }
 
+enum ExpenseStatus {
+  reported
+  confirmed
+  rejected
+}
+
+enum ExpenseClass {
+  variable
+  fixed
+}
+
 enum ExpenseRecurrence {
   none
   monthly
@@ -286,6 +297,9 @@ model Branch {
 }
 
 model User {
+  expensesReported  Expense[] @relation("ExpenseReportedBy")
+  expensesConfirmed Expense[] @relation("ExpenseConfirmedBy")
+
   /// TAC mappings this user proposed, and those they confirmed. Two relations,
   /// because who suggested and who decided must stay distinguishable.
   recognitionsProposed  ProductRecognition[] @relation("RecognitionProposedBy")
@@ -1197,6 +1211,35 @@ model Expense {
   amount      Decimal  @db.Decimal(14, 2)
   spentOn     DateTime @map("spent_on") @db.Date
   note        String?  @db.Text
+  /// `reported` moves NO money and reaches no report. Only `confirmed` does.
+  status      ExpenseStatus @default(confirmed)
+  /// `variable` belongs to the day it is CONFIRMED; `fixed` to its DUE date,
+  /// and is never spread across every day.
+  expenseClass ExpenseClass @default(variable) @map("expense_class")
+  /// Salaries stay separately reportable from other fixed costs.
+  isSalary    Boolean  @default(false) @map("is_salary")
+  /// The date a FIXED expense is recognised on. Null for variable.
+  dueDate     DateTime? @map("due_date") @db.Date
+  /// Only `cash` touches the drawer.
+  method      RefundMethod @default(cash)
+  receivingAccountId Bytes? @map("receiving_account_id") @db.Binary(16)
+  /// Frozen when REPORTED, so a later rename cannot retitle a movement that
+  /// already happened, and deactivation cannot strand a confirmation.
+  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+  reference   String?  @db.VarChar(120)
+  /// An explicit state, never invented placeholder copy: "Miscellaneous" in a
+  /// ledger is indistinguishable from a real category a year later.
+  reasonOmitted Boolean @default(false) @map("reason_omitted")
+  reportedById Bytes?  @map("reported_by_id") @db.Binary(16)
+  reportedAt   DateTime? @map("reported_at") @db.DateTime(6)
+  confirmedById Bytes? @map("confirmed_by_id") @db.Binary(16)
+  confirmedAt   DateTime? @map("confirmed_at") @db.DateTime(6)
+  /// The business day the cash movement belongs to.
+  confirmationDate DateTime? @map("confirmation_date") @db.Date
+  rejectedReason String? @map("rejected_reason") @db.VarChar(255)
+  clientUuid   Bytes?  @map("client_uuid") @db.Binary(16)
+  clientRequestHash String? @map("client_request_hash") @db.Char(64)
+  version      Int     @default(0)
   createdById Bytes?   @map("created_by") @db.Binary(16)
   createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(6)
@@ -1205,7 +1248,13 @@ model Expense {
   branch    Branch?          @relation(fields: [branchId], references: [id])
   template  ExpenseTemplate? @relation(fields: [templateId], references: [id])
   createdBy User?            @relation(fields: [createdById], references: [id])
+  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
+  reportedBy  User? @relation("ExpenseReportedBy", fields: [reportedById], references: [id])
+  confirmedBy User? @relation("ExpenseConfirmedBy", fields: [confirmedById], references: [id])
 
+  @@unique([companyId, clientUuid])
+  @@index([companyId, branchId, confirmationDate, status])
+  @@index([companyId, branchId, dueDate, status])
   @@index([companyId, branchId, spentOn])
   @@index([templateId])
   @@index([createdById])
@@ -1239,6 +1288,8 @@ model DailyClosing {
   /// (Milestone B), keyed on the CORRECTION day — never the original payment's.
   correctionsTotal         Decimal @default(0) @map("corrections_total") @db.Decimal(14, 2)
   correctionsCash          Decimal @default(0) @map("corrections_cash") @db.Decimal(14, 2)
+  /// Cash expenses confirmed on this day — the part that left the drawer.
+  expensesCash             Decimal @default(0) @map("expenses_cash") @db.Decimal(14, 2)
   /// Supplier payments CONFIRMED on this day (0039). A balance-sheet
   /// movement, never an expense and never COGS - it appears in no profit
   /// figure. Only the cash part left the drawer.
@@ -1514,6 +1565,8 @@ model CompanySettings {
 ///
 /// Cash is not represented: it is always available and needs no configuration.
 model ReceivingAccount {
+  expenses Expense[]
+
   id        Bytes             @id @db.Binary(16)
   companyId Bytes             @map("company_id") @db.Binary(16)
   provider  ReceivingProvider
@@ -1752,6 +1805,14 @@ model DailyRollup {
   refundsPaidTotal Decimal @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
   refundsPaidCash  Decimal @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
   refundsPaidCount Int     @default(0) @map("refunds_paid_count")
+  /// Expenses CONFIRMED for this day (Milestone D). Variable ones are keyed on
+  /// their confirmation date, fixed ones on their due date — a fixed cost is
+  /// never spread across every day.
+  expensesCash    Decimal @default(0) @map("expenses_cash") @db.Decimal(14, 2)
+  expensesCount   Int     @default(0) @map("expenses_count")
+  expensesFixed   Decimal @default(0) @map("expenses_fixed") @db.Decimal(14, 2)
+  /// Salaries, separately reportable from other fixed costs.
+  expensesSalary  Decimal @default(0) @map("expenses_salary") @db.Decimal(14, 2)
   /// Corrections approved on this day. No profit component: a correction moves
   /// cash and liability only.
   correctionsTotal Decimal @default(0) @map("corrections_total") @db.Decimal(14, 2)

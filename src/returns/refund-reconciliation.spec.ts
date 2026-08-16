@@ -105,17 +105,28 @@ describe('reconciliation', () => {
 
   it('never treats a refund as an expense', () => {
     /**
-     * Checked against the CODE, not the prose.
+     * Narrowed in Milestone D.
      *
-     * Comments in this block now explain that a refund and a supplier payment
-     * are balance-sheet movements rather than expenses, and a naive text search
-     * read that documentation as a violation of the rule it documents.
+     * This used to slice from `refundedCash` to `const lines` and forbid the
+     * word "expense" anywhere inside. That was a proxy for the real rule, and
+     * it stopped being a valid one the moment expenses legitimately gained
+     * their own line in the same function — the assertion would have failed for
+     * a correct change, which is worse than not having it.
+     *
+     * The actual rule is narrower and is what is asserted now: the refund
+     * figure comes from the REFUND rollup component, and the expense figure
+     * from the expense one. Neither reads the other's column.
      */
-    const cashBlock = closing
-      .slice(closing.indexOf('const refundedCash'), closing.indexOf('const lines'))
-      .replace(/\/\*\*[\s\S]*?\*\//g, '')
-      .replace(/\/\/[^\n]*/g, '');
-    expect(cashBlock).not.toMatch(/expense/i);
+    // Each figure reads its OWN rollup column. They appear together only in the
+    // expected-cash equation, which is exactly where both belong.
+    expect(closing).toMatch(/const refundedCash = round2\(num\(rollup\?\.refundsPaidCash/);
+    expect(closing).toMatch(/const expensesCash = round2\(num\(rollup\?\.expensesCash/);
+    expect(closing).not.toMatch(/refundedCash = round2\(num\(rollup\?\.expenses/);
+    expect(closing).not.toMatch(/expensesCash = round2\(num\(rollup\?\.refunds/);
+
+    // And a refund still reaches profit nowhere: it was reversed at approval.
+    const digest = closing.slice(closing.indexOf('digest:'), closing.indexOf('digest:') + 200);
+    expect(digest).not.toMatch(/refund/i);
   });
 
   it('subtracts confirmed cash SUPPLIER payments from expected cash, once', () => {
