@@ -26,6 +26,7 @@ import {
   type Component,
   type MovementRow,
 } from './channels';
+import { opensDiscrepancy } from './debt-rules';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -279,6 +280,41 @@ export class ClosingService {
             },
           });
         }
+      }
+
+      /**
+       * A difference becomes a question, not a number (E-CP2).
+       *
+       * Opened `pending_investigation` and **never** assigned to anybody. The
+       * system observes that a channel is out; it does not accuse the person
+       * who happened to be counting. Only the Owner may decide responsibility,
+       * and `debt.manage` — which no Manager holds — is what gates it.
+       *
+       * A skipped or uncounted channel opens nothing: nobody claimed a figure,
+       * so there is nothing to disagree with.
+       */
+      const frozenRows = await tx.closingChannelCount.findMany({ where: { closingId } });
+      for (const row of frozenRows) {
+        const shaped = {
+          counted: row.counted == null ? null : num(row.counted),
+          isSkipped: row.isSkipped,
+          difference: row.difference == null ? null : num(row.difference),
+        };
+        if (!opensDiscrepancy(shaped)) continue;
+        const already = await tx.closingDiscrepancy.findFirst({
+          where: { closingId, channelCountId: row.id },
+        });
+        if (already) continue;
+        await tx.closingDiscrepancy.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            branchId,
+            closingId,
+            channelCountId: row.id,
+            amount: shaped.difference as number,
+          },
+        });
       }
 
       const digestId = newUuidV7Bin();
