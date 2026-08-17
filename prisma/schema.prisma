@@ -96,7 +96,12 @@ enum UnitStatus {
   returned
   faulty
   in_transit
+  /// Moved to another BRANCH of this company. Internal.
   transferred_out
+  /// Held by another COMPANY on consignment (0049). Ownership has not moved:
+  /// the phone is still ours, which is exactly why it needs its own state
+  /// rather than reusing `transferred_out`.
+  consigned_out
 }
 
 enum PurchaseStatus {

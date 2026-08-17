@@ -17,7 +17,7 @@ import { UnitStatus } from '@prisma/client';
  * reached at transfer **request** and released on cancellation before shipment.
  */
 const TRANSITIONS: Record<UnitStatus, UnitStatus[]> = {
-  in_stock: ['reserved', 'sold', 'in_transit', 'faulty', 'transferred_out'],
+  in_stock: ['reserved', 'sold', 'in_transit', 'faulty', 'transferred_out', 'consigned_out'],
   /**
    * **A reserved unit cannot be sold.** It used to list `sold` here, which
    * contradicted `SalesPolicyService.assertSellable` — that requires `in_stock`
@@ -34,6 +34,20 @@ const TRANSITIONS: Record<UnitStatus, UnitStatus[]> = {
   in_transit: ['in_stock', 'transferred_out'],
   faulty: ['in_stock'], // future: add 'scrapped'
   transferred_out: [],
+  /**
+   * Held by another COMPANY on consignment (0049). **Not terminal**, and that
+   * is the whole difference from `transferred_out`: the phone is still ours.
+   *
+   *   → `in_stock` when it comes back unsold and we confirm receipt;
+   *   → `sold`     when the holding store sells it and reports the disposition;
+   *   → `faulty`   when it comes back damaged, which routes it to inspection
+   *                rather than straight back onto the shelf.
+   *
+   * There is deliberately no `consigned_out → reserved` or `→ in_transit`: a
+   * phone in somebody else's shop cannot be promised to one of our transfers,
+   * and pretending otherwise would let two shops believe they hold it.
+   */
+  consigned_out: ['in_stock', 'sold', 'faulty'],
 };
 
 export function canTransition(from: UnitStatus, to: UnitStatus): boolean {

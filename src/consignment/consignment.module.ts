@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { ConnectionsController } from './connections.controller';
+import { ConsignmentsController } from './consignments.controller';
+import { ConsignmentsService } from './consignments.service';
 import { ConnectionsService } from './connections.service';
 
 /**
@@ -16,8 +19,9 @@ import { ConnectionsService } from './connections.service';
  * only, and every result shaped by `toPublicPreview`.
  */
 @Module({
-  controllers: [ConnectionsController],
-  providers: [ConnectionsService],
-  exports: [ConnectionsService],
+  imports: [NotificationsModule],
+  controllers: [ConnectionsController, ConsignmentsController],
+  providers: [ConnectionsService, ConsignmentsService],
+  exports: [ConnectionsService, ConsignmentsService],
 })
 export class ConsignmentModule {}
