@@ -26,7 +26,23 @@ import {
   type Action,
   type ConsignmentStatus,
 } from './consignment-lifecycle';
-import { CreateConsignmentDto, DecideConsignmentDto, CustodyDto } from './dto/consignment.dto';
+import {
+  ConsignmentPaymentDto,
+  CreateConsignmentDto,
+  CustodyDto,
+  DecideConsignmentDto,
+  ForgiveDto,
+  ReportSoldDto,
+  ReturnDto,
+} from './dto/consignment.dto';
+import {
+  assertForgivenessAllowed,
+  assertPaymentAllowed,
+  MoneyRefused,
+  outstanding,
+  type LedgerKind,
+} from './consignment-money';
+import { dayKey } from '../common/utils/date.util';
 
 const num = (d: { toString(): string } | number | null): number => (d == null ? 0 : Number(d));
 
@@ -451,6 +467,404 @@ export class ConsignmentsService {
     });
 
     return this.get(id);
+  }
+
+
+  // --- H-CP4: disposition, money and returns --------------------------------
+
+  /**
+   * The holding store reports that a consigned phone sold.
+   *
+   * This is the moment the source's profit is recognised, and the only one. The
+   * payment that follows moves cash and liability and touches profit again
+   * never.
+   *
+   * Store 1 learns that it sold and nothing else: not the customer, not the
+   * resale price, not Store 2's margin. Those figures live in Store 2's own
+   * `Sale`, which this method deliberately does not read or create — creating
+   * one here would put a foreign key from Store 2's sale into Store 1's units.
+   */
+  async reportSold(id: string, dto: ReportSoldDto) {
+    const me = this.tenant.companyId();
+    const userId = this.tenant.userId() ?? null;
+
+    const c = await this.mine(id);
+    const side = sideOf(c, me);
+
+    /**
+     * A manual counterparty has no application account, so the SOURCE Owner
+     * confirms the sale on their behalf. For an application counterparty only
+     * the holder may report it — they are the one who knows.
+     */
+    if (c.destinationCompanyId) assertDestination(c, me);
+    else assertSource(c, me);
+
+    let next: ConsignmentStatus;
+    try {
+      next = assertTransition({ action: 'report_sold', from: c.status as ConsignmentStatus, side });
+    } catch (e) {
+      if (e instanceof TransitionRefused) throw new ConflictException(e.message);
+      throw e;
+    }
+
+    const lines = await this.prisma.consignmentLine.findMany({
+      where: { consignmentId: c.id, status: 'in_custody' },
+    });
+    const soldLines = dto.lineIds?.length
+      ? lines.filter((l) => dto.lineIds!.includes(binToUuid(l.id)))
+      : lines;
+    if (soldLines.length === 0) throw new BadRequestException('There is nothing to report as sold');
+
+    const raised = soldLines.reduce((s, l) => s + Number(l.agreedAmount ?? 0), 0);
+
+    await this.prisma.$transaction(async (tx) => {
+      const won = await tx.consignment.updateMany({
+        where: { id: c.id, version: c.version, status: c.status },
+        data: { status: next, version: { increment: 1 } },
+      });
+      if (won.count === 0) {
+        throw new ConflictException('refresh_required: this consignment changed while you were reading it');
+      }
+
+      for (const line of soldLines) {
+        await tx.consignmentLine.update({
+          where: { id: line.id },
+          data: { status: 'sold', disposition: 'sold', disposedAt: new Date() },
+        });
+        /**
+         * The source's unit becomes `sold`. It never becomes a unit in the
+         * destination company — Store 2 sold something it did not own, which is
+         * exactly what a consignment is.
+         */
+        await tx.unit.updateMany({
+          where: { id: line.unitId, status: 'consigned_out' },
+          data: { status: 'sold', dateSold: new Date() },
+        });
+      }
+
+      /**
+       * One receivable entry per consignment, not per line, because the debt is
+       * between two businesses rather than per phone. The line-level record of
+       * what sold lives on the lines themselves.
+       */
+      await tx.consignmentLedgerEntry.create({
+        data: {
+          id: newUuidV7Bin(),
+          consignmentId: c.id,
+          sourceCompanyId: c.sourceCompanyId,
+          destinationCompanyId: c.destinationCompanyId,
+          kind: 'receivable_raised',
+          amount: raised,
+          actingCompanyId: me,
+          actingUserId: userId,
+          entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+        },
+      });
+    });
+
+    await this.audit.record({
+      entityType: 'Consignment',
+      entityId: c.id,
+      action: 'status_change',
+      before: { status: c.status },
+      after: { status: next, sold: soldLines.length, receivable: raised },
+      branchId: c.sourceBranchId,
+    });
+    return this.get(id);
+  }
+
+  /**
+   * Report a payment, or confirm one arrived.
+   *
+   * Two-party, like every other money movement here: the payer reports, the
+   * creditor confirms. A report changes no balance until it is confirmed, so a
+   * debtor cannot clear their own debt by asserting they paid.
+   */
+  async payment(id: string, dto: ConsignmentPaymentDto) {
+    const me = this.tenant.companyId();
+    const userId = this.tenant.userId() ?? null;
+
+    const c = await this.mine(id);
+    sideOf(c, me);
+
+    const rows = await this.ledgerRows(c.id);
+    const owed = outstanding(rows);
+
+    if (dto.action === 'confirm') {
+      /**
+       * Only the creditor may say money arrived. The source is always the
+       * creditor on a consignment: it sent the goods and is owed for them.
+       */
+      assertSource(c, me);
+      const reported = await this.prisma.consignmentLedgerEntry.findFirst({
+        where: { id: uuidToBin(dto.entryId ?? ''), consignmentId: c.id, kind: 'payment_reported' },
+      });
+      if (!reported) throw new NotFoundException('No such reported payment');
+
+      const already = await this.prisma.consignmentLedgerEntry.findFirst({
+        where: { refersToId: reported.id, kind: 'payment_confirmed' },
+      });
+      if (already) throw new ConflictException('That payment has already been confirmed');
+
+      try {
+        assertPaymentAllowed({
+          amount: Number(reported.amount),
+          method: (reported.method ?? 'cash') as 'cash' | 'account',
+          receivingAccountId: reported.receivingAccountId ? binToUuid(reported.receivingAccountId) : null,
+          outstanding: owed,
+        });
+      } catch (e) {
+        if (e instanceof MoneyRefused) throw new ConflictException(e.message);
+        throw e;
+      }
+
+      await this.prisma.consignmentLedgerEntry.create({
+        data: {
+          id: newUuidV7Bin(),
+          consignmentId: c.id,
+          sourceCompanyId: c.sourceCompanyId,
+          destinationCompanyId: c.destinationCompanyId,
+          kind: 'payment_confirmed',
+          amount: reported.amount,
+          method: reported.method,
+          receivingAccountId: reported.receivingAccountId,
+          accountLabelSnapshot: reported.accountLabelSnapshot,
+          reference: reported.reference,
+          refersToId: reported.id,
+          actingCompanyId: me,
+          actingUserId: userId,
+          entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+        },
+      });
+      await this.settleIfClear(c.id);
+      return this.get(id);
+    }
+
+    // --- report ---
+    if (dto.clientUuid) {
+      const replay = await this.prisma.consignmentLedgerEntry.findFirst({
+        where: { actingCompanyId: me, clientUuid: uuidToBin(dto.clientUuid) },
+      });
+      if (replay) return this.get(id);
+    }
+
+    try {
+      assertPaymentAllowed({
+        amount: dto.amount ?? 0,
+        method: dto.method ?? 'cash',
+        receivingAccountId: dto.receivingAccountId ?? null,
+        outstanding: owed,
+      });
+    } catch (e) {
+      if (e instanceof MoneyRefused) throw new BadRequestException(e.message);
+      throw e;
+    }
+
+    // Frozen at the moment of movement: renaming an account later must not
+    // retitle a payment that already happened.
+    const account = dto.receivingAccountId
+      ? await this.prisma.receivingAccount.findFirst({
+          where: { id: uuidToBin(dto.receivingAccountId), companyId: me },
+          select: { label: true },
+        })
+      : null;
+
+    await this.prisma.consignmentLedgerEntry.create({
+      data: {
+        id: newUuidV7Bin(),
+        consignmentId: c.id,
+        sourceCompanyId: c.sourceCompanyId,
+        destinationCompanyId: c.destinationCompanyId,
+        kind: 'payment_reported',
+        amount: dto.amount as number,
+        method: dto.method,
+        receivingAccountId: dto.receivingAccountId ? uuidToBin(dto.receivingAccountId) : null,
+        accountLabelSnapshot: account?.label ?? null,
+        reference: dto.reference?.trim() || null,
+        /**
+         * A reference is not proof. No provider is contacted and nothing is
+         * verified — this is a note the two shops can compare, and the UI must
+         * never present it as confirmation.
+         */
+        evidenceRef: dto.evidenceRef?.trim() || null,
+        actingCompanyId: me,
+        actingUserId: userId,
+        entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+        clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
+      },
+    });
+
+    await this.audit.record({
+      entityType: 'Consignment',
+      entityId: c.id,
+      action: 'update',
+      after: { paymentReported: dto.amount, method: dto.method },
+      branchId: c.sourceBranchId,
+    });
+    return this.get(id);
+  }
+
+  /**
+   * Write off part or all of what is owed.
+   *
+   * Creditor's Owner only, gated on `consignment.forgive` at the route and on
+   * `assertSource` here — the permission says who in a company may do it, and
+   * the side check says which company.
+   *
+   * Forgiveness reduces the receivable and is **not cash**. It never touches
+   * the till, and it appears as its own component rather than hiding among
+   * expenses.
+   */
+  async forgive(id: string, dto: ForgiveDto) {
+    const me = this.tenant.companyId();
+    const userId = this.tenant.userId() ?? null;
+
+    const c = await this.mine(id);
+    assertSource(c, me);
+
+    const rows = await this.ledgerRows(c.id);
+    const owed = outstanding(rows);
+
+    try {
+      assertForgivenessAllowed({ amount: dto.amount, reason: dto.reason, outstanding: owed });
+    } catch (e) {
+      if (e instanceof MoneyRefused) throw new BadRequestException(e.message);
+      throw e;
+    }
+
+    await this.prisma.consignmentLedgerEntry.create({
+      data: {
+        id: newUuidV7Bin(),
+        consignmentId: c.id,
+        sourceCompanyId: c.sourceCompanyId,
+        destinationCompanyId: c.destinationCompanyId,
+        kind: 'forgiven',
+        amount: dto.amount,
+        reason: dto.reason.trim(),
+        actingCompanyId: me,
+        actingUserId: userId,
+        entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+      },
+    });
+
+    await this.audit.record({
+      entityType: 'Consignment',
+      entityId: c.id,
+      action: 'override',
+      after: { forgiven: dto.amount, reason: dto.reason.trim() },
+      branchId: c.sourceBranchId,
+    });
+    await this.settleIfClear(c.id, 'forgiven_settled');
+    return this.get(id);
+  }
+
+  /**
+   * Send an unsold phone back, and accept it.
+   *
+   * The sequence is deliberate and cannot be short-circuited: the holder
+   * initiates, the holder ships, and **the owner confirms physical receipt and
+   * condition**. The unit returns to stock only at that last step — a phone
+   * marked available while still in transit is one the shop will try to sell
+   * twice.
+   */
+  async returnFlow(id: string, dto: ReturnDto) {
+    const me = this.tenant.companyId();
+    const userId = this.tenant.userId() ?? null;
+
+    const c = await this.mine(id);
+    const side = sideOf(c, me);
+    const action: Action =
+      dto.action === 'initiate' ? 'initiate_return' : dto.action === 'ship' ? 'ship_return' : 'confirm_return';
+
+    let next: ConsignmentStatus;
+    try {
+      next = assertTransition({ action, from: c.status as ConsignmentStatus, side });
+    } catch (e) {
+      if (e instanceof TransitionRefused) throw new ConflictException(e.message);
+      throw e;
+    }
+
+    if (action === 'confirm_return' && !dto.condition) {
+      throw new BadRequestException('Say what condition it came back in');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const won = await tx.consignment.updateMany({
+        where: { id: c.id, version: c.version, status: c.status },
+        data: { status: next, version: { increment: 1 } },
+      });
+      if (won.count === 0) {
+        throw new ConflictException('refresh_required: this consignment changed while you were reading it');
+      }
+
+      if (action === 'confirm_return') {
+        const lines = await tx.consignmentLine.findMany({
+          where: { consignmentId: c.id, status: 'in_custody' },
+        });
+        for (const line of lines) {
+          await tx.consignmentLine.update({
+            where: { id: line.id },
+            data: {
+              status: 'returned',
+              disposition: dto.condition === 'damaged' ? 'damaged' : 'returned',
+              returnCondition: dto.condition,
+              returnNote: dto.note?.trim() || null,
+              disposedAt: new Date(),
+            },
+          });
+          /**
+           * A damaged phone goes to `faulty`, never straight back to sellable.
+           * Automatically restocking something that came back broken is how a
+           * shop sells a fault it already knew about.
+           */
+          await tx.unit.updateMany({
+            where: { id: line.unitId, status: 'consigned_out' },
+            data: { status: dto.condition === 'damaged' ? 'faulty' : 'in_stock' },
+          });
+        }
+      }
+
+      await this.audit.record({
+        entityType: 'Consignment',
+        entityId: c.id,
+        action: 'status_change',
+        before: { status: c.status },
+        after: { status: next, condition: dto.condition ?? null },
+        branchId: c.sourceBranchId,
+      });
+    });
+
+    return this.get(id);
+  }
+
+  /** Every ledger row for a consignment, as the pure module wants them. */
+  private async ledgerRows(consignmentId: Buffer) {
+    const rows = await this.prisma.consignmentLedgerEntry.findMany({
+      where: { consignmentId },
+      select: { kind: true, amount: true },
+    });
+    return rows.map((r) => ({ kind: r.kind as LedgerKind, amount: Number(r.amount) }));
+  }
+
+  /**
+   * Close the consignment once nothing is owed.
+   *
+   * Checked rather than assumed: a payment that exactly clears the balance and
+   * one that leaves a rounding remainder must not both read as settled.
+   */
+  private async settleIfClear(consignmentId: Buffer, as: 'settled' | 'forgiven_settled' = 'settled') {
+    const owed = outstanding(await this.ledgerRows(consignmentId));
+    if (owed > 0) {
+      await this.prisma.consignment.updateMany({
+        where: { id: consignmentId, status: 'sold_awaiting_settlement' },
+        data: { status: 'partially_paid' },
+      });
+      return;
+    }
+    await this.prisma.consignment.updateMany({
+      where: { id: consignmentId, status: { in: ['sold_awaiting_settlement', 'partially_paid'] } },
+      data: { status: as, settledAt: new Date() },
+    });
   }
 
   // --- helpers --------------------------------------------------------------
