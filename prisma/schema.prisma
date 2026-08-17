@@ -265,6 +265,12 @@ model Company {
   consignmentLedgerAsSource      ConsignmentLedgerEntry[] @relation("LedgerSource")
   consignmentLedgerAsDestination ConsignmentLedgerEntry[] @relation("LedgerDestination")
   consignmentLedgerActed         ConsignmentLedgerEntry[] @relation("LedgerActing")
+  loans                 Loan[]            @relation("LoanCompany")
+  loansAgainstUs        Loan[]            @relation("LoanCounterpartyCompany")
+  loansProposed         Loan[]            @relation("LoanProposedByCompany")
+  loanLedger            LoanLedgerEntry[] @relation("LoanLedgerCompany")
+  loanLedgerAgainstUs   LoanLedgerEntry[] @relation("LoanLedgerCounterparty")
+  loanLedgerActed       LoanLedgerEntry[] @relation("LoanLedgerActing")
   closingChannelCounts ClosingChannelCount[]
   closingDiscrepancies ClosingDiscrepancy[]
   employeeDebtEntries  EmployeeDebtEntry[]
@@ -329,6 +335,7 @@ model Branch {
   dailyClosings    DailyClosing[]
   goals            Goal[]
   consignments     Consignment[]
+  loans            Loan[]
   closingDiscrepancies ClosingDiscrepancy[]
   employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests     DailyDigest[]
@@ -392,6 +399,12 @@ model User {
   counterpartyRecords    Counterparty[]    @relation("CounterpartyUser")
   counterpartiesCreated  Counterparty[]    @relation("CounterpartyCreatedBy")
   consignmentLedgerEntries ConsignmentLedgerEntry[]
+
+  /// Loan roles. Named, because who proposed and who decided must stay
+  /// distinguishable even when an owner does both.
+  loansProposedBy Loan[]                    @relation("LoanProposedBy")
+  loansDecidedBy  Loan[]                    @relation("LoanDecidedBy")
+  loanLedgerEntries LoanLedgerEntry[]       @relation("LoanLedgerUser")
 
   id           Bytes     @id @db.Binary(16)
   companyId    Bytes     @map("company_id") @db.Binary(16)
@@ -1926,6 +1939,7 @@ model CompanySettings {
 model ReceivingAccount {
   expenses      Expense[]
   consignmentLedger ConsignmentLedgerEntry[]
+  loanLedger        LoanLedgerEntry[]
   payments      Payment[]
   channelCounts ClosingChannelCount[]
 
@@ -2998,6 +3012,7 @@ model StoreConnection {
 
   counterparties Counterparty[]
   consignments   Consignment[]
+  loans          Loan[]
 
   @@index([requesterCompanyId, status])
   @@index([addresseeCompanyId, status])
@@ -3055,6 +3070,7 @@ model Counterparty {
   createdBy        User?            @relation("CounterpartyCreatedBy", fields: [createdById], references: [id])
 
   consignments Consignment[]
+  loans        Loan[]
 
   @@index([companyId, kind, isActive])
   @@index([connectionId])
@@ -3285,4 +3301,167 @@ model ConsignmentLedgerEntry {
   @@index([actingUserId])
   @@index([refersToId])
   @@map("consignment_ledger")
+}
+
+// ------------------------- Money loans (0050) -------------------------------
+
+/// Which way the money goes, **relative to `companyId`** — the company that
+/// created the row. The counterparty reads the same row inverted.
+///
+/// An explicit column, never the sign of an amount: a negative number becomes
+/// ambiguous the moment somebody corrects a payment, and a sign flip is a
+/// silent reversal of who owes whom.
+enum LoanDirection {
+  they_owe_us
+  we_owe_them
+}
+
+enum LoanStatus {
+  proposed
+  counter_proposed
+  disputed
+  accepted
+  partially_paid
+  payment_awaiting_confirmation
+  settled
+  forgiven_settled
+  cancelled
+}
+
+/// Money lent or borrowed, with no goods attached (Milestone I).
+///
+/// Deliberately NOT a consignment with no unit. A consignment carries custody —
+/// shipment, condition, disposition, return — and a loan has none of that;
+/// modelling one as the other would put custody states on a record that can
+/// never have custody.
+///
+/// What IS shared is `Counterparty`, which already carries `manual_person` and
+/// `employee` kinds from 0049 for exactly this purpose, so a loan and a
+/// consignment against the same shop do not become two different answers to
+/// "who owes us money".
+model Loan {
+  id        Bytes  @id @db.Binary(16)
+  /// The company that created this record. Like `Consignment`, a loan between
+  /// two application companies is cross-tenant and cannot be scoped
+  /// automatically — every read filters on both company columns.
+  companyId Bytes  @map("company_id") @db.Binary(16)
+  branchId  Bytes? @map("branch_id") @db.Binary(16)
+
+  counterpartyId Bytes @map("counterparty_id") @db.Binary(16)
+  /// Set only when the counterparty is a company on this platform.
+  counterpartyCompanyId Bytes? @map("counterparty_company_id") @db.Binary(16)
+  connectionId          Bytes? @map("connection_id") @db.Binary(16)
+
+  direction LoanDirection
+  status    LoanStatus    @default(proposed)
+
+  proposedAmount Decimal  @map("proposed_amount") @db.Decimal(14, 2)
+  counterAmount  Decimal? @map("counter_amount") @db.Decimal(14, 2)
+  /// Immutable at acceptance. Before that there is nothing to freeze; after it
+  /// the amount cannot move under either party, which is the point of asking
+  /// the recipient to accept at all.
+  principal      Decimal? @db.Decimal(14, 2)
+
+  note          String? @db.VarChar(255)
+  disputeReason String? @map("dispute_reason") @db.VarChar(255)
+
+  /// Which COMPANY made the offer on the table, so "you cannot accept your own
+  /// offer" is answerable from the row itself.
+  proposedByCompanyId Bytes     @map("proposed_by_company_id") @db.Binary(16)
+  proposedById        Bytes?    @map("proposed_by_id") @db.Binary(16)
+  decidedById         Bytes?    @map("decided_by_id") @db.Binary(16)
+  decidedAt           DateTime? @map("decided_at") @db.DateTime(6)
+  acceptedAt          DateTime? @map("accepted_at") @db.DateTime(6)
+  settledAt           DateTime? @map("settled_at") @db.DateTime(6)
+
+  clientUuid Bytes?   @map("client_uuid") @db.Binary(16)
+  version    Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company             Company          @relation("LoanCompany", fields: [companyId], references: [id])
+  branch              Branch?          @relation(fields: [branchId], references: [id])
+  counterparty        Counterparty     @relation(fields: [counterpartyId], references: [id])
+  counterpartyCompany Company?         @relation("LoanCounterpartyCompany", fields: [counterpartyCompanyId], references: [id])
+  connection          StoreConnection? @relation(fields: [connectionId], references: [id])
+  proposedByCompany   Company          @relation("LoanProposedByCompany", fields: [proposedByCompanyId], references: [id])
+  proposedBy          User?            @relation("LoanProposedBy", fields: [proposedById], references: [id])
+  decidedBy           User?            @relation("LoanDecidedBy", fields: [decidedById], references: [id])
+
+  ledger LoanLedgerEntry[]
+
+  @@unique([companyId, clientUuid], map: "ux_loans_client_uuid")
+  @@index([companyId, status, createdAt], map: "ix_loans_company")
+  @@index([counterpartyCompanyId, status], map: "ix_loans_counterparty_company")
+  @@index([counterpartyId])
+  @@index([branchId])
+  @@index([connectionId])
+  @@index([proposedById])
+  @@index([decidedById])
+  @@map("loans")
+}
+
+/// What each ledger row means. A payment REPORT changes nothing until the
+/// creditor confirms it — the same two-party rule every other money movement
+/// in this system follows.
+enum LoanLedgerKind {
+  principal_accepted
+  payment_reported
+  payment_confirmed
+  payment_corrected
+  forgiven
+  settled
+}
+
+/// The money, append-only. What remains is DERIVED from these rows and stored
+/// nowhere — a stored balance can disagree with its own history.
+model LoanLedgerEntry {
+  id     Bytes @id @db.Binary(16)
+  loanId Bytes @map("loan_id") @db.Binary(16)
+  /// Both sides, so either party reads its own ledger without a join.
+  companyId             Bytes  @map("company_id") @db.Binary(16)
+  counterpartyCompanyId Bytes? @map("counterparty_company_id") @db.Binary(16)
+
+  kind LoanLedgerKind
+  /// Always a positive magnitude; `kind` carries the direction.
+  amount Decimal @db.Decimal(14, 2)
+
+  method               RefundMethod?
+  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  /// Frozen: renaming an account later must not retitle a movement.
+  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+  reference            String? @db.VarChar(120)
+  /// A photo or document reference. **Not proof** — nothing is verified, and
+  /// the screens must never present it as confirmation.
+  evidenceRef          String? @map("evidence_ref") @db.VarChar(512)
+
+  /// Mandatory for forgiveness and correction.
+  reason String? @db.VarChar(255)
+  note   String? @db.VarChar(255)
+
+  actingCompanyId Bytes    @map("acting_company_id") @db.Binary(16)
+  actingUserId    Bytes?   @map("acting_user_id") @db.Binary(16)
+  entryDate       DateTime @map("entry_date") @db.Date
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  clientUuid      Bytes?   @map("client_uuid") @db.Binary(16)
+  /// The reported entry a confirmation or correction answers.
+  refersToId      Bytes?   @map("refers_to_id") @db.Binary(16)
+
+  loan                Loan              @relation(fields: [loanId], references: [id])
+  company             Company           @relation("LoanLedgerCompany", fields: [companyId], references: [id])
+  counterpartyCompany Company?          @relation("LoanLedgerCounterparty", fields: [counterpartyCompanyId], references: [id])
+  actingCompany       Company           @relation("LoanLedgerActing", fields: [actingCompanyId], references: [id])
+  receivingAccount    ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
+  actingUser          User?             @relation("LoanLedgerUser", fields: [actingUserId], references: [id])
+  refersTo            LoanLedgerEntry?  @relation("LoanLedgerRefers", fields: [refersToId], references: [id])
+  referredBy          LoanLedgerEntry[] @relation("LoanLedgerRefers")
+
+  @@unique([actingCompanyId, clientUuid], map: "ux_lledger_client_uuid")
+  @@index([loanId, kind])
+  @@index([companyId, entryDate], map: "ix_lledger_company")
+  @@index([counterpartyCompanyId, entryDate], map: "ix_lledger_cp_company")
+  @@index([receivingAccountId])
+  @@index([actingUserId])
+  @@index([refersToId])
+  @@map("loan_ledger")
 }

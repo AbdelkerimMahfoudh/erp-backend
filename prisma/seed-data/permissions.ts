@@ -100,6 +100,16 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'consignment.payment.confirm', label: 'Confirm a consignment payment arrived' },
   { key: 'consignment.return.confirm',  label: 'Confirm a consigned phone came back' },
   { key: 'consignment.forgive', label: 'Forgive part or all of a consignment balance' },
+  /**
+   * Milestone I — money loans. A loan is money with no goods attached, so the
+   * split follows the money rules rather than the stock rules: reporting a
+   * payment is operational, confirming one and writing one off are not.
+   */
+  { key: 'loan.view',           label: 'See money owed and lent' },
+  { key: 'loan.manage',         label: 'Propose, accept, counter or dispute a loan' },
+  { key: 'loan.payment.report', label: 'Report a loan payment' },
+  { key: 'loan.payment.confirm',label: 'Confirm a loan payment arrived' },
+  { key: 'loan.forgive',        label: 'Forgive part or all of a loan' },
   { key: 'report.view',         label: 'View reports' },
   { key: 'branch.manage',       label: 'Manage branches' },
   { key: 'user.manage',         label: 'Manage users' },
@@ -215,6 +225,12 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'consignment.view', 'consignment.request', 'consignment.review',
     'consignment.custody.send', 'consignment.custody.receive', 'consignment.sell',
     'consignment.payment.report', 'consignment.return.confirm',
+    /**
+     * I: a manager sees the balances and reports a payment, and decides
+     * nothing. Deliberately WITHOUT `loan.manage` — agreeing that this
+     * business owes another business money is not a branch decision.
+     */
+    'loan.view', 'loan.payment.report',
     'purchase.manage', 'supplier.manage', 'closing.count', 'closing.perform', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
     // manager approves and cancels within the branch they are managing.

@@ -61,10 +61,14 @@ describe('store-facing roles', () => {
     // authority (choose a partner, write off a debt), and one broad key would
     // let whoever ships stock also decide who the business trades with.
     //
+    // 56 → 61 in Milestone I — five loan keys. An Employee gets NONE of them:
+    // a loan can be against an employee, and showing them the ledger would show
+    // them their colleagues' debts.
+    //
     // The Owner holds every permission by construction, so this number moving
     // is the signal that a phase added authority — it should never move by
     // accident, and it moving LATE means a phase shipped a drift.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(56);
+    expect(ROLE_PERMISSIONS.owner.length).toBe(61);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
@@ -388,5 +392,36 @@ describe('inter-store trust is company-level, not branch-level (Milestone H)', (
     ]) {
       expect(has('store_manager', perm)).toBe(true);
     }
+  });
+});
+
+describe('money owed is not an employee matter (Milestone I)', () => {
+  it('gives a Store Employee no loan permission at all', () => {
+    /**
+     * A loan can be against an EMPLOYEE — `counterparties` carries an
+     * `employee` kind for exactly that. Giving employees the loan list would
+     * show them their colleagues' debts, which is a privacy failure dressed up
+     * as a feature.
+     */
+    for (const perm of [
+      'loan.view',
+      'loan.manage',
+      'loan.payment.report',
+      'loan.payment.confirm',
+      'loan.forgive',
+    ]) {
+      expect(has('store_employee', perm)).toBe(false);
+    }
+  });
+
+  it('lets a Manager see balances and report a payment, and decide nothing', () => {
+    expect(has('store_manager', 'loan.view')).toBe(true);
+    expect(has('store_manager', 'loan.payment.report')).toBe(true);
+
+    // Agreeing that this business owes another business money is not a branch
+    // decision, and confirming or forgiving are Owner calls everywhere else.
+    expect(has('store_manager', 'loan.manage')).toBe(false);
+    expect(has('store_manager', 'loan.payment.confirm')).toBe(false);
+    expect(has('store_manager', 'loan.forgive')).toBe(false);
   });
 });
