@@ -172,6 +172,12 @@ export class LoansService {
         id: binToUuid(e.id),
         kind: e.kind,
         amount: num(e.amount),
+        /**
+         * Which entry this one answers. The screens need it to tell a report
+         * still waiting from one already confirmed, and guessing by position
+         * would pick the wrong entry once two payments overlap.
+         */
+        refersToId: e.refersToId ? binToUuid(e.refersToId) : null,
         method: e.method,
         accountLabel: e.accountLabelSnapshot,
         reference: e.reference,
