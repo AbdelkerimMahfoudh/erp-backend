@@ -41,6 +41,7 @@ import { ExpensesModule } from './expenses/expenses.module';
 import { ClosingModule } from './closing/closing.module';
 import { GoalsModule } from './goals/goals.module';
 import { ImportsModule } from './imports/imports.module';
+import { ConsignmentModule } from './consignment/consignment.module';
 
 @Module({
   imports: [
@@ -142,6 +143,7 @@ import { ImportsModule } from './imports/imports.module';
     ClosingModule,
     GoalsModule,
     ImportsModule,
+    ConsignmentModule,
     SettingsModule,
     MessagingModule,
   ],

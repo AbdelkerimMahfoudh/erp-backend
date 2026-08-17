@@ -202,6 +202,18 @@ model Company {
   /// Not the binary `id`, a branch id, a device id or a subscription id.
   /// Generated on create, unique, immutable through store-facing APIs.
   publicStoreId String  @unique @map("public_store_id") @db.VarChar(16)
+  /// Discovery (0049). Off until the Owner turns it on: a shop that never
+  /// heard of consignment must not be searchable by every other shop by
+  /// default. Publication is a decision, not a default.
+  isDiscoverable Boolean @default(false) @map("is_discoverable")
+  /// Coarse location only. Never an address — a city narrows a search, an
+  /// address identifies a building full of stock.
+  city           String? @db.VarChar(120)
+  logoRef        String? @map("logo_ref") @db.VarChar(512)
+  /// Shown only AFTER a connection is accepted, so a connection request cannot
+  /// be used to harvest phone numbers.
+  publicPhone    String? @map("public_phone") @db.VarChar(40)
+
   currency     String   @default("USD") @db.Char(3)
   timezone     String   @default("UTC") @db.VarChar(64)
   settingsJson Json     @map("settings") @db.Json
