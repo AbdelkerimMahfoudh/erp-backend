@@ -152,7 +152,16 @@ export class LoansService {
     });
     if (!loan) throw new NotFoundException('No such loan');
 
-    const rows = loan.ledger.map((e) => ({ kind: e.kind as LedgerKind, amount: num(e.amount) }));
+    /**
+     * Ids and links included: `breakdown` needs them to tell a report that has
+     * been confirmed from one still waiting.
+     */
+    const rows = loan.ledger.map((e) => ({
+      kind: e.kind as LedgerKind,
+      amount: num(e.amount),
+      id: binToUuid(e.id),
+      refersToId: e.refersToId ? binToUuid(e.refersToId) : null,
+    }));
     return {
       ...this.summarise(loan, me),
       note: loan.note,

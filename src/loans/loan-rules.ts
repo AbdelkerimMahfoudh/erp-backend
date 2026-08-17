@@ -114,11 +114,41 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 export interface LedgerRow {
   kind: LedgerKind;
   amount: number;
+  /**
+   * Identity and the entry this one answers. Optional because `remaining()`
+   * needs neither — a balance is decided by kinds and amounts alone. They exist
+   * for `awaitingConfirmation`, which has to know WHICH reports are still
+   * unanswered rather than how much was ever reported.
+   */
+  id?: string;
+  refersToId?: string | null;
 }
 
 /** What remains. Derived every time, stored nowhere. */
 export function remaining(rows: LedgerRow[]): number {
   return round2(rows.reduce((sum, r) => sum + BALANCE_EFFECT[r.kind] * r.amount, 0));
+}
+
+/**
+ * Reported payments nobody has confirmed yet.
+ *
+ * Answered-ness comes from the explicit `refersToId` link a confirmation
+ * carries, not from counting: pairing the Nth confirmation with the Nth report
+ * happens to work while everything arrives in order, and stops working the
+ * moment one report of several is confirmed out of order.
+ *
+ * Rows without ids are treated as unanswered, which keeps the old callers that
+ * only pass kinds and amounts honest rather than silently reporting zero.
+ */
+export function unansweredReports(rows: LedgerRow[]): number {
+  const answered = new Set(
+    rows.filter((r) => r.kind === 'payment_confirmed' && r.refersToId).map((r) => r.refersToId),
+  );
+  return round2(
+    rows
+      .filter((r) => r.kind === 'payment_reported' && !(r.id && answered.has(r.id)))
+      .reduce((s, r) => s + r.amount, 0),
+  );
 }
 
 /** The parts, so a screen can explain a balance rather than assert it. */
@@ -130,8 +160,16 @@ export function breakdown(rows: LedgerRow[]) {
     confirmedPaid: total('payment_confirmed'),
     corrected: total('payment_corrected'),
     forgiven: total('forgiven'),
-    /** Reported but not confirmed. Visible, and deliberately not deducted. */
-    awaitingConfirmation: total('payment_reported'),
+    /**
+     * Reported and STILL unanswered. Visible, and deliberately not deducted.
+     *
+     * Only reports no confirmation points at: totalling every report ever made
+     * would leave a settled payment showing as outstanding forever, and the
+     * shop would chase money that had already arrived. A later correction does
+     * not revive the report — the confirmation still answers it, and the debt
+     * it puts back is already carried by `payment_corrected`.
+     */
+    awaitingConfirmation: unansweredReports(rows),
     remaining: remaining(rows),
   };
 }

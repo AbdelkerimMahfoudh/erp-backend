@@ -154,6 +154,49 @@ describe('a report is not a payment', () => {
     expect(remaining(rows)).toBe(13000);
   });
 
+  it('stops waiting once the creditor has answered it', () => {
+    /*
+      The whole point of the figure is "what is still unanswered". Totalling
+      every report ever made left a payment that had already arrived showing as
+      outstanding forever, and the shop would go and chase it.
+    */
+    const rows: LedgerRow[] = [
+      { kind: 'principal_accepted', amount: 18000, id: 'p' },
+      { kind: 'payment_reported', amount: 5000, id: 'r1' },
+      { kind: 'payment_confirmed', amount: 5000, id: 'c1', refersToId: 'r1' },
+    ];
+    expect(breakdown(rows).awaitingConfirmation).toBe(0);
+    expect(breakdown(rows).remaining).toBe(13000);
+  });
+
+  it('waits only on the report nobody answered, even out of order', () => {
+    // The second report is confirmed first. Positional pairing would have
+    // credited the wrong one and reported the wrong amount as waiting.
+    const rows: LedgerRow[] = [
+      { kind: 'principal_accepted', amount: 18000, id: 'p' },
+      { kind: 'payment_reported', amount: 5000, id: 'r1' },
+      { kind: 'payment_reported', amount: 2000, id: 'r2' },
+      { kind: 'payment_confirmed', amount: 2000, id: 'c1', refersToId: 'r2' },
+    ];
+    expect(breakdown(rows).awaitingConfirmation).toBe(5000);
+  });
+
+  it('does not start waiting again when a confirmed payment is reversed', () => {
+    /*
+      The report was answered; reversing the confirmation puts the DEBT back,
+      which `payment_corrected` already carries. Reviving the report as well
+      would ask the creditor to confirm a payment they have just rejected.
+    */
+    const rows: LedgerRow[] = [
+      { kind: 'principal_accepted', amount: 18000, id: 'p' },
+      { kind: 'payment_reported', amount: 5000, id: 'r1' },
+      { kind: 'payment_confirmed', amount: 5000, id: 'c1', refersToId: 'r1' },
+      { kind: 'payment_corrected', amount: 5000, id: 'x1', refersToId: 'c1' },
+    ];
+    expect(breakdown(rows).awaitingConfirmation).toBe(0);
+    expect(breakdown(rows).remaining).toBe(18000);
+  });
+
   it('a correction puts the debt back rather than erasing the claim', () => {
     const rows: LedgerRow[] = [
       { kind: 'principal_accepted', amount: 18000 },
