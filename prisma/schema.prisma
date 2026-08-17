@@ -223,6 +223,7 @@ model Company {
   expenseTemplates  ExpenseTemplate[]
   expenses          Expense[]
   dailyClosings     DailyClosing[]
+  goals             Goal[]
   closingChannelCounts ClosingChannelCount[]
   closingDiscrepancies ClosingDiscrepancy[]
   employeeDebtEntries  EmployeeDebtEntry[]
@@ -285,6 +286,7 @@ model Branch {
   expenseTemplates ExpenseTemplate[]
   expenses         Expense[]
   dailyClosings    DailyClosing[]
+  goals            Goal[]
   closingDiscrepancies ClosingDiscrepancy[]
   employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests     DailyDigest[]
@@ -332,6 +334,11 @@ model User {
   /// Ledger rows ABOUT this user, and ledger rows this user wrote.
   debtEntries        EmployeeDebtEntry[] @relation("DebtSubject")
   debtEntriesCreated EmployeeDebtEntry[] @relation("DebtCreatedBy")
+
+  /// Goals set FOR this person, and goals this person set. Two relations,
+  /// because who is aiming and who decided the aim must stay distinguishable.
+  goalsTargeted Goal[]             @relation("GoalTargetUser")
+  goalsCreated  Goal[]             @relation("GoalCreatedBy")
 
   id           Bytes     @id @db.Binary(16)
   companyId    Bytes     @map("company_id") @db.Binary(16)
@@ -2760,4 +2767,90 @@ model FinancialCorrection {
   @@index([companyId, status])
   @@index([companyId, branchId, correctionDate])
   @@map("financial_corrections")
+}
+
+/// What a goal measures (0047). Each one maps to a figure `daily_rollups`
+/// already computes, so a goal can never disagree with the day's analytics.
+///
+/// Deliberately NO `net_profit`: expenses are not the salesperson's doing, and
+/// a target somebody cannot influence is not a goal, it is a grievance.
+enum GoalMetric {
+  gross_profit
+  revenue
+  sales_count
+  units_sold
+}
+
+enum GoalScope {
+  company
+  branch
+  /// One person, within one branch. Somebody working across two shops has two
+  /// jobs, and one merged number would hide which is going badly.
+  user
+}
+
+/// Kept for wording only ("this month"), never for arithmetic — the dates are
+/// what the figures are computed from.
+enum GoalPeriodLabel {
+  daily
+  weekly
+  monthly
+  custom
+}
+
+enum GoalStatus {
+  active
+  /// Archived rather than deleted. A goal that was missed is a fact about the
+  /// shop's history, and deleting it would make every past period look met.
+  archived
+}
+
+/// A target somebody is working toward (Milestone F).
+///
+/// **Progress is not stored here.** It is derived from `DailyRollup` every time
+/// a goal is read — the same rule the employee debt balance follows. A stored
+/// progress figure can disagree with the sales it claims to summarise, and it
+/// would need invalidating on every sale, return, refund and correction.
+model Goal {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+
+  scope        GoalScope
+  branchId     Bytes? @map("branch_id") @db.Binary(16)
+  targetUserId Bytes? @map("target_user_id") @db.Binary(16)
+
+  metric GoalMetric
+
+  /// A real, closed range of days. Storing both dates rather than a period type
+  /// plus an offset means a month that started mid-month, or a one-off push
+  /// over a holiday week, needs no special case.
+  periodStart DateTime        @map("period_start") @db.Date
+  periodEnd   DateTime        @map("period_end") @db.Date
+  periodLabel GoalPeriodLabel @default(custom) @map("period_label")
+
+  targetAmount Decimal @map("target_amount") @db.Decimal(14, 2)
+
+  status         GoalStatus @default(active)
+  /// Mandatory when archiving, like every other decision in this schema.
+  archivedReason String?    @map("archived_reason") @db.VarChar(255)
+
+  note String? @db.VarChar(255)
+
+  createdById Bytes    @map("created_by_id") @db.Binary(16)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+  version     Int      @default(0)
+
+  company    Company @relation(fields: [companyId], references: [id])
+  branch     Branch? @relation(fields: [branchId], references: [id])
+  targetUser User?   @relation("GoalTargetUser", fields: [targetUserId], references: [id])
+  createdBy  User    @relation("GoalCreatedBy", fields: [createdById], references: [id])
+
+  // Uniqueness is on the generated `active_key` (0047), because MySQL has no
+  // partial unique index and two ACTIVE goals for the same person, metric and
+  // period would make "am I on target" have two answers.
+  @@index([companyId, branchId, status, periodEnd], map: "ix_goals_lookup")
+  @@index([companyId, targetUserId, status], map: "ix_goals_user")
+  @@index([createdById])
+  @@map("goals")
 }

@@ -75,6 +75,13 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    * off, is the Owner's call and nobody else's.
    */
   { key: 'debt.manage',         label: 'Assign, collect or forgive a cash discrepancy' },
+  /**
+   * Milestone F. SETTING a target is deciding what the shop is aiming at, so
+   * this is Owner and Manager. READING one is deliberately not gated at all —
+   * an employee with a personal target must be able to see it, and gating it on
+   * `report.view` would hand them the shop's profit reporting at the same time.
+   */
+  { key: 'goal.manage',         label: 'Set and archive goals' },
   { key: 'report.view',         label: 'View reports' },
   { key: 'branch.manage',       label: 'Manage branches' },
   { key: 'user.manage',         label: 'Manage users' },
@@ -175,6 +182,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'unit.add', 'import.run',
     // E: a manager may count as well as sign off. `debt.manage` is NOT here —
     // holding a named person responsible for a shortage is the Owner's call.
+    // F: a manager sets the targets their branch is working toward.
+    'goal.manage',
     'purchase.manage', 'supplier.manage', 'closing.count', 'closing.perform', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
     // manager approves and cancels within the branch they are managing.

@@ -51,10 +51,15 @@ describe('store-facing roles', () => {
     // second is deliberately NOT part of `closing.perform`, which a Manager
     // holds — deciding a named person owes the business money is Owner-only.
     //
+    // 44 → 45 in Milestone F — `goal.manage`. One key, not two, because READING
+    // a goal is deliberately ungated: an employee with a personal target must
+    // be able to see it, and `report.view` would hand them the shop's profit
+    // reporting at the same time.
+    //
     // The Owner holds every permission by construction, so this number moving
     // is the signal that a phase added authority — it should never move by
     // accident, and it moving LATE means a phase shipped a drift.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(44);
+    expect(ROLE_PERMISSIONS.owner.length).toBe(45);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);

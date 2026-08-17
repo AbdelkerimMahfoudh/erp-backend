@@ -39,6 +39,7 @@ import { ReturnsModule } from './returns/returns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { ClosingModule } from './closing/closing.module';
+import { GoalsModule } from './goals/goals.module';
 
 @Module({
   imports: [
@@ -138,6 +139,7 @@ import { ClosingModule } from './closing/closing.module';
     AnalyticsModule,
     ExpensesModule,
     ClosingModule,
+    GoalsModule,
     SettingsModule,
     MessagingModule,
   ],
