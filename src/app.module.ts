@@ -40,6 +40,7 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { ClosingModule } from './closing/closing.module';
 import { GoalsModule } from './goals/goals.module';
+import { ImportsModule } from './imports/imports.module';
 
 @Module({
   imports: [
@@ -140,6 +141,7 @@ import { GoalsModule } from './goals/goals.module';
     ExpensesModule,
     ClosingModule,
     GoalsModule,
+    ImportsModule,
     SettingsModule,
     MessagingModule,
   ],

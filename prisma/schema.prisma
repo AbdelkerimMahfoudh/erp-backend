@@ -156,6 +156,19 @@ enum ImportStatus {
   failed
 }
 
+/// What a sheet describes, from its identifier column (0048).
+enum ImportKind {
+  imei
+  serial
+  quantity
+}
+
+/// Which table an import row's product ended up in.
+enum ImportCreatedKind {
+  unit
+  stock_item
+}
+
 enum ImportRowStatus {
   valid
   warning
@@ -339,6 +352,9 @@ model User {
   /// because who is aiming and who decided the aim must stay distinguishable.
   goalsTargeted Goal[]             @relation("GoalTargetUser")
   goalsCreated  Goal[]             @relation("GoalCreatedBy")
+
+  /// Imports this user COMMITTED, kept apart from the one who uploaded.
+  importsCommitted ImportBatch[] @relation("ImportCommittedBy")
 
   id           Bytes     @id @db.Binary(16)
   companyId    Bytes     @map("company_id") @db.Binary(16)
@@ -1666,17 +1682,40 @@ model ImportBatch {
   totalRows Int          @default(0) @map("total_rows")
   validRows Int          @default(0) @map("valid_rows")
   errorRows Int          @default(0) @map("error_rows")
+
+  /// What the sheet describes, decided by which identifier column it carries
+  /// rather than asked. A column of IMEIs is phones (0048).
+  kind             ImportKind?
+  /// What the shop actually called their file; `fileRef` is a storage key.
+  originalFilename String?     @map("original_filename") @db.VarChar(255)
+  /// The confirmed column mapping, frozen at preview. The commit reads this and
+  /// never re-guesses, or a shop approves one interpretation and receives
+  /// stock built from another.
+  mapping          Json?       @db.Json
+  /// Rows that will import but are worth a look. There was no counter at all.
+  warningRows      Int         @default(0) @map("warning_rows")
+  /// How many rows the commit actually created — not the same as how many the
+  /// preview predicted, if anything changed in between.
+  importedRows     Int         @default(0) @map("imported_rows")
+  committedAt      DateTime?   @map("committed_at") @db.DateTime(6)
+  committedById    Bytes?      @map("committed_by_id") @db.Binary(16)
+  /// An offline retry must not import the same file twice.
+  clientUuid       Bytes?      @map("client_uuid") @db.Binary(16)
+  version          Int         @default(0)
   createdAt DateTime     @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt DateTime     @updatedAt @map("updated_at") @db.DateTime(6)
 
   company Company     @relation(fields: [companyId], references: [id])
   branch  Branch      @relation(fields: [branchId], references: [id])
-  user    User?       @relation(fields: [userId], references: [id])
-  rows    ImportRow[]
+  user        User?       @relation(fields: [userId], references: [id])
+  committedBy User?       @relation("ImportCommittedBy", fields: [committedById], references: [id])
+  rows        ImportRow[]
 
   @@index([companyId])
   @@index([branchId])
+  @@unique([companyId, clientUuid], map: "ux_import_batches_client_uuid")
   @@index([userId])
+  @@index([companyId, branchId, status, createdAt], map: "ix_import_batches_status")
   @@map("import_batches")
 }
 
@@ -1690,11 +1729,25 @@ model ImportRow {
   status    ImportRowStatus
   message   String?         @db.Text
 
+  /// The unit or stock row this line produced (0048). Without it there is no
+  /// way to get from line 47 of a spreadsheet to the phone it created, which is
+  /// the first thing anybody asks when an import looks wrong.
+  ///
+  /// Not a relation: it points at one of two tables depending on the batch
+  /// kind, and a row that produced nothing keeps null.
+  createdEntityId Bytes?              @map("created_entity_id") @db.Binary(16)
+  createdKind     ImportCreatedKind?  @map("created_kind")
+  /// The identifier this row claimed, extracted so duplicate detection and the
+  /// commit need not re-read the JSON.
+  identifier      String?             @db.VarChar(64)
+
   company Company     @relation(fields: [companyId], references: [id])
   batch   ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
 
   @@index([batchId])
   @@index([companyId])
+  @@index([companyId, identifier], map: "ix_import_rows_identifier")
+  @@index([batchId, status], map: "ix_import_rows_batch_status")
   @@map("import_rows")
 }
 
