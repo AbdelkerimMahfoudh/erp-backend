@@ -56,10 +56,15 @@ describe('store-facing roles', () => {
     // be able to see it, and `report.view` would hand them the shop's profit
     // reporting at the same time.
     //
+    // 45 → 56 in Milestone H — eleven consignment keys. Narrow on purpose:
+    // consignment mixes operational acts (hand a phone over) with company-level
+    // authority (choose a partner, write off a debt), and one broad key would
+    // let whoever ships stock also decide who the business trades with.
+    //
     // The Owner holds every permission by construction, so this number moving
     // is the signal that a phase added authority — it should never move by
     // accident, and it moving LATE means a phase shipped a drift.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(45);
+    expect(ROLE_PERMISSIONS.owner.length).toBe(56);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
@@ -160,6 +165,22 @@ describe('Store Employee', () => {
      */
     expect(has('store_employee', 'closing.count')).toBe(true);
     expect(has('store_employee', 'closing.perform')).toBe(false);
+  });
+
+  it('may HANDLE a consigned phone and never AGREE what it is worth', () => {
+    /**
+     * Milestone H's permission decision, pinned. Handing a phone over and
+     * confirming one arrived are physical acts — the same reasoning that gives
+     * an employee `transfer.ship` and `transfer.receive`.
+     *
+     * Agreeing what another business pays us is not an operational act, and
+     * "employees can receive ordinary stock" is not a reason to hand them that.
+     */
+    expect(has('store_employee', 'consignment.custody.send')).toBe(true);
+    expect(has('store_employee', 'consignment.custody.receive')).toBe(true);
+    expect(has('store_employee', 'consignment.request')).toBe(false);
+    expect(has('store_employee', 'consignment.review')).toBe(false);
+    expect(has('store_employee', 'consignment.sell')).toBe(false);
   });
 
   it('is never able to decide who owes the shop money', () => {
@@ -326,6 +347,46 @@ describe('legacy roles', () => {
   it('are not offered anywhere store-facing', () => {
     for (const legacy of ['sales_employee', 'warehouse_employee', 'branch_manager', 'administrator']) {
       expect(STORE_FACING_ROLES).not.toContain(legacy);
+    }
+  });
+});
+
+describe('inter-store trust is company-level, not branch-level (Milestone H)', () => {
+  it('only the Owner decides which businesses this shop deals with', () => {
+    /**
+     * `connection.manage` covers connecting to, blocking and unblocking another
+     * company. A Store Manager runs the branch; choosing the partners is not a
+     * branch decision, and a manager who could block a store could also cut off
+     * a creditor.
+     */
+    expect(has('owner', 'connection.manage')).toBe(true);
+    expect(has('store_manager', 'connection.manage')).toBe(false);
+    expect(has('store_employee', 'connection.manage')).toBe(false);
+  });
+
+  it('only the Owner forgives money owed, or vouches that it arrived', () => {
+    /**
+     * The same split every other money workflow uses. A manager may REPORT a
+     * payment; confirming one and writing one off are the Owner's.
+     */
+    expect(has('owner', 'consignment.forgive')).toBe(true);
+    expect(has('store_manager', 'consignment.forgive')).toBe(false);
+
+    expect(has('owner', 'consignment.payment.confirm')).toBe(true);
+    expect(has('store_manager', 'consignment.payment.confirm')).toBe(false);
+    expect(has('store_manager', 'consignment.payment.report')).toBe(true);
+  });
+
+  it('a manager runs the operational half end to end', () => {
+    for (const perm of [
+      'consignment.request',
+      'consignment.review',
+      'consignment.custody.send',
+      'consignment.custody.receive',
+      'consignment.sell',
+      'consignment.return.confirm',
+    ]) {
+      expect(has('store_manager', perm)).toBe(true);
     }
   });
 });

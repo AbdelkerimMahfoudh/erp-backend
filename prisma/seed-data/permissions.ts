@@ -82,6 +82,24 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    * `report.view` would hand them the shop's profit reporting at the same time.
    */
   { key: 'goal.manage',         label: 'Set and archive goals' },
+  /**
+   * Milestone H — inter-store consignment. Narrow keys, because consignment
+   * mixes operational acts (hand a phone over, confirm one arrived) with
+   * company-level authority (decide who this business trades with, write off
+   * money owed). Granting them together would let whoever ships stock also
+   * choose the partners.
+   */
+  { key: 'connection.manage',   label: 'Connect to, block or unblock another store' },
+  { key: 'consignment.view',    label: 'See consignments' },
+  { key: 'consignment.request', label: 'Propose sending stock on consignment' },
+  { key: 'consignment.review',  label: 'Accept, counter or dispute a consignment proposal' },
+  { key: 'consignment.custody.send',    label: 'Record handing a consigned phone over' },
+  { key: 'consignment.custody.receive', label: 'Confirm physically receiving a consigned phone' },
+  { key: 'consignment.sell',    label: 'Sell a phone held on consignment' },
+  { key: 'consignment.payment.report',  label: 'Report a consignment payment' },
+  { key: 'consignment.payment.confirm', label: 'Confirm a consignment payment arrived' },
+  { key: 'consignment.return.confirm',  label: 'Confirm a consigned phone came back' },
+  { key: 'consignment.forgive', label: 'Forgive part or all of a consignment balance' },
   { key: 'report.view',         label: 'View reports' },
   { key: 'branch.manage',       label: 'Manage branches' },
   { key: 'user.manage',         label: 'Manage users' },
@@ -184,6 +202,19 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     // holding a named person responsible for a shortage is the Owner's call.
     // F: a manager sets the targets their branch is working toward.
     'goal.manage',
+    /**
+     * H: a manager runs consignment end to end operationally — proposing,
+     * reviewing, custody both ways, selling and reporting a payment.
+     *
+     * Deliberately WITHOUT `connection.manage`: choosing which businesses this
+     * shop deals with is company-level trust, not branch operation. Deliberately
+     * WITHOUT `consignment.forgive` and `consignment.payment.confirm`: writing
+     * off money owed, and vouching that money arrived, are Owner calls
+     * everywhere else in this system and stay so here.
+     */
+    'consignment.view', 'consignment.request', 'consignment.review',
+    'consignment.custody.send', 'consignment.custody.receive', 'consignment.sell',
+    'consignment.payment.report', 'consignment.return.confirm',
     'purchase.manage', 'supplier.manage', 'closing.count', 'closing.perform', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
     // manager approves and cancels within the branch they are managing.
@@ -250,6 +281,16 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      * Signing the day off stays with `closing.perform`, which they do not hold.
      */
     'closing.count',
+    /**
+     * H: the two PHYSICAL acts and nothing else — hand a phone over, confirm
+     * one arrived. The same reasoning that gives them `transfer.ship` and
+     * `transfer.receive`.
+     *
+     * Deliberately WITHOUT `consignment.request` or `consignment.review`:
+     * agreeing what another business pays us is not an operational act, and
+     * "employees can receive ordinary stock" is not a reason to hand them that.
+     */
+    'consignment.view', 'consignment.custody.send', 'consignment.custody.receive',
     /**
      * H1.2. An employee does the daily stock movement — asks for a transfer,
      * sends it once approved, receives one arriving — but never approves,

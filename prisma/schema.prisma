@@ -237,6 +237,17 @@ model Company {
   expenses          Expense[]
   dailyClosings     DailyClosing[]
   goals             Goal[]
+  connectionsRequested StoreConnection[] @relation("ConnectionRequester")
+  connectionsReceived  StoreConnection[] @relation("ConnectionAddressee")
+  connectionsBlocked   StoreConnection[] @relation("ConnectionBlockedBy")
+  counterparties       Counterparty[]
+  counterpartyOf       Counterparty[]    @relation("CounterpartyConnectedCompany")
+  consignmentsOut      Consignment[]     @relation("ConsignmentSource")
+  consignmentsIn       Consignment[]     @relation("ConsignmentDestination")
+  consignmentLines     ConsignmentLine[]
+  consignmentLedgerAsSource      ConsignmentLedgerEntry[] @relation("LedgerSource")
+  consignmentLedgerAsDestination ConsignmentLedgerEntry[] @relation("LedgerDestination")
+  consignmentLedgerActed         ConsignmentLedgerEntry[] @relation("LedgerActing")
   closingChannelCounts ClosingChannelCount[]
   closingDiscrepancies ClosingDiscrepancy[]
   employeeDebtEntries  EmployeeDebtEntry[]
@@ -300,6 +311,7 @@ model Branch {
   expenses         Expense[]
   dailyClosings    DailyClosing[]
   goals            Goal[]
+  consignments     Consignment[]
   closingDiscrepancies ClosingDiscrepancy[]
   employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests     DailyDigest[]
@@ -355,6 +367,14 @@ model User {
 
   /// Imports this user COMMITTED, kept apart from the one who uploaded.
   importsCommitted ImportBatch[] @relation("ImportCommittedBy")
+
+  /// Consignment and connection roles. Named because several of them touch the
+  /// same model and Prisma cannot tell them apart otherwise.
+  connectionsRequestedBy StoreConnection[] @relation("ConnectionRequestedBy")
+  connectionsDecidedBy   StoreConnection[] @relation("ConnectionDecidedBy")
+  counterpartyRecords    Counterparty[]    @relation("CounterpartyUser")
+  counterpartiesCreated  Counterparty[]    @relation("CounterpartyCreatedBy")
+  consignmentLedgerEntries ConsignmentLedgerEntry[]
 
   id           Bytes     @id @db.Binary(16)
   companyId    Bytes     @map("company_id") @db.Binary(16)
@@ -620,6 +640,10 @@ model TacCatalog {
 }
 
 model Unit {
+  /// Consignment lines this unit has been on. Ownership never leaves this
+  /// company — a consigned phone is in somebody else's shop, not their books.
+  consignmentLines ConsignmentLine[]
+
   id            Bytes      @id @db.Binary(16)
   companyId     Bytes      @map("company_id") @db.Binary(16)
   productId     Bytes      @map("product_id") @db.Binary(16)
@@ -1884,6 +1908,7 @@ model CompanySettings {
 /// Cash is not represented: it is always available and needs no configuration.
 model ReceivingAccount {
   expenses      Expense[]
+  consignmentLedger ConsignmentLedgerEntry[]
   payments      Payment[]
   channelCounts ClosingChannelCount[]
 
@@ -2906,4 +2931,341 @@ model Goal {
   @@index([companyId, targetUserId, status], map: "ix_goals_user")
   @@index([createdById])
   @@map("goals")
+}
+
+// ------------------------- Inter-store consignment (0049) -------------------
+
+/// Where a connection between two shops stands.
+enum StoreConnectionStatus {
+  pending
+  accepted
+  rejected
+  /// Stops NEW requests. Never deletes history, never erases a liability — a
+  /// shop cannot escape what it owes by blocking the creditor.
+  blocked
+}
+
+/// The trust relationship between two companies.
+///
+/// One row per pair whichever way round it was requested, enforced by the
+/// generated `pair_key` — without it two shops could each hold a pending
+/// request to the other and neither could accept cleanly.
+model StoreConnection {
+  id Bytes @id @db.Binary(16)
+
+  requesterCompanyId Bytes @map("requester_company_id") @db.Binary(16)
+  addresseeCompanyId Bytes @map("addressee_company_id") @db.Binary(16)
+
+  status StoreConnectionStatus @default(pending)
+
+  /// Either side may block, so who did it is recorded — otherwise the blocked
+  /// party could simply unblock themselves.
+  blockedByCompanyId Bytes?    @map("blocked_by_company_id") @db.Binary(16)
+  blockedAt          DateTime? @map("blocked_at") @db.DateTime(6)
+  blockReason        String?   @map("block_reason") @db.VarChar(255)
+
+  requestedById Bytes?    @map("requested_by_id") @db.Binary(16)
+  decidedById   Bytes?    @map("decided_by_id") @db.Binary(16)
+  decidedAt     DateTime? @map("decided_at") @db.DateTime(6)
+  note          String?   @db.VarChar(255)
+
+  version   Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  requesterCompany Company  @relation("ConnectionRequester", fields: [requesterCompanyId], references: [id])
+  addresseeCompany Company  @relation("ConnectionAddressee", fields: [addresseeCompanyId], references: [id])
+  blockedByCompany Company? @relation("ConnectionBlockedBy", fields: [blockedByCompanyId], references: [id])
+  requestedBy      User?    @relation("ConnectionRequestedBy", fields: [requestedById], references: [id])
+  decidedBy        User?    @relation("ConnectionDecidedBy", fields: [decidedById], references: [id])
+
+  counterparties Counterparty[]
+  consignments   Consignment[]
+
+  @@index([requesterCompanyId, status])
+  @@index([addresseeCompanyId, status])
+  @@index([blockedByCompanyId])
+  @@index([requestedById])
+  @@index([decidedById])
+  @@map("store_connections")
+}
+
+/// What kind of party is on the other side.
+enum CounterpartyKind {
+  connected_store
+  manual_store
+  manual_person
+  /// Milestone I only.
+  employee
+}
+
+/// Who the other party is, from ONE company's point of view.
+///
+/// Tenant-scoped, and deliberately shared with Milestone I: a loan and a
+/// consignment can be against the same shop or the same person, and duplicating
+/// the concept would make "who owes us money" two different lists.
+///
+/// A manual counterparty is NEVER a fake `Company` row. Inventing one would give
+/// it a Store Account ID, a tenant scope and a login path, none of which it
+/// should have.
+model Counterparty {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+
+  kind CounterpartyKind
+
+  connectedCompanyId Bytes? @map("connected_company_id") @db.Binary(16)
+  connectionId       Bytes? @map("connection_id") @db.Binary(16)
+  userId             Bytes? @map("user_id") @db.Binary(16)
+
+  /// Also the display name for a connected store, so a rename on their side
+  /// cannot silently retitle our historical records.
+  name  String  @db.VarChar(160)
+  phone String? @db.VarChar(40)
+  city  String? @db.VarChar(120)
+  note  String? @db.VarChar(255)
+
+  isActive    Boolean  @default(true) @map("is_active")
+  version     Int      @default(0)
+  createdById Bytes?   @map("created_by_id") @db.Binary(16)
+  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company          Company          @relation(fields: [companyId], references: [id])
+  connectedCompany Company?         @relation("CounterpartyConnectedCompany", fields: [connectedCompanyId], references: [id])
+  connection       StoreConnection? @relation(fields: [connectionId], references: [id])
+  user             User?            @relation("CounterpartyUser", fields: [userId], references: [id])
+  createdBy        User?            @relation("CounterpartyCreatedBy", fields: [createdById], references: [id])
+
+  consignments Consignment[]
+
+  @@index([companyId, kind, isActive])
+  @@index([connectionId])
+  @@index([userId])
+  @@index([createdById])
+  @@map("counterparties")
+}
+
+/// Detailed internal states. The UI groups them into Pending / Accepted /
+/// Confirmed, but the record keeps the distinctions — "accepted" and "the phone
+/// is physically there" are different facts, and collapsing them is how a shop
+/// ends up believing stock moved when it did not.
+enum ConsignmentStatus {
+  draft
+  requested
+  counter_proposed
+  disputed
+  accepted_awaiting_custody
+  custody_awaiting_confirmation
+  in_custody
+  sold_awaiting_settlement
+  partially_paid
+  return_initiated
+  return_in_transit
+  settled
+  returned_accepted
+  forgiven_settled
+  cancelled
+}
+
+/// **The first table in this schema that belongs to two companies at once.**
+///
+/// It therefore CANNOT be scoped automatically by `tenant.extension.ts`, and the
+/// guard that protects every other table stops protecting this one. Every read
+/// must go through `consignment-scope.ts`, which filters
+/// `sourceCompanyId = me OR destinationCompanyId = me`, and a spec asserts no
+/// query bypasses it.
+model Consignment {
+  id Bytes @id @db.Binary(16)
+
+  /// Always set: the company that owns the stock and carries the receivable.
+  sourceCompanyId Bytes @map("source_company_id") @db.Binary(16)
+  sourceBranchId  Bytes @map("source_branch_id") @db.Binary(16)
+
+  /// Set for an application counterparty, null for a manual one. This column is
+  /// what makes the record cross-tenant.
+  destinationCompanyId Bytes? @map("destination_company_id") @db.Binary(16)
+  /// The source's own view of who this went to, always set.
+  counterpartyId Bytes  @map("counterparty_id") @db.Binary(16)
+  connectionId   Bytes? @map("connection_id") @db.Binary(16)
+
+  status ConsignmentStatus @default(draft)
+
+  proposedAmount Decimal? @map("proposed_amount") @db.Decimal(14, 2)
+  counterAmount  Decimal? @map("counter_amount") @db.Decimal(14, 2)
+  /// Immutable once custody is confirmed — after that the phone is in another
+  /// shop and the price cannot move under them.
+  agreedAmount   Decimal? @map("agreed_amount") @db.Decimal(14, 2)
+
+  /// A dispute must say why. "Rejected" with no reason is not a conversation.
+  disputeReason String? @map("dispute_reason") @db.VarChar(255)
+  note          String? @db.VarChar(255)
+
+  proposedById         Bytes?    @map("proposed_by_id") @db.Binary(16)
+  decidedById          Bytes?    @map("decided_by_id") @db.Binary(16)
+  decidedAt            DateTime? @map("decided_at") @db.DateTime(6)
+  custodySentAt        DateTime? @map("custody_sent_at") @db.DateTime(6)
+  custodySentById      Bytes?    @map("custody_sent_by_id") @db.Binary(16)
+  custodyConfirmedAt   DateTime? @map("custody_confirmed_at") @db.DateTime(6)
+  custodyConfirmedById Bytes?    @map("custody_confirmed_by_id") @db.Binary(16)
+  settledAt            DateTime? @map("settled_at") @db.DateTime(6)
+
+  clientUuid Bytes?   @map("client_uuid") @db.Binary(16)
+  version    Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  sourceCompany      Company          @relation("ConsignmentSource", fields: [sourceCompanyId], references: [id])
+  sourceBranch       Branch           @relation(fields: [sourceBranchId], references: [id])
+  destinationCompany Company?         @relation("ConsignmentDestination", fields: [destinationCompanyId], references: [id])
+  counterparty       Counterparty     @relation(fields: [counterpartyId], references: [id])
+  connection         StoreConnection? @relation(fields: [connectionId], references: [id])
+
+  lines  ConsignmentLine[]
+  ledger ConsignmentLedgerEntry[]
+
+  @@unique([sourceCompanyId, clientUuid], map: "ux_consignments_client_uuid")
+  @@index([sourceCompanyId, status, createdAt], map: "ix_consignments_source")
+  @@index([destinationCompanyId, status, createdAt], map: "ix_consignments_destination")
+  @@index([counterpartyId])
+  @@index([sourceBranchId])
+  @@index([connectionId])
+  @@map("consignments")
+}
+
+enum ConsignmentLineStatus {
+  proposed
+  in_custody
+  sold
+  returned
+  cancelled
+}
+
+/// How a line ended. Recorded on the LINE rather than inferred from the parent,
+/// because a multi-line consignment can have some sold and some returned.
+enum ConsignmentDisposition {
+  sold
+  returned
+  damaged
+  forgiven
+}
+
+enum ConsignmentReturnCondition {
+  good
+  damaged
+}
+
+/// One phone per line.
+///
+/// There is deliberately no destination unit. Store 2 has custody, not
+/// ownership, and a second owned row could be sold independently — the
+/// double-sale this whole design exists to make impossible.
+model ConsignmentLine {
+  id            Bytes @id @db.Binary(16)
+  consignmentId Bytes @map("consignment_id") @db.Binary(16)
+  /// Denormalised so a line can be scoped without joining its parent.
+  sourceCompanyId Bytes @map("source_company_id") @db.Binary(16)
+
+  unitId Bytes @map("unit_id") @db.Binary(16)
+
+  /// Snapshotted at proposal, because this is what the destination was shown and
+  /// agreed to. **Cost and margin are absent by design.**
+  brand         String? @db.VarChar(80)
+  model         String  @db.VarChar(120)
+  variant       String? @db.VarChar(120)
+  identifier    String  @db.VarChar(64)
+  conditionNote String? @map("condition_note") @db.VarChar(255)
+  /// Defects the source chose to disclose, so "I was not told" is answerable.
+  defectNote    String? @map("defect_note") @db.VarChar(255)
+
+  agreedAmount Decimal? @map("agreed_amount") @db.Decimal(14, 2)
+
+  status          ConsignmentLineStatus       @default(proposed)
+  disposedAt      DateTime?                   @map("disposed_at") @db.DateTime(6)
+  disposition     ConsignmentDisposition?
+  returnCondition ConsignmentReturnCondition? @map("return_condition")
+  returnNote      String?                     @map("return_note") @db.VarChar(255)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  consignment   Consignment @relation(fields: [consignmentId], references: [id])
+  unit          Unit        @relation(fields: [unitId], references: [id])
+  sourceCompany Company     @relation(fields: [sourceCompanyId], references: [id])
+
+  ledger ConsignmentLedgerEntry[]
+
+  // Uniqueness is on the generated `active_unit_id` (0049): a unit can be on
+  // only ONE active consignment. That is the database half of the double-claim
+  // guarantee; the compare-and-swap on `units.status` is the other half.
+  @@index([consignmentId, status])
+  @@index([unitId])
+  @@index([sourceCompanyId])
+  @@map("consignment_lines")
+}
+
+/// What each ledger row means. A payment REPORT changes nothing until it is
+/// confirmed — the same two-party rule refunds and supplier settlements follow.
+enum ConsignmentLedgerKind {
+  receivable_raised
+  payment_reported
+  payment_confirmed
+  payment_corrected
+  forgiven
+  settled
+}
+
+/// The money, append-only. What is owed is DERIVED from these rows and stored
+/// nowhere, the same rule the employee debt ledger follows.
+model ConsignmentLedgerEntry {
+  id            Bytes @id @db.Binary(16)
+  consignmentId Bytes @map("consignment_id") @db.Binary(16)
+  /// Both sides, so either company can read its own ledger without a join.
+  sourceCompanyId      Bytes  @map("source_company_id") @db.Binary(16)
+  destinationCompanyId Bytes? @map("destination_company_id") @db.Binary(16)
+
+  kind ConsignmentLedgerKind
+  /// Always a positive magnitude; `kind` carries the direction.
+  amount Decimal @db.Decimal(14, 2)
+
+  lineId Bytes? @map("line_id") @db.Binary(16)
+
+  method               RefundMethod?
+  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  /// Frozen: renaming an account later must not retitle a movement.
+  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+  reference            String? @db.VarChar(120)
+  evidenceRef          String? @map("evidence_ref") @db.VarChar(512)
+
+  /// Mandatory for forgiveness and correction.
+  reason String? @db.VarChar(255)
+
+  /// Which side wrote this, so a two-party flow can tell report from confirm.
+  actingCompanyId Bytes    @map("acting_company_id") @db.Binary(16)
+  actingUserId    Bytes?   @map("acting_user_id") @db.Binary(16)
+  entryDate       DateTime @map("entry_date") @db.Date
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  clientUuid      Bytes?   @map("client_uuid") @db.Binary(16)
+  /// The reported entry a confirmation or correction refers to.
+  refersToId      Bytes?   @map("refers_to_id") @db.Binary(16)
+
+  consignment        Consignment       @relation(fields: [consignmentId], references: [id])
+  sourceCompany      Company           @relation("LedgerSource", fields: [sourceCompanyId], references: [id])
+  destinationCompany Company?          @relation("LedgerDestination", fields: [destinationCompanyId], references: [id])
+  actingCompany      Company           @relation("LedgerActing", fields: [actingCompanyId], references: [id])
+  line               ConsignmentLine?  @relation(fields: [lineId], references: [id])
+  receivingAccount   ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
+  actingUser         User?             @relation(fields: [actingUserId], references: [id])
+  refersTo           ConsignmentLedgerEntry?  @relation("LedgerRefers", fields: [refersToId], references: [id])
+  referredBy         ConsignmentLedgerEntry[] @relation("LedgerRefers")
+
+  @@unique([actingCompanyId, clientUuid], map: "ux_cledger_client_uuid")
+  @@index([consignmentId, kind])
+  @@index([sourceCompanyId, entryDate], map: "ix_cledger_source")
+  @@index([destinationCompanyId, entryDate], map: "ix_cledger_destination")
+  @@index([lineId])
+  @@index([receivingAccountId])
+  @@index([actingUserId])
+  @@index([refersToId])
+  @@map("consignment_ledger")
 }
