@@ -115,6 +115,32 @@ export class ConsignmentsService {
 
     const consignmentId = newUuidV7Bin();
     const created = await this.prisma.$transaction(async (tx) => {
+      /**
+       * The parent row is written FIRST, because `fk_cline_consignment` requires
+       * it — the live run failed here with "Related record constraint failed"
+       * when the lines went in ahead of it.
+       *
+       * This does not weaken the reserve-first rule. Reservation still happens
+       * before any line exists, and the whole thing is one transaction: if a
+       * compare-and-swap loses, the consignment row rolls back with it and no
+       * half-made proposal survives.
+       */
+      await tx.consignment.create({
+        data: {
+          id: consignmentId,
+          sourceCompanyId: me,
+          sourceBranchId: branchId,
+          destinationCompanyId: counterparty.connectedCompanyId,
+          counterpartyId: counterparty.id,
+          connectionId: counterparty.connectionId,
+          status: 'requested',
+          proposedAmount: dto.proposedAmount,
+          note: dto.note?.trim() || null,
+          proposedById: userId,
+          clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
+        },
+      });
+
       const lines: { id: Buffer; identifier: string }[] = [];
 
       for (const rawUnitId of dto.unitIds) {
@@ -164,22 +190,6 @@ export class ConsignmentsService {
         });
         lines.push({ id: lineId, identifier: unit.imeiPrimary ?? unit.serialNo ?? '' });
       }
-
-      await tx.consignment.create({
-        data: {
-          id: consignmentId,
-          sourceCompanyId: me,
-          sourceBranchId: branchId,
-          destinationCompanyId: counterparty.connectedCompanyId,
-          counterpartyId: counterparty.id,
-          connectionId: counterparty.connectionId,
-          status: 'requested',
-          proposedAmount: dto.proposedAmount,
-          note: dto.note?.trim() || null,
-          proposedById: userId,
-          clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
-        },
-      });
 
       await this.audit.record({
         entityType: 'Consignment',
