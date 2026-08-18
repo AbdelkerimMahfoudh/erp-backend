@@ -4,6 +4,7 @@ import { RollupListener } from './rollup.listener';
 import { ROLLUP_QUEUE } from './rollup-queue';
 import { InProcessRollupQueue } from './in-process-rollup-queue';
 import { AnalyticsService } from './analytics.service';
+import { SummaryService } from './summary.service';
 import { AnalyticsController } from './analytics.controller';
 import { DashboardService } from './dashboard.service';
 import { DashboardController } from './dashboard.controller';
@@ -19,6 +20,7 @@ import { HealthController } from './health.controller';
 @Module({
   controllers: [AnalyticsController, DashboardController, HealthController],
   providers: [
+    SummaryService,
     RollupService,
     { provide: ROLLUP_QUEUE, useClass: InProcessRollupQueue },
     RollupListener,
