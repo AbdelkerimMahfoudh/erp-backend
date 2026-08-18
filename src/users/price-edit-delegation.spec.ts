@@ -157,6 +157,9 @@ function makeService(opts: { rows?: Row[]; permissionExists?: boolean } = {}) {
       requireUserId: () => OWNER_ID,
     } as never,
     { record: jest.fn(async (p: Record<string, unknown>) => void audits.push(p)) } as never,
+    // Seats are not what these tests are about: allow by default, and let
+    // the seat-limit behaviour be pinned by its own test below.
+    { maySeat: jest.fn(async () => ({ allowed: true, seatsUsed: 0, seatLimit: 99 })) } as never,
   );
 
   return { service, rows, audits, written };

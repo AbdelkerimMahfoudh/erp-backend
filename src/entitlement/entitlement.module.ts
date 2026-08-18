@@ -3,6 +3,7 @@ import { CLOCK, systemClock } from './clock';
 import { EntitlementController } from './entitlement.controller';
 import { EntitlementGuard } from './entitlement.guard';
 import { EntitlementService } from './entitlement.service';
+import { ProvisioningController } from './provisioning.controller';
 
 /**
  * Subscription entitlement (Milestone K).
@@ -13,7 +14,7 @@ import { EntitlementService } from './entitlement.service';
  */
 @Global()
 @Module({
-  controllers: [EntitlementController],
+  controllers: [EntitlementController, ProvisioningController],
   providers: [
     EntitlementService,
     EntitlementGuard,

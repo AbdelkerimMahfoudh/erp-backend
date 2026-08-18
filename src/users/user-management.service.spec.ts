@@ -92,6 +92,8 @@ function makeService(
     sessions?: SessionRow[];
     /** Set false to simulate a database behind the code (0022 not applied). */
     permissionExists?: boolean;
+    /** Seat availability, so the limit path can be exercised. */
+    seats?: { allowed: boolean; seatsUsed: number; seatLimit: number };
   } = {},
 ) {
   const companyId = opts.companyId ?? COMPANY;
@@ -260,6 +262,9 @@ function makeService(
       requireUserId: () => (opts.selfId ? uuidToBin(opts.selfId) : uuidToBin(OWNER_ID)),
     } as never,
     { record: jest.fn(async (p: unknown) => void audits.push(p)) } as never,
+    // Seats are not what these tests are about: allow by default, and let
+    // the seat-limit behaviour be pinned by its own test below.
+    { maySeat: jest.fn(async () => opts.seats ?? { allowed: true, seatsUsed: 0, seatLimit: 99 }) } as never,
   );
 
   return { service, db, users, sessions, audits, grantRows };
@@ -457,6 +462,56 @@ describe('activation lifecycle (no hard delete)', () => {
 
     await service.update(binToUuid(u.id), { isActive: true });
     expect(users[0].isActive).toBe(true);
+  });
+
+
+  it('refuses to re-enable somebody when every staff place is taken', async () => {
+    /*
+      A seat is a headcount the shop pays for. Checked at the moment of
+      activation rather than against a figure the client was shown earlier, so
+      two Owners re-enabling the last place at once cannot both succeed.
+    */
+    const u = user({ isActive: false });
+    const { service, users } = makeService({
+      users: [u],
+      seats: { allowed: false, seatsUsed: 2, seatLimit: 2 },
+    });
+
+    await expect(service.update(binToUuid(u.id), { isActive: true })).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    // Nothing changed. The refusal must not half-apply.
+    expect(users[0].isActive).toBe(false);
+  });
+
+  it('still lets you DEACTIVATE somebody while over the limit', async () => {
+    /*
+      The way back under the limit must never be blocked by the limit. A seat
+      check that stopped a company removing staff would trap it there.
+    */
+    const u = user({ login: 'seller', isActive: true });
+    const { service, users } = makeService({
+      users: [u],
+      selfId: OWNER_ID,
+      seats: { allowed: false, seatsUsed: 5, seatLimit: 2 },
+    });
+
+    await service.update(binToUuid(u.id), { isActive: false });
+    expect(users[0].isActive).toBe(false);
+  });
+
+  it('never deactivates anybody on its own to balance the arithmetic', async () => {
+    // An app that fires somebody to make an invoice add up is not a tool
+    // anybody should trust. Being over the limit only blocks ADDING.
+    const a = user({ login: 'a', isActive: true });
+    const b = user({ login: 'b', isActive: true });
+    const { service, users } = makeService({
+      users: [a, b],
+      seats: { allowed: false, seatsUsed: 5, seatLimit: 2 },
+    });
+
+    await expect(service.update(binToUuid(a.id), { name: 'Renamed' })).resolves.toBeDefined();
+    expect(users.every((u) => u.isActive)).toBe(true);
   });
 
   it('refuses to let you deactivate your own account', async () => {

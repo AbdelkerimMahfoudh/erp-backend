@@ -14,6 +14,8 @@ import { binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
 import { isDelegatable, DELEGATION_ELIGIBLE_ROLE, DELEGATABLE_PERMISSIONS } from '../rbac/permission-scope';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { toE164, isValidEmail } from './contact.util';
+import { EntitlementService } from '../entitlement/entitlement.service';
+import { SEAT_LIMIT_REACHED } from '../entitlement/entitlement-rules';
 
 /**
  * The one permission this API can delegate, as a server-side constant.
@@ -103,6 +105,7 @@ export class UserManagementService {
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
+    private readonly entitlement: EntitlementService,
   ) {}
 
   async list(): Promise<UserView[]> {
@@ -155,6 +158,29 @@ export class UserManagementService {
       if (dto.isActive === false && this.isSelf(id)) {
         throw new BadRequestException('You cannot deactivate your own account');
       }
+
+      /**
+       * Reactivating somebody consumes a staff seat (Milestone K).
+       *
+       * Checked here, at the moment of activation, rather than against a figure
+       * the client was shown earlier — two Owners re-enabling the last seat at
+       * the same time must not both succeed.
+       *
+       * Deactivation is never blocked. A company over its limit must always be
+       * able to get back under it, and a seat check that stopped somebody
+       * *removing* staff would trap them there.
+       */
+      if (dto.isActive === true) {
+        const seats = await this.entitlement.maySeat(this.tenant.companyId());
+        if (!seats.allowed) {
+          throw new ConflictException({
+            code: SEAT_LIMIT_REACHED,
+            message:
+              `All ${seats.seatLimit} staff places are in use. Deactivate somebody, or add places, before re-enabling this account.`,
+          });
+        }
+      }
+
       data.isActive = dto.isActive;
       changed.push('isActive');
     }
