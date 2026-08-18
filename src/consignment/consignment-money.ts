@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * What is owed on a consignment, and what it does to the books (H-CP4).
  *
@@ -182,4 +184,34 @@ export function paymentAffectsProfit(): false {
  */
 export function forgivenessIsCash(): false {
   return false;
+}
+
+/**
+ * The payload fingerprint behind idempotency (Milestone J).
+ *
+ * Same key and the same payload replays; same key with a different payload is a
+ * conflict, because that is a second report wearing the first one's id — which
+ * is precisely what a queued offline draft looks like after somebody edits it.
+ *
+ * Mirrors `fingerprintPayment` in the loan rules deliberately: the two ledgers
+ * behave identically, and a shop should not have to learn which is which.
+ */
+export function fingerprintPayment(input: {
+  consignmentId: string;
+  amount: number;
+  method: string;
+  receivingAccountId?: string | null;
+  reference?: string | null;
+}): string {
+  return createHash('sha256')
+    .update(
+      [
+        input.consignmentId,
+        input.amount.toFixed(2),
+        input.method,
+        input.receivingAccountId ?? '',
+        (input.reference ?? '').trim(),
+      ].join('|'),
+    )
+    .digest('hex');
 }

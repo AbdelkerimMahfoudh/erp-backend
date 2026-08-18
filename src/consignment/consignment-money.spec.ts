@@ -1,4 +1,5 @@
 import {
+  fingerprintPayment,
   assertForgivenessAllowed,
   assertPaymentAllowed,
   BALANCE_EFFECT,
@@ -220,5 +221,37 @@ describe('profit is recognised once, at disposition', () => {
   it('reports a real loss when the agreed amount is below cost', () => {
     // Clearing old stock at a loss is a decision, not an error to hide.
     expect(sourceAccounting(600, 700).grossProfit).toBe(-100);
+  });
+});
+
+describe('a queued consignment report cannot lie about its own payload', () => {
+  const payment = {
+    consignmentId: '018f0000-0000-7000-8000-00000000000a',
+    amount: 12000,
+    method: 'cash',
+    reference: 'Paid at the counter',
+  };
+
+  it('the same payload is a retry', () => {
+    expect(fingerprintPayment(payment)).toBe(fingerprintPayment({ ...payment }));
+  });
+
+  it('a changed amount is not', () => {
+    // The offline case: a queued report edited before it was ever sent. The
+    // server must refuse rather than answer about the original amount.
+    expect(fingerprintPayment({ ...payment, amount: 15000 })).not.toBe(fingerprintPayment(payment));
+  });
+
+  it('nor is a changed method, account or reference', () => {
+    const base = fingerprintPayment(payment);
+    expect(fingerprintPayment({ ...payment, method: 'account' })).not.toBe(base);
+    expect(fingerprintPayment({ ...payment, receivingAccountId: 'acc-9' })).not.toBe(base);
+    expect(fingerprintPayment({ ...payment, reference: 'Different note' })).not.toBe(base);
+  });
+
+  it('a different consignment with the same numbers is a different report', () => {
+    expect(
+      fingerprintPayment({ ...payment, consignmentId: '018f0000-0000-7000-8000-00000000000b' }),
+    ).not.toBe(fingerprintPayment(payment));
   });
 });

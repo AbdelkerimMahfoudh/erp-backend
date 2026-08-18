@@ -18,6 +18,7 @@ import {
   assertPaymentAllowed,
   breakdown,
   directionFor,
+  fingerprintPayment,
   GROUP_OF,
   LoanRefused,
   readable,
@@ -380,11 +381,37 @@ export class LoansService {
     }
 
     // --- report ---
+    /**
+     * The fingerprint is what makes this safe to queue offline (Milestone J).
+     *
+     * Replaying on the key alone would answer an edited draft with the original
+     * amount, and the phone would show it as synced — so the shop would believe
+     * it had reported a figure the server never saw.
+     */
+    const fingerprint = fingerprintPayment({
+      loanId: id,
+      amount: dto.amount ?? 0,
+      method: dto.method ?? 'cash',
+      receivingAccountId: dto.receivingAccountId,
+      reference: dto.reference,
+      evidenceRef: dto.evidenceRef,
+    });
+
     if (dto.clientUuid) {
       const replay = await this.prisma.loanLedgerEntry.findFirst({
         where: { actingCompanyId: me, clientUuid: uuidToBin(dto.clientUuid) },
       });
-      if (replay) return this.get(id);
+      if (replay) {
+        // Null on rows written before J: those keep replaying as they always
+        // did rather than becoming a conflict nobody can explain.
+        if (replay.clientRequestHash && replay.clientRequestHash !== fingerprint) {
+          throw new ConflictException({
+            code: 'idempotency_conflict',
+            message: 'That request id was already used to report a different payment.',
+          });
+        }
+        return this.get(id);
+      }
     }
 
     try {
@@ -429,6 +456,7 @@ export class LoansService {
         actingUserId: userId,
         entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
         clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
+        clientRequestHash: dto.clientUuid ? fingerprint : null,
       },
     });
     await this.prisma.loan.updateMany({

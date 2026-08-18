@@ -3279,6 +3279,10 @@ model ConsignmentLedgerEntry {
   entryDate       DateTime @map("entry_date") @db.Date
   createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(6)
   clientUuid      Bytes?   @map("client_uuid") @db.Binary(16)
+  /// Payload fingerprint (J). A replay carrying the same key with a different
+  /// payload is a conflict, not a retry. Nullable: rows written before J
+  /// have none, and must keep replaying as they always did.
+  clientRequestHash String? @map("client_request_hash") @db.Char(64)
   /// The reported entry a confirmation or correction refers to.
   refersToId      Bytes?   @map("refers_to_id") @db.Binary(16)
 
@@ -3444,6 +3448,10 @@ model LoanLedgerEntry {
   entryDate       DateTime @map("entry_date") @db.Date
   createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(6)
   clientUuid      Bytes?   @map("client_uuid") @db.Binary(16)
+  /// Payload fingerprint (J). A replay carrying the same key with a different
+  /// payload is a conflict, not a retry — it is a second report wearing the
+  /// first one's id. Nullable: rows written before J have none.
+  clientRequestHash String? @map("client_request_hash") @db.Char(64)
   /// The reported entry a confirmation or correction answers.
   refersToId      Bytes?   @map("refers_to_id") @db.Binary(16)
 

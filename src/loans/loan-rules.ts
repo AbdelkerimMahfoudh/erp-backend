@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Money owed, in both directions (Milestone I).
  *
@@ -319,4 +321,38 @@ export function readable(status: LoanStatus): string {
     case 'cancelled':
       return 'cancelled';
   }
+}
+
+/**
+ * The payload fingerprint behind idempotency (Milestone J).
+ *
+ * Same key and the same payload is a retry, and replays. Same key with a
+ * DIFFERENT payload is a conflict, because that is a second report wearing the
+ * first one's id — the exact shape of an offline draft that was edited between
+ * being queued and being sent.
+ *
+ * Before J the ledger replayed on the key alone, which was harmless while every
+ * request was made online and immediately, and would have quietly returned the
+ * old amount behind a queue.
+ */
+export function fingerprintPayment(input: {
+  loanId: string;
+  amount: number;
+  method: string;
+  receivingAccountId?: string | null;
+  reference?: string | null;
+  evidenceRef?: string | null;
+}): string {
+  return createHash('sha256')
+    .update(
+      [
+        input.loanId,
+        input.amount.toFixed(2),
+        input.method,
+        input.receivingAccountId ?? '',
+        (input.reference ?? '').trim(),
+        (input.evidenceRef ?? '').trim(),
+      ].join('|'),
+    )
+    .digest('hex');
 }

@@ -38,6 +38,7 @@ import {
 import {
   assertForgivenessAllowed,
   assertPaymentAllowed,
+  fingerprintPayment,
   MoneyRefused,
   outstanding,
   type LedgerKind,
@@ -651,11 +652,33 @@ export class ConsignmentsService {
     }
 
     // --- report ---
+    /**
+     * The fingerprint is what makes this safe to queue offline (Milestone J).
+     * Replaying on the key alone would answer an edited draft with the original
+     * amount while the phone showed it as synced.
+     */
+    const fingerprint = fingerprintPayment({
+      consignmentId: id,
+      amount: dto.amount ?? 0,
+      method: dto.method ?? 'cash',
+      receivingAccountId: dto.receivingAccountId,
+      reference: dto.reference,
+    });
+
     if (dto.clientUuid) {
       const replay = await this.prisma.consignmentLedgerEntry.findFirst({
         where: { actingCompanyId: me, clientUuid: uuidToBin(dto.clientUuid) },
       });
-      if (replay) return this.get(id);
+      if (replay) {
+        // Null on rows written before J: those replay as they always did.
+        if (replay.clientRequestHash && replay.clientRequestHash !== fingerprint) {
+          throw new ConflictException({
+            code: 'idempotency_conflict',
+            message: 'That request id was already used to report a different payment.',
+          });
+        }
+        return this.get(id);
+      }
     }
 
     try {
@@ -701,6 +724,7 @@ export class ConsignmentsService {
         actingUserId: userId,
         entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
         clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
+        clientRequestHash: dto.clientUuid ? fingerprint : null,
       },
     });
 

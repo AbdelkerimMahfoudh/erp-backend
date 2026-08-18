@@ -6,6 +6,7 @@ import {
   breakdown,
   creditorIs,
   directionFor,
+  fingerprintPayment,
   forgivenessIsCash,
   GROUP_OF,
   invert,
@@ -287,5 +288,52 @@ describe('a loan is not income and not a cost', () => {
      * expense would bury a credit decision among electricity bills.
      */
     expect(forgivenessIsCash()).toBe(false);
+  });
+});
+
+describe('a queued report cannot lie about its own payload', () => {
+  const payment = {
+    loanId: '018f0000-0000-7000-8000-000000000001',
+    amount: 5000,
+    method: 'cash',
+    reference: 'Handed over Thursday',
+  };
+
+  it('the same payload fingerprints the same, so a retry is a retry', () => {
+    expect(fingerprintPayment(payment)).toBe(fingerprintPayment({ ...payment }));
+  });
+
+  it('a changed amount fingerprints differently', () => {
+    /*
+      The offline case this exists for: a queued 5 000 report is edited to 8 000
+      and keeps its key. Without this, the server would answer about the 5 000
+      and the phone would show "synced" — so the shop would believe it had
+      reported a figure the server never saw.
+    */
+    expect(fingerprintPayment({ ...payment, amount: 8000 })).not.toBe(fingerprintPayment(payment));
+  });
+
+  it('so does a changed method, account, reference or evidence', () => {
+    const base = fingerprintPayment(payment);
+    expect(fingerprintPayment({ ...payment, method: 'account' })).not.toBe(base);
+    expect(fingerprintPayment({ ...payment, receivingAccountId: 'acc-1' })).not.toBe(base);
+    expect(fingerprintPayment({ ...payment, reference: 'Something else' })).not.toBe(base);
+    expect(fingerprintPayment({ ...payment, evidenceRef: 'photo.jpg' })).not.toBe(base);
+  });
+
+  it('but surrounding whitespace does not, because that is the same report', () => {
+    expect(fingerprintPayment({ ...payment, reference: '  Handed over Thursday  ' })).toBe(
+      fingerprintPayment(payment),
+    );
+  });
+
+  it('and 5000 written as 5000.00 is the same payment', () => {
+    expect(fingerprintPayment({ ...payment, amount: 5000.0 })).toBe(fingerprintPayment(payment));
+  });
+
+  it('a different loan with identical numbers is a different report', () => {
+    expect(
+      fingerprintPayment({ ...payment, loanId: '018f0000-0000-7000-8000-000000000002' }),
+    ).not.toBe(fingerprintPayment(payment));
   });
 });
