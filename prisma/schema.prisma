@@ -303,6 +303,8 @@ model Company {
   @@map("companies")
   supplierSettlements SupplierSettlement[]
   supplierSettlementAllocations SupplierSettlementAllocation[]
+  subscription       Subscription?
+  subscriptionEvents SubscriptionEvent[]
 }
 
 model Branch {
@@ -3472,4 +3474,63 @@ model LoanLedgerEntry {
   @@index([actingUserId])
   @@index([refersToId])
   @@map("loan_ledger")
+}
+
+/// What a company is entitled to (Milestone K).
+///
+/// One functional plan. This row says whether the shop has paid and for how
+/// many branches — not which features it may use, because there are no tiers.
+model Subscription {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @unique(map: "ux_subscriptions_company") @map("company_id") @db.Binary(16)
+
+  /// Branches being paid for. Included seats derive from this.
+  subscribedBranchCount Int @default(1) @map("subscribed_branch_count") @db.UnsignedInt
+  /// Bought beyond the included pool. Not prorated.
+  additionalSeats       Int @default(0) @map("additional_seats") @db.UnsignedInt
+
+  /// When the paid period ends. Grace is derived as +72h and never stored, so
+  /// it cannot drift away from the period it belongs to.
+  currentPeriodEnd DateTime? @map("current_period_end") @db.DateTime(6)
+
+  /// Granted by the platform, never by a tenant.
+  isComplimentary     Boolean   @default(false) @map("is_complimentary")
+  complimentaryReason String?   @map("complimentary_reason") @db.VarChar(255)
+  complimentaryUntil  DateTime? @map("complimentary_until") @db.DateTime(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+  version   Int      @default(0) @db.UnsignedInt
+
+  company Company                @relation(fields: [companyId], references: [id])
+  events  SubscriptionEvent[]
+
+  @@map("subscriptions")
+}
+
+/// Every change to what a company is entitled to, kept forever.
+///
+/// Append-only, enforced by triggers: "who gave this shop free access, and
+/// when" is exactly the question somebody eventually asks, and a record that
+/// can be quietly rewritten is worth nothing as an answer.
+model SubscriptionEvent {
+  id             Bytes  @id @db.Binary(16)
+  companyId      Bytes  @map("company_id") @db.Binary(16)
+  subscriptionId Bytes  @map("subscription_id") @db.Binary(16)
+  kind           String
+  note           String? @db.VarChar(255)
+
+  periodEndAfter DateTime? @map("period_end_after") @db.DateTime(6)
+  branchesAfter  Int?      @map("branches_after") @db.UnsignedInt
+  seatsAfter     Int?      @map("seats_after") @db.UnsignedInt
+
+  /// Who did it. NULL means the migration itself; only backfill uses that.
+  actor     String?  @db.VarChar(120)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  company      Company      @relation(fields: [companyId], references: [id])
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([companyId, createdAt], map: "ix_subevents_company")
+  @@map("subscription_events")
 }

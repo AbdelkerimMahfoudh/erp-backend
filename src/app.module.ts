@@ -13,6 +13,8 @@ import { CostGatingInterceptor } from './common/interceptors/cost-gating.interce
 import { isUuid, newUuidV7, uuidToBin } from './common/utils/uuid.util';
 import { HashingModule } from './common/security/hashing.module';
 import { TenantModule } from './common/tenant/tenant.module';
+import { EntitlementModule } from './entitlement/entitlement.module';
+import { EntitlementGuard } from './entitlement/entitlement.guard';
 import { AuditModule } from './common/audit/audit.module';
 import { NumberingModule } from './common/numbering/numbering.module';
 import { EventsModule } from './common/events/events.module';
@@ -126,6 +128,7 @@ import { LoansModule } from './loans/loans.module';
     StorageModule,
     HealthModule,
     AuthModule,
+    EntitlementModule,
     NotificationsModule,
     TrackingModule,
     CatalogModule,
@@ -156,6 +159,10 @@ import { LoansModule } from './loans/loans.module';
     { provide: APP_INTERCEPTOR, useClass: CostGatingInterceptor },
     { provide: APP_INTERCEPTOR, useClass: BinaryUuidInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Registered after the JWT guard so a company is resolved by the time it
+    // runs. It refuses rather than skips when one is missing, so a future
+    // reordering fails loudly instead of waving writes through.
+    { provide: APP_GUARD, useClass: EntitlementGuard },
   ],
 })
 export class AppModule {}
