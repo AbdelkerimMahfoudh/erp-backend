@@ -1,7 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { CLOCK, systemClock } from './clock';
 import { EntitlementController } from './entitlement.controller';
-import { EntitlementGuard } from './entitlement.guard';
+import { EntitlementInterceptor } from './entitlement.interceptor';
 import { EntitlementService } from './entitlement.service';
 import { ProvisioningController } from './provisioning.controller';
 
@@ -17,9 +17,9 @@ import { ProvisioningController } from './provisioning.controller';
   controllers: [EntitlementController, ProvisioningController],
   providers: [
     EntitlementService,
-    EntitlementGuard,
+    EntitlementInterceptor,
     { provide: CLOCK, useValue: systemClock },
   ],
-  exports: [EntitlementService, EntitlementGuard, CLOCK],
+  exports: [EntitlementService, EntitlementInterceptor, CLOCK],
 })
 export class EntitlementModule {}

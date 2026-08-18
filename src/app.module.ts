@@ -14,7 +14,7 @@ import { isUuid, newUuidV7, uuidToBin } from './common/utils/uuid.util';
 import { HashingModule } from './common/security/hashing.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { EntitlementModule } from './entitlement/entitlement.module';
-import { EntitlementGuard } from './entitlement/entitlement.guard';
+import { EntitlementInterceptor } from './entitlement/entitlement.interceptor';
 import { AuditModule } from './common/audit/audit.module';
 import { NumberingModule } from './common/numbering/numbering.module';
 import { EventsModule } from './common/events/events.module';
@@ -156,13 +156,14 @@ import { LoansModule } from './loans/loans.module';
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
     // Registered before BinaryUuid → runs OUTERMOST, stripping financial fields
     // after Decimals have been converted to numbers.
+    // Runs after EVERY guard by the framework request lifecycle, so auth and
+    // tenant resolution have both happened. It was a guard first, and the live
+    // run proved global guards run in registration order — this one ran before
+    // the JWT guard and refused every write with its fail-closed branch.
+    { provide: APP_INTERCEPTOR, useClass: EntitlementInterceptor },
     { provide: APP_INTERCEPTOR, useClass: CostGatingInterceptor },
     { provide: APP_INTERCEPTOR, useClass: BinaryUuidInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
-    // Registered after the JWT guard so a company is resolved by the time it
-    // runs. It refuses rather than skips when one is missing, so a future
-    // reordering fails loudly instead of waving writes through.
-    { provide: APP_GUARD, useClass: EntitlementGuard },
   ],
 })
 export class AppModule {}
