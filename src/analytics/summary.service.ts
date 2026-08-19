@@ -161,9 +161,20 @@ export class SummaryService {
    * query would encode them slightly differently.
    */
   private async rollupTotals(fromISO: string, toISO: string) {
+    /*
+      Branch scoping is EXPLICIT here. The tenant extension scopes by company
+      only, so without this the summary reported every branch of the company
+      whichever branch was selected — a two-shop owner would have read one
+      shop's screen and seen both shops' figures, with nothing to indicate it.
+
+      Null branch means a company-wide view, which is a legitimate thing to ask
+      for and is what the absence of a branch header means everywhere else.
+    */
+    const branchId = this.tenant.branchId() ?? null;
     const rows = await this.db.dailyRollup.findMany({
       where: {
         day: { gte: new Date(`${fromISO}T00:00:00.000Z`), lte: new Date(`${toISO}T00:00:00.000Z`) },
+        ...(branchId ? { branchId } : {}),
       },
     });
 

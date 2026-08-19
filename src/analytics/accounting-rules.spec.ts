@@ -4,6 +4,7 @@ import {
   cashMovement,
   compare,
   EFFECT_OF,
+  isoDay,
   precedingPeriod,
   profit,
   type BusinessEvent,
@@ -241,5 +242,42 @@ describe('every event explains itself', () => {
       'closing_discrepancy',
     ];
     for (const e of events) expect(EFFECT_OF[e]).toBeDefined();
+  });
+});
+
+describe('the requested window is honoured', () => {
+  const TODAY = new Date('2026-08-19T09:00:00.000Z');
+
+  it('accepts a real date', () => {
+    expect(isoDay('2026-08-18', TODAY)).toBe('2026-08-18');
+    expect(isoDay('2025-12-31', TODAY)).toBe('2025-12-31');
+  });
+
+  it('falls back to today when nothing was asked for', () => {
+    expect(isoDay(undefined, TODAY)).toBe('2026-08-19');
+    expect(isoDay('', TODAY)).toBe('2026-08-19');
+  });
+
+  it('refuses a date that is merely shaped like one', () => {
+    /*
+      The bug this exists for: the check shipped with its escaping lost, so the
+      pattern matched the literal text `dddd-dd-dd`. Every request silently
+      reported TODAY instead of the window asked for, and returned 200 with a
+      perfectly shaped body — the worst way for a report to be wrong, because
+      nothing looks broken and a shop reads last month's decision off it.
+    */
+    expect(isoDay('dddd-dd-dd', TODAY)).toBe('2026-08-19');
+    expect(isoDay('yesterday', TODAY)).toBe('2026-08-19');
+    expect(isoDay('18/08/2026', TODAY)).toBe('2026-08-19');
+    expect(isoDay('2026-8-1', TODAY)).toBe('2026-08-19');
+  });
+
+  it('refuses a well-shaped date that does not exist', () => {
+    expect(isoDay('2026-02-30', TODAY)).toBe('2026-08-19');
+    expect(isoDay('2026-13-01', TODAY)).toBe('2026-08-19');
+  });
+
+  it('keeps a leap day that really exists', () => {
+    expect(isoDay('2028-02-29', TODAY)).toBe('2028-02-29');
   });
 });

@@ -3,10 +3,17 @@ import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger'
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { AnalyticsService } from './analytics.service';
 import { SummaryService } from './summary.service';
+import { isoDay } from './accounting-rules';
 
-/** A date the server trusts. Anything else falls back to today. */
-const isoDay = (raw?: string): string =>
-  /^d{4}-d{2}-d{2}$/.test(raw ?? '') ? (raw as string) : new Date().toISOString().slice(0, 10);
+/*
+ * Moved to `accounting-rules.ts` and given tests.
+ *
+ * It lived here as an inline regex and shipped broken — the escaping was lost,
+ * so the pattern matched the literal text `dddd-dd-dd` and every request
+ * silently fell back to today. The endpoint answered 200 with a perfectly
+ * shaped body for the wrong period, which is the worst way for a report to be
+ * wrong: nothing looks broken.
+ */
 
 const clampDays = (raw?: string): number => {
   const n = Number(raw);

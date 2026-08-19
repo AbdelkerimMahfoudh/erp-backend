@@ -249,3 +249,22 @@ export function precedingPeriod(fromISO: string, toISO: string): { from: string;
   const prevFrom = new Date(prevTo.getTime() - (days - 1) * 86_400_000);
   return { from: prevFrom.toISOString().slice(0, 10), to: prevTo.toISOString().slice(0, 10) };
 }
+
+/**
+ * A date the server will act on, or today.
+ *
+ * Deliberately strict and deliberately tested. This began as an inline regex in
+ * the controller and shipped broken — the pattern matched the literal text
+ * `dddd-dd-dd`, so every request silently reported **today** instead of the
+ * window asked for. The endpoint returned 200 with a perfectly shaped body for
+ * the wrong period, which is the worst way for a report to be wrong: nothing
+ * looks broken, and a shop reads last month's decision off today's numbers.
+ */
+export function isoDay(raw: string | undefined, today: Date = new Date()): string {
+  const fallback = today.toISOString().slice(0, 10);
+  if (!raw || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return fallback;
+  // A well-shaped string can still be a date that does not exist.
+  const parsed = new Date(`${raw}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed.toISOString().slice(0, 10) === raw ? raw : fallback;
+}
