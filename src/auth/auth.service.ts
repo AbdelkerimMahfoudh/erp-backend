@@ -5,6 +5,7 @@ import { HashingService } from '../common/security/hashing.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { normalizeStoreCode } from '../common/utils/store-code.util';
+import { classifyIdentifier } from './identifier';
 import { TokensService } from './tokens.service';
 import { SessionsService } from './sessions.service';
 import { DevicesService, type DeviceEnrollment } from './devices.service';
@@ -20,6 +21,30 @@ export interface AuthTokenResponse {
   device?: DeviceEnrollment;
 }
 
+/**
+ * The same phone, the same password, more than one shop (CP3).
+ *
+ * Returned INSTEAD of tokens, and only ever after the password has been
+ * verified — the shop names in here are the thing that must not leak, so
+ * nothing reaches this shape until the credential is proven.
+ */
+export interface AccountChoiceResponse {
+  status: 'choose_account';
+  /**
+   * Short-lived and purpose-bound. It authorises exactly one thing: naming
+   * which of these accounts to continue as. It is not an access token and
+   * cannot be used as one.
+   */
+  continuationToken: string;
+  expiresIn: number;
+  accounts: { accountRef: string; companyName: string; userName: string }[];
+}
+
+export type LoginResult = AuthTokenResponse | AccountChoiceResponse;
+
+/** How long somebody has to pick a shop before starting again. */
+export const ACCOUNT_CHOICE_TTL_SECONDS = 120;
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -31,34 +56,86 @@ export class AuthService {
     private readonly prisma: PrismaService,
   ) {}
 
-  async login(dto: LoginDto, meta: { ip?: string; userAgent?: string }): Promise<AuthTokenResponse> {
+  async login(dto: LoginDto, meta: { ip?: string; userAgent?: string }): Promise<LoginResult> {
     /*
-     * Tenant resolution (F1 Stage 3.2). The client names its company by the
-     * PUBLIC Store Account ID — never a binary company id it could forge. We
-     * resolve the company, then find the user WITHIN it, so the same login can
-     * exist in two companies without collision and a Store-ID-A + login-from-B
-     * pairing simply fails.
+     * Tenant resolution from the CREDENTIAL, not from the client (CP3).
      *
-     * Non-enumerating + timing-safe: a bad Store ID, a bad login and a bad
-     * password all produce the SAME generic failure, and every path spends one
-     * Argon2 verify so "no such company/user" cannot be told apart from "wrong
-     * password" by timing.
+     * The caller no longer names a company. They type one identifier — their
+     * phone or their personal ID — and the server works out who that is and
+     * which company they belong to. Nothing about the tenant is trusted from
+     * an unauthenticated request, which is strictly stronger than the old
+     * arrangement where a Store ID selected the company before any credential
+     * had been checked.
+     *
+     * Non-enumerating and timing-even: an unrecognised identifier, a real one
+     * with the wrong password, and a disabled account all produce the SAME
+     * generic failure, and every path spends at least one Argon2 verify so
+     * "no such person" cannot be told from "wrong password" by timing.
      */
-    const storeCode = normalizeStoreCode(dto.storeAccountId);
-    const company = storeCode
-      ? await this.prisma.company.findUnique({
-          where: { publicStoreId: storeCode },
-          select: { id: true, isActive: true, publicStoreId: true },
-        })
-      : null;
-    const user =
-      company && company.isActive ? await this.users.findByLoginForAuth(company.id, dto.login) : null;
+    const identifier = classifyIdentifier(dto.identifier);
 
-    const passwordOk = user
-      ? await this.hashing.verify(user.passwordHash, dto.password)
-      : await this.hashing.verifyDummy(dto.password);
+    const candidates =
+      identifier.kind === 'unrecognised' || identifier.value === null
+        ? []
+        : await this.users.findCandidatesForAuth(identifier.kind, identifier.value);
 
-    if (!user || !user.isActive || !passwordOk) {
+    /*
+     * A phone is unique only within a company, so the same number may belong
+     * to a person at two shops. Each candidate is checked, and the password
+     * decides — no company name is read, let alone returned, before one has
+     * matched.
+     */
+    const matches: typeof candidates = [];
+    for (const candidate of candidates) {
+      if (await this.hashing.verify(candidate.passwordHash, dto.password)) {
+        matches.push(candidate);
+      }
+    }
+
+    // Always spend one verify when there was nothing to check against.
+    if (candidates.length === 0) await this.hashing.verifyDummy(dto.password);
+
+    if (matches.length === 0) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    /*
+     * More than one shop matched the same phone AND the same password.
+     * Genuinely ambiguous, and only now — after the credential is proven — may
+     * the shops be named. The alternative the brief rules out is asking for a
+     * Store ID up front, which would put the burden back on the shopkeeper.
+     */
+    if (matches.length > 1) {
+      return this.accountChoice(matches);
+    }
+
+    const user = matches[0];
+    return this.completeLogin(user, dto, meta);
+  }
+
+  /**
+   * Everything after the credential is proven (CP3).
+   *
+   * Shared by the direct path and the account chooser, so device recognition,
+   * session creation and the response shape have exactly one implementation.
+   * Two copies of this would drift, and the half that drifted would be the
+   * one handling the rarer multi-shop case — the one nobody exercises.
+   */
+  private async completeLogin(
+    // The whole row:  and the device path both read fields
+    // beyond the few the credential check needed.
+    user: User,
+    dto: LoginDto,
+    meta: { ip?: string; userAgent?: string },
+  ): Promise<AuthTokenResponse> {
+    const company = await this.prisma.company.findUnique({
+      where: { id: user.companyId },
+      select: { id: true, isActive: true, publicStoreId: true },
+    });
+
+    // A dormant company is refused with the same generic message: whether a
+    // business exists is not something an unauthenticated caller may learn.
+    if (!company || !company.isActive) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -226,5 +303,72 @@ export class AuthService {
         publicStoreId,
       },
     };
+  }
+
+  /**
+   * Offer the shops whose credential just matched.
+   *
+   * Reached only from a verified password. The continuation token carries the
+   * matched user ids and nothing else, expires in two minutes, and is bound to
+   * this purpose — it cannot be presented as an access token, and it cannot be
+   * used to reach any account other than the ones already proven.
+   *
+   * `accountRef` is an opaque index rather than a user id: the client needs to
+   * say "the second one", not to learn anybody's internal identifier.
+   */
+  private async accountChoice(matches: { id: Buffer; name: string; companyId: Buffer }[]): Promise<AccountChoiceResponse> {
+    const companies = await this.prisma.company.findMany({
+      where: { id: { in: matches.map((m) => m.companyId) }, isActive: true },
+      select: { id: true, name: true },
+    });
+    const nameOf = new Map(companies.map((c) => [c.id.toString('hex'), c.name]));
+
+    // A company that has since been deactivated is dropped rather than named.
+    const usable = matches.filter((m) => nameOf.has(m.companyId.toString('hex')));
+    if (usable.length === 0) throw new UnauthorizedException('Invalid credentials');
+
+    const continuationToken = this.tokens.signContinuation(
+      usable.map((m) => binToUuid(m.id)),
+      ACCOUNT_CHOICE_TTL_SECONDS,
+    );
+
+    return {
+      status: 'choose_account',
+      continuationToken,
+      expiresIn: ACCOUNT_CHOICE_TTL_SECONDS,
+      accounts: usable.map((m, index) => ({
+        accountRef: String(index),
+        companyName: nameOf.get(m.companyId.toString('hex'))!,
+        userName: m.name,
+      })),
+    };
+  }
+
+  /**
+   * Continue as one of the accounts the password already matched.
+   *
+   * The token is the authority here: it was issued from a verified credential,
+   * so this step re-proves nothing and grants nothing beyond what that
+   * verification already established. An index outside the token's own list is
+   * refused — the client may only choose from what it was offered.
+   */
+  async chooseAccount(
+    continuationToken: string,
+    accountRef: string,
+    dto: LoginDto,
+    meta: { ip?: string; userAgent?: string },
+  ): Promise<AuthTokenResponse> {
+    const userIds = this.tokens.verifyContinuation(continuationToken);
+    if (!userIds) throw new UnauthorizedException('That sign-in attempt expired. Please start again.');
+
+    const index = Number(accountRef);
+    if (!Number.isInteger(index) || index < 0 || index >= userIds.length) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const user = await this.users.findById(uuidToBin(userIds[index]));
+    if (!user || !user.isActive) throw new UnauthorizedException('Invalid credentials');
+
+    return this.completeLogin(user, dto, meta);
   }
 }

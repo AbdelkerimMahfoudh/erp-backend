@@ -417,6 +417,10 @@ model User {
   companyId    Bytes     @map("company_id") @db.Binary(16)
   name         String    @db.VarChar(160)
   login        String    @db.VarChar(120)
+  /// The identifier somebody signs in with when they have no phone, or
+  /// prefer not to type one. Generated, globally unique, and NOT the binary id:
+  /// `U-` plus 8 characters with the ambiguous glyphs removed. See docs/35.
+  personalId   String    @unique(map: "ux_users_personal_id") @map("personal_id") @db.Char(10)
   /// Contact phone in E.164 (e.g. +2223xxxxxxx). The future WhatsApp OTP and
   /// recovery channel, so uniqueness is enforced in the database — see
   /// @@unique([companyId, phone]) — not in application code, where two devices

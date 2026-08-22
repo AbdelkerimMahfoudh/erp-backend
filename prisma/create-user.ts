@@ -13,6 +13,7 @@
 
 import { config as loadEnv } from 'dotenv';
 import { PrismaClient, RoleKey } from '@prisma/client';
+import { generatePersonalId } from '../src/auth/identifier';
 import * as argon2 from 'argon2';
 import { newUuidV7Bin, uuidToBin, binToUuid } from './lib/uuid';
 import { pruneGrantsForRole } from '../src/rbac/delegation-lifecycle';
@@ -60,7 +61,7 @@ async function main() {
   const user = await prisma.user.upsert({
     where: { companyId_login: { companyId: company.id, login } },
     update: { passwordHash, name, deletedAt: null },
-    create: { id: newUuidV7Bin(), companyId: company.id, name, login, passwordHash },
+    create: { id: newUuidV7Bin(), companyId: company.id, name, login, passwordHash, personalId: generatePersonalId() },
   });
 
   // Assign to every branch in the company. A user with no branch assignment

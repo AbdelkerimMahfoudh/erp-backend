@@ -11,6 +11,7 @@
 
 import { config as loadEnv } from 'dotenv';
 import { Prisma, PrismaClient, RoleKey, TrackingType } from '@prisma/client';
+import { generatePersonalId } from '../src/auth/identifier';
 import * as argon2 from 'argon2';
 import { newUuidV7Bin, uuidToBin, binToUuid } from './lib/uuid';
 import { generateStoreCode } from '../src/common/utils/store-code.util';
@@ -100,7 +101,7 @@ async function seedDemo() {
   const owner = await prisma.user.upsert({
     where: { companyId_login: { companyId: company.id, login: 'owner' } },
     update: {},
-    create: { id: newUuidV7Bin(), companyId: company.id, name: 'Demo Owner', login: 'owner', passwordHash },
+    create: { id: newUuidV7Bin(), companyId: company.id, name: 'Demo Owner', login: 'owner', passwordHash, personalId: generatePersonalId() },
   });
 
   const ownerRoleId = roleByKey.get('owner')!;

@@ -25,9 +25,27 @@ interface FakeUser {
   companyId: Buffer;
   name: string;
   login: string;
+  personalId: string;
+  phone: string | null;
   passwordHash: string;
   isActive: boolean;
   deletedAt: Date | null;
+}
+
+/**
+ * A valid personal ID for a test login.
+ *
+ * Built from the same restricted alphabet the product uses — `U-OWNERXXX`
+ * looks plausible and is not a personal ID at all, because `O` is one of the
+ * glyphs deliberately excluded.
+ */
+function personalIdFor(login: string): string {
+  const alphabet = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
+  let body = '';
+  for (let i = 0; i < 8; i++) {
+    body += alphabet[(login.charCodeAt(i % login.length) + i * 7) % alphabet.length];
+  }
+  return `U-${body}`;
 }
 
 function user(companyId: Buffer, login: string, over: Partial<FakeUser> = {}): FakeUser {
@@ -36,6 +54,9 @@ function user(companyId: Buffer, login: string, over: Partial<FakeUser> = {}): F
     companyId,
     name: login,
     login,
+    // Only characters the real alphabet contains: no I, L, O, U, 0 or 1.
+    personalId: personalIdFor(login),
+    phone: null,
     passwordHash: '$argon2id$SECRET-HASH',
     isActive: true,
     deletedAt: null,
@@ -57,6 +78,19 @@ function makeService(opts: {
     findByLoginForAuth: jest.fn(async (companyId: Buffer, login: string) =>
       users.find((u) => u.companyId.equals(companyId) && u.login === login && !u.deletedAt) ?? null,
     ),
+    /*
+      CP3: one identifier, resolved across companies. A personal ID matches at
+      most one user; a phone may match one per company, which is what makes
+      the chooser necessary.
+    */
+    findCandidatesForAuth: jest.fn(async (kind: 'personal_id' | 'phone', value: string) =>
+      users.filter(
+        (u) =>
+          !u.deletedAt &&
+          u.isActive &&
+          (kind === 'personal_id' ? u.personalId === value : u.phone === value),
+      ),
+    ),
     setLastLogin: jest.fn(async () => undefined),
     findById: jest.fn(async () => users[0]),
   };
@@ -68,6 +102,8 @@ function makeService(opts: {
     generateRefreshSecret: jest.fn(() => 'refresh-secret'),
     signAccessToken: jest.fn(() => ({ token: 'access.jwt.token', expiresIn: 900 })),
     buildRefreshToken: jest.fn(() => 'sid.refresh-secret'),
+    signContinuation: jest.fn(() => 'continuation.jwt.token'),
+    verifyContinuation: jest.fn(() => null),
   };
   const sessions = { create: jest.fn(async () => sessionId) };
   const devices = {
@@ -77,8 +113,19 @@ function makeService(opts: {
   };
   const prisma = {
     company: {
-      findUnique: jest.fn(async ({ where }: any) => companies[where.publicStoreId] ?? null),
+      findUnique: jest.fn(async ({ where }: any) => {
+        if (where.publicStoreId) return companies[where.publicStoreId] ?? null;
+        // CP3 resolves the company FROM the user, so the lookup is by id.
+        return Object.values(companies).find((c: any) => c.id.equals(where.id)) ?? null;
+      }),
+      // Only reached when one phone matches more than one shop.
+      findMany: jest.fn(async ({ where }: any) =>
+        Object.values(companies)
+          .filter((c: any) => c.isActive && where.id.in.some((id: Buffer) => id.equals(c.id)))
+          .map((c: any) => ({ id: c.id, name: `Shop ${c.publicStoreId}` })),
+      ),
     },
+
   };
 
   const service = new AuthService(
@@ -93,72 +140,121 @@ function makeService(opts: {
 }
 
 const meta = { label: 'Test phone', platform: 'android' };
-const doLogin = (service: AuthService, over: Record<string, unknown> = {}) =>
-  service.login({ storeAccountId: STORE_A, login: 'owner', password: 'pw', ...over } as never, {});
+/**
+ * Sign in with the ONE identifier the field now takes.
+ *
+ * The result is narrowed to a signed-in response: a test that expects tokens
+ * and gets an account chooser has found a real bug, and should fail here
+ * rather than silently read `undefined` off the wrong shape.
+ */
+const doLogin = async (service: AuthService, over: Record<string, unknown> = {}) => {
+  const result = await service.login({ identifier: personalIdFor('owner'), password: 'pw', ...over } as never, {});
+  if ('status' in result) throw new Error('expected a signed-in response, got an account chooser');
+  return result;
+};
 
 // ─────────────────────────── Stage 3.2: tenant resolution ───────────────────
 
-describe('tenant resolution by Store Account ID', () => {
-  it('resolves the company from the public Store ID and authenticates its user', async () => {
-    const { service, prisma, tokens, usersSvc } = makeService();
+describe('tenant resolution from the credential (CP3)', () => {
+  it('resolves the company FROM the credential, with no Store ID supplied', async () => {
+    /*
+      The heart of CP3. The caller names no company at all; the server works
+      out who the identifier belongs to and which shop that is. Nothing about
+      the tenant is trusted from an unauthenticated request, which is strictly
+      stronger than a Store ID selecting the company before any credential was
+      checked.
+    */
+    const { service, tokens, usersSvc, prisma } = makeService();
 
     const res = await doLogin(service);
 
-    expect(prisma.company.findUnique).toHaveBeenCalledWith({
-      where: { publicStoreId: STORE_A },
-      select: { id: true, isActive: true, publicStoreId: true },
-    });
+    expect(usersSvc.findCandidatesForAuth).toHaveBeenCalledWith('personal_id', personalIdFor('owner'));
+    // The company was looked up BY ID, derived from the user — not by a
+    // public store code the client sent.
+    expect(prisma.company.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: COMPANY_A } }),
+    );
     expect(res.user.publicStoreId).toBe(STORE_A);
-    // The user was looked up WITHIN the resolved company.
-    expect(usersSvc.findByLoginForAuth).toHaveBeenCalledWith(COMPANY_A, 'owner');
-    expect(res.user.companyId).toBeDefined();
-    // JWT identity comes from the resolved company, not from any client field.
     expect(tokens.signAccessToken).toHaveBeenCalled();
   });
 
-  it('normalizes the Store ID (case, dashes, O/I/L) before resolving', async () => {
-    const { service, prisma } = makeService();
-    await doLogin(service, { storeAccountId: ' abcde-12345 ' });
-    expect(prisma.company.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { publicStoreId: STORE_A } }),
-    );
+  it('signs in by phone number just as well as by personal ID', async () => {
+    const owner = user(COMPANY_A, 'owner', { phone: '+22243210987' });
+    const { service, usersSvc } = makeService({ users: [owner] });
+
+    // Typed the way it is printed on a card, spaces and all.
+    const res = await doLogin(service, { identifier: '4321 0987' });
+
+    expect(usersSvc.findCandidatesForAuth).toHaveBeenCalledWith('phone', '+22243210987');
+    expect(res.user.publicStoreId).toBe(STORE_A);
   });
 
-  it('the SAME login in two companies is disambiguated by the Store ID', async () => {
-    const ownerA = user(COMPANY_A, 'owner');
-    const ownerB = user(COMPANY_B, 'owner');
-    const setup = {
+  it('a Store ID is not an identifier and resolves to nobody', async () => {
+    // The whole point: nobody types one to sign in, and sending one gets the
+    // same generic failure as any other unrecognised string.
+    const { service, usersSvc } = makeService();
+    await expect(doLogin(service, { identifier: STORE_A })).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(usersSvc.findCandidatesForAuth).not.toHaveBeenCalled();
+  });
+
+  it('one phone in two companies asks WHICH SHOP — after the password, never before', async () => {
+    /*
+      Ambiguity is resolved by asking, not by demanding a Store ID up front.
+      The shop names are the thing that must not leak, so nothing is named
+      until the credential has matched.
+    */
+    const shared = '+22243210987';
+    const ownerA = user(COMPANY_A, 'owner', { phone: shared });
+    const ownerB = user(COMPANY_B, 'manager', { phone: shared });
+    const { service } = makeService({
       companies: {
         [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A },
         [STORE_B]: { id: COMPANY_B, isActive: true, publicStoreId: STORE_B },
       },
       users: [ownerA, ownerB],
-    };
+    });
 
-    const a = makeService(setup);
-    await a.service.login({ storeAccountId: STORE_A, login: 'owner', password: 'pw' } as never, {});
-    expect(a.usersSvc.findByLoginForAuth).toHaveBeenCalledWith(COMPANY_A, 'owner');
+    const result = await service.login({ identifier: shared, password: 'pw' } as never, {});
 
-    const b = makeService(setup);
-    await b.service.login({ storeAccountId: STORE_B, login: 'owner', password: 'pw' } as never, {});
-    expect(b.usersSvc.findByLoginForAuth).toHaveBeenCalledWith(COMPANY_B, 'owner');
+    expect('status' in result && result.status).toBe('choose_account');
+    if (!('status' in result)) throw new Error('expected a chooser');
+    expect(result.accounts).toHaveLength(2);
+    // Purpose-bound and short-lived: it names shops, so it must not linger.
+    expect(result.continuationToken).toBeTruthy();
+    expect(result.expiresIn).toBeLessThanOrEqual(300);
   });
 
-  it('Store ID of company A + a login that exists only in company B is rejected', async () => {
+  it('and names no shop at all when the password is wrong', async () => {
+    const shared = '+22243210987';
     const { service } = makeService({
-      companies: { [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A } },
-      users: [user(COMPANY_B, 'owner')], // owner exists, but in a DIFFERENT company
+      verifyPassword: false,
+      companies: {
+        [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A },
+        [STORE_B]: { id: COMPANY_B, isActive: true, publicStoreId: STORE_B },
+      },
+      users: [user(COMPANY_A, 'owner', { phone: shared }), user(COMPANY_B, 'manager', { phone: shared })],
+    });
+
+    await expect(
+      service.login({ identifier: shared, password: 'wrong' } as never, {}),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('a deactivated user is never even a candidate', async () => {
+    const { service } = makeService({
+      users: [user(COMPANY_A, 'owner', { isActive: false })],
     });
     await expect(doLogin(service)).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
   it('an inactive company cannot authenticate', async () => {
-    const { service, usersSvc } = makeService({
+    const { service } = makeService({
       companies: { [STORE_A]: { id: COMPANY_A, isActive: false, publicStoreId: STORE_A } },
       users: [user(COMPANY_A, 'owner')],
     });
+    // Refused with the same generic message: whether a business exists is not
+    // something an unauthenticated caller may learn.
     await expect(doLogin(service)).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(usersSvc.findByLoginForAuth).not.toHaveBeenCalled(); // never looked past a dead tenant
   });
 });
 
@@ -174,12 +270,12 @@ describe('non-enumerating + timing-safe primary auth', () => {
     return { thrown, ctx };
   }
 
-  it('a bad Store ID, a bad login and a bad password all throw the same generic error', async () => {
+  it('an unknown identifier and a bad password throw the same generic error', async () => {
     const messages = new Set<string>();
     const codes = new Set<unknown>();
 
-    // Bad Store ID and bad login (miss the user), gathered via the shared harness.
-    for (const over of [{ storeAccountId: '99999AAAAA' }, { login: 'ghost' }]) {
+    // An unrecognised string and a well-formed identifier nobody holds.
+    for (const over of [{ identifier: 'not-an-identifier' }, { identifier: 'U-ZZZZZZZZ' }]) {
       const { thrown } = await failure(over);
       expect(thrown).toBeInstanceOf(UnauthorizedException);
       messages.add((thrown.getResponse() as any).message ?? thrown.message);
@@ -201,12 +297,17 @@ describe('non-enumerating + timing-safe primary auth', () => {
     expect([...codes]).toEqual([undefined]); // no machine code exposes which field failed
   });
 
-  it('spends an Argon2 verify even when the company or user is missing (timing)', async () => {
-    const noStore = await failure({ storeAccountId: '99999AAAAA' });
-    expect(noStore.ctx.hashing.verifyDummy).toHaveBeenCalled();
+  it('spends an Argon2 verify even when nobody matched (timing)', async () => {
+    /*
+      Without this, "no such person" returns immediately while "wrong
+      password" takes an Argon2 verify — and the difference is measurable
+      enough to enumerate who exists.
+    */
+    const unrecognised = await failure({ identifier: 'not-an-identifier' });
+    expect(unrecognised.ctx.hashing.verifyDummy).toHaveBeenCalled();
 
-    const noUser = await failure({ login: 'ghost' });
-    expect(noUser.ctx.hashing.verifyDummy).toHaveBeenCalled();
+    const nobodyHoldsIt = await failure({ identifier: 'U-ZZZZZZZZ' });
+    expect(nobodyHoldsIt.ctx.hashing.verifyDummy).toHaveBeenCalled();
   });
 
   it('never looks at the device credential when the password is wrong', async () => {

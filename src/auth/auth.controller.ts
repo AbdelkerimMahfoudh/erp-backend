@@ -10,7 +10,7 @@ import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { UsersService } from '../users/users.service';
 import { AccessService } from '../rbac/access.service';
 import { AuthService } from './auth.service';
-import { LoginDto } from './dto/login.dto';
+import { ChooseAccountDto, LoginDto } from './dto/login.dto';
 import { LogoutDto, RefreshDto } from './dto/token.dto';
 
 // Stricter rate limit on auth endpoints (brute-force defense).
@@ -29,9 +29,29 @@ export class AuthController {
   @Throttle(AUTH_THROTTLE)
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Authenticate and receive access + refresh tokens' })
+  @ApiOperation({ summary: 'Sign in with a phone number or personal ID. No Store ID.' })
   login(@Body() dto: LoginDto, @Req() req: Request) {
     return this.auth.login(dto, { ip: req.ip, userAgent: req.headers['user-agent'] });
+  }
+
+  /**
+   * Continue as one of the shops the password already matched (CP3).
+   *
+   * Reachable only with a continuation token, which is issued solely from a
+   * verified credential — so this route grants nothing that the password
+   * check had not already established. Rate-limited like every other
+   * unauthenticated auth route.
+   */
+  @Public()
+  @Throttle(AUTH_THROTTLE)
+  @Post('choose-account')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Pick which shop to sign in to, after the password matched' })
+  chooseAccount(@Body() dto: ChooseAccountDto, @Req() req: Request) {
+    return this.auth.chooseAccount(dto.continuationToken, dto.accountRef, dto as never, {
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
   }
 
   @Public()

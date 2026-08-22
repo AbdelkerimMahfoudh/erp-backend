@@ -28,6 +28,35 @@ export class TokensService {
     return { token: this.jwt.sign(payload), expiresIn: this.accessTtlSeconds() };
   }
 
+/**
+   * A short-lived token that authorises ONE thing: naming which of several
+   * already-verified accounts to continue as (CP3).
+   *
+   * Purpose-bound by `type`, which the access-token guard does not accept, so
+   * this can never be presented as an access token. It carries only the user
+   * ids whose password already matched — it grants no reach beyond what the
+   * credential check had already established.
+   */
+  signContinuation(userIds: string[], ttlSeconds: number): string {
+    return this.jwt.sign(
+      { type: 'account_choice', accounts: userIds },
+      { expiresIn: ttlSeconds },
+    );
+  }
+
+  /** The ids inside a continuation token, or null if it is not one. */
+  verifyContinuation(token: string): string[] | null {
+    try {
+      const payload = this.jwt.verify<{ type?: string; accounts?: unknown }>(token);
+      if (payload?.type !== 'account_choice') return null;
+      if (!Array.isArray(payload.accounts)) return null;
+      return payload.accounts.filter((a): a is string => typeof a === 'string');
+    } catch {
+      // Expired or tampered with. Either way the shopkeeper starts again.
+      return null;
+    }
+  }
+
   generateRefreshSecret(): string {
     return randomBytes(32).toString('base64url');
   }
