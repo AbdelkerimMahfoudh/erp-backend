@@ -670,7 +670,10 @@ export class PricingService {
     const trimmed = identifier?.trim();
     if (!trimmed) throw new BadRequestException('Scan or type an IMEI or serial number');
     const unit = await this.db.unit.findFirst({
-      where: { OR: [{ imeiPrimary: trimmed }, { serialNo: trimmed }] },
+      // Either IMEI prices the phone, for the same reason it finds it.
+      where: {
+        OR: [{ imeiPrimary: trimmed }, { imeiSecondary: trimmed }, { serialNo: trimmed }],
+      },
       select: {
         id: true,
         productId: true,

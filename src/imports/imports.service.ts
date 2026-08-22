@@ -360,11 +360,23 @@ export class ImportsService {
     const existsInShop = new Set<string>();
     if (claimed.length > 0) {
       const units = await this.db.unit.findMany({
-        where: { OR: [{ imeiPrimary: { in: claimed } }, { serialNo: { in: claimed } }] },
-        select: { imeiPrimary: true, serialNo: true },
+        // A spreadsheet claiming an identifier already held as another unit's
+        // SECOND IMEI is a duplicate too — 0042 would refuse the insert, so
+        // catching it here turns a crash into a readable row error.
+        where: {
+          OR: [
+            { imeiPrimary: { in: claimed } },
+            { imeiSecondary: { in: claimed } },
+            { serialNo: { in: claimed } },
+          ],
+        },
+        select: { imeiPrimary: true, imeiSecondary: true, serialNo: true },
       });
       for (const u of units) {
         if (u.imeiPrimary) existsInShop.add(u.imeiPrimary);
+        // Selecting the row by its second IMEI and then not reading it back
+        // would find the duplicate and forget it again.
+        if (u.imeiSecondary) existsInShop.add(u.imeiSecondary);
         if (u.serialNo) existsInShop.add(u.serialNo);
       }
     }

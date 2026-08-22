@@ -369,7 +369,16 @@ export class InventoryService {
   /** Look up a unit by its identifier (IMEI or serial). */
   async findByIdentifier(identifier: string): Promise<Unit> {
     const unit = await this.db.unit.findFirst({
-      where: { OR: [{ imeiPrimary: identifier }, { serialNo: identifier }] },
+      // Either IMEI finds the phone. A dual-SIM unit stores both, so looking
+      // up only the primary means the second identifier — printed on the same
+      // box, scanned just as often — reports 'Unit not found'.
+      where: {
+        OR: [
+          { imeiPrimary: identifier },
+          { imeiSecondary: identifier },
+          { serialNo: identifier },
+        ],
+      },
       include: { product: true, branch: { select: { id: true, name: true } } },
     });
     if (!unit) throw new NotFoundException('Unit not found');

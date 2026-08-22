@@ -93,7 +93,15 @@ export class SalesService {
           const discount = l.discount ?? 0;
           if (l.identifier) {
             const unit = await tx.unit.findFirst({
-              where: { OR: [{ imeiPrimary: l.identifier }, { serialNo: l.identifier }] },
+              // Either IMEI sells the phone. Without the secondary column a
+              // dual-SIM handset scanned by its second number could not be sold.
+              where: {
+                OR: [
+                  { imeiPrimary: l.identifier },
+                  { imeiSecondary: l.identifier },
+                  { serialNo: l.identifier },
+                ],
+              },
               include: { product: { select: { defaultPrice: true } } },
             });
             if (!unit) throw new NotFoundException(`Unit not found: ${l.identifier}`);
