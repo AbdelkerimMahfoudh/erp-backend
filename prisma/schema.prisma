@@ -56,9 +56,14 @@ enum BranchType {
 /// Language for Owner WhatsApp summaries. Separate from the app's UI language,
 /// which is a device preference — the Owner may read the app in one language
 /// and want the nightly message in another.
+///
+/// `fr` was added with the French app catalogue (milestone M): an Owner running
+/// the app in French had no matching choice here, and the two settings drifting
+/// apart is exactly the confusion the separation was meant to avoid.
 enum SummaryLanguage {
   en
   ar
+  fr
 }
 
 /// Money-receiving providers used in Mauritania, plus an escape hatch.

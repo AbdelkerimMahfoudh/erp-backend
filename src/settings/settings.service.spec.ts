@@ -579,9 +579,14 @@ describe('validation', () => {
     expect(await dtoErrors(UpdateSettingsDto, { returnWindowHours: 24 })).not.toEqual([]);
   });
 
-  it('accepts only English and Arabic for the summary', async () => {
-    expect(await dtoErrors(UpdateSettingsDto, { version: 0, whatsapp: { language: 'fr' } })).not.toEqual([]);
+  // French joined the list with the French app catalogue (milestone M). This
+  // test used to pin 'fr' as INVALID, so widening the enum had to come here and
+  // say so — the assertion flipping is the record that it was a decision.
+  it('accepts English, Arabic and French for the summary, and nothing else', async () => {
+    expect(await dtoErrors(UpdateSettingsDto, { version: 0, whatsapp: { language: 'en' } })).toEqual([]);
     expect(await dtoErrors(UpdateSettingsDto, { version: 0, whatsapp: { language: 'ar' } })).toEqual([]);
+    expect(await dtoErrors(UpdateSettingsDto, { version: 0, whatsapp: { language: 'fr' } })).toEqual([]);
+    expect(await dtoErrors(UpdateSettingsDto, { version: 0, whatsapp: { language: 'es' } })).not.toEqual([]);
   });
 
   it('requires a non-empty label on an account', async () => {

@@ -21,13 +21,23 @@ import { BadRequestException } from '@nestjs/common';
 
 export type MessageCategory = 'authentication' | 'business_summary' | 'operational';
 
+/**
+ * Languages a message may be requested in.
+ *
+ * Widened to include French with the French app catalogue (milestone M). Note
+ * that this says what may be *asked for*, not what may be *sent* — a template
+ * still has to declare the language itself, which is the point of
+ * `assertLanguageSupported` below.
+ */
+export type MessageLanguage = 'en' | 'ar' | 'fr';
+
 export interface TemplateDefinition {
   /** Stable internal key. Never sent to a provider — see `providerTemplateName`. */
   readonly key: string;
   readonly category: MessageCategory;
   /** Variables the template requires, in the order a provider expects them. */
   readonly variables: readonly string[];
-  readonly languages: readonly ('en' | 'ar')[];
+  readonly languages: readonly MessageLanguage[];
   /**
    * The provider's own template name, from configuration.
    *
@@ -51,6 +61,11 @@ export const AUTH_OTP_TEMPLATE: TemplateDefinition = {
   key: 'auth.otp',
   category: 'authentication',
   variables: ['code', 'ttlMinutes'],
+  // Deliberately NOT 'fr', even though the app now speaks French. This registry
+  // mirrors what a provider has approved, and no French one-time-code template
+  // has been approved anywhere — claiming it here would let the app try to send
+  // a message that does not exist. `assertLanguageSupported` refuses it until
+  // there is a real approval to mirror.
   languages: ['en', 'ar'],
   // Set from configuration once a provider is chosen (Stage 4B).
   providerTemplateName: null,
@@ -107,7 +122,7 @@ export function validateTemplateVariables(
 
 export function assertLanguageSupported(
   template: TemplateDefinition,
-  language: 'en' | 'ar',
+  language: MessageLanguage,
 ): void {
   if (!template.languages.includes(language)) {
     throw new BadRequestException(`Template "${template.key}" has no ${language} version`);
