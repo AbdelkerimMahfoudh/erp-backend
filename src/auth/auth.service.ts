@@ -16,7 +16,15 @@ export interface AuthTokenResponse {
   accessToken: string;
   expiresIn: number;
   refreshToken: string;
-  user: { id: string; name: string; login: string; companyId: string; publicStoreId: string };
+  user: {
+    id: string;
+    name: string;
+    login: string;
+    /** How this person signs in when they have no phone. Shown in Settings. */
+    personalId: string;
+    companyId: string;
+    publicStoreId: string;
+  };
   /** Present ONLY when this login enrolled a new device. The secret appears here and nowhere else. */
   device?: DeviceEnrollment;
 }
@@ -297,6 +305,7 @@ export class AuthService {
         id: binToUuid(user.id),
         name: user.name,
         login: user.login,
+        personalId: user.personalId,
         companyId: binToUuid(user.companyId),
         // The public Store Account ID the client namespaces its device
         // credential by (Stage 3.2). Not a secret.

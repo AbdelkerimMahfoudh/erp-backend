@@ -91,6 +91,9 @@ export class AuthController {
       id: binToUuid(found.id),
       name: found.name,
       login: found.login,
+      // Shown in Settings so somebody can find their own sign-in identifier
+      // without contacting support (CP3). Not a secret, and not a password.
+      personalId: found.personalId,
       companyId: binToUuid(found.companyId),
       // Lets a RESTORED session namespace its device credential without a
       // re-login (Stage 3.2). Not a secret.
