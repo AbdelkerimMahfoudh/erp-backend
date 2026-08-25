@@ -17,6 +17,49 @@ import type { ContactChannel } from '@prisma/client';
  * refuses outright.
  */
 
+/**
+ * Whether the development outbox may handle delivery.
+ *
+ * An explicit opt-in, not "anything that is not production". The old test
+ * was `NODE_ENV !== 'production'`, which quietly hands the outbox to any
+ * environment somebody forgot to label — and an outbox that silently stands
+ * in for a provider is how a real shop ends up waiting for a message nobody
+ * ever sent.
+ *
+ * Two doors, and production is barred at both:
+ *
+ *  - ordinary local development (`NODE_ENV=development`);
+ *  - staging, and only when it ALSO sets `STAGING_CONTACT_OUTBOX=enabled`.
+ *
+ * Staging runs with `NODE_ENV=production` so it exercises production code
+ * paths, which is exactly why it needs its own deliberate flag rather than
+ * inheriting a development default.
+ */
+export function outboxAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  const appEnv = (env.APP_ENV ?? '').toLowerCase();
+  const nodeEnv = (env.NODE_ENV ?? '').toLowerCase();
+
+  // Never, under any combination of flags.
+  if (appEnv === 'production') return false;
+
+  if (appEnv === 'staging') return env.STAGING_CONTACT_OUTBOX === 'enabled';
+  return nodeEnv !== 'production';
+}
+
+/**
+ * Whether a code may be returned in an HTTP response.
+ *
+ * Stricter than {@link outboxAllowed}, deliberately. In **staging** the
+ * answer is always no: a tester fetches the code with a server-side command,
+ * because a code in a response body makes the whole verification
+ * meaningless — anybody could "verify" any address they liked.
+ */
+export function codeMayBeReturned(env: NodeJS.ProcessEnv = process.env): boolean {
+  const appEnv = (env.APP_ENV ?? '').toLowerCase();
+  if (appEnv === 'staging' || appEnv === 'production') return false;
+  return (env.NODE_ENV ?? '') !== 'production';
+}
+
 export interface DeliveryRequest {
   channel: ContactChannel;
   /** Normalised: a lowercased email, or an E.164 number. */
@@ -61,9 +104,15 @@ export class OutboxDeliveryProvider extends ContactDeliveryProvider {
     return { delivery: 'outbox', provider: this.name };
   }
 
-  /** Development only. Guarded again at the route. */
+  /**
+   * Read a stored code.
+   *
+   * Available wherever the outbox itself is, so the staging retrieval
+   * command can work — but the ROUTE still refuses to put the result in a
+   * response outside development. Two separate gates, on purpose.
+   */
   peek(destination: string): string | null {
-    if (process.env.NODE_ENV === 'production') return null;
+    if (!outboxAllowed()) return null;
     return this.recent.get(destination)?.code ?? null;
   }
 

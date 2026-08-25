@@ -3,7 +3,11 @@ import { createHash, randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
 import { isEmail, normaliseEmail, normalisePhone } from '../auth/identifier';
-import { ContactDeliveryProvider, OutboxDeliveryProvider } from './contact-delivery';
+import {
+  codeMayBeReturned,
+  ContactDeliveryProvider,
+  OutboxDeliveryProvider,
+} from './contact-delivery';
 
 /**
  * Proving somebody holds a contact.
@@ -87,12 +91,17 @@ export class ContactVerificationService {
     const result = await this.delivery.send({ channel, destination, code, language });
 
     /*
-     * The code comes back ONLY through the development outbox, and only outside
-     * production. Returning it from a production endpoint would make the whole
-     * verification meaningless — anybody could "verify" any address.
+     * The code comes back in the RESPONSE only during ordinary local
+     * development.
+     *
+     * Never in staging, even though staging uses the outbox: a code in a
+     * response body makes the whole verification meaningless, because
+     * anybody could then "verify" any address they liked. A staging tester
+     * uses the server-side retrieval command instead, which needs shell
+     * access to the box.
      */
     const devCode =
-      process.env.NODE_ENV !== 'production' && result.delivery === 'outbox'
+      codeMayBeReturned() && result.delivery === 'outbox'
         ? (this.outbox.peek(destination) ?? undefined)
         : undefined;
 

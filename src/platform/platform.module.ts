@@ -12,6 +12,7 @@ import { ContactVerificationService } from './contact-verification.service';
 import { EntitlementModule } from '../entitlement/entitlement.module';
 import {
   ContactDeliveryProvider,
+  outboxAllowed,
   OutboxDeliveryProvider,
   UnconfiguredDeliveryProvider,
 } from './contact-delivery';
@@ -57,10 +58,7 @@ import {
        * objects — and the code is silently never found. Aliasing the single
        * registered instance is what makes the development flow work at all.
        */
-      useExisting:
-        process.env.NODE_ENV === 'production'
-          ? UnconfiguredDeliveryProvider
-          : OutboxDeliveryProvider,
+      useExisting: outboxAllowed() ? OutboxDeliveryProvider : UnconfiguredDeliveryProvider,
     },
     OutboxDeliveryProvider,
     UnconfiguredDeliveryProvider,
