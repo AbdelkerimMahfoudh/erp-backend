@@ -39,6 +39,9 @@ import { PlatformAdminService, ADMIN_SESSION_TTL_HOURS } from './platform-admin.
 import { PlatformAuditService } from './platform-audit.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
+import { BillingService } from '../billing/billing.service';
+import { EntitlementService } from '../entitlement/entitlement.service';
+import { TenantContext } from '../common/tenant/tenant-context.service';
 
 /**
  * The platform-control API.
@@ -122,6 +125,16 @@ class PaymentDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
+class PlanVersionDto {
+  @IsInt() @Min(0) branchMonthly: number;
+  @IsInt() @Min(0) includedStaffPerBranch: number;
+  @IsInt() @Min(0) extraStaffMonthly: number;
+  /** ISO date. Must be in the future — a past price would rewrite history. */
+  @IsString() effectiveFrom: string;
+  @IsString() @MinLength(1) @MaxLength(500) reason: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+}
+
 /** `@IsNotEmpty` under a name that reads in this file. */
 function IsNotEmptyish() {
   return MinLength(1);
@@ -136,6 +149,9 @@ export class PlatformController {
     private readonly audit: PlatformAuditService,
     private readonly lifecycle: SubscriptionLifecycleService,
     private readonly registration: RegistrationService,
+    private readonly billing: BillingService,
+    private readonly entitlement: EntitlementService,
+    private readonly tenant: TenantContext,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -582,6 +598,121 @@ export class PlatformController {
       /** Stated on every response, so no caller can infer otherwise. */
       providerVerified: false,
     };
+  }
+
+  // ── The customer portal ──────────────────────────────────────────────────
+
+  /**
+   * Everything an Owner's account page shows.
+   *
+   * A TENANT route, not an administrator one: it runs on the shop's own JWT
+   * and answers only about that shop. It is deliberately reachable in every
+   * subscription state — pending, suspended and expired included — because it
+   * is where somebody goes to find out WHY they cannot get in.
+   *
+   * It returns no operational data. Identity, subscription, price, history.
+   */
+  @Get('my-subscription')
+  async mySubscription() {
+    const companyId = this.tenant.companyId();
+
+    const [company, entitlement, pricing] = await Promise.all([
+      this.prisma.company.findUniqueOrThrow({
+        where: { id: companyId },
+        select: {
+          name: true,
+          city: true,
+          createdAt: true,
+          branches: { where: { isActive: true }, select: { name: true, type: true } },
+        },
+      }),
+      this.entitlement.forCompany(companyId),
+      this.billing.pricingFor(companyId),
+    ]);
+
+    const timeline = await this.lifecycle.timeline(binToUuid(companyId));
+
+    const owner = await this.prisma.user.findFirst({
+      where: { companyId, deletedAt: null },
+      orderBy: { createdAt: 'asc' },
+      select: { name: true, email: true, phone: true, emailVerifiedAt: true, phoneVerifiedAt: true },
+    });
+
+    return {
+      business: {
+        name: company.name,
+        city: company.city,
+        createdAt: company.createdAt.toISOString(),
+        // Names and types only. No internal binary id reaches the client.
+        branches: company.branches.map((b) => ({ name: b.name, type: b.type })),
+      },
+      owner: owner
+        ? {
+            name: owner.name,
+            email: owner.email,
+            phone: owner.phone,
+            emailVerified: owner.emailVerifiedAt !== null,
+            phoneVerified: owner.phoneVerifiedAt !== null,
+          }
+        : null,
+      entitlement,
+      pricing,
+      ...timeline,
+    };
+  }
+
+  // ── Pricing administration ───────────────────────────────────────────────
+
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Get('plans')
+  async plans() {
+    const rows = await this.prisma.planVersion.findMany({
+      where: { planKey: 'standard' },
+      orderBy: { effectiveFrom: 'asc' },
+    });
+    const now = new Date();
+    return rows.map((r) => ({
+      id: binToUuid(r.id),
+      version: r.version,
+      branchMonthly: r.branchMonthly,
+      includedStaffPerBranch: r.includedStaffPerBranch,
+      extraStaffMonthly: r.extraStaffMonthly,
+      effectiveFrom: r.effectiveFrom.toISOString(),
+      reason: r.reason,
+      createdBy: r.createdBy,
+      state: r.effectiveFrom.getTime() <= now.getTime() ? 'in_force' : 'scheduled',
+    }));
+  }
+
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('plans')
+  @HttpCode(HttpStatus.CREATED)
+  async schedulePlan(@Body() dto: PlanVersionDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+
+    const created = await this.billing.schedulePlanVersion({
+      branchMonthly: dto.branchMonthly,
+      includedStaffPerBranch: dto.includedStaffPerBranch,
+      extraStaffMonthly: dto.extraStaffMonthly,
+      effectiveFrom: new Date(dto.effectiveFrom),
+      reason: dto.reason,
+      createdBy: admin.email,
+    });
+
+    await this.audit.record({
+      admin,
+      action: 'plan.schedule',
+      targetType: 'PlanVersion',
+      targetLabel: `standard v${created.version}`,
+      reason: dto.reason,
+      after: created,
+      ip: req.ip ?? null,
+    });
+
+    return created;
   }
 
   // ── Audit ────────────────────────────────────────────────────────────────

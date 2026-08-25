@@ -110,6 +110,9 @@ export const ALWAYS_READABLE: readonly string[] = [
   'auth/logout',
   'auth/refresh',
   'health',
+  // The customer's own account page. Reachable in EVERY state — it is where
+  // somebody goes to find out why they cannot get in.
+  'platform/my-subscription',
 ] as const;
 
 export function isAlwaysReadable(path: string): boolean {

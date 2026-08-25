@@ -358,6 +358,7 @@ model Company {
   subscription        Subscription?
   subscriptionEvents  SubscriptionEvent[]
   subscriptionPayments SubscriptionPayment[]
+  billingPeriods      BillingPeriod[]
 }
 
 model Branch {
@@ -3575,6 +3576,7 @@ model Subscription {
   company  Company               @relation(fields: [companyId], references: [id])
   events   SubscriptionEvent[]
   payments SubscriptionPayment[]
+  periods  BillingPeriod[]
 
   @@map("subscriptions")
 }
@@ -3807,4 +3809,99 @@ model ContactVerification {
 
   @@index([destination, createdAt], map: "ix_contact_verif_dest")
   @@map("contact_verifications")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Billing (0058)
+//
+// One plan, versioned by effective date, and an immutable snapshot of what each
+// period was actually charged. Nothing here computes a price at read time — the
+// snapshot IS the historical truth, so a later plan version cannot rewrite what
+// a shop was told last March.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A dated version of the Standard plan.
+///
+/// There is exactly one commercial plan; this is its price over time, not a
+/// tier. Versions are effective-dated and become immutable the moment a billing
+/// period references them, which is what stops a future price edit from
+/// silently rewriting history.
+model PlanVersion {
+  id Bytes @id @db.Binary(16)
+
+  /// Always 'standard' today. Present so a second plan is a data change rather
+  /// than a migration, without pretending tiers exist.
+  planKey String @default("standard") @map("plan_key") @db.VarChar(40)
+
+  /// Monotonic per plan. Version 1 is the launch price.
+  version Int @db.UnsignedInt
+
+  /// Integer MRU. No float ever touches an amount.
+  branchMonthly          Int @map("branch_monthly") @db.UnsignedInt
+  includedStaffPerBranch Int @map("included_staff_per_branch") @db.UnsignedInt
+  extraStaffMonthly      Int @map("extra_staff_monthly") @db.UnsignedInt
+
+  /// From when this pricing applies. Never in the past at creation time.
+  effectiveFrom DateTime @map("effective_from") @db.DateTime(6)
+
+  /// Who scheduled it, and why. Required — a price change without a reason is
+  /// a price change nobody can explain later.
+  createdBy String @map("created_by") @db.VarChar(160)
+  reason    String @db.VarChar(500)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  periods BillingPeriod[]
+
+  @@unique([planKey, version], map: "ux_plan_versions_key_version")
+  @@index([planKey, effectiveFrom], map: "ix_plan_versions_effective")
+  @@map("plan_versions")
+}
+
+/// What one billing period was assessed at, frozen.
+///
+/// The unit prices are COPIED in rather than joined at read time. A join would
+/// mean the figure a shop saw in March changes the day somebody schedules a new
+/// price — which is precisely the thing an immutable snapshot exists to prevent.
+///
+/// The assessed fields are the high-water mark for the period: there is no
+/// prorating, so additions raise them immediately and removals never lower
+/// them. Reductions land on the next period's snapshot instead.
+model BillingPeriod {
+  id             Bytes @id @db.Binary(16)
+  companyId      Bytes @map("company_id") @db.Binary(16)
+  subscriptionId Bytes @map("subscription_id") @db.Binary(16)
+  planVersionId  Bytes @map("plan_version_id") @db.Binary(16)
+
+  periodStart DateTime  @map("period_start") @db.DateTime(6)
+  periodEnd   DateTime? @map("period_end") @db.DateTime(6)
+
+  /// The unit prices in force for THIS period. Copied, never looked up.
+  branchMonthly          Int @map("branch_monthly") @db.UnsignedInt
+  includedStaffPerBranch Int @map("included_staff_per_branch") @db.UnsignedInt
+  extraStaffMonthly      Int @map("extra_staff_monthly") @db.UnsignedInt
+
+  /// The size that produced the assessment, at the moment it was last raised.
+  activeBranchCount    Int @map("active_branch_count") @db.UnsignedInt
+  activeStaffCount     Int @map("active_staff_count") @db.UnsignedInt
+  includedStaffCount   Int @map("included_staff_count") @db.UnsignedInt
+  chargeableStaffCount Int @map("chargeable_staff_count") @db.UnsignedInt
+
+  /// The high-water mark, per component. Per component rather than on the total
+  /// so a branch added late cannot mask a staff charge already assessed.
+  assessedBranchFee Int @map("assessed_branch_fee") @db.UnsignedInt
+  assessedStaffFee  Int @map("assessed_staff_fee") @db.UnsignedInt
+  assessedTotal     Int @map("assessed_total") @db.UnsignedInt
+
+  currency String @default("MRU") @db.Char(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company      Company      @relation(fields: [companyId], references: [id])
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  planVersion  PlanVersion  @relation(fields: [planVersionId], references: [id])
+
+  @@index([companyId, periodStart], map: "ix_billing_periods_company")
+  @@map("billing_periods")
 }

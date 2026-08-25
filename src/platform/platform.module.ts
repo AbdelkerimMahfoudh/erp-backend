@@ -7,6 +7,8 @@ import { PlatformAdminGuard } from './platform-admin.guard';
 import { PlatformAuditService } from './platform-audit.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
+import { BillingService } from '../billing/billing.service';
+import { EntitlementModule } from '../entitlement/entitlement.module';
 import {
   ContactDeliveryProvider,
   OutboxDeliveryProvider,
@@ -26,7 +28,7 @@ import {
  * administrator session.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, EntitlementModule],
   controllers: [PlatformController],
   providers: [
     HashingService,
@@ -35,6 +37,7 @@ import {
     PlatformAuditService,
     SubscriptionLifecycleService,
     RegistrationService,
+    BillingService,
     {
       /*
        * Which delivery provider is real is an environment decision, and the
@@ -51,6 +54,6 @@ import {
     },
     OutboxDeliveryProvider,
   ],
-  exports: [PlatformAdminService, SubscriptionLifecycleService, RegistrationService],
+  exports: [PlatformAdminService, SubscriptionLifecycleService, RegistrationService, BillingService],
 })
 export class PlatformModule {}

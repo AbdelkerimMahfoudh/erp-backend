@@ -3,6 +3,7 @@ import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin, uuidToBin, binToUuid, isUuid } from '../common/utils/uuid.util';
 import { PlatformAuditService } from './platform-audit.service';
+import { BillingService } from '../billing/billing.service';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
 /**
@@ -44,6 +45,7 @@ export class SubscriptionLifecycleService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: PlatformAuditService,
+    private readonly billing: BillingService,
   ) {}
 
   private companyIdOf(companyId: string): Buffer {
@@ -201,6 +203,15 @@ export class SubscriptionLifecycleService {
       after: { ...this.snapshot(after), grantDays: input.days, paymentRecorded: false },
       ip: ctx.ip ?? null,
     });
+
+    /*
+     * Open a billing period, freezing today's unit prices into it.
+     *
+     * Done here rather than at registration: a pending business has never been
+     * billed, and a period snapshot for one would be a billing history it does
+     * not have.
+     */
+    await this.billing.openPeriod(id, before.id, after.complimentaryUntil);
 
     return { subscription: after, applied: true };
   }
