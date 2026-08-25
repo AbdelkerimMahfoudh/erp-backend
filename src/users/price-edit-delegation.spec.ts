@@ -160,6 +160,12 @@ function makeService(opts: { rows?: Row[]; permissionExists?: boolean } = {}) {
     // Seats are not what these tests are about: allow by default, and let
     // the seat-limit behaviour be pinned by its own test below.
     { maySeat: jest.fn(async () => ({ allowed: true, seatsUsed: 0, seatLimit: 99 })) } as never,
+    // Delegation never touches a login contact, so the password confirmation
+    // is not reached here. Present because the constructor requires it.
+    {
+      verify: jest.fn(async () => true),
+      verifyDummy: jest.fn(async () => false),
+    } as never,
   );
 
   return { service, rows, audits, written };

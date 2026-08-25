@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -14,6 +15,8 @@ import { binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
 import { isDelegatable, DELEGATION_ELIGIBLE_ROLE, DELEGATABLE_PERMISSIONS } from '../rbac/permission-scope';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { toE164, isValidEmail } from './contact.util';
+import { normalisePhone, normaliseEmail } from '../auth/identifier';
+import { HashingService } from '../common/security/hashing.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { SEAT_LIMIT_REACHED } from '../entitlement/entitlement-rules';
 
@@ -106,7 +109,50 @@ export class UserManagementService {
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
     private readonly entitlement: EntitlementService,
+    private readonly hashing: HashingService,
   ) {}
+
+  /**
+   * Prove the person at the keyboard is still the person who signed in.
+   *
+   * A session says a device was authenticated once; it says nothing about who
+   * is holding it now. A till left unlocked on a shop counter is the ordinary
+   * case, not the exotic one, so changing the credential somebody signs in with
+   * asks for the actor's own password again.
+   *
+   * The actor's, not the target's — an Owner correcting an employee's number
+   * does not know that employee's password, and demanding it would make the
+   * feature unusable and push shops toward sharing passwords.
+   */
+  private async confirmActorPassword(password: string | undefined): Promise<void> {
+    const actorId = this.tenant.userId();
+    if (!actorId) throw new ForbiddenException('Sign in again to change a login contact');
+
+    if (!password) {
+      throw new ForbiddenException({
+        code: 'password_confirmation_required',
+        message: 'Confirm your password to change a login contact.',
+      });
+    }
+
+    const actor = await this.db.user.findUnique({
+      where: { id: actorId },
+      select: { passwordHash: true },
+    });
+
+    // Spend a verify either way, so a missing actor cannot be told from a wrong
+    // password by how long the answer takes.
+    const ok = actor
+      ? await this.hashing.verify(actor.passwordHash, password)
+      : await this.hashing.verifyDummy(password);
+
+    if (!ok) {
+      throw new ForbiddenException({
+        code: 'password_confirmation_failed',
+        message: 'That password did not match.',
+      });
+    }
+  }
 
   async list(): Promise<UserView[]> {
     const rows = await this.db.user.findMany({
@@ -189,16 +235,56 @@ export class UserManagementService {
       throw new BadRequestException('No changes were provided');
     }
 
+    /*
+     * A login contact is how somebody reaches their own shop. Changing one is
+     * a security event, not an edit like a name.
+     */
+    const contactChanged = changed.includes('phone') || changed.includes('email');
+    if (contactChanged) {
+      /*
+       * Never let an edit strip somebody's last way in.
+       *
+       * The guard is conditional on them having one **now**, deliberately. The
+       * accounts that pre-date email/WhatsApp sign-in have neither contact, and
+       * a blanket rule would block unrelated edits to exactly the people who
+       * most need their record touched. See `docs/36`.
+       */
+      const nextPhone = 'phone' in data ? (data.phone as string | null) : before.phone;
+      const nextEmail = 'email' in data ? (data.email as string | null) : before.email;
+      const hadOne = Boolean(before.phone || before.email);
+      if (hadOne && !nextPhone && !nextEmail) {
+        throw new BadRequestException(
+          'This person needs an email or a WhatsApp number to sign in. Add one before removing the other.',
+        );
+      }
+
+      // Recent-authentication proof. The actor re-types THEIR OWN password:
+      // it proves the person at the keyboard is still the person who signed
+      // in, which a session cookie on an unattended till does not.
+      await this.confirmActorPassword(dto.currentPassword);
+    }
+
     // Deactivation must be a security boundary, not just a flag flip: in one
     // transaction we set isActive=false AND revoke every active session, so the
     // user's refresh tokens die and — because access tokens are bound to a
     // session — their access tokens stop authorizing at once. Reactivation does
     // NOT un-revoke sessions, so a re-enabled user must authenticate again.
     const deactivating = changed.includes('isActive') && dto.isActive === false;
+
+    /*
+     * A changed login contact ends the target's sessions too.
+     *
+     * The identifier they authenticate with just became a different one. If the
+     * change was made because an account was compromised — the ordinary reason
+     * anybody edits a login contact in a hurry — leaving the old sessions alive
+     * would leave the attacker signed in, and the fix would have achieved
+     * nothing. Their next sign-in uses the new contact.
+     */
+    const revoking = deactivating || contactChanged;
     let sessionsRevoked = 0;
     try {
       const ops: Prisma.PrismaPromise<unknown>[] = [this.db.user.update({ where: { id }, data })];
-      if (deactivating) {
+      if (revoking) {
         ops.push(
           this.db.authSession.updateMany({
             where: { userId: id, revokedAt: null },
@@ -207,12 +293,17 @@ export class UserManagementService {
         );
       }
       const results = await this.db.$transaction(ops);
-      if (deactivating) sessionsRevoked = (results[1] as { count: number }).count;
+      if (revoking) sessionsRevoked = (results[1] as { count: number }).count;
     } catch (e) {
-      // The per-company unique index is the real guarantee; this turns the
-      // race-loser's 500 into a clear 409.
+      // The per-company unique indexes are the real guarantee; this turns the
+      // race-loser's 500 into a clear 409 naming the field that actually clashed.
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-        throw new ConflictException('Another user in this company already uses that phone number');
+        const target = String((e.meta as { target?: string })?.target ?? '');
+        throw new ConflictException(
+          target.includes('email')
+            ? 'Another user in this company already uses that email address'
+            : 'Another user in this company already uses that WhatsApp number',
+        );
       }
       throw e;
     }
@@ -386,22 +477,37 @@ export class UserManagementService {
     return row;
   }
 
-  /** '' clears the phone; anything else must normalize to E.164 or it is a 400. */
+  /**
+   * '' clears the phone; anything else must reach one canonical E.164 form.
+   *
+   * Uses the **same permissive parser the sign-in field uses**, so a shop can
+   * enrol a number the way it is printed on a card — `43 21 09 87` — and still
+   * sign in with it. Two different normalisers either side of the same column
+   * would mean a number enrolled one way could not be typed the other, which
+   * is precisely the failure a single canonical representation exists to stop.
+   */
   private resolvePhone(raw: string): string | null {
     if (raw === '') return null;
-    const e164 = toE164(raw);
-    if (!e164) {
-      throw new BadRequestException('Enter the phone in international format, e.g. +2223XXXXXX');
+    const canonical = normalisePhone(raw) ?? toE164(raw);
+    if (!canonical) {
+      throw new BadRequestException('Enter a WhatsApp number, e.g. 43 21 09 87 or +222 43210987');
     }
-    return e164;
+    return canonical;
   }
 
+  /**
+   * '' clears the email; anything else is stored lowercased.
+   *
+   * The column is `ai_ci`, so the database already compares case-insensitively
+   * — writing the lowered form only makes what is stored match what is
+   * compared, both at sign-in and against the per-company unique index.
+   */
   private resolveEmail(raw: string): string | null {
     if (raw === '') return null;
     if (!isValidEmail(raw)) {
       throw new BadRequestException('That does not look like an email address');
     }
-    return raw;
+    return normaliseEmail(raw);
   }
 
   private isSelf(id: Buffer): boolean {

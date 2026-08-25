@@ -145,3 +145,72 @@ describe('the field decides for itself which one it got', () => {
     expect(c.kind).toBe('unrecognised');
   });
 });
+
+describe('email as a sign-in identifier (CP1)', () => {
+  it('is recognised, and normalised to one canonical form', () => {
+    expect(classifyIdentifier('owner@shop.mr')).toEqual({ kind: 'email', value: 'owner@shop.mr' });
+    expect(classifyIdentifier('  Owner@Shop.MR  ')).toEqual({
+      kind: 'email',
+      value: 'owner@shop.mr',
+    });
+  });
+
+  it('case does not create a second account', () => {
+    /*
+      The column is utf8mb4_0900_ai_ci, so MySQL already treats these as one
+      row for both the unique index and the lookup. Lowercasing on the way in
+      only makes what is stored match what is compared.
+    */
+    expect(classifyIdentifier('ALI@shop.mr').value).toBe(classifyIdentifier('ali@SHOP.mr').value);
+  });
+
+  it('an @ is never fed to the phone normaliser', () => {
+    // Otherwise an address would be mangled into a "number" and then fail to
+    // match anything, with no way for the person typing it to understand why.
+    expect(classifyIdentifier('not an email@').kind).toBe('unrecognised');
+    expect(classifyIdentifier('@shop.mr').kind).toBe('unrecognised');
+    expect(classifyIdentifier('a@b').kind).toBe('unrecognised');
+  });
+
+  it('accepts addresses that are legal but unusual', () => {
+    // Refusing a real address is a support call; a typo is caught immediately
+    // by the sign-in simply failing.
+    expect(classifyIdentifier("o'brien+till@shop.co.mr").kind).toBe('email');
+    expect(classifyIdentifier('a.b_c-d@sub.domain.mr').kind).toBe('email');
+  });
+
+  it('refuses an address longer than the column', () => {
+    expect(classifyIdentifier('a'.repeat(160) + '@shop.mr').kind).toBe('unrecognised');
+  });
+});
+
+describe('a WhatsApp number is a phone identifier and nothing more (CP1)', () => {
+  it('accepts the spellings a shop actually writes', () => {
+    for (const raw of ['43210987', '43 21 09 87', '43-21-09-87', '+222 43210987', '+22243210987']) {
+      expect(classifyIdentifier(raw)).toEqual({ kind: 'phone', value: '+22243210987' });
+    }
+  });
+
+  it('the label claims nothing about WhatsApp', () => {
+    /*
+      Nothing here proves the number is registered with WhatsApp, reachable, or
+      verified — no verification service exists. "WhatsApp number" is what a
+      shop calls the number they are reachable on; it is a user-facing
+      convention, not an assertion the product can back.
+    */
+    const classified = classifyIdentifier('43210987');
+    expect(classified.kind).toBe('phone');
+    expect(Object.keys(classified)).toEqual(['kind', 'value']);
+  });
+});
+
+describe('the personal ID is the transitional path only (CP1)', () => {
+  it('is still accepted, so the contactless accounts are not locked out', () => {
+    expect(classifyIdentifier('U-R6H5NWRY').kind).toBe('personal_id');
+  });
+
+  it('and is never produced from an email or a phone', () => {
+    expect(classifyIdentifier('owner@shop.mr').kind).not.toBe('personal_id');
+    expect(classifyIdentifier('43210987').kind).not.toBe('personal_id');
+  });
+});

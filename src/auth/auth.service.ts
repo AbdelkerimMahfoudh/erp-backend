@@ -66,14 +66,21 @@ export class AuthService {
 
   async login(dto: LoginDto, meta: { ip?: string; userAgent?: string }): Promise<LoginResult> {
     /*
-     * Tenant resolution from the CREDENTIAL, not from the client (CP3).
+     * Tenant resolution from the CREDENTIAL, not from the client.
      *
      * The caller no longer names a company. They type one identifier — their
-     * phone or their personal ID — and the server works out who that is and
-     * which company they belong to. Nothing about the tenant is trusted from
-     * an unauthenticated request, which is strictly stronger than the old
-     * arrangement where a Store ID selected the company before any credential
-     * had been checked.
+     * email address or their WhatsApp number — and the server works out who
+     * that is and which company they belong to. Nothing about the tenant is
+     * trusted from an unauthenticated request, which is strictly stronger than
+     * the old arrangement where a Store ID selected the company before any
+     * credential had been checked.
+     *
+     * A generated personal ID is still accepted here, and deliberately is not
+     * offered anywhere in the sign-in UI. It is the **transitional legacy
+     * path**: when email/WhatsApp sign-in landed, every active user had
+     * neither contact on file, so refusing it would have locked all of them
+     * out. It is removed once those accounts carry a real contact — see
+     * `docs/36`. Nothing else about the login differs between the three kinds.
      *
      * Non-enumerating and timing-even: an unrecognised identifier, a real one
      * with the wrong password, and a disabled account all produce the SAME
@@ -88,10 +95,10 @@ export class AuthService {
         : await this.users.findCandidatesForAuth(identifier.kind, identifier.value);
 
     /*
-     * A phone is unique only within a company, so the same number may belong
-     * to a person at two shops. Each candidate is checked, and the password
-     * decides — no company name is read, let alone returned, before one has
-     * matched.
+     * A contact is unique only within a company, so the same email address or
+     * the same number may belong to a person at two shops. Each candidate is
+     * checked, and the password decides — no company name is read, let alone
+     * returned, before one has matched.
      */
     const matches: typeof candidates = [];
     for (const candidate of candidates) {

@@ -430,8 +430,11 @@ model User {
   /// changes. Never set it to fake "verified" — there is no verification
   /// mechanism in Stage 1, so this stays null until Stage 4 delivers OTP.
   phoneVerifiedAt DateTime? @map("phone_verified_at") @db.DateTime(6)
-  /// Optional recovery address. Not unique in Stage 1 (docs/23 §4 enforces
-  /// uniqueness only on `phone`); email uniqueness is deferred.
+  /// A sign-in identifier, not just recovery, as of `0055`. Unique per company
+  /// — the same rule `phone` already had — so one address used at two shops
+  /// still reaches the password-first account chooser rather than colliding.
+  /// Stored lowercased; the column is `ai_ci`, so comparison is already case-
+  /// and accent-insensitive and matches the index exactly. NULLs coexist.
   email           String?   @db.VarChar(160)
   /// Set only by a real verification event, and cleared whenever `email` changes.
   emailVerifiedAt DateTime? @map("email_verified_at") @db.DateTime(6)
@@ -484,6 +487,7 @@ model User {
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
+  @@unique([companyId, email], map: "ux_users_company_email") // 0055: email is a login identifier; same per-company rule as phone
   @@map("users")
   settlementsReported  SupplierSettlement[] @relation("SettlementReportedBy")
   settlementsConfirmed SupplierSettlement[] @relation("SettlementConfirmedBy")

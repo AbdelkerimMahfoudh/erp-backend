@@ -1,11 +1,17 @@
 import { randomInt } from 'node:crypto';
 
 /**
- * What somebody types into the one sign-in field (CP3).
+ * What somebody types into the one sign-in field.
  *
- * Either a phone number or a generated personal ID. Only one, never both, and
- * never a Store ID — a shopkeeper should not have to know their business's
+ * An **email address or a WhatsApp number** — one or the other, never both, and
+ * never a Store ID: a shopkeeper should not have to know their business's
  * identifier to reach their own till.
+ *
+ * "WhatsApp number" is what the app calls it, because that is what a shop calls
+ * the number they are reachable on. Technically it is a **normalised phone
+ * identifier and nothing more.** Nothing here proves the number is registered
+ * with WhatsApp, or reachable, or verified — no verification service exists
+ * yet. The label is a user-facing convention; it is not a claim.
  *
  * Pure and dependency-free so every rule here is testable without a database.
  */
@@ -95,7 +101,38 @@ export function normalisePhone(raw: string): string | null {
   return null;
 }
 
-export type IdentifierKind = 'personal_id' | 'phone' | 'unrecognised';
+/**
+ * One canonical email address.
+ *
+ * **The case policy is the database's, not an invention here.** `users.email`
+ * is `utf8mb4_0900_ai_ci` — case- and accent-insensitive — exactly like `login`
+ * and `personal_id` before it. So `Owner@Shop.com` and `owner@shop.com` are
+ * already the same row to MySQL, both for the unique index and for the lookup.
+ * Storing the lowercased form simply makes what is written match what is
+ * compared; it does not add a rule the database was not already applying.
+ *
+ * Strictly, RFC 5321 lets a local part be case-sensitive. No mail provider
+ * anybody uses actually treats it that way, and honouring it here would let
+ * `Ali@shop.com` and `ali@shop.com` become two accounts that cannot both
+ * sign in — a foot-gun in exchange for a technicality.
+ *
+ * Validation is deliberately permissive, matching `users/contact.util.ts`:
+ * refusing a legitimate but unusual address is a support call, while a typo is
+ * caught immediately by the sign-in failing.
+ */
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const EMAIL_MAX_LENGTH = 160;
+
+export function isEmail(raw: string): boolean {
+  const value = (raw ?? '').trim();
+  return value.length <= EMAIL_MAX_LENGTH && EMAIL_SHAPE.test(value);
+}
+
+export function normaliseEmail(raw: string): string {
+  return (raw ?? '').trim().toLowerCase();
+}
+
+export type IdentifierKind = 'email' | 'phone' | 'personal_id' | 'unrecognised';
 
 export interface ClassifiedIdentifier {
   kind: IdentifierKind;
@@ -106,14 +143,32 @@ export interface ClassifiedIdentifier {
 /**
  * Decide what somebody typed, without asking them.
  *
- * The personal ID is checked **first**. It starts with a letter, so no phone
- * normalisation can ever produce one, and testing it first means an ID is
- * never mangled by the phone rules — the failure the brief warns about, where
- * an arbitrary identifier is transformed as though it were a number.
+ * Order matters, and each step is chosen so an earlier rule can never mangle
+ * something meant for a later one:
+ *
+ *  1. **Email** — an `@` appears in no phone number and in no personal ID, so
+ *     anything containing one is an email attempt and is never fed to the
+ *     phone normaliser.
+ *  2. **Personal ID** — starts with a letter, so no phone normalisation can
+ *     produce one. Checked before phone for the same reason.
+ *  3. **Phone** — the permissive parser, so a number typed the way it is
+ *     printed on a card still resolves.
+ *
+ * The personal ID remains here **only as the transitional legacy path**. It is
+ * not offered by the sign-in UI and is not advertised; it exists because every
+ * active user at the time of this change had neither an email nor a phone, and
+ * removing it would have locked all of them out of their own shop. See
+ * `docs/36`. It comes out once those accounts carry a real contact.
  */
 export function classifyIdentifier(raw: string): ClassifiedIdentifier {
   const trimmed = (raw ?? '').trim();
   if (trimmed === '') return { kind: 'unrecognised', value: null };
+
+  if (trimmed.includes('@')) {
+    return isEmail(trimmed)
+      ? { kind: 'email', value: normaliseEmail(trimmed) }
+      : { kind: 'unrecognised', value: null };
+  }
 
   if (isPersonalId(trimmed)) {
     return { kind: 'personal_id', value: normalisePersonalId(trimmed) };

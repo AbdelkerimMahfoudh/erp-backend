@@ -56,4 +56,21 @@ export class UpdateUserDto {
   @Optional()
   @IsBoolean()
   isActive?: boolean;
+
+  /**
+   * The ACTOR's own password, required only when this request changes a login
+   * contact (email or phone).
+   *
+   * Not the target's: an Owner correcting an employee's number does not know
+   * that employee's password, and demanding it would push shops toward sharing
+   * passwords — the opposite of what this protects.
+   */
+  @ApiPropertyOptional({
+    maxLength: 200,
+    description: "Your own password. Required when changing a user's email or WhatsApp number.",
+  })
+  @Optional()
+  @IsString()
+  @MaxLength(200)
+  currentPassword?: string;
 }

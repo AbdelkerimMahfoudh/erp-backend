@@ -149,6 +149,25 @@ function makeService(
         const hit = users.find((u) => match(u, where ?? {}));
         return hit ? copy(hit) : null;
       }),
+      /*
+       * The actor's own row, read to confirm their password before a login
+       * contact may be changed.
+       *
+       * Falls back to a synthetic row when the acting user is not in the
+       * fixture. Most tests only seed the user they are editing, but the actor
+       * is authenticated by definition — a request reaches this service only
+       * after the guards have established who is making it — so "the actor
+       * does not exist" is not a state the real system can be in.
+       */
+      findUnique: jest.fn(async ({ where }: any) => {
+        const hit = users.find((u) => match(u, where ?? {}));
+        if (hit) return { ...copy(hit), passwordHash: 'hash-of-actor-password' };
+        const actor = opts.selfId ? uuidToBin(opts.selfId) : uuidToBin(OWNER_ID);
+        if (where?.id && Buffer.isBuffer(where.id) && where.id.equals(actor)) {
+          return { passwordHash: 'hash-of-actor-password' };
+        }
+        return null;
+      }),
       update: jest.fn(async ({ where, data }: any) => {
         const row = users.find((u) => match(u, where));
         if (!row) {
@@ -157,15 +176,22 @@ function makeService(
             clientVersion: 'test',
           });
         }
-        // Enforce the per-company UNIQUE(company_id, phone) index for real.
-        if (typeof data.phone === 'string' && data.phone !== null) {
+        // Enforce the per-company UNIQUE indexes for real — both of them, since
+        // `0055` made email a login identifier with the same rule as phone.
+        for (const field of ['phone', 'email'] as const) {
+          if (typeof data[field] !== 'string' || data[field] === null) continue;
           const clash = users.some(
-            (u) => !u.id.equals(row.id) && u.companyId.equals(row.companyId) && u.deletedAt === null && u.phone === data.phone,
+            (u) =>
+              !u.id.equals(row.id) &&
+              u.companyId.equals(row.companyId) &&
+              u.deletedAt === null &&
+              u[field] === data[field],
           );
           if (clash) {
             throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
               code: 'P2002',
               clientVersion: 'test',
+              meta: { target: `ux_users_company_${field}` },
             });
           }
         }
@@ -265,6 +291,14 @@ function makeService(
     // Seats are not what these tests are about: allow by default, and let
     // the seat-limit behaviour be pinned by its own test below.
     { maySeat: jest.fn(async () => opts.seats ?? { allowed: true, seatsUsed: 0, seatLimit: 99 }) } as never,
+    // Contact changes ask the actor to re-type their own password; these
+    // tests supply a hashing service that accepts the fixture password and
+    // refuses anything else, so the confirmation is exercised rather than
+    // stubbed away.
+    {
+      verify: jest.fn(async (_hash: string, plain: string) => plain === 'actor-password'),
+      verifyDummy: jest.fn(async () => false),
+    } as never,
   );
 
   return { service, db, users, sessions, audits, grantRows };
@@ -368,7 +402,7 @@ describe('editing contact details', () => {
     const u = user({ phone: null, phoneVerifiedAt: new Date() });
     const { service, users } = makeService({ users: [u] });
 
-    const view = await service.update(binToUuid(u.id), { phone: ' +222 31-23-45-67 ' });
+    const view = await service.update(binToUuid(u.id), { phone: ' +222 31-23-45-67 ' , currentPassword: 'actor-password' });
 
     expect(view.phone).toBe('+22231234567');
     expect(view.phoneVerifiedAt).toBeNull();
@@ -379,7 +413,7 @@ describe('editing contact details', () => {
     const u = user();
     const { service } = makeService({ users: [u] });
 
-    await expect(service.update(binToUuid(u.id), { phone: '12345' })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.update(binToUuid(u.id), { phone: '12345' , currentPassword: 'actor-password' })).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('refuses a phone already used by another user in the company (409)', async () => {
@@ -388,7 +422,7 @@ describe('editing contact details', () => {
     const { service } = makeService({ users: [taken, other] });
 
     await expect(
-      service.update(binToUuid(other.id), { phone: '+22231234567' }),
+      service.update(binToUuid(other.id), { phone: '+22231234567' , currentPassword: 'actor-password' }),
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
@@ -399,27 +433,55 @@ describe('editing contact details', () => {
     const mine = user({ login: 'mine' });
     const { service } = makeService({ users: [foreignSame, mine] });
 
-    const view = await service.update(binToUuid(mine.id), { phone: '+22231234567' });
+    const view = await service.update(binToUuid(mine.id), { phone: '+22231234567' , currentPassword: 'actor-password' });
     expect(view.phone).toBe('+22231234567');
   });
 
   it('clears a phone with an empty string and drops the verified mark', async () => {
-    const u = user({ phone: '+22231234567', phoneVerifiedAt: new Date() });
+    // They keep an email, so removing the number still leaves them a way in.
+    const u = user({ phone: '+22231234567', phoneVerifiedAt: new Date(), email: 'seller@shop.mr' });
     const { service, users } = makeService({ users: [u] });
 
-    const view = await service.update(binToUuid(u.id), { phone: '' });
+    const view = await service.update(binToUuid(u.id), { phone: '' , currentPassword: 'actor-password' });
 
     expect(view.phone).toBeNull();
     expect(users[0].phoneVerifiedAt).toBeNull();
+  });
+
+  it('refuses to remove somebody’s last way of signing in', async () => {
+    /*
+      The whole point of the contact is that it is the credential. Clearing the
+      only one leaves an account that exists, is active, and cannot reach the
+      sign-in screen — the exact state the contactless legacy users are already
+      stuck in, which nobody should be able to create more of.
+    */
+    const u = user({ phone: '+22231234567', email: null });
+    const { service } = makeService({ users: [u] });
+
+    await expect(
+      service.update(binToUuid(u.id), { phone: '', currentPassword: 'actor-password' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('but a user who never had a contact can still be edited', async () => {
+    /*
+      The guard is conditional on having one NOW, deliberately. Applying it to
+      the accounts that pre-date email/WhatsApp sign-in would block renaming or
+      deactivating exactly the people whose records most need attention.
+    */
+    const u = user({ phone: null, email: null });
+    const { service } = makeService({ users: [u] });
+
+    await expect(service.update(binToUuid(u.id), { name: 'Renamed' })).resolves.toBeDefined();
   });
 
   it('validates email and resets its verified mark on change', async () => {
     const u = user({ email: 'old@shop.mr', emailVerifiedAt: new Date() });
     const { service, users } = makeService({ users: [u] });
 
-    await expect(service.update(binToUuid(u.id), { email: 'nope' })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.update(binToUuid(u.id), { email: 'nope' , currentPassword: 'actor-password' })).rejects.toBeInstanceOf(BadRequestException);
 
-    const view = await service.update(binToUuid(u.id), { email: 'new@shop.mr' });
+    const view = await service.update(binToUuid(u.id), { email: 'new@shop.mr' , currentPassword: 'actor-password' });
     expect(view.email).toBe('new@shop.mr');
     expect(users[0].emailVerifiedAt).toBeNull();
   });
@@ -527,7 +589,7 @@ describe('audit safety', () => {
     const u = user({ phone: null, email: null });
     const { service, audits } = makeService({ users: [u] });
 
-    await service.update(binToUuid(u.id), { phone: '+22231234567', email: 'a@shop.mr' });
+    await service.update(binToUuid(u.id), { phone: '+22231234567', email: 'a@shop.mr' , currentPassword: 'actor-password' });
 
     const entry = audits.find((a) => a.entityType === 'User');
     expect(entry.after).toMatchObject({ phone: '+22231234567', email: 'a@shop.mr', phoneVerifiedAt: null });
@@ -632,11 +694,107 @@ describe('contact normalization (F1.1)', () => {
     const u = user({ phone: '+22231234567', email: 'a@shop.mr', phoneVerifiedAt, emailVerifiedAt });
     const { service, users } = makeService({ users: [u] });
 
-    await service.update(binToUuid(u.id), { phone: '+22239998877' });
+    await service.update(binToUuid(u.id), { phone: '+22239998877' , currentPassword: 'actor-password' });
     expect(users[0].phoneVerifiedAt).toBeNull(); // phone changed → reset
     expect(users[0].emailVerifiedAt).toBe(emailVerifiedAt); // email untouched
 
-    await service.update(binToUuid(u.id), { email: 'b@shop.mr' });
+    await service.update(binToUuid(u.id), { email: 'b@shop.mr' , currentPassword: 'actor-password' });
     expect(users[0].emailVerifiedAt).toBeNull(); // email changed → reset
+  });
+});
+
+describe('changing a login contact is a security event (CP1)', () => {
+  it('needs the actor to re-type their own password', async () => {
+    /*
+      A session proves a device was authenticated once. It says nothing about
+      who is holding it now, and a till left unlocked on a shop counter is the
+      ordinary case, not the exotic one.
+    */
+    const u = user({ email: 'old@shop.mr' });
+    const { service } = makeService({ users: [u] });
+
+    await expect(service.update(binToUuid(u.id), { email: 'new@shop.mr' })).rejects.toMatchObject({
+      response: { code: 'password_confirmation_required' },
+    });
+  });
+
+  it('and refuses a wrong one', async () => {
+    const u = user({ email: 'old@shop.mr' });
+    const { service } = makeService({ users: [u] });
+
+    await expect(
+      service.update(binToUuid(u.id), { email: 'new@shop.mr', currentPassword: 'not-it' }),
+    ).rejects.toMatchObject({ response: { code: 'password_confirmation_failed' } });
+  });
+
+  it('the ACTOR’s password, not the target’s', async () => {
+    /*
+      An Owner correcting an employee's number does not know that employee's
+      password. Demanding it would make the feature unusable and push shops
+      toward sharing passwords — the opposite of what this protects.
+    */
+    const target = user({ email: 'old@shop.mr', passwordHash: 'someone-elses-hash' });
+    const { service } = makeService({ users: [target] });
+
+    await expect(
+      service.update(binToUuid(target.id), { email: 'new@shop.mr', currentPassword: 'actor-password' }),
+    ).resolves.toBeDefined();
+  });
+
+  it('a name change still needs no password', async () => {
+    const u = user();
+    const { service } = makeService({ users: [u] });
+    await expect(service.update(binToUuid(u.id), { name: 'Renamed' })).resolves.toBeDefined();
+  });
+
+  it('ends the target’s sessions, because their credential just changed', async () => {
+    /*
+      If the change was made because an account was compromised — the ordinary
+      reason anybody edits a login contact in a hurry — leaving the old
+      sessions alive would leave the attacker signed in and the fix would have
+      achieved nothing.
+    */
+    const u = user({ email: 'old@shop.mr' });
+    const sessions = [
+      { id: newUuidV7Bin(), companyId: COMPANY, userId: u.id, revokedAt: null },
+      { id: newUuidV7Bin(), companyId: COMPANY, userId: u.id, revokedAt: null },
+    ];
+    const { service } = makeService({ users: [u], sessions });
+
+    await service.update(binToUuid(u.id), { email: 'new@shop.mr', currentPassword: 'actor-password' });
+
+    expect(sessions.every((s) => s.revokedAt !== null)).toBe(true);
+  });
+
+  it('a duplicate email is refused by name, not as a phone clash', async () => {
+    const taken = user({ email: 'taken@shop.mr' });
+    const mine = user({ email: 'mine@shop.mr' });
+    const { service } = makeService({ users: [taken, mine] });
+
+    await expect(
+      service.update(binToUuid(mine.id), { email: 'taken@shop.mr', currentPassword: 'actor-password' }),
+    ).rejects.toThrow(/email address/);
+  });
+
+  it('an email is stored lowercased, matching how it is compared', async () => {
+    // The column is ai_ci, so the database already ignores case. Writing the
+    // lowered form only makes what is stored match what is compared.
+    const u = user();
+    const { service, users } = makeService({ users: [u] });
+
+    await service.update(binToUuid(u.id), { email: 'Owner@Shop.MR', currentPassword: 'actor-password' });
+
+    expect(users[0].email).toBe('owner@shop.mr');
+  });
+
+  it('a WhatsApp number may be typed the way it is printed', async () => {
+    // Enrolment and sign-in must accept the same spellings, or a number
+    // enrolled one way could not be typed the other.
+    const u = user();
+    const { service, users } = makeService({ users: [u] });
+
+    await service.update(binToUuid(u.id), { phone: '43 21 09 87', currentPassword: 'actor-password' });
+
+    expect(users[0].phone).toBe('+22243210987');
   });
 });
