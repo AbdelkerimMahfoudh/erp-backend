@@ -11,7 +11,28 @@
  * a subscription lapses is whether the server accepts writes.
  */
 
-export type EntitlementState = 'active' | 'grace' | 'expired' | 'complimentary';
+/**
+ * The lifecycle position a platform administrator has PUT this subscription in.
+ *
+ * Distinct from {@link EntitlementState}, which is mostly derived from dates.
+ * These are decisions somebody made, and no arithmetic can reproduce them: a
+ * suspension is not a date passing, and a business that has never been
+ * activated is not the same thing as one whose period ran out.
+ *
+ * `activated` means "the dates decide" — which is exactly how every
+ * subscription behaved before this existed, so every pre-existing row carries
+ * it and nothing about their behaviour changes.
+ */
+export type SubscriptionStatus = 'pending_activation' | 'activated' | 'suspended' | 'cancelled';
+
+export type EntitlementState =
+  | 'pending'
+  | 'active'
+  | 'grace'
+  | 'expired'
+  | 'complimentary'
+  | 'suspended'
+  | 'cancelled';
 
 /** Exactly 72 hours. Derived from the period, never stored beside it. */
 export const GRACE_HOURS = 72;
@@ -27,6 +48,11 @@ export interface SubscriptionRecord {
   currentPeriodEnd: Date | null;
   isComplimentary: boolean;
   complimentaryUntil: Date | null;
+  /**
+   * Optional so that callers written before the lifecycle existed keep
+   * compiling and keep behaving identically — absent reads as `activated`.
+   */
+  status?: SubscriptionStatus;
 }
 
 export interface SeatUsage {
@@ -38,12 +64,46 @@ export interface SeatUsage {
 /**
  * The state, from the server's clock.
  *
- * Complimentary is checked first and independently: a platform grant is a
- * decision about this shop that outranks whatever the paid period says, and
- * a grant that has run out falls back to the paid period rather than to
+ * Order of precedence: an administrator's explicit decision, then a
+ * complimentary grant, then the paid period.
+ *
+ * Complimentary is checked before the dates and independently: a platform grant
+ * is a decision about this shop that outranks whatever the paid period says,
+ * and a grant that has run out falls back to the paid period rather than to
  * `expired`, because the two are separate facts.
  */
 export function stateOf(sub: SubscriptionRecord, now: Date): EntitlementState {
+  /*
+   * A deliberate decision outranks the calendar.
+   *
+   * Checked before everything, including a complimentary grant: suspending a
+   * business that also holds a grant must actually suspend it, or suspension
+   * would be unreliable in exactly the case somebody reaches for it.
+   *
+   * `pending_activation` is checked here rather than derived, because the
+   * alternative is telling a shop that registered five minutes ago that its
+   * subscription has **expired** — which is both confusing and untrue.
+   */
+  const status = sub.status ?? 'activated';
+  if (status === 'cancelled') return 'cancelled';
+  if (status === 'suspended') return 'suspended';
+  if (status === 'pending_activation') return 'pending';
+
+  /*
+   * A value that is none of the four.
+   *
+   * Not hypothetical: this MySQL server runs with an EMPTY `sql_mode`, so a
+   * bad ENUM written outside Prisma is silently coerced to `''` rather than
+   * refused. Falling through to the date logic would make a corrupted row
+   * behave as `activated` — the most permissive state there is, reached by
+   * accident.
+   *
+   * `expired` instead: writes are refused, and the shop can still read
+   * everything it owns. Not silently permissive, and nobody is locked out of
+   * their own records while somebody works out what happened.
+   */
+  if (status !== 'activated') return 'expired';
+
   if (sub.isComplimentary && sub.complimentaryUntil && sub.complimentaryUntil.getTime() > now.getTime()) {
     return 'complimentary';
   }
@@ -65,18 +125,34 @@ export function stateOf(sub: SubscriptionRecord, now: Date): EntitlementState {
  * The warning is loud; the till keeps working.
  */
 export function canWrite(state: EntitlementState): boolean {
-  return state !== 'expired';
+  return state === 'active' || state === 'grace' || state === 'complimentary';
 }
 
 /**
- * Reading is never blocked.
+ * Whether the operational app may be read at all.
  *
- * A shop locked out of yesterday's sales reaches for the notebook immediately,
- * and would be right to. Expiry stops new business truth being written; it never
- * hides or deletes what the shop already owns.
+ * **Expiry never hides anything, and that rule is unchanged.** A shop locked
+ * out of yesterday's sales reaches for the notebook immediately, and would be
+ * right to. Expiry stops new business truth being written; it never takes away
+ * what the shop already owns.
+ *
+ * The two new states are genuinely different, and the difference is worth
+ * stating because it looks like an inconsistency until you say it out loud:
+ *
+ *  - **`pending`** — a business that has never been activated. There is no
+ *    operational history to withhold; the shop has never sold anything. Opening
+ *    the till to it would be handing out the product before activation, which
+ *    is the whole point of there being no free trial.
+ *  - **`suspended`** / **`cancelled`** — somebody deliberately did this, with a
+ *    recorded reason. Expiry is administrative drift, and treating a decision
+ *    the same as drift would make suspension useless in exactly the case
+ *    anybody reaches for it.
+ *
+ * In every one of those states the Owner keeps the customer portal, so nobody
+ * is ever locked out of finding out *why* — see `docs/37`.
  */
-export function canRead(): boolean {
-  return true;
+export function canRead(state: EntitlementState = 'active'): boolean {
+  return state !== 'pending' && state !== 'suspended' && state !== 'cancelled';
 }
 
 export function graceEndsAt(sub: SubscriptionRecord): Date | null {
@@ -159,6 +235,8 @@ export interface Entitlement {
   canRead: boolean;
   canWrite: boolean;
   isComplimentary: boolean;
+  /** The lifecycle position an administrator put this in. */
+  status: SubscriptionStatus;
   /** When the server computed this, so a cached copy can be shown as stale. */
   calculatedAt: string;
 }
@@ -191,9 +269,10 @@ export function buildEntitlement(
     seatLimit: seats.seatLimit,
     seatsUsed: seats.seatsUsed,
     overLimit: seats.overLimit,
-    canRead: canRead(),
+    canRead: canRead(state),
     canWrite: canWrite(state),
     isComplimentary: state === 'complimentary',
+    status: sub.status ?? 'activated',
     calculatedAt: now.toISOString(),
   };
 }

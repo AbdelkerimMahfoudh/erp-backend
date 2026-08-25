@@ -48,6 +48,33 @@ enum RoleKey {
   warehouse_employee
 }
 
+/// Where a subscription sits in its lifecycle (0056).
+enum SubscriptionStatus {
+  /// Registered, never activated. No operational access, and no free trial.
+  pending_activation
+  /// Normal. The dates decide whether it is active, in grace, or expired.
+  activated
+  /// Deliberately stopped by the platform, with a recorded reason.
+  suspended
+  /// Ended. History is kept; nothing is deleted.
+  cancelled
+}
+
+/// How money actually arrived. No provider is integrated in this checkpoint,
+/// so nothing here may claim one confirmed anything.
+enum SubscriptionPaymentChannel {
+  /// Cash or a transfer somebody recorded by hand.
+  manual
+  bank_transfer
+  mobile_money
+}
+
+/// The contact channel a verification code was sent on.
+enum ContactChannel {
+  email
+  phone
+}
+
 enum BranchType {
   store
   warehouse
@@ -308,8 +335,9 @@ model Company {
   @@map("companies")
   supplierSettlements SupplierSettlement[]
   supplierSettlementAllocations SupplierSettlementAllocation[]
-  subscription       Subscription?
-  subscriptionEvents SubscriptionEvent[]
+  subscription        Subscription?
+  subscriptionEvents  SubscriptionEvent[]
+  subscriptionPayments SubscriptionPayment[]
 }
 
 model Branch {
@@ -3497,6 +3525,15 @@ model Subscription {
   id        Bytes @id @db.Binary(16)
   companyId Bytes @unique(map: "ux_subscriptions_company") @map("company_id") @db.Binary(16)
 
+  /// Where an administrator has PUT this subscription (0056).
+  ///
+  /// Distinct from the derived entitlement state: a suspension is not a date
+  /// passing, and a business that has never been activated is not one whose
+  /// period ran out. `activated` means "the dates decide", which is how every
+  /// row behaved before this column existed — so that is the default and no
+  /// existing subscription changes behaviour.
+  status SubscriptionStatus @default(activated)
+
   /// Branches being paid for. Included seats derive from this.
   subscribedBranchCount Int @default(1) @map("subscribed_branch_count") @db.UnsignedInt
   /// Bought beyond the included pool. Not prorated.
@@ -3515,8 +3552,9 @@ model Subscription {
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
   version   Int      @default(0) @db.UnsignedInt
 
-  company Company                @relation(fields: [companyId], references: [id])
-  events  SubscriptionEvent[]
+  company  Company               @relation(fields: [companyId], references: [id])
+  events   SubscriptionEvent[]
+  payments SubscriptionPayment[]
 
   @@map("subscriptions")
 }
@@ -3546,4 +3584,207 @@ model SubscriptionEvent {
 
   @@index([companyId, createdAt], map: "ix_subevents_company")
   @@map("subscription_events")
+}
+
+
+// ───────────────────────────────────────────────────────────────────────────
+// Platform control (0056)
+//
+// Everything below belongs to US, not to a shop. None of it is tenant-scoped,
+// none of it is reachable from a store role, and the tenant Prisma extension
+// never touches it.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A person who administers the PLATFORM. Not a shop's Owner.
+///
+/// Deliberately its own table rather than a `RoleKey` on `users`: a tenant role
+/// lives inside a company, and "administrator" as a company role would mean a
+/// shop could mint one. Platform administrators belong to no company at all,
+/// and there is no path from any store role to this table.
+///
+/// Never created by public registration. Bootstrapped by CLI only.
+model PlatformAdmin {
+  id    Bytes  @id @db.Binary(16)
+  /// The only identifier. Lowercased on write; the column is `ai_ci`, so
+  /// comparison already ignores case exactly as it does for tenant users.
+  email String @unique(map: "ux_platform_admins_email") @db.VarChar(160)
+  name  String @db.VarChar(160)
+
+  passwordHash String @map("password_hash") @db.VarChar(255)
+
+  isActive    Boolean   @default(true) @map("is_active")
+  lastLoginAt DateTime? @map("last_login_at") @db.DateTime(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt   DateTime? @map("deleted_at") @db.DateTime(6)
+
+  sessions PlatformAdminSession[]
+  events   PlatformAuditEvent[]
+
+  @@map("platform_admins")
+}
+
+/// A signed-in administrator session, revocable one by one.
+///
+/// Separate from `auth_sessions` on purpose. A shared table would mean one bug
+/// in tenant session lookup could return a platform session, and that is not a
+/// risk worth taking to save a table.
+model PlatformAdminSession {
+  id      Bytes @id @db.Binary(16)
+  adminId Bytes @map("admin_id") @db.Binary(16)
+
+  /// Only ever the hash. The token itself exists in the response once.
+  refreshTokenHash String @map("refresh_token_hash") @db.VarChar(255)
+
+  ip        String?   @db.VarChar(45)
+  userAgent String?   @map("user_agent") @db.VarChar(255)
+  expiresAt DateTime  @map("expires_at") @db.DateTime(6)
+  revokedAt DateTime? @map("revoked_at") @db.DateTime(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  admin PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([expiresAt])
+  @@map("platform_admin_sessions")
+}
+
+/// Every platform mutation, kept forever.
+///
+/// Append-only, enforced by a trigger — the same protection `subscription_events`
+/// already has. "Who suspended this shop, and why" is precisely the question
+/// somebody asks months later, and an answer that can be quietly edited is
+/// worth nothing.
+///
+/// `beforeJson`/`afterJson` hold the relevant state either side. They must
+/// never contain a password, a token or a verification code.
+model PlatformAuditEvent {
+  id      Bytes  @id @db.Binary(16)
+  adminId Bytes? @map("admin_id") @db.Binary(16)
+  /// Kept as text as well, so the record still reads after an admin row is gone.
+  actor   String @db.VarChar(160)
+
+  action     String  @db.VarChar(60)
+  targetType String  @map("target_type") @db.VarChar(40)
+  targetId   Bytes?  @map("target_id") @db.Binary(16)
+  /// Human-readable target, so the log is legible without joining.
+  targetLabel String? @map("target_label") @db.VarChar(200)
+
+  /// Required for anything high-impact. Enforced in the service, not the column,
+  /// because a few low-impact actions legitimately have nothing to say.
+  reason String? @db.VarChar(500)
+
+  beforeJson Json? @map("before_state") @db.Json
+  afterJson  Json? @map("after_state") @db.Json
+
+  ip        String?  @db.VarChar(45)
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  admin PlatformAdmin? @relation(fields: [adminId], references: [id])
+
+  @@index([createdAt], map: "ix_platform_audit_created")
+  @@index([targetType, targetId], map: "ix_platform_audit_target")
+  @@index([action], map: "ix_platform_audit_action")
+  @@map("platform_audit_events")
+}
+
+/// A real payment for a SUBSCRIPTION, recorded by hand.
+///
+/// Not `payments` — that table is a till payment against a sale and carries a
+/// `sale_id`. This is money a shop paid US.
+///
+/// **Nothing here is provider-verified.** No payment provider is integrated in
+/// this checkpoint, so `confirmedBy` means "a named administrator says they saw
+/// this money", never "Bankily confirmed it". The distinction is the whole
+/// reason an administrative grant is a different table.
+///
+/// Append-only. A correction is a compensating row, never an edit.
+model SubscriptionPayment {
+  id             Bytes @id @db.Binary(16)
+  companyId      Bytes @map("company_id") @db.Binary(16)
+  subscriptionId Bytes @map("subscription_id") @db.Binary(16)
+
+  /// Always MRU in this product. Stored anyway, so a future currency is a
+  /// migration of meaning rather than of every historical row.
+  amount   Decimal @db.Decimal(14, 2)
+  currency String  @default("MRU") @db.Char(3)
+
+  paidAt  DateTime                   @map("paid_at") @db.DateTime(6)
+  channel SubscriptionPaymentChannel @default(manual)
+
+  /// The shop's own reference — a transfer id, a receipt number.
+  reference String? @db.VarChar(120)
+  note      String? @db.VarChar(500)
+
+  /// Who typed it in, and who says the money is real. Often the same person;
+  /// kept apart so a two-person process is possible without a migration.
+  recordedBy    String    @map("recorded_by") @db.VarChar(160)
+  confirmedBy   String?   @map("confirmed_by") @db.VarChar(160)
+  confirmedAt   DateTime? @map("confirmed_at") @db.DateTime(6)
+
+  /// Set when this row exists to cancel out an earlier one.
+  reversesId Bytes? @map("reverses_id") @db.Binary(16)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  company      Company      @relation(fields: [companyId], references: [id])
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([companyId, paidAt], map: "ix_subpayments_company")
+  @@map("subscription_payments")
+}
+
+/// One registration attempt, so a retry cannot create a second business.
+///
+/// The client sends an idempotency key; the winner of the unique index owns the
+/// company it created, and every later retry is handed the same answer. Without
+/// this a flaky connection during sign-up produces two companies, two Owners
+/// and two branches — and the shopkeeper cannot tell which one is theirs.
+model RegistrationAttempt {
+  id             Bytes  @id @db.Binary(16)
+  idempotencyKey String @unique(map: "ux_registration_idem") @map("idempotency_key") @db.VarChar(80)
+
+  /// Null only while the transaction that creates it is still open.
+  companyId Bytes? @map("company_id") @db.Binary(16)
+
+  /// What was asked for, for the pending-registrations queue. Never a password.
+  businessName String  @map("business_name") @db.VarChar(160)
+  ownerName    String  @map("owner_name") @db.VarChar(160)
+  city         String? @db.VarChar(120)
+  email        String? @db.VarChar(160)
+  phone        String? @db.VarChar(24)
+  language     String  @default("en") @db.VarChar(5)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  @@index([createdAt], map: "ix_registration_created")
+  @@map("registration_attempts")
+}
+
+/// A code sent to prove somebody holds a contact.
+///
+/// **This is not two-step login verification.** It answers "is this your email
+/// address" once, at registration. Optional login 2FA is a separate feature
+/// that does not exist.
+///
+/// Only the hash is stored, exactly like a refresh token: a leaked database
+/// must not hand somebody a working code.
+model ContactVerification {
+  id Bytes @id @db.Binary(16)
+
+  channel     ContactChannel
+  /// The normalised destination — a lowercased email, or an E.164 number.
+  destination String         @db.VarChar(160)
+
+  codeHash  String   @map("code_hash") @db.VarChar(255)
+  expiresAt DateTime @map("expires_at") @db.DateTime(6)
+
+  /// Wrong guesses. A code with too many is dead, whatever it is.
+  attempts Int @default(0) @db.UnsignedInt
+
+  consumedAt DateTime? @map("consumed_at") @db.DateTime(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  @@index([destination, createdAt], map: "ix_contact_verif_dest")
+  @@map("contact_verifications")
 }
