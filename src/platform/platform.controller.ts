@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -40,6 +41,7 @@ import { PlatformAuditService } from './platform-audit.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
 import { BillingService } from '../billing/billing.service';
+import { ContactVerificationService } from './contact-verification.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 
@@ -125,6 +127,16 @@ class PaymentDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
+class VerifyStartDto {
+  @IsString() @MinLength(3) @MaxLength(160) destination: string;
+  @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
+}
+
+class VerifyConfirmDto {
+  @IsString() @MinLength(3) @MaxLength(160) destination: string;
+  @IsString() @MinLength(1) @MaxLength(12) code: string;
+}
+
 class PlanVersionDto {
   @IsInt() @Min(0) branchMonthly: number;
   @IsInt() @Min(0) includedStaffPerBranch: number;
@@ -150,6 +162,7 @@ export class PlatformController {
     private readonly lifecycle: SubscriptionLifecycleService,
     private readonly registration: RegistrationService,
     private readonly billing: BillingService,
+    private readonly verification: ContactVerificationService,
     private readonly entitlement: EntitlementService,
     private readonly tenant: TenantContext,
   ) {}
@@ -172,6 +185,53 @@ export class PlatformController {
       password: dto.password,
       language: dto.language,
     });
+  }
+
+  // ── Contact verification ─────────────────────────────────────────────────
+
+  /**
+   * Send a code to a contact.
+   *
+   * Rate-limited and public, because it necessarily runs before any account
+   * exists. The response says what actually HAPPENED — sent, or queued in the
+   * development outbox — and never pretends a message went out when no
+   * provider sent one.
+   */
+  @Public()
+  @Throttle(PUBLIC_THROTTLE)
+  @Post('verify-contact/start')
+  @HttpCode(HttpStatus.OK)
+  async verifyStart(@Body() dto: VerifyStartDto) {
+    return this.verification.start(dto.destination, dto.language);
+  }
+
+  @Public()
+  @Throttle(PUBLIC_THROTTLE)
+  @Post('verify-contact/confirm')
+  @HttpCode(HttpStatus.OK)
+  async verifyConfirm(@Body() dto: VerifyConfirmDto) {
+    const ok = await this.verification.confirm(dto.destination, dto.code);
+    if (!ok) {
+      // Generic: an expired code, a wrong one and an unknown destination all
+      // answer the same way, so this cannot be used to probe addresses.
+      throw new BadRequestException('That code did not match.');
+    }
+    return { verified: true };
+  }
+
+  /**
+   * What a business would pay, as it currently stands.
+   *
+   * Public and read-only. It returns a PRICE for a company id somebody
+   * already holds — no identity, no contact, no history — so a shop can see
+   * its own quote immediately after registering, before it can sign in.
+   */
+  @Public()
+  @Throttle(PUBLIC_THROTTLE)
+  @Get('quote/:id')
+  async quote(@Param('id') id: string) {
+    if (!isUuid(id)) throw new BadRequestException('Unknown business');
+    return this.billing.pricingFor(uuidToBin(id));
   }
 
   // ── Administrator sign-in ────────────────────────────────────────────────

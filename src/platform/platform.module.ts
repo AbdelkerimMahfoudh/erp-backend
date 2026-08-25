@@ -8,6 +8,7 @@ import { PlatformAuditService } from './platform-audit.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
 import { BillingService } from '../billing/billing.service';
+import { ContactVerificationService } from './contact-verification.service';
 import { EntitlementModule } from '../entitlement/entitlement.module';
 import {
   ContactDeliveryProvider,
@@ -38,6 +39,7 @@ import {
     SubscriptionLifecycleService,
     RegistrationService,
     BillingService,
+    ContactVerificationService,
     {
       /*
        * Which delivery provider is real is an environment decision, and the
@@ -47,12 +49,21 @@ import {
        * and strand all of them.
        */
       provide: ContactDeliveryProvider,
-      useClass:
+      /*
+       * useExisting, NOT useClass.
+       *
+       * useClass makes Nest build a SECOND instance, so the outbox that
+       * stored a code and the outbox something later reads are different
+       * objects — and the code is silently never found. Aliasing the single
+       * registered instance is what makes the development flow work at all.
+       */
+      useExisting:
         process.env.NODE_ENV === 'production'
           ? UnconfiguredDeliveryProvider
           : OutboxDeliveryProvider,
     },
     OutboxDeliveryProvider,
+    UnconfiguredDeliveryProvider,
   ],
   exports: [PlatformAdminService, SubscriptionLifecycleService, RegistrationService, BillingService],
 })
