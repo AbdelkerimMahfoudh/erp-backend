@@ -48,6 +48,26 @@ enum RoleKey {
   warehouse_employee
 }
 
+/// What happened to a subscription (0057).
+///
+/// Declared here because it was ALREADY an ENUM in the database while the
+/// schema called it a String. Nothing reconciled the two, so a new kind was
+/// accepted by Prisma and silently coerced to an empty string by MySQL.
+enum SubscriptionEventKind {
+  created
+  extended
+  branches_changed
+  seats_changed
+  complimentary_granted
+  complimentary_revoked
+  backfilled
+  registered
+  administrative_grant
+  suspended
+  reinstated
+  cancelled
+}
+
 /// Where a subscription sits in its lifecycle (0056).
 enum SubscriptionStatus {
   /// Registered, never activated. No operational access, and no free trial.
@@ -3568,7 +3588,7 @@ model SubscriptionEvent {
   id             Bytes  @id @db.Binary(16)
   companyId      Bytes  @map("company_id") @db.Binary(16)
   subscriptionId Bytes  @map("subscription_id") @db.Binary(16)
-  kind           String
+  kind           SubscriptionEventKind
   note           String? @db.VarChar(255)
 
   periodEndAfter DateTime? @map("period_end_after") @db.DateTime(6)

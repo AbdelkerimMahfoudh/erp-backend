@@ -46,11 +46,21 @@ import { RegistrationService } from './registration.service';
  * Hidden from the tenant-facing Swagger document: an operations surface is not
  * something the shop API's documentation should advertise.
  *
- * Every route below is either `@Public()` (registration, admin sign-in — both
- * rate-limited) or behind {@link PlatformAdminGuard}, which reads a completely
- * different credential from a completely different table. A tenant JWT is not
- * merely rejected here; there is nothing on the request for it to be rejected
- * *from*.
+ * ## What `@Public()` means on an administrator route
+ *
+ * It is **not** "anyone may call this". `@Public()` only tells the global
+ * TENANT authentication guard to stand down — that guard looks for a shop's
+ * JWT, and an administrator does not have one, so without this every
+ * administrator request is rejected before {@link PlatformAdminGuard} ever
+ * runs. (It was, and the live check caught it: thirteen routes returning 401 to
+ * a perfectly good administrator session.)
+ *
+ * Authorisation is then done entirely by `PlatformAdminGuard`, which reads a
+ * different credential from a different table. The existing provisioning
+ * controller uses exactly this pairing for exactly this reason.
+ *
+ * The two genuinely public routes — registration and administrator sign-in —
+ * carry no `PlatformAdminGuard` and are both rate-limited.
  */
 
 /** Registration and admin sign-in are both unauthenticated. Both are throttled. */
@@ -194,15 +204,17 @@ export class PlatformController {
     };
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Post('admin/sign-out')
   @HttpCode(HttpStatus.NO_CONTENT)
   async adminSignOut(@Req() req: AdminRequest, @Res({ passthrough: true }) res: Response) {
-    const token = readCookie(req.headers.cookie, ADMIN_SESSION_COOKIE);
-    await this.admins.signOut(token);
+    // The session that authenticated THIS request, whichever way it arrived.
+    await this.admins.signOut(req.platformSessionToken);
     res.clearCookie(ADMIN_SESSION_COOKIE, { path: '/' });
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Get('admin/me')
   me(@Req() req: AdminRequest) {
@@ -212,6 +224,7 @@ export class PlatformController {
 
   // ── Dashboard ────────────────────────────────────────────────────────────
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Get('dashboard')
   async dashboard() {
@@ -271,6 +284,7 @@ export class PlatformController {
 
   // ── Businesses ───────────────────────────────────────────────────────────
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Get('businesses')
   async businesses(
@@ -345,6 +359,7 @@ export class PlatformController {
     };
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Get('businesses/:id')
   async business(@Param('id') id: string) {
@@ -429,6 +444,7 @@ export class PlatformController {
     };
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Get('pending')
   async pending() {
@@ -460,6 +476,7 @@ export class PlatformController {
 
   // ── Lifecycle actions ────────────────────────────────────────────────────
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Post('businesses/:id/activate-grant')
   @HttpCode(HttpStatus.OK)
@@ -474,6 +491,7 @@ export class PlatformController {
     return { applied: r.applied, version: r.subscription.version, status: r.subscription.status };
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Post('businesses/:id/extend')
   @HttpCode(HttpStatus.OK)
@@ -492,6 +510,7 @@ export class PlatformController {
     };
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Post('businesses/:id/suspend')
   @HttpCode(HttpStatus.OK)
@@ -506,6 +525,7 @@ export class PlatformController {
     return { applied: r.applied, version: r.subscription.version, status: r.subscription.status };
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Post('businesses/:id/reinstate')
   @HttpCode(HttpStatus.OK)
@@ -520,6 +540,7 @@ export class PlatformController {
     return { applied: r.applied, version: r.subscription.version, status: r.subscription.status };
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Post('businesses/:id/cancel')
   @HttpCode(HttpStatus.OK)
@@ -534,6 +555,7 @@ export class PlatformController {
     return { applied: r.applied, version: r.subscription.version, status: r.subscription.status };
   }
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Post('businesses/:id/payments')
   @HttpCode(HttpStatus.CREATED)
@@ -564,6 +586,7 @@ export class PlatformController {
 
   // ── Audit ────────────────────────────────────────────────────────────────
 
+  @Public()
   @UseGuards(PlatformAdminGuard)
   @Get('audit')
   async auditLog(@Query('action') action?: string, @Query('page') page?: string) {

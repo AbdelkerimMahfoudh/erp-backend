@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { IsBoolean, IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
+import type { SubscriptionEventKind } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppConfigService } from '../common/config/app-config.service';
 import { Public } from '../common/decorators/public.decorator';
@@ -102,7 +103,9 @@ export class ProvisioningController {
 
     const now = this.clock.now();
     const data: Record<string, unknown> = {};
-    let kind = 'extended';
+    // Typed since 0057. It was a bare string, which is how a kind the ENUM
+    // did not contain could be written and silently stored as blank.
+    let kind: SubscriptionEventKind = 'extended';
 
     if (dto.months) {
       // Extend from whichever is later, so renewing early does not shorten the

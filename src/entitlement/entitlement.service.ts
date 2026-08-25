@@ -53,6 +53,9 @@ export class EntitlementService {
         currentPeriodEnd: null,
         isComplimentary: false,
         complimentaryUntil: null,
+        // No subscription row at all. `expired` is the honest reading: reads
+        // work, writes do not, and nothing was ever granted.
+        status: 'activated',
       };
     }
     return {
@@ -61,6 +64,10 @@ export class EntitlementService {
       currentPeriodEnd: row.currentPeriodEnd,
       isComplimentary: row.isComplimentary,
       complimentaryUntil: row.complimentaryUntil,
+      // Carried explicitly. Omitting it silently defaults to `activated`, and a
+      // pending business then reads as EXPIRED — which is what happened, and
+      // which no test caught because the field is optional by design.
+      status: row.status,
     };
   }
 

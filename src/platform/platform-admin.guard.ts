@@ -7,6 +7,15 @@ export const ADMIN_SESSION_COOKIE = 'erp_platform_session';
 
 export interface AdminRequest extends Request {
   platformAdmin?: PlatformAdminIdentity;
+  /**
+   * The token that actually authenticated this request.
+   *
+   * Stashed so sign-out can revoke *this* session rather than re-deriving it
+   * from the cookie. They are usually the same, but not always — and a sign-out
+   * that silently revoked nothing because it looked in the wrong place is a
+   * particularly bad bug to ship on an administration portal.
+   */
+  platformSessionToken?: string;
 }
 
 /**
@@ -70,6 +79,7 @@ export class PlatformAdminGuard implements CanActivate {
     }
 
     req.platformAdmin = admin;
+    req.platformSessionToken = token;
     return true;
   }
 }

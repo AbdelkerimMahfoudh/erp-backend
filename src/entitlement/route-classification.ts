@@ -95,3 +95,23 @@ const SEAT_KEYS = new Set(SEAT_CONSUMING.map((r) => key(r.method, r.path)));
 export function isSeatConsumingRoute(method: string, path: string): boolean {
   return SEAT_KEYS.has(key(method, path));
 }
+
+/**
+ * Reads that stay available however the subscription stands.
+ *
+ * The customer's own account surface: what state am I in, who am I, and how do
+ * I sign out. A business that is pending or suspended keeps all of it, because
+ * these are the routes that let the app *explain* the situation. Nothing here
+ * returns operational business data — no sales, no stock, no money.
+ */
+export const ALWAYS_READABLE: readonly string[] = [
+  'entitlement',
+  'auth/me',
+  'auth/logout',
+  'auth/refresh',
+  'health',
+] as const;
+
+export function isAlwaysReadable(path: string): boolean {
+  return ALWAYS_READABLE.includes(path);
+}

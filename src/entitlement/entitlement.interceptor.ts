@@ -11,7 +11,7 @@ import { Observable } from 'rxjs';
 import { IS_PUBLIC_KEY } from '../common/decorators/public.decorator';
 import { EntitlementService } from './entitlement.service';
 import { ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
-import { isAllowedWhenExpired, isMutation } from './route-classification';
+import { isAllowedWhenExpired, isAlwaysReadable, isMutation } from './route-classification';
 
 /**
  * One place where a lapsed subscription stops a write (Milestone K).
@@ -69,6 +69,17 @@ export class EntitlementInterceptor implements NestInterceptor {
      * finding out why.
      */
     if (!isMutation(method)) {
+      /*
+       * The limited account surface stays open in every state.
+       *
+       * Blocking these would be self-defeating: `/entitlement` is precisely how
+       * the app learns it is pending or suspended, so refusing it would leave
+       * the client unable to show the screen explaining the refusal. A shop
+       * locked out with no way to find out why would reach for the phone, and
+       * be right to.
+       */
+      if (isAlwaysReadable(normalise(req.route?.path ?? ''))) return next.handle();
+
       const companyId = this.cls.get<Buffer | undefined>('companyId');
       if (!companyId) return next.handle();
 
