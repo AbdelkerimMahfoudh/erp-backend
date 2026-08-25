@@ -3,6 +3,9 @@
 # stay AFTER the wildcard, or the example file is swallowed by it.
 .env
 .env.*
+# ...but the EXAMPLES are the documentation: names and safe descriptions,
+# never values. Committing them is the whole point.
+!.env.*.example
 !.env.example
 
 # ── Dependencies & build output ────────────────────────────────────────────
@@ -49,3 +52,9 @@ temp/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Staging secrets. Only the example is committed.
+.env.staging
+
+# Local staging launcher, carries generated secrets.
+staging-server.cjs
