@@ -217,6 +217,10 @@ export function mayConsumeSeat(math: SeatMath): boolean {
 
 /** The stable code the client keys on. It never parses English. */
 export const ENTITLEMENT_WRITE_BLOCKED = 'ENTITLEMENT_WRITE_BLOCKED';
+/// Registered, never activated. The client shows an activation-pending screen.
+export const ENTITLEMENT_PENDING = 'ENTITLEMENT_PENDING';
+/// Deliberately stopped. Distinct from pending so the client can say which.
+export const ENTITLEMENT_SUSPENDED = 'ENTITLEMENT_SUSPENDED';
 export const SEAT_LIMIT_REACHED = 'SEAT_LIMIT_REACHED';
 
 export interface Entitlement {

@@ -10,6 +10,10 @@ import {
   stateOf,
   type Entitlement,
   type SubscriptionRecord,
+  canRead,
+  ENTITLEMENT_PENDING,
+  ENTITLEMENT_SUSPENDED,
+  type EntitlementState,
 } from './entitlement-rules';
 
 /**
@@ -98,6 +102,31 @@ export class EntitlementService {
   async mayWrite(companyId: Buffer): Promise<boolean> {
     const record = await this.recordFor(companyId);
     return canWrite(stateOf(record, this.clock.now()));
+  }
+
+  /**
+   * Whether the operational app is closed to this company entirely.
+   *
+   * Returns `null` when it is open — including when the subscription has
+   * EXPIRED, because expiry has never hidden anything and still does not.
+   * Only the two deliberate states close the door, and each says which one it
+   * is so the client can show the right screen rather than guess.
+   */
+  async operationalAccessBlocked(
+    companyId: Buffer,
+  ): Promise<{ code: string; message: string; state: EntitlementState } | null> {
+    const record = await this.recordFor(companyId);
+    const state = stateOf(record, this.clock.now());
+    if (canRead(state)) return null;
+
+    return {
+      code: state === 'pending' ? ENTITLEMENT_PENDING : ENTITLEMENT_SUSPENDED,
+      message:
+        state === 'pending'
+          ? 'This business is waiting to be activated.'
+          : 'This business is not active. Open your account page to see why.',
+      state,
+    };
   }
 
   /**

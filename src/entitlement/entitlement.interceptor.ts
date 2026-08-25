@@ -54,9 +54,33 @@ export class EntitlementInterceptor implements NestInterceptor {
     const req = context.switchToHttp().getRequest<{ method: string; route?: { path?: string } }>();
     const method = (req.method ?? 'GET').toUpperCase();
 
-    // Reads are never blocked. A shop locked out of yesterday's sales reaches
-    // for the notebook immediately, and would be right to.
-    if (!isMutation(method)) return next.handle();
+    /*
+     * Reads.
+     *
+     * **Expiry still blocks nothing**, and that rule has not moved: a shop
+     * locked out of yesterday's sales reaches for the notebook immediately, and
+     * would be right to.
+     *
+     * Two states are different, and both are decisions rather than drift:
+     * a business that has never been activated has no operational history to
+     * withhold — opening the till to it would be a free trial by accident — and
+     * a suspended one was stopped deliberately, with a recorded reason. The
+     * Owner keeps the customer portal in both, so nobody is ever locked out of
+     * finding out why.
+     */
+    if (!isMutation(method)) {
+      const companyId = this.cls.get<Buffer | undefined>('companyId');
+      if (!companyId) return next.handle();
+
+      const blocked = await this.entitlement.operationalAccessBlocked(companyId);
+      if (!blocked) return next.handle();
+
+      throw new ForbiddenException({
+        code: blocked.code,
+        message: blocked.message,
+        state: blocked.state,
+      });
+    }
 
     const path = normalise(req.route?.path ?? '');
     if (isAllowedWhenExpired(method, path)) return next.handle();

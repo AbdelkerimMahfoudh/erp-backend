@@ -14,6 +14,7 @@ import { isUuid, newUuidV7, uuidToBin } from './common/utils/uuid.util';
 import { HashingModule } from './common/security/hashing.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { EntitlementModule } from './entitlement/entitlement.module';
+import { PlatformModule } from './platform/platform.module';
 import { EntitlementInterceptor } from './entitlement/entitlement.interceptor';
 import { AuditModule } from './common/audit/audit.module';
 import { NumberingModule } from './common/numbering/numbering.module';
@@ -129,6 +130,7 @@ import { LoansModule } from './loans/loans.module';
     HealthModule,
     AuthModule,
     EntitlementModule,
+    PlatformModule,
     NotificationsModule,
     TrackingModule,
     CatalogModule,
