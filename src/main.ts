@@ -16,7 +16,20 @@ async function bootstrap(): Promise<void> {
   app.useLogger(app.get(Logger));
 
   // Security headers + CORS allowlist.
-  app.use(helmet());
+  /*
+   * Helmet's defaults, minus HSTS in staging.
+   *
+   * `helmet()` sends `Strict-Transport-Security: max-age=15552000;
+   * includeSubDomains`. On a production domain that is right. On a STAGING
+   * host it is a trap: `includeSubDomains` pins the whole parent domain to
+   * HTTPS in every browser that saw the header, for six months, and it keeps
+   * doing so long after the staging environment is gone. A test environment
+   * must not be able to break a sibling that has nothing to do with it.
+   *
+   * Only HSTS is dropped. Every other header helmet sets still applies.
+   */
+  const isStaging = (process.env.APP_ENV ?? '').toLowerCase() === 'staging';
+  app.use(helmet(isStaging ? { hsts: false } : undefined));
   app.enableCors({
     origin: config.corsOrigins.length > 0 ? config.corsOrigins : false,
     credentials: true,
@@ -48,8 +61,23 @@ async function bootstrap(): Promise<void> {
     SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, swaggerConfig));
   }
 
-  await app.listen(config.port);
-  app.get(Logger).log(`API listening on http://localhost:${config.port}/api`);
+  /*
+   * Which interface the API answers on.
+   *
+   * `API_BIND` defaults to every interface, because in development a phone on
+   * the same Wi-Fi has to reach this machine directly.
+   *
+   * A DEPLOYED environment should set `API_BIND=127.0.0.1` and put the API
+   * behind the edge, so `/api/*` is reachable only through the proxy that also
+   * enforces the `/admin` boundary and the security headers. Otherwise the
+   * administration ENDPOINTS stay reachable on the API port even while the
+   * administration PAGES are refused — the guard would then be a password
+   * alone, which is exactly the single layer the deployment is supposed to
+   * avoid while administrator MFA does not exist.
+   */
+  const bind = process.env.API_BIND ?? '0.0.0.0';
+  await app.listen(config.port, bind);
+  app.get(Logger).log(`API listening on ${bind}:${config.port}/api`);
 }
 
 void bootstrap();
