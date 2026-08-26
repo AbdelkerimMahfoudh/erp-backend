@@ -40,5 +40,6 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
     // Global JWT guard — every route requires a valid token unless @Public().
     { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],
+  exports: [TokensService, SessionsService, VerificationIntentService],
 })
 export class AuthModule {}

@@ -7,6 +7,7 @@ import { AppClsStore } from '../../common/context/request-context';
 import { AccessTokenPayload, AuthUser } from '../../common/types/auth-user';
 import { uuidToBin } from '../../common/utils/uuid.util';
 import { SessionsService } from '../sessions.service';
+import { readCookie, PORTAL_SESSION_COOKIE } from '../../common/http/cookies';
 
 /**
  * Validates the access token and establishes request context: it puts `userId`
@@ -28,7 +29,23 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     private readonly sessions: SessionsService,
   ) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      /*
+       * The Authorization header first, and the PORTAL COOKIE second.
+       *
+       * The app sends a bearer token. The website customer portal has no
+       * bearer to send — it is opened from the app through a one-time handoff
+       * and left holding an HttpOnly cookie, which no script on the page can
+       * read. Both carry the SAME kind of access token, so nothing about
+       * validation below changes and no guard is loosened: an invalid token is
+       * still invalid, and a revoked session still cuts the request off.
+       *
+       * The cookie is , so a cross-site POST does not carry it.
+       */
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+        (req: { headers?: { cookie?: string } }) =>
+          readCookie(req?.headers?.cookie, PORTAL_SESSION_COOKIE) ?? null,
+      ]),
       ignoreExpiration: false,
       secretOrKey: config.jwtAccessSecret,
     });

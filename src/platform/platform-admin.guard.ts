@@ -3,7 +3,8 @@ import type { Request } from 'express';
 import { PlatformAdminService, type PlatformAdminIdentity } from './platform-admin.service';
 
 /** The cookie the session token lives in. HttpOnly — script can never read it. */
-export const ADMIN_SESSION_COOKIE = 'erp_platform_session';
+export { ADMIN_SESSION_COOKIE, readCookie } from '../common/http/cookies';
+import { ADMIN_SESSION_COOKIE, readCookie } from '../common/http/cookies';
 
 export interface AdminRequest extends Request {
   platformAdmin?: PlatformAdminIdentity;
@@ -28,16 +29,6 @@ export interface AdminRequest extends Request {
  * nothing here needs to: the value is an opaque random token whose only
  * meaning comes from matching a hash in the database.
  */
-export function readCookie(header: string | undefined, name: string): string | undefined {
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq < 0) continue;
-    if (part.slice(0, eq).trim() !== name) continue;
-    return decodeURIComponent(part.slice(eq + 1).trim());
-  }
-  return undefined;
-}
 
 /**
  * The wall between the platform and every shop.

@@ -2331,6 +2331,13 @@ enum OtpPurpose {
 
   /// Signing in again on a device after an explicit logout asked for re-verification.
   logout_reauth
+
+  /// A one-time ticket that opens the WEBSITE subscription portal already
+  /// signed in as this Owner (0060). It is not a contact or device check: it
+  /// reuses this model because the properties that matter — hashed, bound to
+  /// one company and user, short-lived, consumed exactly once — are the same,
+  /// and are already proven here.
+  portal_handoff
 }
 
 /// Terminal and non-terminal states of a challenge. A challenge leaves `pending`

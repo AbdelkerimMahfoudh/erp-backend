@@ -10,6 +10,8 @@ import { RegistrationService } from './registration.service';
 import { BillingService } from '../billing/billing.service';
 import { ContactVerificationService } from './contact-verification.service';
 import { EntitlementModule } from '../entitlement/entitlement.module';
+import { AuthModule } from '../auth/auth.module';
+import { PortalHandoffService } from './portal-handoff.service';
 import {
   ContactDeliveryProvider,
   outboxAllowed,
@@ -30,7 +32,7 @@ import {
  * administrator session.
  */
 @Module({
-  imports: [PrismaModule, EntitlementModule],
+  imports: [PrismaModule, EntitlementModule, AuthModule],
   controllers: [PlatformController],
   providers: [
     HashingService,
@@ -41,6 +43,7 @@ import {
     RegistrationService,
     BillingService,
     ContactVerificationService,
+    PortalHandoffService,
     {
       /*
        * Which delivery provider is real is an environment decision, and the

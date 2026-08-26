@@ -70,10 +70,24 @@ describe(`migration ${CATALOGUE_MIGRATION}`, () => {
    */
   const executable = sql.replace(/^\s*--.*$/gm, '');
 
-  it('exists, and is the highest migration in the tree', () => {
+  it('exists, and no later migration touches the catalogue', () => {
+    /*
+     * Originally this asserted 0059 was the LAST migration, which was only
+     * true on the day it was written — 0060 followed for an unrelated reason.
+     * The property that actually matters is narrower and permanent: 0059 is
+     * present, and nothing applied after it changes the `permissions` table
+     * behind its back.
+     */
     const all = readdirSync(MIGRATIONS).filter((d) => /^\d{4}_/.test(d)).sort();
     expect(all).toContain(CATALOGUE_MIGRATION);
-    expect(all[all.length - 1]).toBe(CATALOGUE_MIGRATION);
+
+    const later = all.slice(all.indexOf(CATALOGUE_MIGRATION) + 1);
+    const touching = later.filter((d) => {
+      const body = readFileSync(join(MIGRATIONS, d, 'migration.sql'), 'utf8')
+        .replace(/^\s*--.*$/gm, '');
+      return /`permissions`/.test(body);
+    });
+    expect(touching).toEqual([]);
   });
 
   it('publishes exactly the canonical key set', () => {

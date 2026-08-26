@@ -14,7 +14,7 @@ import {
 } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import {
   IsEmail,
   IsIn,
@@ -37,6 +37,9 @@ import {
   type AdminRequest,
 } from './platform-admin.guard';
 import { PlatformAdminService, ADMIN_SESSION_TTL_HOURS } from './platform-admin.service';
+import { PortalHandoffService, HANDOFF_TTL_SECONDS, PORTAL_SESSION_TTL_HOURS } from './portal-handoff.service';
+import { PORTAL_SESSION_COOKIE } from '../common/http/cookies';
+import { paymentInstructions } from './payment-instructions';
 import { PlatformAuditService } from './platform-audit.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
@@ -165,6 +168,7 @@ export class PlatformController {
     private readonly verification: ContactVerificationService,
     private readonly entitlement: EntitlementService,
     private readonly tenant: TenantContext,
+    private readonly handoff: PortalHandoffService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -718,6 +722,123 @@ export class PlatformController {
       entitlement,
       pricing,
       ...timeline,
+    };
+  }
+
+
+  // ── The mobile → website portal handoff ──────────────────────────────────
+
+  /**
+   * Mint a one-time ticket that opens the subscription portal signed in.
+   *
+   * Authenticated as a normal tenant user, so this adds no authority — it moves
+   * authority the caller already holds onto one other surface, for ninety
+   * seconds, once.
+   *
+   * The ticket is returned in the BODY, never in a URL the app then builds by
+   * hand. The app hands it straight to the browser as a single query parameter
+   * on the exchange endpoint, and the exchange endpoint redirects to a clean
+   * URL before the page renders.
+   */
+  @Post('portal-handoff')
+  @HttpCode(HttpStatus.CREATED)
+  async createPortalHandoff() {
+    const companyId = this.tenant.companyId();
+    // Fail-closed: an authenticated route always has a user.
+    const userId = this.tenant.requireUserId();
+
+    const { token, expiresAt } = await this.handoff.issue(companyId, userId);
+    return { token, expiresAt, expiresInSeconds: HANDOFF_TTL_SECONDS };
+  }
+
+  /**
+   * Spend a ticket and land in the portal, signed in.
+   *
+   * Public because the browser arrives holding nothing else — the ticket IS the
+   * credential, and it is worth exactly one portal session.
+   *
+   * Three things happen here in order, and the order is the point:
+   *
+   *  1. the ticket is consumed atomically, so a second tap gets nothing;
+   *  2. an `HttpOnly` cookie is set, which no script on the page can read;
+   *  3. the browser is redirected to a CLEAN url.
+   *
+   * Step 3 is what keeps the ticket out of `document.referrer`, out of the
+   * address bar, and out of browser history. It is already spent by then, but a
+   * spent credential sitting in history is still a credential sitting in
+   * history.
+   */
+  @Public()
+  @Get('portal-session')
+  async exchangePortalHandoff(
+    @Query('t') token: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    /*
+     * `Referrer-Policy: no-referrer` on THIS response, so the redirect cannot
+     * carry the ticket to the destination as a referrer.
+     */
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
+
+    const result = await this.handoff.exchange(token ?? '', {
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    if (!result.ok) {
+      /*
+       * One destination for every failure. Expired, replayed, forged and
+       * belonging-to-a-disabled-user all land in the same place, so the page
+       * cannot be used to tell live tickets from dead ones. The app shows a
+       * plain "open the portal again" action; the account is untouched.
+       */
+      return res.redirect(302, '/account?handoff=failed');
+    }
+
+    res.cookie(PORTAL_SESSION_COOKIE, result.accessToken, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: PORTAL_SESSION_TTL_HOURS * 60 * 60 * 1000,
+      path: '/',
+    });
+
+    // Clean URL. The ticket does not survive into the address bar.
+    return res.redirect(302, '/account?welcome=1');
+  }
+
+  /**
+   * End a portal session.
+   *
+   * Clearing the cookie is enough for the browser; the underlying session row
+   * expires on its own.
+   */
+  @Public()
+  @Post('portal-sign-out')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  portalSignOut(@Res({ passthrough: true }) res: Response) {
+    res.clearCookie(PORTAL_SESSION_COOKIE, { path: '/' });
+  }
+
+  /**
+   * How to pay, for an authenticated Owner.
+   *
+   * **Instructions, not an integration.** Reading this calls no provider,
+   * creates no payment row, reports nothing, confirms nothing and moves no
+   * subscription. A shop pays out-of-band and a person confirms it.
+   */
+  @Get('payment-instructions')
+  async paymentInstructions() {
+    const companyId = this.tenant.companyId();
+    const pricing = await this.billing.pricingFor(companyId);
+
+    return {
+      ...paymentInstructions(),
+      // The same server-calculated figure the portal already shows, so the
+      // modal can never quote a different number from the page behind it.
+      amount: pricing,
     };
   }
 
