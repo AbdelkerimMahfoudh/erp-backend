@@ -1,9 +1,10 @@
 import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
-import { Prisma, RoleKey } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { HashingService } from '../common/security/hashing.service';
 import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
+import { provisionDefaultRoles } from '../rbac/role-provisioning';
 import {
   generatePersonalId,
   isEmail,
@@ -156,21 +157,23 @@ export class RegistrationService {
           },
         });
 
-        // The store-facing roles this company will use.
-        const roleIds: Partial<Record<RoleKey, Buffer>> = {};
-        for (const key of ['owner', 'store_manager', 'store_employee'] as RoleKey[]) {
-          const id = newUuidV7Bin();
-          roleIds[key] = id;
-          await tx.role.create({
-            data: {
-              id,
-              companyId,
-              key,
-              name:
-                key === 'owner' ? 'Owner' : key === 'store_manager' ? 'Manager' : 'Employee',
-            },
-          });
-        }
+        /*
+         * The store-facing roles this company will use — AND the permissions
+         * that make them mean anything.
+         *
+         * This used to create three `roles` rows and stop. `AccessService`
+         * resolves authority only from `role_permissions`, so the union was
+         * empty and every shop that signed up through the website got an Owner
+         * who could sign in and then do nothing: `403 Missing permission(s)`.
+         * The demo company worked only because the seed separately applied the
+         * matrix, which is precisely the second provisioning path that hid the
+         * bug.
+         *
+         * Inside this transaction on purpose: roles, permissions, Owner and
+         * subscription now succeed or roll back together, so a half-built
+         * tenant cannot survive a failure.
+         */
+        const { roleIds } = await provisionDefaultRoles(tx, companyId);
 
         await tx.user.create({
           data: {
@@ -192,7 +195,7 @@ export class RegistrationService {
             companyId,
             userId,
             branchId,
-            roleId: roleIds.owner!,
+            roleId: roleIds.owner,
           },
         });
 

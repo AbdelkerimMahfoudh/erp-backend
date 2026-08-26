@@ -15,6 +15,7 @@ import { generatePersonalId } from '../src/auth/identifier';
 import * as argon2 from 'argon2';
 import { newUuidV7Bin, uuidToBin, binToUuid } from './lib/uuid';
 import { generateStoreCode } from '../src/common/utils/store-code.util';
+import { provisionDefaultRoles } from '../src/rbac/role-provisioning';
 import {
   PERMISSIONS,
   ROLE_PERMISSIONS,
@@ -70,30 +71,18 @@ async function seedDemo() {
     create: { id: newUuidV7Bin(), companyId: company.id, name: DEMO_BRANCH_NAME, type: 'store' },
   });
 
-  // 3. Roles + role_permissions
-  const permByKey = new Map(
-    (await prisma.permission.findMany()).map((p) => [p.key, p.id]),
-  );
-  const roleByKey = new Map<string, Buffer>();
-
-  for (const key of Object.keys(ROLE_PERMISSIONS) as SeedRoleKey[]) {
-    const role = await prisma.role.upsert({
-      where: { companyId_key: { companyId: company.id, key: key as RoleKey } },
-      update: { name: ROLE_LABELS[key] },
-      create: { id: newUuidV7Bin(), companyId: company.id, key: key as RoleKey, name: ROLE_LABELS[key] },
-    });
-    roleByKey.set(key, role.id);
-
-    for (const permKey of ROLE_PERMISSIONS[key]) {
-      const permId = permByKey.get(permKey);
-      if (!permId) continue;
-      await prisma.rolePermission.upsert({
-        where: { roleId_permissionId: { roleId: role.id, permissionId: permId } },
-        update: {},
-        create: { companyId: company.id, roleId: role.id, permissionId: permId },
-      });
-    }
-  }
+  /*
+   * 3. Roles + role_permissions
+   *
+   * Through the SAME function the server uses when a shop registers itself.
+   * The seed used to carry its own copy of this loop, and that second
+   * implementation is exactly what let registration ship without the
+   * permissions half — the demo company looked fine, so nothing revealed that
+   * real tenants were being created empty.
+   */
+  const allRoleKeys = Object.keys(ROLE_PERMISSIONS) as SeedRoleKey[];
+  const { roleIds } = await provisionDefaultRoles(prisma, company.id, allRoleKeys);
+  const roleByKey = new Map<string, Buffer>(Object.entries(roleIds));
   console.log(`✓ Roles: ${roleByKey.size} with permission mappings`);
 
   // 4. Owner user + branch assignment
