@@ -20,6 +20,8 @@
 
 import { config as loadEnv } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
+import { newUuidV7Bin } from './lib/uuid';
+import { PERMISSIONS } from '../src/rbac/role-permissions';
 
 // `override` is load-bearing: `@prisma/client` loads `.env` as an import
 // side effect, before this line runs, and plain dotenv will not replace a
@@ -46,6 +48,34 @@ async function main() {
   if (companies > 0) {
     console.log(`  ${companies} company(ies) already present — leaving them alone.`);
   }
+
+  /*
+   * The permission catalogue is REFERENCE data, and every environment needs
+   * all of it.
+   *
+   * It is not created by any migration. The base keys — `sale.create`,
+   * `report.view`, `user.manage` and the rest — are inserted only by
+   * `prisma/seed.ts`, which also seeds the demo company and therefore never
+   * runs here. Staging was left holding 44 of the 61 keys, and the first thing
+   * that noticed was the role repair refusing to provision a partial Owner.
+   *
+   * Seeded through the same `PERMISSIONS` constant the main seed uses, so there
+   * is no second list. `upsert` keeps this idempotent and leaves existing rows
+   * alone.
+   */
+  let added = 0;
+  for (const permission of PERMISSIONS) {
+    const before = await prisma.permission.findUnique({ where: { key: permission.key } });
+    await prisma.permission.upsert({
+      where: { key: permission.key },
+      update: { label: permission.label },
+      create: { id: newUuidV7Bin(), key: permission.key, label: permission.label },
+    });
+    if (!before) added++;
+  }
+  console.log(
+    `  permission catalogue: ${PERMISSIONS.length} keys present (${added} added this run)`,
+  );
 
   const plans = await prisma.planVersion.count({ where: { planKey: 'standard' } });
   if (plans === 0) {
