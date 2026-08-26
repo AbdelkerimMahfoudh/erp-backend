@@ -24,7 +24,23 @@ import { config as loadEnv } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { createHash } from 'node:crypto';
 
-loadEnv({ path: '.env.staging' });
+/*
+ * `override` is load-bearing. Do not remove it.
+ *
+ * `@prisma/client` loads `.env` as a side effect of being imported, and ES
+ * imports are evaluated before any statement in this file — so by the time this
+ * line runs, `DATABASE_URL` already points at the DEVELOPMENT database, and
+ * plain dotenv will not replace a variable that is already set.
+ *
+ * The result was worse than a plain misconfiguration: `APP_ENV` is absent from
+ * `.env`, so it WAS set from `.env.staging` and the staging guard passed, while
+ * `DATABASE_URL` was present in `.env` and silently stayed on development. The
+ * command believed it was in staging and read the wrong database.
+ *
+ * `PrismaClient` resolves its URL when it is constructed, not when it is
+ * imported, so overriding here is enough.
+ */
+loadEnv({ path: '.env.staging', override: true });
 
 /**
  * The stored value is a hash, so the code cannot simply be read back.

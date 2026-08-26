@@ -25,7 +25,12 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-loadEnv({ path: '.env.staging' });
+// `override` is load-bearing: `@prisma/client` loads `.env` as an import
+// side effect, before this line runs, and plain dotenv will not replace a
+// variable that is already set. See `scripts/staging-verification-code.ts`
+// for the full account of how that made a staging guard pass while the
+// connection stayed on development.
+loadEnv({ path: '.env.staging', override: true });
 
 /** Names this script will never touch, however they are spelled. */
 const FORBIDDEN = [/^phonestore$/i, /prod/i, /production/i, /^live$/i, /demo/i];
