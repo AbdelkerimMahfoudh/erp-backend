@@ -141,7 +141,65 @@ export class ContactVerificationService {
     return true;
   }
 
-  /** Whether this contact has been proven, for the registration to consult. */
+  /**
+   * The challenge a `start()` just created for this destination.
+   *
+   * Returned so a caller can BIND it — see `confirmChallenge`. Without the
+   * binding there is nothing to distinguish this attempt's challenge from any
+   * other challenge that happens to share the destination.
+   */
+  async latestChallengeFor(rawDestination: string): Promise<Buffer | null> {
+    const { destination } = this.classify(rawDestination);
+    const row = await this.prisma.contactVerification.findFirst({
+      where: { destination, consumedAt: null, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+    return row?.id ?? null;
+  }
+
+  /**
+   * Check a code against **one specific challenge**, never against a
+   * destination.
+   *
+   * This is the difference between "somebody proved this address at some point"
+   * and "this person proved this address, in this attempt, just now". Only the
+   * second can carry authority, so registration completion uses this and never
+   * {@link confirm}.
+   *
+   * Does not consume: the caller consumes it inside the same transaction that
+   * spends the continuation, so the two cannot fall out of step.
+   */
+  async confirmChallenge(
+    challengeId: Buffer,
+    code: string,
+  ): Promise<'ok' | 'wrong' | 'gone'> {
+    const row = await this.prisma.contactVerification.findUnique({ where: { id: challengeId } });
+    if (!row) return 'gone';
+    if (row.consumedAt) return 'gone';
+    if (row.expiresAt <= new Date()) return 'gone';
+    if (row.attempts >= MAX_ATTEMPTS) return 'gone';
+
+    if (row.codeHash !== this.hash(row.destination, code.trim())) {
+      await this.prisma.contactVerification.update({
+        where: { id: row.id },
+        data: { attempts: { increment: 1 } },
+      });
+      return 'wrong';
+    }
+    return 'ok';
+  }
+
+  /**
+   * Whether this contact has been proven, for the registration to consult.
+   *
+   * ⚠️ **This is not authentication, and must never be used as it.** It answers
+   * for the most recent consumed verification of a destination, with no bound
+   * on when, by whom, or in which attempt. An endpoint that issued a session on
+   * the strength of it would let anyone who ever verified an address mint a
+   * session for whoever owns that address now — with no password. Registration
+   * completion binds to a specific challenge instead; see `confirmChallenge`.
+   */
   async isVerified(rawDestination: string): Promise<boolean> {
     const { destination } = this.classify(rawDestination);
     const consumed = await this.prisma.contactVerification.findFirst({

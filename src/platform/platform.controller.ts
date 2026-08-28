@@ -40,6 +40,10 @@ import { PlatformAdminService, ADMIN_SESSION_TTL_HOURS } from './platform-admin.
 import { PortalHandoffService, HANDOFF_TTL_SECONDS, PORTAL_SESSION_TTL_HOURS } from './portal-handoff.service';
 import { PORTAL_SESSION_COOKIE } from '../common/http/cookies';
 import { paymentInstructions } from './payment-instructions';
+import {
+  RegistrationContinuationService,
+  CONTINUATION_TTL_SECONDS,
+} from './registration-continuation.service';
 import { PlatformAuditService } from './platform-audit.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
@@ -130,6 +134,17 @@ class PaymentDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
+class ContinueStartDto {
+  /** The opaque continuation minted by registration. Never logged. */
+  @IsString() @MinLength(16) @MaxLength(200) continuation: string;
+  @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
+}
+
+class ContinueConfirmDto {
+  @IsString() @MinLength(16) @MaxLength(200) continuation: string;
+  @IsString() @MinLength(1) @MaxLength(12) code: string;
+}
+
 class VerifyStartDto {
   @IsString() @MinLength(3) @MaxLength(160) destination: string;
   @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
@@ -169,6 +184,7 @@ export class PlatformController {
     private readonly entitlement: EntitlementService,
     private readonly tenant: TenantContext,
     private readonly handoff: PortalHandoffService,
+    private readonly continuation: RegistrationContinuationService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -178,7 +194,7 @@ export class PlatformController {
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   async register(@Body() dto: RegisterDto) {
-    return this.registration.register({
+    const result = await this.registration.register({
       idempotencyKey: dto.idempotencyKey,
       ownerName: dto.ownerName,
       businessName: dto.businessName,
@@ -189,6 +205,91 @@ export class PlatformController {
       password: dto.password,
       language: dto.language,
     });
+
+    /*
+     * A continuation, never a session.
+     *
+     * Registration proves somebody filled a form. It does not prove they can
+     * read the address they typed, so it cannot be the thing that signs them
+     * in. The continuation carries the attempt forward and buys exactly one
+     * thing: the completion of THIS registration, once, after the code bound to
+     * it is proved.
+     *
+     * Issued only for a registration that is still incomplete. A retry that
+     * recognises an already-completed registration gets no new credential —
+     * otherwise a public idempotency key would be a way to mint one.
+     */
+    const owner = await this.registration.pendingOwnerFor(result.companyId);
+    const continuation = owner
+      ? await this.continuation.issue(owner.companyId, owner.userId)
+      : null;
+
+    return {
+      status: result.status,
+      created: result.created,
+      publicStoreId: result.publicStoreId,
+      /** Where the code will go. From the OWNER RECORD, not from the request. */
+      verification: owner ? { destination: owner.destinationMasked, channel: owner.channel } : null,
+      continuation: continuation
+        ? {
+            token: continuation.token,
+            expiresAt: continuation.expiresAt,
+            expiresInSeconds: CONTINUATION_TTL_SECONDS,
+          }
+        : null,
+      next: continuation ? 'verify_contact' : 'sign_in',
+    };
+  }
+
+  // ── Finishing a registration ─────────────────────────────────────────────
+
+  /**
+   * Send the code for THIS registration, and bind the challenge to it.
+   *
+   * Public because it runs before any session exists, but not open: it does
+   * nothing without a valid continuation, and the destination comes from the
+   * Owner record rather than the request, so a stolen continuation cannot
+   * redirect a code somewhere else.
+   */
+  @Public()
+  @Throttle(PUBLIC_THROTTLE)
+  @Post('register/verify/start')
+  @HttpCode(HttpStatus.OK)
+  async continueStart(@Body() dto: ContinueStartDto) {
+    const result = await this.continuation.startChallenge(dto.continuation, dto.language);
+    if (!result.ok) {
+      // One shape for every refusal: a caller must not be able to tell an
+      // expired continuation from an unknown one, or probe which addresses
+      // exist.
+      throw new BadRequestException('That registration cannot be continued.');
+    }
+    return { delivery: result.delivery };
+  }
+
+  /**
+   * Prove the code and finish, receiving one ordinary Owner session.
+   *
+   * The session comes from `SessionsService` exactly as a password sign-in
+   * would. It carries no extra authority, no platform-administrator rights, and
+   * the subscription stays `pending` — being signed in is not being entitled.
+   */
+  @Public()
+  @Throttle(PUBLIC_THROTTLE)
+  @Post('register/verify/confirm')
+  @HttpCode(HttpStatus.OK)
+  async continueConfirm(@Body() dto: ContinueConfirmDto, @Req() req: Request) {
+    const result = await this.continuation.complete(dto.continuation, dto.code, {
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    if (!result.ok) {
+      throw new BadRequestException('That code did not match.');
+    }
+    return {
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      expiresIn: result.expiresIn,
+    };
   }
 
   // ── Contact verification ─────────────────────────────────────────────────

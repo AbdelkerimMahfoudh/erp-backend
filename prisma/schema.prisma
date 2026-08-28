@@ -2338,6 +2338,16 @@ enum OtpPurpose {
   /// one company and user, short-lived, consumed exactly once — are the same,
   /// and are already proven here.
   portal_handoff
+
+  /// Carries authority from "this person just created this company" to "this
+  /// person is now signed in" (0061), without ever replaying the registration
+  /// password.
+  ///
+  /// Deliberately a DISTINCT purpose from `portal_handoff`: `resolve()` matches
+  /// on purpose, so sharing one value would make the two tickets
+  /// interchangeable, and a ticket minted to open a subscription page could be
+  /// spent to complete somebody's registration.
+  registration_continuation
 }
 
 /// Terminal and non-terminal states of a challenge. A challenge leaves `pending`

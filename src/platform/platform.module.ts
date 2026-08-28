@@ -12,6 +12,7 @@ import { ContactVerificationService } from './contact-verification.service';
 import { EntitlementModule } from '../entitlement/entitlement.module';
 import { AuthModule } from '../auth/auth.module';
 import { PortalHandoffService } from './portal-handoff.service';
+import { RegistrationContinuationService } from './registration-continuation.service';
 import {
   ContactDeliveryProvider,
   outboxAllowed,
@@ -44,6 +45,7 @@ import {
     BillingService,
     ContactVerificationService,
     PortalHandoffService,
+    RegistrationContinuationService,
     {
       /*
        * Which delivery provider is real is an environment decision, and the

@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { HashingService } from '../common/security/hashing.service';
-import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
+import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { provisionDefaultRoles } from '../rbac/role-provisioning';
 import {
   generatePersonalId,
@@ -63,6 +63,22 @@ export interface RegistrationResult {
 /** Ten uppercase hex characters, matching the existing Store Account ID shape. */
 function newPublicStoreId(): string {
   return randomBytes(5).toString('hex').toUpperCase();
+}
+
+/**
+ * Enough to recognise, not enough to learn.
+ *
+ * Somebody who just typed their address needs to see the code went to the right
+ * place; nobody else should be able to read it back out of a public endpoint.
+ */
+function maskDestination(value: string): string {
+  const at = value.indexOf('@');
+  if (at > 0) {
+    const name = value.slice(0, at);
+    const head = name.slice(0, Math.min(2, name.length));
+    return head + '***' + value.slice(at);
+  }
+  return value.length > 4 ? '***' + value.slice(-4) : '***';
 }
 
 @Injectable()
@@ -253,6 +269,52 @@ export class RegistrationService {
     }
 
     return this.describe(companyId, true);
+  }
+
+  /**
+   * The Owner of a registration that is still waiting to be finished.
+   *
+   * Returns null once the contact has been proved, which is what stops a public
+   * idempotency key from being a way to mint a fresh continuation for an
+   * account that already exists and already has a password.
+   *
+   * The destination is masked: the caller is told where the code went, not what
+   * the address is, so this cannot be used to read back a contact.
+   */
+  async pendingOwnerFor(companyUuid: string): Promise<{
+    companyId: Buffer;
+    userId: Buffer;
+    destinationMasked: string;
+    channel: 'email' | 'phone';
+  } | null> {
+    const companyId = uuidToBin(companyUuid);
+    const owner = await this.prisma.user.findFirst({
+      where: { companyId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        companyId: true,
+        email: true,
+        phone: true,
+        emailVerifiedAt: true,
+        phoneVerifiedAt: true,
+        isActive: true,
+        deletedAt: true,
+      },
+    });
+    if (!owner || !owner.isActive || owner.deletedAt) return null;
+    // Already finished: nothing left to continue.
+    if (owner.emailVerifiedAt || owner.phoneVerifiedAt) return null;
+
+    const destination = owner.email ?? owner.phone;
+    if (!destination) return null;
+
+    return {
+      companyId: owner.companyId,
+      userId: owner.id,
+      destinationMasked: maskDestination(destination),
+      channel: owner.email ? 'email' : 'phone',
+    };
   }
 
   private async describe(companyId: Buffer, created: boolean): Promise<RegistrationResult> {

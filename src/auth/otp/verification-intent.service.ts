@@ -38,6 +38,8 @@ export type IntentResolution =
       userId: Buffer;
       purpose: OtpPurpose;
       deviceId: Buffer | null;
+      /** The challenge this intent is bound to, when one was recorded. */
+      challengeId: Buffer | null;
     }
   | { ok: false; reason: 'not_found' | 'expired' | 'consumed' | 'mismatch' };
 
@@ -125,6 +127,7 @@ export class VerificationIntentService {
       userId: intent.userId,
       purpose: intent.purpose,
       deviceId: intent.deviceId,
+      challengeId: intent.challengeId,
     };
   }
 
