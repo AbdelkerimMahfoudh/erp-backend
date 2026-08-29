@@ -3,6 +3,10 @@ import { PortalHandoffService, HANDOFF_TTL_SECONDS } from './portal-handoff.serv
 import { PORTAL_SESSION_COOKIE, readCookie } from '../common/http/cookies';
 import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
 import { hashIntentToken } from '../auth/otp/otp-code.util';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { ROLE_PERMISSIONS } from '../rbac/role-permissions';
+import { DELEGATABLE_PERMISSIONS, isCompanyPermission } from '../rbac/permission-scope';
 
 /**
  * The one-time ticket that opens the website portal signed in.
@@ -301,5 +305,54 @@ describe('what the handoff must never leak', () => {
     expect(readCookie(header, PORTAL_SESSION_COOKIE)).toBe('abc123');
     expect(readCookie(header, 'erp_platform_session')).toBeUndefined();
     expect(readCookie(undefined, PORTAL_SESSION_COOKIE)).toBeUndefined();
+  });
+});
+
+/**
+ * Who may mint one.
+ *
+ * The CP8 staging acceptance found a real Store Manager and a real Store
+ * Employee each minting a ticket happily, over HTTP, against MySQL — both
+ * HTTP 201. The portal is the account surface: what the shop is charged, what
+ * it owes and how to pay. A Manager runs a branch; an Employee sells. Neither
+ * settles the bill.
+ *
+ * Read from the source rather than by standing up Nest, because what is being
+ * pinned is the decorator on the route — the guard itself already has its own
+ * tests.
+ */
+describe('only an Owner may mint a portal handoff', () => {
+  const source = readFileSync(join(__dirname, 'platform.controller.ts'), 'utf8');
+  const route = source.slice(source.indexOf("@Post('portal-handoff')"));
+  const signature = route.slice(0, route.indexOf('async createPortalHandoff'));
+
+  it('gates the route on an Owner-only permission', () => {
+    expect(signature).toContain("@RequirePermissions('settings.manage')");
+  });
+
+  it('uses a permission no manager and no employee holds', () => {
+    /*
+     * The Owner and the company `administrator` — the Owner's deputy, 58 of 61
+     * permissions — hold it, and nobody else does. Every managing and selling
+     * role is refused, which is the property the acceptance found broken.
+     */
+    for (const [role, keys] of Object.entries(ROLE_PERMISSIONS)) {
+      const allowed = role === 'owner' || role === 'administrator';
+      expect([role, keys.includes('settings.manage')]).toEqual([role, allowed]);
+    }
+    for (const role of ['store_manager', 'branch_manager', 'store_employee',
+      'sales_employee', 'warehouse_employee'] as const) {
+      expect(ROLE_PERMISSIONS[role]).not.toContain('settings.manage');
+    }
+  });
+
+  it('uses a permission that can never be delegated to a branch', () => {
+    // A branch delegation would put the account surface back within a
+    // Manager's reach by another route.
+    expect(DELEGATABLE_PERMISSIONS).not.toContain('settings.manage');
+  });
+
+  it('needs no branch context, so a pending Owner with no active branch still passes', () => {
+    expect(isCompanyPermission('settings.manage')).toBe(true);
   });
 });

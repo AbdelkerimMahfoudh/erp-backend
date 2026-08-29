@@ -26,6 +26,7 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { binToUuid, uuidToBin, isUuid } from '../common/utils/uuid.util';
@@ -38,7 +39,7 @@ import {
 } from './platform-admin.guard';
 import { PlatformAdminService, ADMIN_SESSION_TTL_HOURS } from './platform-admin.service';
 import { PortalHandoffService, HANDOFF_TTL_SECONDS, PORTAL_SESSION_TTL_HOURS } from './portal-handoff.service';
-import { PORTAL_SESSION_COOKIE } from '../common/http/cookies';
+import { PORTAL_SESSION_COOKIE, cookieSecure } from '../common/http/cookies';
 import { paymentInstructions } from './payment-instructions';
 import {
   RegistrationContinuationService,
@@ -363,7 +364,7 @@ export class PlatformController {
     res.cookie(ADMIN_SESSION_COOKIE, result.sessionToken, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      secure: cookieSecure(),
       maxAge: ADMIN_SESSION_TTL_HOURS * 60 * 60 * 1000,
       path: '/',
     });
@@ -832,9 +833,16 @@ export class PlatformController {
   /**
    * Mint a one-time ticket that opens the subscription portal signed in.
    *
-   * Authenticated as a normal tenant user, so this adds no authority — it moves
-   * authority the caller already holds onto one other surface, for ninety
-   * seconds, once.
+   * **Owner only.** It moves authority the caller already holds onto one other
+   * surface, for ninety seconds, once — and the surface it opens is the account
+   * itself: what the shop is charged, what it owes, and how to pay. A Manager
+   * runs a branch and an Employee sells; neither is the person who settles the
+   * bill, and the CP8 acceptance found both minting tickets happily.
+   *
+   * `settings.manage` is the gate because it is the company-wide administration
+   * permission, held by the Owner alone and — by `permission-scope.ts` — never
+   * delegatable to a branch. No new permission key was invented for this: one
+   * more key means a catalogue migration, and the authority already exists.
    *
    * The ticket is returned in the BODY, never in a URL the app then builds by
    * hand. The app hands it straight to the browser as a single query parameter
@@ -842,6 +850,7 @@ export class PlatformController {
    * URL before the page renders.
    */
   @Post('portal-handoff')
+  @RequirePermissions('settings.manage')
   @HttpCode(HttpStatus.CREATED)
   async createPortalHandoff() {
     const companyId = this.tenant.companyId();
@@ -901,7 +910,7 @@ export class PlatformController {
     res.cookie(PORTAL_SESSION_COOKIE, result.accessToken, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      secure: cookieSecure(),
       maxAge: PORTAL_SESSION_TTL_HOURS * 60 * 60 * 1000,
       path: '/',
     });

@@ -35,3 +35,30 @@ export function readCookie(header: string | undefined, name: string): string | u
   }
   return undefined;
 }
+
+/**
+ * Whether session cookies are marked `Secure`.
+ *
+ * `NODE_ENV === 'production'` alone was the rule, and it is wrong for exactly
+ * one environment that matters: a staging host served over plain HTTP with
+ * `NODE_ENV=production` — which is what `.env.staging` sets, so the build is
+ * production-like. A `Secure` cookie is silently DISCARDED by the browser on a
+ * plain-HTTP origin, and `localhost` hides it, because browsers treat localhost
+ * as trustworthy and keep the cookie anyway.
+ *
+ * The CP8 acceptance walked the handoff twice. On `http://localhost:8088` the
+ * Owner landed signed in. On `http://192.168.100.3:8088` — the LAN path
+ * `docs/39` keeps open precisely so a phone can test the portal — the exchange
+ * succeeded, the cookie was set, the browser threw it away, and the Owner was
+ * shown a password form.
+ *
+ * So the flag follows an explicit setting when there is one, and `NODE_ENV`
+ * only when there is not. **Production must leave this unset**, or set it to
+ * `true`: turning it off means session cookies travel in clear text.
+ */
+export function cookieSecure(env: NodeJS.ProcessEnv = process.env): boolean {
+  const explicit = env.COOKIE_SECURE?.trim().toLowerCase();
+  if (explicit === 'true' || explicit === '1') return true;
+  if (explicit === 'false' || explicit === '0') return false;
+  return env.NODE_ENV === 'production';
+}
