@@ -50,6 +50,11 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
   ),
   allow(
     'POST',
+    'platform/portal-handoff',
+    'Every newly registered shop is pending by definition, and this is the route to the page where they find out what to pay. Blocking it would mean a shop could never reach the portal that ends the pending state — the one thing a lapsed or unstarted subscription most needs to allow. It mints a 90-second single-use ticket for a surface the caller already has authority over, creates no business record, and moves no money',
+  ),
+  allow(
+    'POST',
     'notifications/:id/read',
     'Sets a flag on the reader own notification. Audited in J as changing no business truth, which is why it is also the one queueable operation needing no client uuid',
   ),

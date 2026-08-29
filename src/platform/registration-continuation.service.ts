@@ -222,12 +222,24 @@ export class RegistrationContinuationService {
         data: channel === 'email' ? { emailVerifiedAt: now } : { phoneVerifiedAt: now },
       });
 
+      /*
+       * On the SAME transaction. `auth_sessions` has a foreign key to `users`,
+       * and the update above holds an exclusive lock on that row — an insert
+       * from a second connection would wait for a lock this very transaction is
+       * holding, and the request would die of a lock wait rather than of
+       * anything being wrong.
+       *
+       * It also makes the rollback honest: if session creation fails, the
+       * consumed challenge and continuation roll back with it, so nothing is
+       * left half-spent.
+       */
       return this.sessions.create({
         companyId: user.companyId,
         userId: user.id,
         secret,
         userAgent: context.userAgent,
         ip: context.ip,
+        tx,
       });
     });
 

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { HashingService } from '../common/security/hashing.service';
@@ -6,6 +7,16 @@ import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 import { DeviceDto } from './dto/device.dto';
 
 interface CreateSessionParams {
+  /**
+   * Run the insert on an existing transaction instead of a fresh connection.
+   *
+   * Needed whenever the caller is already inside an interactive transaction
+   * that has locked the user row: `auth_sessions` has a foreign key to
+   * `users`, so an insert on a SECOND connection waits for a lock the caller
+   * itself is holding, and the request dies of a lock wait rather than of
+   * anything wrong with the session.
+   */
+  tx?: Prisma.TransactionClient;
   companyId: Buffer;
   userId: Buffer;
   secret: string;
@@ -33,7 +44,7 @@ export class SessionsService {
     const refreshTokenHash = await this.hashing.hash(params.secret);
     const expiresAt = new Date(Date.now() + this.config.jwtRefreshTtlDays * 86_400_000);
 
-    await this.prisma.authSession.create({
+    await (params.tx ?? this.prisma).authSession.create({
       data: {
         id,
         companyId: params.companyId,
