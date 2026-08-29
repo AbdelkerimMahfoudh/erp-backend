@@ -12,7 +12,13 @@ import {
   stateOf,
   type SubscriptionRecord,
 } from './entitlement-rules';
-import { isAllowedWhenExpired, isMutation, ALWAYS_ALLOWED } from './route-classification';
+import {
+  isAllowedWhenExpired,
+  isMutation,
+  ALWAYS_ALLOWED,
+  ALWAYS_READABLE,
+  isAlwaysReadable,
+} from './route-classification';
 
 /**
  * Subscription entitlement (Milestone K).
@@ -317,5 +323,55 @@ describe('route classification fails closed', () => {
   it('the code the client keys on is stable', () => {
     // The mobile app must never parse English to know what happened.
     expect(ENTITLEMENT_WRITE_BLOCKED).toBe('ENTITLEMENT_WRITE_BLOCKED');
+  });
+});
+
+/**
+ * The account surface a shop keeps in every state.
+ *
+ * Pinned by name for the same reason as the mutation allow-list: the default
+ * refuses, and each exception is a decision somebody has to argue for twice.
+ */
+describe('what a pending or suspended shop may still read', () => {
+  it('the readable list stays exactly this short', () => {
+    expect([...ALWAYS_READABLE].sort()).toEqual([
+      'auth/logout',
+      'auth/me',
+      'auth/refresh',
+      'entitlement',
+      'health',
+      'platform/my-subscription',
+      'platform/payment-instructions',
+    ]);
+  });
+
+  it('lets a pending shop read how to pay', () => {
+    /*
+     * The CP8 acceptance walked the handoff as a genuinely pending shop and the
+     * payment dialog never opened: `payment-instructions` answered
+     * ENTITLEMENT_PENDING, and the page treats an instructions failure as
+     * non-fatal, so it failed silently — for the only kind of shop that needs
+     * it. The portal is where a pending shop finds out what to pay; refusing it
+     * the instructions makes the whole handoff pointless.
+     */
+    expect(isAlwaysReadable('platform/payment-instructions')).toBe(true);
+    expect(isAlwaysReadable('platform/my-subscription')).toBe(true);
+  });
+
+  it('opens no operational read to a pending shop', () => {
+    for (const path of [
+      'sales', 'products', 'units', 'inventory/summary', 'purchases', 'transfers',
+      'returns', 'expenses', 'suppliers', 'analytics/dashboard', 'closing', 'goals',
+      'consignments', 'loans', 'pricing', 'categories', 'users', 'settings',
+    ]) {
+      expect(isAlwaysReadable(path)).toBe(false);
+    }
+  });
+
+  it('names only account routes, never a business one', () => {
+    for (const path of ALWAYS_READABLE) {
+      const accountish = /^(entitlement|health|auth\/|platform\/(my-subscription|payment-instructions))/;
+      expect([path, accountish.test(path)]).toEqual([path, true]);
+    }
   });
 });

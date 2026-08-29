@@ -118,6 +118,20 @@ export const ALWAYS_READABLE: readonly string[] = [
   // The customer's own account page. Reachable in EVERY state — it is where
   // somebody goes to find out why they cannot get in.
   'platform/my-subscription',
+  /*
+   * How to pay, for a shop that has not paid.
+   *
+   * This sat outside the list and the CP8 acceptance found what that meant: a
+   * pending Owner arrived at the portal from the app, the page asked for the
+   * instructions, the entitlement guard answered ENTITLEMENT_PENDING, and the
+   * payment dialog silently never opened — for the only kind of shop that
+   * needs it. `my-subscription` was already here for exactly this reason; the
+   * instructions are the other half of the same page.
+   *
+   * It returns a provider list and a placeholder code. No operational data, no
+   * money, and reading it pays nothing.
+   */
+  'platform/payment-instructions',
 ] as const;
 
 export function isAlwaysReadable(path: string): boolean {
