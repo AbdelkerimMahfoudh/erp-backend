@@ -47,6 +47,33 @@ const APPLY = process.argv.includes('--apply');
  */
 const REMOVE_ADMIN = process.argv.includes('--remove-admin');
 
+/**
+ * Only what a given run created.
+ *
+ * "Owner has an `@example.invalid` address" identifies test data, but it does
+ * NOT distinguish this afternoon's litter from the staging fixtures every
+ * session depends on — those are synthetic too, because staging has no real
+ * shops in it at all. The CP8 acceptance found this the safe way round, in a
+ * dry run: the script proposed deleting 41 companies, and three of them were
+ * the baseline.
+ *
+ * With `--since`, a company must be synthetic AND newer than the moment the
+ * run began. Without it nothing changes — a full sweep is still what somebody
+ * resetting the whole environment wants.
+ */
+function parseSince(): Date | null {
+  const arg = process.argv.find((a) => a.startsWith('--since='));
+  if (!arg) return null;
+  const raw = arg.slice('--since='.length);
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) {
+    throw new Error(`--since="${raw}" is not a date I can read. Use an ISO timestamp.`);
+  }
+  return at;
+}
+
+const SINCE = parseSince();
+
 function assertStaging(): string {
   const appEnv = (process.env.APP_ENV ?? '').toLowerCase();
   if (appEnv !== 'staging') {
@@ -128,8 +155,17 @@ async function main() {
      * outlive the thing they describe.
      */
     if (REMOVE_ADMIN) {
+      /*
+       * The same window applies here. A run that creates a temporary
+       * administrator should be able to take its own away without also removing
+       * the deliberate staging one, which is the whole point of keeping that
+       * one by default.
+       */
       const admins = await prisma.platformAdmin.findMany({
-        where: { email: { contains: '@example.' } },
+        where: {
+          email: { contains: '@example.' },
+          ...(SINCE ? { createdAt: { gte: SINCE } } : {}),
+        },
         select: { id: true },
       });
       const ids = admins.map((a) => a.id);
@@ -152,7 +188,9 @@ async function main() {
     // Synthetic tenants. Only companies whose owner is a synthetic address —
     // never a sweep of every company, because "delete all tenants" is a command
     // that must not exist in a file somebody might run in the wrong shell.
-    const users = await prisma.user.findMany({ select: { id: true, email: true, companyId: true } });
+    const users = await prisma.user.findMany({
+      select: { id: true, email: true, companyId: true, company: { select: { createdAt: true } } },
+    });
     /*
      * Deduplicated BY VALUE, not by reference.
      *
@@ -162,9 +200,24 @@ async function main() {
      * the hex string is what makes one company count once.
      */
     const byHex = new Map<string, Buffer>();
+    /** Companies holding a real contact. Never candidates, whatever else matches. */
+    const real = new Set<string>();
     for (const u of users) {
-      if (u.email && SYNTHETIC_EMAIL.test(u.email)) byHex.set(u.companyId.toString('hex'), u.companyId);
+      const hex = u.companyId.toString('hex');
+      // A real address anywhere in a company disqualifies the whole company.
+      if (u.email && !SYNTHETIC_EMAIL.test(u.email)) { real.add(hex); continue; }
+      if (SINCE && u.company.createdAt < SINCE) continue;
+      /*
+       * Inside a window, a company with NO email at all counts too. A
+       * WhatsApp-only registration leaves an owner with a phone and no address,
+       * so the email rule cannot see it — the CP8 acceptance created six such
+       * shops and the first dry run listed none of them. Outside a window the
+       * old, narrower rule still applies: without a timestamp to bound it,
+       * "has no email" would match far too much.
+       */
+      if (u.email || SINCE) byHex.set(hex, u.companyId);
     }
+    for (const hex of real) byHex.delete(hex);
     const syntheticCompanyIds = byHex.values();
 
     if (byHex.size === 0) {
@@ -179,20 +232,51 @@ async function main() {
        * deleted. That is correct behaviour, and it is reported rather than
        * worked around: nothing here disables a trigger or drops a constraint.
        */
+      if (!APPLY) {
+        removed.companyCandidates = (removed.companyCandidates ?? 0) + 1;
+        continue;
+      }
       try {
-        if (APPLY) await prisma.company.delete({ where: { id: companyId } });
-        removed.companies = (removed.companies ?? 0) + 1;
-      } catch (e) {
-        console.log(
-          '  a synthetic tenant could not be deleted, and was left in place:\n' +
-            '    ' + (e instanceof Error ? e.message.split('\n')[0] : String(e)) + '\n' +
-            '    This usually means append-only audit rows reference it. That is the\n' +
-            '    protection working. Reset the database instead if it must go.\n',
-        );
+        await prisma.company.delete({ where: { id: companyId } });
+        removed.companiesRemoved = (removed.companiesRemoved ?? 0) + 1;
+      } catch {
+        removed.companiesRefused = (removed.companiesRefused ?? 0) + 1;
       }
     }
 
     for (const [what, n] of Object.entries(removed)) console.log(`  ${what}: ${n}`);
+
+    /*
+     * A tenant is a CANDIDATE, never a promise.
+     *
+     * `companies` is referenced by seventy-odd tables and every one of them
+     * restricts deletion — branches, users, roles, role_permissions and
+     * subscriptions among them, all of which registration itself creates. So
+     * `company.delete()` cannot succeed for any shop that has ever registered,
+     * and this script has never removed one. It reported "companies: 38" in a
+     * dry run and then removed nothing, which reads exactly like success.
+     *
+     * Deleting the children in dependency order is not the fix. "Nothing
+     * financial is hard-deleted" is a rule of this system, not an obstacle to
+     * route around. Reclaiming a staging tenant means restoring the database,
+     * which is a deliberate act with its own procedure in `docs/22`.
+     */
+    const refusedCount = removed.companiesRefused ?? 0;
+    if (refusedCount > 0) {
+      console.log(
+        `\n  ${refusedCount} tenant(s) could NOT be removed, and were left intact.\n` +
+          '  That is the schema working: a company is referenced by its branches,\n' +
+          '  users, roles and subscription, and all of them restrict deletion.\n' +
+          '  Staging tenants accumulate. Reclaiming them means restoring the\n' +
+          '  database (docs/22), not deleting rows.',
+      );
+    }
+    if (!APPLY && (removed.companyCandidates ?? 0) > 0) {
+      console.log(
+        `\n  NOTE: ${removed.companyCandidates} tenant(s) match, but tenant deletion is\n` +
+          '  refused by foreign keys in practice. Expect them to remain.',
+      );
+    }
 
     const kept = {
       auditEvents: await prisma.platformAuditEvent.count(),

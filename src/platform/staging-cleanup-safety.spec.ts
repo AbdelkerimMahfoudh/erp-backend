@@ -77,7 +77,9 @@ describe('staging cleanup is safe by default', () => {
      * and would have tried to delete the same company twice.
      */
     expect(code).not.toMatch(/new Set\(\s*users\.filter/);
-    expect(code).toMatch(/byHex\.set\(u\.companyId\.toString\('hex'\)/);
+    // The key is the hex STRING, however the line is arranged.
+    expect(code).toMatch(/toString\('hex'\)/);
+    expect(code).toMatch(/byHex\.set\(hex, u\.companyId\)|byHex\.set\(u\.companyId\.toString\('hex'\)/);
   });
 
   it('refuses anything that is not unmistakably staging', () => {
@@ -98,5 +100,47 @@ describe('staging cleanup is safe by default', () => {
     for (const forbidden of ['SET FOREIGN_KEY_CHECKS', 'DROP TRIGGER', 'TRUNCATE', 'DROP TABLE']) {
       expect(code).not.toContain(forbidden);
     }
+  });
+});
+
+/**
+ * Identifying a run's own litter.
+ *
+ * "The owner has an `@example.invalid` address" identifies test data, but every
+ * company in staging is test data — including the fixtures each session starts
+ * from. The CP8 acceptance saw a dry run propose deleting 41 companies, three
+ * of which were the baseline, and stopped there.
+ */
+describe('the cleanup can be scoped to one run', () => {
+  const source = readFileSync(
+    join(__dirname, '..', '..', 'scripts', 'staging-cleanup.ts'),
+    'utf8',
+  );
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+  it('accepts a --since window', () => {
+    expect(code).toMatch(/--since=/);
+    expect(code).toMatch(/const SINCE = parseSince\(\)/);
+  });
+
+  it('refuses a date it cannot read rather than sweeping everything', () => {
+    // Falling back to "no window" on a typo would silently widen a delete.
+    expect(code).toMatch(/Number\.isNaN\(at\.getTime\(\)\)/);
+    expect(code).toMatch(/throw new Error/);
+  });
+
+  it('applies the window to companies', () => {
+    expect(code).toMatch(/SINCE && u\.company\.createdAt < SINCE/);
+  });
+
+  it('applies the same window to the temporary administrator', () => {
+    // Otherwise a run that made its own administrator could only remove it by
+    // also removing the deliberate staging one.
+    expect(code).toMatch(/SINCE \? \{ createdAt: \{ gte: SINCE \} \} : \{\}/);
+  });
+
+  it('still sweeps everything synthetic when no window is given', () => {
+    // A full environment reset is a legitimate thing to want.
+    expect(code).toMatch(/if \(!arg\) return null/);
   });
 });
