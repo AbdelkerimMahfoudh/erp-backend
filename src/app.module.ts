@@ -12,6 +12,7 @@ import { BinaryUuidInterceptor } from './common/interceptors/binary-uuid.interce
 import { CostGatingInterceptor } from './common/interceptors/cost-gating.interceptor';
 import { isUuid, newUuidV7, uuidToBin } from './common/utils/uuid.util';
 import { HashingModule } from './common/security/hashing.module';
+import { scrubQuery, scrubUrl } from './common/http/log-scrub';
 import { TenantModule } from './common/tenant/tenant.module';
 import { EntitlementModule } from './entitlement/entitlement.module';
 import { PlatformModule } from './platform/platform.module';
@@ -102,6 +103,16 @@ import { LoansModule } from './loans/loans.module';
               'res.headers["set-cookie"]',
             ],
             remove: true,
+          },
+          /*
+           * `redact.paths` cannot reach inside a URL, and the portal-handoff
+           * ticket arrives as `?t=…`. Without this the request line writes a
+           * live credential to the log file twice per request.
+           */
+          serializers: {
+            req(req: Record<string, unknown>) {
+              return { ...req, url: scrubUrl(req.url), query: scrubQuery(req.query) };
+            },
           },
           transport: cfg.isProduction
             ? undefined
