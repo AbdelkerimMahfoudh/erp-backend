@@ -272,6 +272,48 @@ describe('route classification fails closed', () => {
     }
   });
 
+  it('the allow-list stays exactly this short', () => {
+    /*
+     * The default is to BLOCK, and that is what protects a lapsed shop. Each
+     * addition is a deliberate decision, so the list is pinned by name: a new
+     * entry has to be argued for here as well as written there.
+     */
+    expect(ALWAYS_ALLOWED.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+      'POST auth/login',
+      'POST auth/logout',
+      'POST auth/logout-all',
+      'POST auth/refresh',
+      'POST notifications/:id/read',
+      'POST platform/portal-handoff',
+    ]);
+  });
+
+  it('no OPERATIONAL route survives a lapsed subscription', () => {
+    /*
+     * The portal handoff was added because every newly registered shop is
+     * pending by definition and that route leads to the page which ends the
+     * pending state. That argument covers exactly one route and must not
+     * quietly extend to the shop's actual work.
+     */
+    const operational = [
+      'sales', 'units', 'inventory', 'purchases', 'transfers', 'returns',
+      'refunds', 'expenses', 'closing', 'suppliers', 'loans', 'consignments',
+      'products', 'pricing', 'goals', 'imports',
+    ];
+    for (const rule of ALWAYS_ALLOWED) {
+      for (const word of operational) {
+        expect(rule.path.startsWith(`${word}/`) || rule.path === word).toBe(false);
+      }
+    }
+  });
+
+  it('and the handoff is the only platform route allowed through', () => {
+    const platform = ALWAYS_ALLOWED.filter((r) => r.path.startsWith('platform/'));
+    expect(platform.map((r) => r.path)).toEqual(['platform/portal-handoff']);
+    // Minting a ticket is not spending one, and neither moves money.
+    expect(platform[0].method).toBe('POST');
+  });
+
   it('the code the client keys on is stable', () => {
     // The mobile app must never parse English to know what happened.
     expect(ENTITLEMENT_WRITE_BLOCKED).toBe('ENTITLEMENT_WRITE_BLOCKED');
