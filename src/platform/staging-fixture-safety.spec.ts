@@ -22,10 +22,24 @@ describe('the staging fixture command is safe by default', () => {
 
   it('writes nothing unless --apply is given', () => {
     expect(code).toMatch(/const APPLY = process\.argv\.includes\('--apply'\)/);
-    for (const write of ['registration.register(', 'prisma.product.create', 'prisma.unit.create']) {
+    /*
+     * Every write sits behind a dry-run guard. Counted rather than measured by
+     * proximity: the guards moved when the unit matching was restructured, and
+     * a distance-based assertion fails on a refactor while proving nothing
+     * about the guard itself.
+     */
+    expect((code.match(/!APPLY|if \(APPLY/g) ?? []).length).toBeGreaterThanOrEqual(4);
+    for (const write of [
+      'registration.register(',
+      'prisma.product.create',
+      'prisma.unit.create',
+      'prisma.unit.update',
+      'tacCatalog.upsert',
+    ]) {
       const at = code.indexOf(write);
-      expect(at).toBeGreaterThan(-1);
-      expect(code.slice(Math.max(0, at - 1600), at)).toMatch(/APPLY/);
+      expect([write, at > -1]).toEqual([write, true]);
+      // Something already refused to proceed in dry run before this line.
+      expect(code.slice(0, at)).toMatch(/if \(!APPLY\)|if \(APPLY\)/);
     }
   });
 
@@ -167,10 +181,17 @@ describe('the fixture IMEIs are synthetic, valid and unique', () => {
       join(__dirname, '..', '..', 'scripts', 'staging-fixture-store.ts'),
       'utf8',
     );
-    expect(code).toMatch(/\{ imeiPrimary: imei \}/);
-    expect(code).toMatch(/\{ imeiSecondary: imei \}/);
-    expect(code).toMatch(/imeiPrimary: imeiSecondary/);
-    expect(code).toMatch(/imeiSecondary: imeiSecondary/);
+    // Both identifiers, against both columns, in one query.
+    expect(code).toMatch(/const wanted = \[imei, \.\.\.\(imeiSecondary \? \[imeiSecondary\] : \[\]\)\]/);
+    expect(code).toMatch(
+      /wanted\.flatMap\(\(v\) => \[\{ imeiPrimary: v \}, \{ imeiSecondary: v \}\]\)/,
+    );
+    /*
+     * And the fixture's OWN unit is not a clash with itself — it is the row
+     * about to be corrected. Without that exclusion a rerun after the
+     * identifiers changed would refuse its own work.
+     */
+    expect(code).toMatch(/NOT: \{ id: existing\.id \}/);
   });
 
   it('a dual-SIM phone is one unit with two identifiers, not two units', () => {
