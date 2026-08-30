@@ -55,6 +55,10 @@ export class DeviceCatalogueService {
   /**
    * The models of one brand, newest first.
    *
+   * The list arrives in the order it must be shown. Clients do not re-sort it:
+   * ordering is a product decision about which phone somebody is most likely
+   * holding, and it belongs in one place.
+   *
    * Empty for an unknown brand rather than an error: an unrecognised brand key
    * means "no catalogue models", which is a state the manual-entry path already
    * handles, and a 404 here would make the selector fail where it should simply
@@ -69,16 +73,26 @@ export class DeviceCatalogueService {
         isActive: true,
         ...(term ? { searchTerms: { contains: term } } : {}),
       },
-      // Newest first, then alphabetically within a release rank.
-      orderBy: [{ releaseRank: 'desc' }, { name: 'asc' }],
-      select: { id: true, name: true, family: true, releaseRank: true },
+      /*
+       * Canonical order, decided here and nowhere else.
+       *
+       * Newest family first, premium variant first within a family. There is
+       * deliberately NO tie-break on name: every model has a distinct rank, and
+       * a comparator that fell back to a name would sort differently in Arabic
+       * than in English — the catalogue must read the same in all three.
+       */
+      orderBy: { displayRank: 'desc' },
+      select: { id: true, name: true, family: true, releaseRank: true, displayRank: true },
     });
 
     return rows.map((r) => ({
       id: r.id,
       name: r.name,
       family: r.family,
-      releaseRank: r.releaseRank,
+      /** The release YEAR — a fact about the phone, not its position. */
+      releaseYear: r.releaseRank,
+      /** Its position. Returned so a client can prove it did not re-sort. */
+      displayRank: r.displayRank,
     }));
   }
 

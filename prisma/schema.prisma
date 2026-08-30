@@ -781,7 +781,18 @@ model DeviceModel {
   name        String          @db.VarChar(120)
   family      String          @db.VarChar(80)
   /// Sortable. Higher is newer; models are returned newest first.
+  /// The release YEAR. A fact about the phone, kept separately queryable.
+  ///
+  /// It used to double as the display order and could not. A family spans
+  /// years, so `iPhone 17e` (2026) belongs BELOW `iPhone 17 Pro Max` (2025) in
+  /// the list and above it by date — the two orderings genuinely conflict.
   releaseRank Int             @map("release_rank")
+  /// Where the model sits in its brand's list. Higher sorts first.
+  ///
+  /// Server-authoritative and canonical: the API returns models already in this
+  /// order and clients never re-sort. Ranks are spaced so a model can be
+  /// slipped between two others without renumbering the whole brand.
+  displayRank Int             @default(0) @map("display_rank")
   searchTerms String          @map("search_terms") @db.VarChar(400)
   isActive    Boolean         @default(true) @map("is_active")
   source      CatalogueSource @default(curated)
@@ -792,7 +803,7 @@ model DeviceModel {
   brand DeviceBrand @relation(fields: [brandKey], references: [key])
 
   @@unique([brandKey, name])
-  @@index([brandKey, isActive, releaseRank])
+  @@index([brandKey, isActive, displayRank])
   @@map("device_models")
 }
 

@@ -22,11 +22,25 @@
  * "128 GB Black" into a model name would make the catalogue unsearchable and
  * the reporting meaningless.
  *
- * ## Ordering
+ * ## Ordering: the list order IS the display order
  *
- * `releaseRank` is the release year. Models are returned newest first and
- * alphabetically within a year, so the phone somebody is most likely holding is
- * near the top without anybody maintaining a hand-sorted list.
+ * Each brand's array is written in the order a shopkeeper should see it —
+ * newest family first, and within a family the premium variant first: Pro Max,
+ * Pro, Air/Plus, standard, then value variants (`e`, mini, SE). Samsung reads
+ * Ultra, Plus, standard, FE, and the other brands follow their own line.
+ *
+ * `displayRank` is derived from that position, so **correcting the order means
+ * moving a line** rather than recomputing numbers by hand.
+ *
+ * Release year was doing this job and could not. It is one fact and the order
+ * is another, and they genuinely conflict: `iPhone 17e` shipped in 2026 and
+ * belongs BELOW `iPhone 17 Pro Max` from 2025, because it is the value variant
+ * of the same family. Sorting by year also fell back to alphabetical, which put
+ * `iPhone 16e` above `iPhone 17`. Both are now impossible.
+ *
+ * `releaseRank` stays exactly what it says — the year — and stays separately
+ * queryable, because a phone's release year is real curated data and
+ * re-deriving it later would mean curating 323 rows again.
  *
  * ## Provenance
  *
@@ -68,10 +82,16 @@ export interface CatalogueModel {
   name: string;
   /** The series it belongs to, for grouping and for search. */
   family: string;
-  /** Release year. Sortable; newest first. */
+  /** Release year. A fact about the phone, not the display order. */
   releaseRank: number;
   /** Regional names and common shorthands. */
   aliases?: string[];
+}
+
+/** A model with its position resolved. What the database and the API carry. */
+export interface RankedCatalogueModel extends CatalogueModel {
+  /** Higher sorts first. Derived from the model's position in its brand list. */
+  displayRank: number;
 }
 
 /**
@@ -118,12 +138,12 @@ const apple: CatalogueModel[] = [
   { brandKey: 'apple', name: 'iPhone 14', family: 'iPhone 14', releaseRank: 2022 },
   { brandKey: 'apple', name: 'iPhone 13 Pro Max', family: 'iPhone 13', releaseRank: 2021 },
   { brandKey: 'apple', name: 'iPhone 13 Pro', family: 'iPhone 13', releaseRank: 2021 },
-  { brandKey: 'apple', name: 'iPhone 13 mini', family: 'iPhone 13', releaseRank: 2021 },
   { brandKey: 'apple', name: 'iPhone 13', family: 'iPhone 13', releaseRank: 2021 },
+  { brandKey: 'apple', name: 'iPhone 13 mini', family: 'iPhone 13', releaseRank: 2021 },
   { brandKey: 'apple', name: 'iPhone 12 Pro Max', family: 'iPhone 12', releaseRank: 2020 },
   { brandKey: 'apple', name: 'iPhone 12 Pro', family: 'iPhone 12', releaseRank: 2020 },
-  { brandKey: 'apple', name: 'iPhone 12 mini', family: 'iPhone 12', releaseRank: 2020 },
   { brandKey: 'apple', name: 'iPhone 12', family: 'iPhone 12', releaseRank: 2020 },
+  { brandKey: 'apple', name: 'iPhone 12 mini', family: 'iPhone 12', releaseRank: 2020 },
   { brandKey: 'apple', name: 'iPhone SE (3rd generation)', family: 'iPhone SE', releaseRank: 2022, aliases: ['iphone se 2022', 'se 3'] },
   { brandKey: 'apple', name: 'iPhone 11 Pro Max', family: 'iPhone 11', releaseRank: 2019 },
   { brandKey: 'apple', name: 'iPhone 11 Pro', family: 'iPhone 11', releaseRank: 2019 },
@@ -461,19 +481,33 @@ const honor: CatalogueModel[] = [
   { brandKey: 'honor', name: 'X7a', family: 'Honor X', releaseRank: 2023 },
 ];
 
-export const MODELS: readonly CatalogueModel[] = [
-  ...apple,
-  ...samsung,
-  ...xiaomi,
-  ...redmi,
-  ...poco,
-  ...tecno,
-  ...infinix,
-  ...itel,
-  ...oppo,
-  ...realmeModels,
-  ...huawei,
-  ...honor,
+/**
+ * Position within the brand, turned into a rank.
+ *
+ * Descending from a high base so the first model listed sorts first, and
+ * spaced by ten so a model can be slipped between two others without
+ * renumbering the brand.
+ */
+const RANK_BASE = 100_000;
+const RANK_STEP = 10;
+
+function ranked(models: CatalogueModel[]): RankedCatalogueModel[] {
+  return models.map((m, index) => ({ ...m, displayRank: RANK_BASE - index * RANK_STEP }));
+}
+
+export const MODELS: readonly RankedCatalogueModel[] = [
+  ...ranked(apple),
+  ...ranked(samsung),
+  ...ranked(xiaomi),
+  ...ranked(redmi),
+  ...ranked(poco),
+  ...ranked(tecno),
+  ...ranked(infinix),
+  ...ranked(itel),
+  ...ranked(oppo),
+  ...ranked(realmeModels),
+  ...ranked(huawei),
+  ...ranked(honor),
 ];
 
 /**
@@ -507,12 +541,18 @@ export function searchTermsFor(model: CatalogueModel): string {
   return normaliseSearch([model.name, model.family, ...(model.aliases ?? [])].join(' '));
 }
 
-/** Newest first, then alphabetically within a year. */
-export function byNewestThenName(a: CatalogueModel, b: CatalogueModel): number {
-  if (a.releaseRank !== b.releaseRank) return b.releaseRank - a.releaseRank;
-  return a.name.localeCompare(b.name);
+/**
+ * The canonical order: highest `displayRank` first.
+ *
+ * There is no tie-break, because there are no ties — every model has a distinct
+ * rank derived from its position. That matters more than it looks: a comparator
+ * that falls back to a name is a comparator that sorts differently in a
+ * different language, and the catalogue must read the same in all three.
+ */
+export function byDisplayRank(a: RankedCatalogueModel, b: RankedCatalogueModel): number {
+  return b.displayRank - a.displayRank;
 }
 
-export function modelsForBrand(brandKey: string): CatalogueModel[] {
-  return MODELS.filter((m) => m.brandKey === brandKey).sort(byNewestThenName);
+export function modelsForBrand(brandKey: string): RankedCatalogueModel[] {
+  return MODELS.filter((m) => m.brandKey === brandKey).sort(byDisplayRank);
 }

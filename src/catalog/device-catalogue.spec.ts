@@ -4,7 +4,7 @@ import {
   BRANDS,
   MODELS,
   CATALOGUE_REVIEWED_ON,
-  byNewestThenName,
+  byDisplayRank,
   modelsForBrand,
   normaliseSearch,
   searchTermsFor,
@@ -70,18 +70,105 @@ describe('the device catalogue', () => {
     for (const m of MODELS) expect([m.name, keys.has(m.brandKey)]).toEqual([m.name, true]);
   });
 
-  it('returns models newest first, then alphabetically within a release rank', () => {
-    const apple = modelsForBrand('apple');
-    for (let i = 1; i < apple.length; i++) {
-      const prev = apple[i - 1];
-      const cur = apple[i];
-      if (prev.releaseRank === cur.releaseRank) {
-        expect(prev.name.localeCompare(cur.name)).toBeLessThanOrEqual(0);
-      } else {
-        expect(prev.releaseRank).toBeGreaterThan(cur.releaseRank);
+  describe('ordering', () => {
+    /*
+     * Release year used to decide this and could not. Two defects, both fixed
+     * here and both pinned so they cannot come back:
+     *
+     *   * models sharing a year fell back to ALPHABETICAL order, which put
+     *     `iPhone 16e` above `iPhone 17`;
+     *   * a family spans years, so `iPhone 17e` (2026) sat alone at the top,
+     *     split from the `iPhone 17` family it belongs to.
+     */
+    const names = (key: string) => modelsForBrand(key).map((m) => m.name);
+
+    it('leads Apple exactly as a shopkeeper reads it', () => {
+      expect(names('apple').slice(0, 10)).toEqual([
+        'iPhone 17 Pro Max',
+        'iPhone 17 Pro',
+        'iPhone Air',
+        'iPhone 17',
+        'iPhone 17e',
+        'iPhone 16 Pro Max',
+        'iPhone 16 Pro',
+        'iPhone 16 Plus',
+        'iPhone 16',
+        'iPhone 16e',
+      ]);
+    });
+
+    it('puts the value variant last in its family, not first', () => {
+      const apple = names('apple');
+      expect(apple.indexOf('iPhone 13')).toBeLessThan(apple.indexOf('iPhone 13 mini'));
+      expect(apple.indexOf('iPhone 12')).toBeLessThan(apple.indexOf('iPhone 12 mini'));
+      expect(apple.indexOf('iPhone 17')).toBeLessThan(apple.indexOf('iPhone 17e'));
+    });
+
+    it('orders a Samsung family Ultra, Plus, standard, FE', () => {
+      const s25 = names('samsung').filter((n) => n.startsWith('Galaxy S25'));
+      expect(s25).toEqual(['Galaxy S25 Ultra', 'Galaxy S25+', 'Galaxy S25', 'Galaxy S25 FE']);
+    });
+
+    it('keeps a family together even when it spans two years', () => {
+      const apple = modelsForBrand('apple');
+      const i17e = apple.findIndex((m) => m.name === 'iPhone 17e');
+      const i17pm = apple.findIndex((m) => m.name === 'iPhone 17 Pro Max');
+      const i16pm = apple.findIndex((m) => m.name === 'iPhone 16 Pro Max');
+      // 17e shipped LATER than 17 Pro Max and still belongs below it…
+      expect(apple[i17e].releaseRank).toBeGreaterThan(apple[i17pm].releaseRank);
+      expect(i17pm).toBeLessThan(i17e);
+      // …and above the previous family.
+      expect(i17e).toBeLessThan(i16pm);
+    });
+
+    it('never falls back to alphabetical for two models of one year', () => {
+      const apple = modelsForBrand('apple');
+      const a = apple.find((m) => m.name === 'iPhone 16e')!;
+      const b = apple.find((m) => m.name === 'iPhone 17')!;
+      expect(a.releaseRank).toBe(b.releaseRank); // same year
+      // Alphabetically '16e' precedes '17'. The catalogue must not agree.
+      expect('iPhone 16e'.localeCompare('iPhone 17')).toBeLessThan(0);
+      expect(apple.indexOf(b)).toBeLessThan(apple.indexOf(a));
+    });
+
+    it('gives every model of a brand a distinct rank, so there is no tie-break', () => {
+      /*
+       * The reason this matters: a comparator that fell back to a NAME would
+       * sort differently under a different locale, and the catalogue must read
+       * identically in English, Arabic and French.
+       */
+      for (const b of BRANDS) {
+        const ranks = modelsForBrand(b.key).map((m) => m.displayRank);
+        expect([b.key, new Set(ranks).size]).toEqual([b.key, ranks.length]);
       }
-    }
-    expect(byNewestThenName({ releaseRank: 2024 } as never, { releaseRank: 2020 } as never)).toBeLessThan(0);
+    });
+
+    it('sorts the same whatever the language is', () => {
+      // Ordering is a pure numeric comparison, so it cannot depend on a locale.
+      const en = modelsForBrand('apple').map((m) => m.name);
+      for (const locale of ['en-US', 'ar-EG', 'fr-FR']) {
+        const shuffled = [...MODELS.filter((m) => m.brandKey === 'apple')]
+          .sort((x, y) => x.name.localeCompare(y.name, locale))
+          .sort(byDisplayRank)
+          .map((m) => m.name);
+        expect([locale, shuffled]).toEqual([locale, en]);
+      }
+    });
+
+    it('leaves room to slip a model in without renumbering a brand', () => {
+      const apple = modelsForBrand('apple');
+      for (let i = 1; i < apple.length; i++) {
+        expect(apple[i - 1].displayRank - apple[i].displayRank).toBeGreaterThanOrEqual(2);
+      }
+    });
+
+    it('keeps the release year as a separate, still-true fact', () => {
+      // The whole reason for a second column: the year is real data and is not
+      // recoverable from a position.
+      const air = MODELS.find((m) => m.name === 'iPhone Air')!;
+      expect(air.releaseRank).toBe(2025);
+      expect(air.displayRank).not.toBe(2025);
+    });
   });
 
   it('never folds storage, colour or condition into a model name', () => {
