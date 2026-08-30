@@ -1,0 +1,215 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  BRANDS,
+  MODELS,
+  CATALOGUE_REVIEWED_ON,
+  byNewestThenName,
+  modelsForBrand,
+  normaliseSearch,
+  searchTermsFor,
+} from './device-catalogue';
+
+/**
+ * The device catalogue, and the promises it makes.
+ *
+ * The catalogue is reference data with two representations — a TypeScript
+ * constant and a migration snapshot — and the failure mode of that arrangement
+ * is drift: somebody adds a model to one and not the other, and staging quietly
+ * offers a different list from development. `0059` learned this lesson with
+ * permissions; the last test here is the same guard for phones.
+ */
+describe('the device catalogue', () => {
+  it('has the brands the market actually sees, in order', () => {
+    expect(BRANDS.map((b) => b.name)).toEqual([
+      'Apple',
+      'Samsung',
+      'Xiaomi',
+      'Redmi',
+      'POCO',
+      'Tecno',
+      'Infinix',
+      'itel',
+      'OPPO',
+      'realme',
+      'Huawei',
+      'Honor',
+      'Other brand',
+    ]);
+  });
+
+  it('sorts `Other brand` last without special-casing it in the UI', () => {
+    const last = [...BRANDS].sort((a, b) => a.order - b.order).at(-1);
+    expect(last?.key).toBe('other');
+    // It is a row like any other, so a selector needs no branch for it.
+    expect(BRANDS.filter((b) => b.key === 'other')).toHaveLength(1);
+  });
+
+  it('keeps Redmi and POCO searchable in their own right', () => {
+    /*
+     * They are Xiaomi's, and that is recorded — but a shop sells a Redmi, and
+     * somebody typing the name printed on the box must find it. Nesting them
+     * under Xiaomi would hide them from exactly that search.
+     */
+    for (const key of ['redmi', 'poco']) {
+      const brand = BRANDS.find((b) => b.key === key)!;
+      expect(brand.parentKey).toBe('xiaomi');
+      expect(brand.order).toBeLessThan(999);
+      expect(modelsForBrand(key).length).toBeGreaterThan(10);
+    }
+  });
+
+  it('gives every brand a unique key and every model a unique name within it', () => {
+    expect(new Set(BRANDS.map((b) => b.key)).size).toBe(BRANDS.length);
+    const pairs = MODELS.map((m) => `${m.brandKey}|${m.name}`);
+    expect(new Set(pairs).size).toBe(pairs.length);
+  });
+
+  it('has no model belonging to a brand that does not exist', () => {
+    const keys = new Set(BRANDS.map((b) => b.key));
+    for (const m of MODELS) expect([m.name, keys.has(m.brandKey)]).toEqual([m.name, true]);
+  });
+
+  it('returns models newest first, then alphabetically within a release rank', () => {
+    const apple = modelsForBrand('apple');
+    for (let i = 1; i < apple.length; i++) {
+      const prev = apple[i - 1];
+      const cur = apple[i];
+      if (prev.releaseRank === cur.releaseRank) {
+        expect(prev.name.localeCompare(cur.name)).toBeLessThanOrEqual(0);
+      } else {
+        expect(prev.releaseRank).toBeGreaterThan(cur.releaseRank);
+      }
+    }
+    expect(byNewestThenName({ releaseRank: 2024 } as never, { releaseRank: 2020 } as never)).toBeLessThan(0);
+  });
+
+  it('never folds storage, colour or condition into a model name', () => {
+    /*
+     * `products.variant` carries storage and colour already. A catalogue that
+     * listed "iPhone 13 128 GB Black" separately from "iPhone 13 256 GB Blue"
+     * would multiply by every SKU and make both search and reporting useless.
+     */
+    /*
+     * Trailing `\b` matters as much as the leading one: without it `red`
+     * matches the start of "Redmi", and the test fails on perfectly good data
+     * rather than on a real mistake.
+     */
+    const forbidden =
+      /\b(\d+\s?(GB|TB)|black|white|blue|red|gold|silver|green|purple|used|refurbished)\b/i;
+    for (const m of MODELS) {
+      expect([m.name, forbidden.test(m.name)]).toEqual([m.name, false]);
+    }
+  });
+
+  it('carries every named family the market trades', () => {
+    const familiesOf = (key: string) => new Set(modelsForBrand(key).map((m) => m.family));
+    expect([...familiesOf('tecno')]).toEqual(
+      expect.arrayContaining(['Phantom', 'Camon', 'Pova', 'Spark', 'Pop']),
+    );
+    expect([...familiesOf('infinix')]).toEqual(
+      expect.arrayContaining(['Zero', 'GT', 'Note', 'Hot', 'Smart']),
+    );
+    expect([...familiesOf('itel')]).toEqual(
+      expect.arrayContaining(['City', 'Super', 'itel S', 'itel A', 'Power', 'RS']),
+    );
+    expect([...familiesOf('oppo')]).toEqual(
+      expect.arrayContaining(['Find X', 'Find N', 'Reno', 'OPPO A']),
+    );
+    expect([...familiesOf('realme')]).toEqual(
+      expect.arrayContaining(['realme GT', 'realme numbered', 'realme C', 'realme Note', 'realme P', 'Narzo']),
+    );
+    expect([...familiesOf('huawei')]).toEqual(
+      expect.arrayContaining(['Pura', 'Huawei P', 'Mate', 'nova', 'Huawei Y']),
+    );
+    expect([...familiesOf('honor')]).toEqual(
+      expect.arrayContaining(['Magic', 'Magic V', 'Honor numbered', 'Honor X']),
+    );
+    expect([...familiesOf('samsung')]).toEqual(
+      expect.arrayContaining(['Galaxy S', 'Galaxy Z Fold', 'Galaxy Z Flip', 'Galaxy A', 'Galaxy M', 'Galaxy Note']),
+    );
+  });
+
+  describe('search', () => {
+    const find = (q: string) =>
+      MODELS.filter((m) => searchTermsFor(m).includes(normaliseSearch(q))).map((m) => m.name);
+
+    it('does not care where the manufacturer put the space', () => {
+      // `Reno13`, `Galaxy S25` and `Note 14` are all current spellings, and
+      // nobody typing into a search box should have to remember which.
+      expect(find('reno 13')).toContain('Reno13');
+      expect(find('reno13')).toContain('Reno13');
+      expect(find('s25')).toContain('Galaxy S25');
+      expect(find('galaxy s 25')).toContain('Galaxy S25');
+    });
+
+    it('matches a family, so one word finds a whole line', () => {
+      expect(find('pova').length).toBeGreaterThan(3);
+      expect(find('narzo').length).toBeGreaterThan(1);
+    });
+
+    it('matches aliases', () => {
+      expect(find('iphone se 2022')).toContain('iPhone SE (3rd generation)');
+      expect(find('note 13 pro plus')).toContain('Redmi Note 13 Pro+');
+    });
+
+    it('folds case and accents', () => {
+      expect(normaliseSearch('Français')).toBe('francais');
+      expect(normaliseSearch('  POCO  X6  ')).toBe('poco x 6');
+    });
+
+    it('finds a brand by the name people say', () => {
+      const apple = BRANDS.find((b) => b.key === 'apple')!;
+      expect(apple.aliases).toContain('iphone');
+    });
+  });
+
+  describe('the migration snapshot matches the source', () => {
+    const sql = readFileSync(
+      join(__dirname, '..', '..', 'prisma', 'migrations', '0062_device_catalogue', 'migration.sql'),
+      'utf8',
+    );
+
+    it('inserts every brand and every model', () => {
+      expect(sql.match(/INSERT INTO `device_brands`/g)).toHaveLength(BRANDS.length);
+      expect(sql.match(/INSERT INTO `device_models`/g)).toHaveLength(MODELS.length);
+      for (const b of BRANDS) expect(sql).toContain(`'${b.key}'`);
+    });
+
+    it('records the review date the source declares', () => {
+      expect(sql).toContain(CATALOGUE_REVIEWED_ON);
+    });
+
+    it('is idempotent by construction, not by luck', () => {
+      /*
+       * `NOT EXISTS`, never `INSERT IGNORE` or `REPLACE`. IGNORE would also
+       * swallow a real error and leave the catalogue quietly short; REPLACE
+       * would delete and reinsert, discarding ids other rows point at.
+       */
+      expect(sql).not.toMatch(/INSERT IGNORE/i);
+      expect(sql).not.toMatch(/\bREPLACE INTO\b/i);
+      expect(sql.match(/WHERE NOT EXISTS/g)?.length).toBe(BRANDS.length + MODELS.length);
+      expect(sql).toContain('CREATE TABLE IF NOT EXISTS `device_brands`');
+      expect(sql).toContain('CREATE TABLE IF NOT EXISTS `device_models`');
+    });
+
+    it('destroys nothing that was already there', () => {
+      // No product is renamed and no mapping is dropped. The one UPDATE fills
+      // in a review date that was previously null.
+      expect(sql).not.toMatch(/\bDROP\s+(TABLE|COLUMN)\b/i);
+      expect(sql).not.toMatch(/\bDELETE FROM\b/i);
+      expect(sql).not.toMatch(/UPDATE `products`/i);
+      expect(sql.match(/^UPDATE /gm)).toHaveLength(1);
+    });
+
+    it('claims curated, never official', () => {
+      /*
+       * `official` is reserved for a licensed feed. Claiming it for a
+       * hand-assembled list would be a claim nobody could check, and would
+       * quietly raise the confidence every downstream screen shows.
+       */
+      expect(sql).not.toMatch(/,'official',/);
+      expect(sql).toMatch(/,'curated',/);
+    });
+  });
+});

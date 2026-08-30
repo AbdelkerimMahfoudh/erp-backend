@@ -242,7 +242,22 @@ describe('permissions and the two layers', () => {
   it('NOTHING writes to the global tac_catalog', () => {
     expect(code).not.toMatch(/tacCatalog\.(create|update|upsert|delete|updateMany)/);
     // Reading it for generic identity is fine, and is all that happens.
-    expect(code).toMatch(/tacCatalog\.findUnique/);
+    expect(code).toMatch(/tacCatalog\.(findUnique|findFirst)/);
+  });
+
+  it('refuses to read synthetic fixture mappings outside staging', () => {
+    /*
+     * The retained test shop maps twenty synthetic TACs to iPhones so the
+     * recognition ladder can be exercised end to end. If those rows ever
+     * travelled — a dump restored into the wrong place, a copied database —
+     * they must not become suggestions somebody acts on. The guard sits at the
+     * READ, not only in the command that writes them, because the command is
+     * not what a stray database has already run.
+     */
+    expect(code).toMatch(/isStagingEnvironment\(\)/);
+    expect(code).toMatch(/source: \{ not: 'synthetic_staging' \}/);
+    // And only active mappings are ever read.
+    expect(code).toMatch(/isActive: true/);
   });
 
   it('a product is looked up through the TENANT client, so another company’s is a 404', () => {

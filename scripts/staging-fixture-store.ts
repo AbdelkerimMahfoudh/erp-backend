@@ -85,7 +85,7 @@ const PHONES: Phone[] = [
   { model: 'iPhone 15 Plus', variant: '256 GB', colour: 'Yellow', cost: 30000, price: 36000 },
   { model: 'iPhone 15 Pro', variant: '256 GB', colour: 'Natural Titanium', cost: 38000, price: 45000, dual: true },
   { model: 'iPhone 15 Pro Max', variant: '512 GB', colour: 'Blue Titanium', cost: 45000, price: 53000 },
-  { model: 'iPhone SE (3rd gen)', variant: '64 GB', colour: 'Midnight', cost: 8000, price: 10000 },
+  { model: 'iPhone SE (3rd generation)', variant: '64 GB', colour: 'Midnight', cost: 8000, price: 10000 },
   { model: 'iPhone XR', variant: '128 GB', colour: 'Coral', cost: 7000, price: 9000 },
   { model: 'iPhone XS Max', variant: '256 GB', colour: 'Silver', cost: 8500, price: 10500, dual: true },
 ];
@@ -100,7 +100,19 @@ const PHONES: Phone[] = [
  * same identifiers, which is what makes a rerun a no-op instead of a second
  * shop's worth of stock.
  */
-const TEST_TAC = '01000000'; // not an allocated TAC; deliberately synthetic
+const TEST_TAC_PREFIX = '0100'; // not an allocated range; deliberately synthetic
+
+/**
+ * One TAC per model, so recognition has something real to do.
+ *
+ * A single shared TAC across twenty phones would make the recognition test
+ * meaningless: every scan would resolve to the same answer whether the lookup
+ * worked or not. `0100` plus the model's index gives twenty distinct eight-digit
+ * codes, each mapped to exactly one iPhone.
+ */
+function tacFor(index: number): string {
+  return TEST_TAC_PREFIX + String(index).padStart(4, '0');
+}
 
 function withCheckDigit(fourteen: string): string {
   if (!/^\d{14}$/.test(fourteen)) throw new Error(`not 14 digits: ${fourteen}`);
@@ -113,10 +125,11 @@ function withCheckDigit(fourteen: string): string {
 }
 
 function syntheticImei(index: number, secondary = false): string {
-  // Primaries and secondaries occupy disjoint bands, so a primary can never
-  // equal a secondary however the list grows.
+  // Primaries and secondaries occupy disjoint serial bands, so a primary can
+  // never equal a secondary however the list grows — and the TAC differs per
+  // model on top of that.
   const serial = (secondary ? 500_000 : 100_000) + index;
-  return withCheckDigit(TEST_TAC + String(serial).padStart(6, '0'));
+  return withCheckDigit(tacFor(index) + String(serial).padStart(6, '0'));
 }
 
 // ── Guards ─────────────────────────────────────────────────────────────────
@@ -318,6 +331,8 @@ async function main(): Promise<void> {
 
     let productsCreated = 0;
     let unitsCreated = 0;
+    let unitsCorrected = 0;
+    let tacsMapped = 0;
     const report: Record<string, string>[] = [];
 
     for (const [index, phone] of PHONES.entries()) {
@@ -333,6 +348,7 @@ async function main(): Promise<void> {
       if (imeiSecondary === imei) throw new Error('primary and secondary must differ');
 
       report.push({
+        tac: tacFor(index),
         model: phone.model,
         variant: `${phone.variant} · ${phone.colour}`,
         status: 'in_stock',
@@ -371,28 +387,52 @@ async function main(): Promise<void> {
         }));
 
       /*
-       * Uniqueness is checked across BOTH columns before insertion, because an
-       * identifier that already exists as somebody's secondary is just as taken
-       * as one that exists as a primary.
+       * Matched by PRODUCT, not by identifier.
+       *
+       * One unit per model is the invariant, and keying the search on the IMEI
+       * would break the moment the identifiers changed — a rerun would find no
+       * clash and provision twenty more phones. Keying on the product means a
+       * rerun recognises the phone it already made and corrects its identifiers
+       * in place, which is what happened when each model gained its own TAC.
        */
+      const existing = await prisma.unit.findFirst({
+        where: { companyId, productId: product.id },
+        select: { id: true, imeiPrimary: true, imeiSecondary: true },
+      });
+
+      /*
+       * Uniqueness across BOTH columns, because an identifier that already
+       * exists as somebody's secondary is just as taken as one that exists as
+       * a primary. Anything belonging to this fixture's own unit is not a
+       * clash — it is the row about to be corrected.
+       */
+      const wanted = [imei, ...(imeiSecondary ? [imeiSecondary] : [])];
       const clash = await prisma.unit.findFirst({
         where: {
-          OR: [
-            { imeiPrimary: imei },
-            { imeiSecondary: imei },
-            ...(imeiSecondary
-              ? [{ imeiPrimary: imeiSecondary }, { imeiSecondary: imeiSecondary }]
-              : []),
+          AND: [
+            { OR: wanted.flatMap((v) => [{ imeiPrimary: v }, { imeiSecondary: v }]) },
+            ...(existing ? [{ NOT: { id: existing.id } }] : []),
           ],
         },
         select: { id: true, companyId: true },
       });
 
       if (clash) {
-        if (!clash.companyId.equals(companyId)) {
-          throw new Error(`Refusing: ${imei} already belongs to another company.`);
+        throw new Error(
+          `Refusing: ${imei} is already held by another unit` +
+            (clash.companyId.equals(companyId) ? ' in this company.' : ' in another company.'),
+        );
+      }
+
+      if (existing) {
+        if (existing.imeiPrimary !== imei || existing.imeiSecondary !== imeiSecondary) {
+          await prisma.unit.update({
+            where: { id: existing.id },
+            data: { imeiPrimary: imei, imeiSecondary },
+          });
+          unitsCorrected++;
         }
-        continue; // already provisioned by an earlier run
+        continue;
       }
 
       await prisma.unit.create({
@@ -411,12 +451,56 @@ async function main(): Promise<void> {
       unitsCreated++;
     }
 
+    // ── TAC recognition, for the fixture only ──────────────────────────────
+    //
+    // Each model's synthetic TAC is mapped to the Apple model it represents, so
+    // scanning a fixture phone exercises the real recognition ladder rather
+    // than a stub. They are marked `synthetic_staging`: the resolver refuses to
+    // read that source outside staging, so these can never surface as a
+    // suggestion in development or production even if the rows travelled.
+    //
+    // Brand and model only. A TAC does not know storage, colour, condition,
+    // cost or price, and this writes none of them.
+    if (APPLY) {
+      for (const [index, phone] of PHONES.entries()) {
+        const tac = tacFor(index);
+        const model = await prisma.deviceModel.findFirst({
+          where: { brandKey: 'apple', name: phone.model },
+          select: { id: true },
+        });
+
+        await prisma.tacCatalog.upsert({
+          where: { tac },
+          create: {
+            tac,
+            brand: 'Apple',
+            model: phone.model,
+            brandKey: 'apple',
+            modelId: model?.id ?? null,
+            source: 'synthetic_staging',
+            isActive: true,
+            reviewedOn: new Date(),
+          },
+          update: {
+            brand: 'Apple',
+            model: phone.model,
+            brandKey: 'apple',
+            modelId: model?.id ?? null,
+            source: 'synthetic_staging',
+            isActive: true,
+          },
+        });
+        tacsMapped++;
+      }
+    }
+
     // ── What it costs ──────────────────────────────────────────────────────
     const pricing = await billing.pricingFor(companyId);
 
     console.log(`  branch      : ${branch.name}`);
     console.log(`  products    : ${productsCreated} created, ${PHONES.length} intended`);
-    console.log(`  units       : ${unitsCreated} created, ${PHONES.length} intended`);
+    console.log(`  units       : ${unitsCreated} created, ${unitsCorrected} corrected, ${PHONES.length} intended`);
+    console.log(`  TAC mappings: ${tacsMapped} written (synthetic_staging)`);
     console.log(`  monthly     : ${pricing.quote.monthlyTotal} ${pricing.quote.currency}`);
 
     console.log('\n  ── synthetic staging fixture inventory ──────────────────');
@@ -425,7 +509,8 @@ async function main(): Promise<void> {
     console.log(
       '  ' +
         'Model'.padEnd(22) +
-        'Variant'.padEnd(28) +
+        'Variant'.padEnd(26) +
+        'TAC'.padEnd(10) +
         'IMEI'.padEnd(17) +
         'IMEI 2'.padEnd(17) +
         'Cost'.padStart(7) +
@@ -435,7 +520,8 @@ async function main(): Promise<void> {
       console.log(
         '  ' +
           r.model.padEnd(22) +
-          r.variant.padEnd(28) +
+          r.variant.padEnd(26) +
+          r.tac.padEnd(10) +
           r.imei.padEnd(17) +
           r.imeiSecondary.padEnd(17) +
           r.cost.padStart(7) +

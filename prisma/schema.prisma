@@ -252,13 +252,13 @@ enum SyncStatus {
 // ------------------------- Tenancy & Access --------------------------------
 
 model Company {
-  id           Bytes    @id @db.Binary(16)
-  name         String   @db.VarChar(160)
+  id             Bytes   @id @db.Binary(16)
+  name           String  @db.VarChar(160)
   /// Public Store Account ID (F1 Stage 3.2): the human-typable, NON-secret code
   /// that selects this company before login. Canonical = 10 uppercase hex chars.
   /// Not the binary `id`, a branch id, a device id or a subscription id.
   /// Generated on create, unique, immutable through store-facing APIs.
-  publicStoreId String  @unique @map("public_store_id") @db.VarChar(16)
+  publicStoreId  String  @unique @map("public_store_id") @db.VarChar(16)
   /// Discovery (0049). Off until the Owner turns it on: a shop that never
   /// heard of consignment must not be searchable by every other shop by
   /// default. Publication is a decision, not a default.
@@ -278,87 +278,87 @@ model Company {
   createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt    DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
-  branches          Branch[]
-  users             User[]
-  roles             Role[]
-  rolePermissions   RolePermission[]
-  userBranches      UserBranch[]
-  products          Product[]
-  units             Unit[]
-  stockItems        StockItem[]
-  suppliers         Supplier[]
-  purchases         Purchase[]
-  purchaseItems     PurchaseItem[]
-  supplierPayments  SupplierPayment[]
-  customers         Customer[]
-  sales             Sale[]
-  saleItems         SaleItem[]
-  payments          Payment[]
-  returns           Return[]
-  refundPayouts     RefundPayout[]
-  financialCorrections FinancialCorrection[]
-    returnRequests    ReturnRequest[]
-  returnAdjustments ReturnAdjustment[]
-  returnReversals   ReturnReversal[]
-    stockTransfers    StockTransfer[]
-  transferItems     TransferItem[]
-  expenseTemplates  ExpenseTemplate[]
-  expenses          Expense[]
-  dailyClosings     DailyClosing[]
-  goals             Goal[]
-  connectionsRequested StoreConnection[] @relation("ConnectionRequester")
-  connectionsReceived  StoreConnection[] @relation("ConnectionAddressee")
-  connectionsBlocked   StoreConnection[] @relation("ConnectionBlockedBy")
-  counterparties       Counterparty[]
-  counterpartyOf       Counterparty[]    @relation("CounterpartyConnectedCompany")
-  consignmentsOut      Consignment[]     @relation("ConsignmentSource")
-  consignmentsIn       Consignment[]     @relation("ConsignmentDestination")
-  consignmentLines     ConsignmentLine[]
-  consignmentLedgerAsSource      ConsignmentLedgerEntry[] @relation("LedgerSource")
-  consignmentLedgerAsDestination ConsignmentLedgerEntry[] @relation("LedgerDestination")
-  consignmentLedgerActed         ConsignmentLedgerEntry[] @relation("LedgerActing")
-  loans                 Loan[]            @relation("LoanCompany")
-  loansAgainstUs        Loan[]            @relation("LoanCounterpartyCompany")
-  loansProposed         Loan[]            @relation("LoanProposedByCompany")
-  loanLedger            LoanLedgerEntry[] @relation("LoanLedgerCompany")
-  loanLedgerAgainstUs   LoanLedgerEntry[] @relation("LoanLedgerCounterparty")
-  loanLedgerActed       LoanLedgerEntry[] @relation("LoanLedgerActing")
-  closingChannelCounts ClosingChannelCount[]
-  closingDiscrepancies ClosingDiscrepancy[]
-  employeeDebtEntries  EmployeeDebtEntry[]
-  dailyDigests      DailyDigest[]
-  digestLines       DigestLine[]
-  notifications     Notification[]
-  importBatches     ImportBatch[]
-  importRows        ImportRow[]
-  reportDefinitions ReportDefinition[]
-  reportSnapshots   ReportSnapshot[]
-  auditLogs         AuditLog[]
-  settings          Setting[]
-  companySettings   CompanySettings?
-  receivingAccounts ReceivingAccount[]
-  syncDevices        SyncDevice[]
-  outboxChanges      OutboxChange[]
-  authSessions       AuthSession[]
-  userDevices        UserDevice[]
-  otpChallenges       OtpChallenge[]
-  verificationIntents VerificationIntent[]
-  userBranchPermissions UserBranchPermission[]
-  branchVariantPrices   BranchVariantPrice[]
-  unitPriceOverrides    UnitPriceOverride[]
-  priceChangeEvents     PriceChangeEvent[]
-  branchCounters     BranchCounter[]
-  productCategories  ProductCategory[]
-  productRecognitions ProductRecognition[]
-  recognitionOutbox RecognitionOutbox[]
+  branches                       Branch[]
+  users                          User[]
+  roles                          Role[]
+  rolePermissions                RolePermission[]
+  userBranches                   UserBranch[]
+  products                       Product[]
+  units                          Unit[]
+  stockItems                     StockItem[]
+  suppliers                      Supplier[]
+  purchases                      Purchase[]
+  purchaseItems                  PurchaseItem[]
+  supplierPayments               SupplierPayment[]
+  customers                      Customer[]
+  sales                          Sale[]
+  saleItems                      SaleItem[]
+  payments                       Payment[]
+  returns                        Return[]
+  refundPayouts                  RefundPayout[]
+  financialCorrections           FinancialCorrection[]
+  returnRequests                 ReturnRequest[]
+  returnAdjustments              ReturnAdjustment[]
+  returnReversals                ReturnReversal[]
+  stockTransfers                 StockTransfer[]
+  transferItems                  TransferItem[]
+  expenseTemplates               ExpenseTemplate[]
+  expenses                       Expense[]
+  dailyClosings                  DailyClosing[]
+  goals                          Goal[]
+  connectionsRequested           StoreConnection[]              @relation("ConnectionRequester")
+  connectionsReceived            StoreConnection[]              @relation("ConnectionAddressee")
+  connectionsBlocked             StoreConnection[]              @relation("ConnectionBlockedBy")
+  counterparties                 Counterparty[]
+  counterpartyOf                 Counterparty[]                 @relation("CounterpartyConnectedCompany")
+  consignmentsOut                Consignment[]                  @relation("ConsignmentSource")
+  consignmentsIn                 Consignment[]                  @relation("ConsignmentDestination")
+  consignmentLines               ConsignmentLine[]
+  consignmentLedgerAsSource      ConsignmentLedgerEntry[]       @relation("LedgerSource")
+  consignmentLedgerAsDestination ConsignmentLedgerEntry[]       @relation("LedgerDestination")
+  consignmentLedgerActed         ConsignmentLedgerEntry[]       @relation("LedgerActing")
+  loans                          Loan[]                         @relation("LoanCompany")
+  loansAgainstUs                 Loan[]                         @relation("LoanCounterpartyCompany")
+  loansProposed                  Loan[]                         @relation("LoanProposedByCompany")
+  loanLedger                     LoanLedgerEntry[]              @relation("LoanLedgerCompany")
+  loanLedgerAgainstUs            LoanLedgerEntry[]              @relation("LoanLedgerCounterparty")
+  loanLedgerActed                LoanLedgerEntry[]              @relation("LoanLedgerActing")
+  closingChannelCounts           ClosingChannelCount[]
+  closingDiscrepancies           ClosingDiscrepancy[]
+  employeeDebtEntries            EmployeeDebtEntry[]
+  dailyDigests                   DailyDigest[]
+  digestLines                    DigestLine[]
+  notifications                  Notification[]
+  importBatches                  ImportBatch[]
+  importRows                     ImportRow[]
+  reportDefinitions              ReportDefinition[]
+  reportSnapshots                ReportSnapshot[]
+  auditLogs                      AuditLog[]
+  settings                       Setting[]
+  companySettings                CompanySettings?
+  receivingAccounts              ReceivingAccount[]
+  syncDevices                    SyncDevice[]
+  outboxChanges                  OutboxChange[]
+  authSessions                   AuthSession[]
+  userDevices                    UserDevice[]
+  otpChallenges                  OtpChallenge[]
+  verificationIntents            VerificationIntent[]
+  userBranchPermissions          UserBranchPermission[]
+  branchVariantPrices            BranchVariantPrice[]
+  unitPriceOverrides             UnitPriceOverride[]
+  priceChangeEvents              PriceChangeEvent[]
+  branchCounters                 BranchCounter[]
+  productCategories              ProductCategory[]
+  productRecognitions            ProductRecognition[]
+  recognitionOutbox              RecognitionOutbox[]
+  supplierSettlements            SupplierSettlement[]
+  supplierSettlementAllocations  SupplierSettlementAllocation[]
+  subscription                   Subscription?
+  subscriptionEvents             SubscriptionEvent[]
+  subscriptionPayments           SubscriptionPayment[]
+  billingPeriods                 BillingPeriod[]
 
   @@map("companies")
-  supplierSettlements SupplierSettlement[]
-  supplierSettlementAllocations SupplierSettlementAllocation[]
-  subscription        Subscription?
-  subscriptionEvents  SubscriptionEvent[]
-  subscriptionPayments SubscriptionPayment[]
-  billingPeriods      BillingPeriod[]
 }
 
 model Branch {
@@ -375,37 +375,37 @@ model Branch {
 
   company Company @relation(fields: [companyId], references: [id])
 
-  refundPayouts    RefundPayout[]
+  refundPayouts        RefundPayout[]
   financialCorrections FinancialCorrection[]
-    returnRequests   ReturnRequest[]
-  returnReversals  ReturnReversal[]
-    userBranches     UserBranch[]
-  units            Unit[]
-  stockItems       StockItem[]
-  purchases        Purchase[]
-  sales            Sale[]
-  transfersFrom    StockTransfer[]   @relation("TransferFrom")
-  transfersTo      StockTransfer[]   @relation("TransferTo")
-  expenseTemplates ExpenseTemplate[]
-  expenses         Expense[]
-  dailyClosings    DailyClosing[]
-  goals            Goal[]
-  consignments     Consignment[]
-  loans            Loan[]
+  returnRequests       ReturnRequest[]
+  returnReversals      ReturnReversal[]
+  userBranches         UserBranch[]
+  units                Unit[]
+  stockItems           StockItem[]
+  purchases            Purchase[]
+  sales                Sale[]
+  transfersFrom        StockTransfer[]       @relation("TransferFrom")
+  transfersTo          StockTransfer[]       @relation("TransferTo")
+  expenseTemplates     ExpenseTemplate[]
+  expenses             Expense[]
+  dailyClosings        DailyClosing[]
+  goals                Goal[]
+  consignments         Consignment[]
+  loans                Loan[]
   closingDiscrepancies ClosingDiscrepancy[]
   employeeDebtEntries  EmployeeDebtEntry[]
-  dailyDigests     DailyDigest[]
-  notifications    Notification[]
-  importBatches    ImportBatch[]
-  settings         Setting[]
-  branchCounters   BranchCounter[]
-  branchVariantPrices BranchVariantPrice[]
-  unitPriceOverrides  UnitPriceOverride[]
-  priceChangeEvents   PriceChangeEvent[]
+  dailyDigests         DailyDigest[]
+  notifications        Notification[]
+  importBatches        ImportBatch[]
+  settings             Setting[]
+  branchCounters       BranchCounter[]
+  branchVariantPrices  BranchVariantPrice[]
+  unitPriceOverrides   UnitPriceOverride[]
+  priceChangeEvents    PriceChangeEvent[]
+  supplierSettlements  SupplierSettlement[]
 
   @@unique([companyId, name]) // company_id is the leftmost column → covers company scans
   @@map("branches")
-  supplierSettlements SupplierSettlement[]
 }
 
 model User {
@@ -442,34 +442,34 @@ model User {
 
   /// Goals set FOR this person, and goals this person set. Two relations,
   /// because who is aiming and who decided the aim must stay distinguishable.
-  goalsTargeted Goal[]             @relation("GoalTargetUser")
-  goalsCreated  Goal[]             @relation("GoalCreatedBy")
+  goalsTargeted Goal[] @relation("GoalTargetUser")
+  goalsCreated  Goal[] @relation("GoalCreatedBy")
 
   /// Imports this user COMMITTED, kept apart from the one who uploaded.
   importsCommitted ImportBatch[] @relation("ImportCommittedBy")
 
   /// Consignment and connection roles. Named because several of them touch the
   /// same model and Prisma cannot tell them apart otherwise.
-  connectionsRequestedBy StoreConnection[] @relation("ConnectionRequestedBy")
-  connectionsDecidedBy   StoreConnection[] @relation("ConnectionDecidedBy")
-  counterpartyRecords    Counterparty[]    @relation("CounterpartyUser")
-  counterpartiesCreated  Counterparty[]    @relation("CounterpartyCreatedBy")
+  connectionsRequestedBy   StoreConnection[]        @relation("ConnectionRequestedBy")
+  connectionsDecidedBy     StoreConnection[]        @relation("ConnectionDecidedBy")
+  counterpartyRecords      Counterparty[]           @relation("CounterpartyUser")
+  counterpartiesCreated    Counterparty[]           @relation("CounterpartyCreatedBy")
   consignmentLedgerEntries ConsignmentLedgerEntry[]
 
   /// Loan roles. Named, because who proposed and who decided must stay
   /// distinguishable even when an owner does both.
-  loansProposedBy Loan[]                    @relation("LoanProposedBy")
-  loansDecidedBy  Loan[]                    @relation("LoanDecidedBy")
-  loanLedgerEntries LoanLedgerEntry[]       @relation("LoanLedgerUser")
+  loansProposedBy   Loan[]            @relation("LoanProposedBy")
+  loansDecidedBy    Loan[]            @relation("LoanDecidedBy")
+  loanLedgerEntries LoanLedgerEntry[] @relation("LoanLedgerUser")
 
-  id           Bytes     @id @db.Binary(16)
-  companyId    Bytes     @map("company_id") @db.Binary(16)
-  name         String    @db.VarChar(160)
-  login        String    @db.VarChar(120)
+  id              Bytes     @id @db.Binary(16)
+  companyId       Bytes     @map("company_id") @db.Binary(16)
+  name            String    @db.VarChar(160)
+  login           String    @db.VarChar(120)
   /// The identifier somebody signs in with when they have no phone, or
   /// prefer not to type one. Generated, globally unique, and NOT the binary id:
   /// `U-` plus 8 characters with the ambiguous glyphs removed. See docs/35.
-  personalId   String    @unique(map: "ux_users_personal_id") @map("personal_id") @db.Char(10)
+  personalId      String    @unique(map: "ux_users_personal_id") @map("personal_id") @db.Char(10)
   /// Contact phone in E.164 (e.g. +2223xxxxxxx). The future WhatsApp OTP and
   /// recovery channel, so uniqueness is enforced in the database — see
   /// @@unique([companyId, phone]) — not in application code, where two devices
@@ -487,59 +487,59 @@ model User {
   email           String?   @db.VarChar(160)
   /// Set only by a real verification event, and cleared whenever `email` changes.
   emailVerifiedAt DateTime? @map("email_verified_at") @db.DateTime(6)
-  passwordHash String    @map("password_hash") @db.VarChar(255)
-  pinHash      String?   @map("pin_hash") @db.VarChar(255)
-  isActive     Boolean   @default(true) @map("is_active")
-  lastLoginAt  DateTime? @map("last_login_at") @db.DateTime(6)
-  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt    DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
-  deletedAt    DateTime? @map("deleted_at") @db.DateTime(6)
+  passwordHash    String    @map("password_hash") @db.VarChar(255)
+  pinHash         String?   @map("pin_hash") @db.VarChar(255)
+  isActive        Boolean   @default(true) @map("is_active")
+  lastLoginAt     DateTime? @map("last_login_at") @db.DateTime(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt       DateTime? @map("deleted_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
 
-  userBranches      UserBranch[]
-  grantsMade        UserBranchPermission[] @relation("GrantsMade")
-  branchPricesSet   BranchVariantPrice[]   @relation("BranchPriceSetBy")
-  unitPricesSet     UnitPriceOverride[]    @relation("UnitPriceSetBy")
-  priceChanges      PriceChangeEvent[]     @relation("PriceChangeActor")
-  unitsCreated      Unit[]             @relation("UnitCreatedBy")
-  unitsUpdated      Unit[]             @relation("UnitUpdatedBy")
-  purchases         Purchase[]
-  supplierPayments  SupplierPayment[]
-  sales             Sale[]
-  returnsRequested      ReturnRequest[]    @relation("ReturnRequestedBy")
-  returnsReviewed       ReturnRequest[]    @relation("ReturnReviewedBy")
-  returnsDecided        ReturnRequest[]    @relation("ReturnDecidedBy")
-  returnsApproved       ReturnReversal[]   @relation("ReturnApprovedBy")
-  refundsReported       RefundPayout[]     @relation("RefundReportedBy")
-  refundsConfirmed      RefundPayout[]     @relation("RefundConfirmedBy")
-  returnAdjustmentsMade ReturnAdjustment[] @relation("ReturnAdjustmentBy")
-    returnPolicyOverrides Sale[] @relation("SaleReturnPolicyOverride")
-  returns           Return[]
-  transfersSent     StockTransfer[]    @relation("TransferSentBy")
-  transfersReceived StockTransfer[]    @relation("TransferReceivedBy")
-  transfersRequested StockTransfer[]   @relation("TransferRequestedBy")
-  transfersApproved StockTransfer[]    @relation("TransferApprovedBy")
-  transfersDecided  StockTransfer[]    @relation("TransferDecidedBy")
-  expenses          Expense[]
-  dailyClosings     DailyClosing[]
-  digestLines       DigestLine[]
-  notifications     Notification[]
-  importBatches     ImportBatch[]
-  reportDefinitions ReportDefinition[]
-  auditLogs         AuditLog[]
-  syncDevices       SyncDevice[]
-  authSessions      AuthSession[]
-  userDevices       UserDevice[]
-  otpChallenges       OtpChallenge[]
-  verificationIntents VerificationIntent[]
+  userBranches          UserBranch[]
+  grantsMade            UserBranchPermission[] @relation("GrantsMade")
+  branchPricesSet       BranchVariantPrice[]   @relation("BranchPriceSetBy")
+  unitPricesSet         UnitPriceOverride[]    @relation("UnitPriceSetBy")
+  priceChanges          PriceChangeEvent[]     @relation("PriceChangeActor")
+  unitsCreated          Unit[]                 @relation("UnitCreatedBy")
+  unitsUpdated          Unit[]                 @relation("UnitUpdatedBy")
+  purchases             Purchase[]
+  supplierPayments      SupplierPayment[]
+  sales                 Sale[]
+  returnsRequested      ReturnRequest[]        @relation("ReturnRequestedBy")
+  returnsReviewed       ReturnRequest[]        @relation("ReturnReviewedBy")
+  returnsDecided        ReturnRequest[]        @relation("ReturnDecidedBy")
+  returnsApproved       ReturnReversal[]       @relation("ReturnApprovedBy")
+  refundsReported       RefundPayout[]         @relation("RefundReportedBy")
+  refundsConfirmed      RefundPayout[]         @relation("RefundConfirmedBy")
+  returnAdjustmentsMade ReturnAdjustment[]     @relation("ReturnAdjustmentBy")
+  returnPolicyOverrides Sale[]                 @relation("SaleReturnPolicyOverride")
+  returns               Return[]
+  transfersSent         StockTransfer[]        @relation("TransferSentBy")
+  transfersReceived     StockTransfer[]        @relation("TransferReceivedBy")
+  transfersRequested    StockTransfer[]        @relation("TransferRequestedBy")
+  transfersApproved     StockTransfer[]        @relation("TransferApprovedBy")
+  transfersDecided      StockTransfer[]        @relation("TransferDecidedBy")
+  expenses              Expense[]
+  dailyClosings         DailyClosing[]
+  digestLines           DigestLine[]
+  notifications         Notification[]
+  importBatches         ImportBatch[]
+  reportDefinitions     ReportDefinition[]
+  auditLogs             AuditLog[]
+  syncDevices           SyncDevice[]
+  authSessions          AuthSession[]
+  userDevices           UserDevice[]
+  otpChallenges         OtpChallenge[]
+  verificationIntents   VerificationIntent[]
+  settlementsReported   SupplierSettlement[]   @relation("SettlementReportedBy")
+  settlementsConfirmed  SupplierSettlement[]   @relation("SettlementConfirmedBy")
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
   @@unique([companyId, email], map: "ux_users_company_email") // 0055: email is a login identifier; same per-company rule as phone
   @@map("users")
-  settlementsReported  SupplierSettlement[] @relation("SettlementReportedBy")
-  settlementsConfirmed SupplierSettlement[] @relation("SettlementConfirmedBy")
 }
 
 model Role {
@@ -561,7 +561,7 @@ model Permission {
   key   String @unique @db.VarChar(80)
   label String @db.VarChar(160)
 
-  rolePermissions RolePermission[]
+  rolePermissions       RolePermission[]
   userBranchPermissions UserBranchPermission[]
 
   @@map("permissions")
@@ -654,7 +654,7 @@ model Product {
   stockItems    StockItem[]
   purchaseItems PurchaseItem[]
   saleItems     SaleItem[]
-    transferItems TransferItem[]
+  transferItems TransferItem[]
   recognitions  ProductRecognition[]
   branchPrices  BranchVariantPrice[]
   priceEvents   PriceChangeEvent[]
@@ -686,37 +686,37 @@ model ProductCategory {
 
 // Learning map: a scanned code (TAC / barcode / future serial_prefix) → product.
 model ProductRecognition {
-  id              Bytes     @id @db.Binary(16)
-  companyId       Bytes     @map("company_id") @db.Binary(16)
-  codeType        CodeType  @map("code_type")
-  code            String    @db.VarChar(64)
-  productId       Bytes     @map("product_id") @db.Binary(16)
-  timesSeen       Int       @default(1) @map("times_seen")
-  confirmations   Int       @default(0)
-  corrections     Int       @default(0)
-  lastSeenAt      DateTime? @map("last_seen_at") @db.DateTime(6)
-  lastConfirmedAt DateTime? @map("last_confirmed_at") @db.DateTime(6)
-  lastCorrectedAt DateTime? @map("last_corrected_at") @db.DateTime(6)
-  sourceStats     Json?     @map("source_stats") @db.Json // {receiving,scan,sale,manual} counts
+  id              Bytes             @id @db.Binary(16)
+  companyId       Bytes             @map("company_id") @db.Binary(16)
+  codeType        CodeType          @map("code_type")
+  code            String            @db.VarChar(64)
+  productId       Bytes             @map("product_id") @db.Binary(16)
+  timesSeen       Int               @default(1) @map("times_seen")
+  confirmations   Int               @default(0)
+  corrections     Int               @default(0)
+  lastSeenAt      DateTime?         @map("last_seen_at") @db.DateTime(6)
+  lastConfirmedAt DateTime?         @map("last_confirmed_at") @db.DateTime(6)
+  lastCorrectedAt DateTime?         @map("last_corrected_at") @db.DateTime(6)
+  sourceStats     Json?             @map("source_stats") @db.Json // {receiving,scan,sale,manual} counts
   /// The authority distinction (Milestone C). `proposed` is an Employee's
   /// suggestion and is NEVER authoritative; `confirmed` is an Owner's or
   /// Manager's decision; `superseded` is a replaced mapping, kept rather than
   /// deleted so what a shop once believed about a code survives.
   status          RecognitionStatus @default(confirmed)
-  proposedById    Bytes?    @map("proposed_by_id") @db.Binary(16)
-  confirmedById   Bytes?    @map("confirmed_by_id") @db.Binary(16)
-  confirmedAt     DateTime? @map("confirmed_at") @db.DateTime(6)
+  proposedById    Bytes?            @map("proposed_by_id") @db.Binary(16)
+  confirmedById   Bytes?            @map("confirmed_by_id") @db.Binary(16)
+  confirmedAt     DateTime?         @map("confirmed_at") @db.DateTime(6)
   /// Where the evidence came from: receiving, scan, sale, manual.
-  evidenceSource  String?   @map("evidence_source") @db.VarChar(24)
+  evidenceSource  String?           @map("evidence_source") @db.VarChar(24)
   /// Optimistic concurrency: two managers confirming one TAC, one winner.
-  version         Int       @default(0)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt       DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  version         Int               @default(0)
+  createdAt       DateTime          @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt       DateTime          @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company Company @relation(fields: [companyId], references: [id])
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
-  proposedBy  User? @relation("RecognitionProposedBy", fields: [proposedById], references: [id])
-  confirmedBy User? @relation("RecognitionConfirmedBy", fields: [confirmedById], references: [id])
+  company     Company @relation(fields: [companyId], references: [id])
+  product     Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  proposedBy  User?   @relation("RecognitionProposedBy", fields: [proposedById], references: [id])
+  confirmedBy User?   @relation("RecognitionConfirmedBy", fields: [confirmedById], references: [id])
 
   @@index([companyId, codeType, code, status])
   @@index([companyId, productId])
@@ -724,12 +724,98 @@ model ProductRecognition {
   @@map("product_recognition")
 }
 
-model TacCatalog {
-  tac            String  @id @db.Char(8)
-  brand          String? @db.VarChar(80)
-  model          String? @db.VarChar(120)
-  defaultVariant String? @map("default_variant") @db.VarChar(120)
+/// Where a piece of reference data came from, and how much it is worth.
+///
+/// `official` is reserved for a licensed feed and is deliberately unused today
+/// — claiming it for a hand-assembled list would be a claim nobody could check.
+/// `synthetic_staging` exists so fixture data can never be mistaken for real
+/// device data, and is refused outside staging.
+enum CatalogueSource {
+  official
+  curated
+  company_confirmed
+  synthetic_staging
+}
 
+/// A phone brand a shop can choose from.
+///
+/// Reference data, not tenant data: there is no `companyId`, because "Samsung"
+/// does not differ between shops. A company's own corrections live in
+/// `ProductRecognition`, which is company-scoped precisely so one shop's
+/// decision cannot rewrite the catalogue for everybody.
+model DeviceBrand {
+  /// Stable, never displayed, safe to reference from anywhere.
+  key          String          @id @db.VarChar(40)
+  name         String          @db.VarChar(80)
+  /// Normalised search terms, space separated. Matched with LIKE.
+  searchTerms  String          @map("search_terms") @db.VarChar(400)
+  /// Lower sorts first.
+  displayOrder Int             @map("display_order")
+  /// The manufacturer, when it differs from the storefront brand. Redmi and
+  /// POCO point at Xiaomi and are still sold, searched and displayed as
+  /// brands in their own right.
+  parentKey    String?         @map("parent_key") @db.VarChar(40)
+  isActive     Boolean         @default(true) @map("is_active")
+  source       CatalogueSource @default(curated)
+  reviewedOn   DateTime        @map("reviewed_on") @db.Date
+  createdAt    DateTime        @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt    DateTime        @updatedAt @map("updated_at") @db.DateTime(6)
+
+  parent   DeviceBrand?  @relation("BrandParent", fields: [parentKey], references: [key])
+  children DeviceBrand[] @relation("BrandParent")
+  models   DeviceModel[]
+
+  @@index([isActive, displayOrder])
+  @@map("device_brands")
+}
+
+/// A phone model — a COMMERCIAL NAME and nothing else.
+///
+/// Storage, colour, cosmetic condition and an individual IMEI are deliberately
+/// absent: `products.variant` already carries storage and colour, and the unit
+/// carries the identifier. Folding them in here would multiply the catalogue by
+/// every SKU and make both search and reporting worthless.
+model DeviceModel {
+  id          Int             @id @default(autoincrement())
+  brandKey    String          @map("brand_key") @db.VarChar(40)
+  name        String          @db.VarChar(120)
+  family      String          @db.VarChar(80)
+  /// Sortable. Higher is newer; models are returned newest first.
+  releaseRank Int             @map("release_rank")
+  searchTerms String          @map("search_terms") @db.VarChar(400)
+  isActive    Boolean         @default(true) @map("is_active")
+  source      CatalogueSource @default(curated)
+  reviewedOn  DateTime        @map("reviewed_on") @db.Date
+  createdAt   DateTime        @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime        @updatedAt @map("updated_at") @db.DateTime(6)
+
+  brand DeviceBrand @relation(fields: [brandKey], references: [key])
+
+  @@unique([brandKey, name])
+  @@index([brandKey, isActive, releaseRank])
+  @@map("device_models")
+}
+
+/// The global TAC → device mapping.
+///
+/// Platform-controlled and generic: manufacturer and model only. It never
+/// carries storage, colour, condition, cost or price, because a TAC does not
+/// know any of those — and a TAC proves nothing about authenticity, ownership
+/// or theft status either.
+model TacCatalog {
+  tac            String          @id @db.Char(8)
+  brand          String?         @db.VarChar(80)
+  model          String?         @db.VarChar(120)
+  defaultVariant String?         @map("default_variant") @db.VarChar(120)
+  /// Which catalogue rows this points at, when it points at any.
+  brandKey       String?         @map("brand_key") @db.VarChar(40)
+  modelId        Int?            @map("model_id")
+  source         CatalogueSource @default(curated)
+  /// False retires a mapping without losing what was once believed.
+  isActive       Boolean         @default(true) @map("is_active")
+  reviewedOn     DateTime?       @map("reviewed_on") @db.Date
+
+  @@index([source])
   @@map("tac_catalog")
 }
 
@@ -768,13 +854,13 @@ model Unit {
   createdBy User?     @relation("UnitCreatedBy", fields: [createdById], references: [id])
   updatedBy User?     @relation("UnitUpdatedBy", fields: [updatedById], references: [id])
 
-  saleItems     SaleItem[]
-  returns       Return[]
+  saleItems       SaleItem[]
+  returns         Return[]
   returnRequests  ReturnRequest[]
   returnReversals ReturnReversal[]
-  transferItems TransferItem[]
-  priceOverride UnitPriceOverride?
-  priceEvents   PriceChangeEvent[]
+  transferItems   TransferItem[]
+  priceOverride   UnitPriceOverride?
+  priceEvents     PriceChangeEvent[]
 
   @@unique([imeiSecondary]) // MySQL allows multiple NULLs → unique-when-present
   @@index([companyId, branchId, status])
@@ -864,16 +950,16 @@ model UnitPriceOverride {
 /// `initiator = 'system'`. UPDATE and DELETE are blocked by database triggers
 /// for the application account, following the `audit_logs` pattern.
 model PriceChangeEvent {
-  id        Bytes  @id @db.Binary(16)
-  companyId Bytes  @map("company_id") @db.Binary(16)
-  branchId  Bytes  @map("branch_id") @db.Binary(16)
-  productId Bytes  @map("product_id") @db.Binary(16)
+  id            Bytes    @id @db.Binary(16)
+  companyId     Bytes    @map("company_id") @db.Binary(16)
+  branchId      Bytes    @map("branch_id") @db.Binary(16)
+  productId     Bytes    @map("product_id") @db.Binary(16)
   /// Set for a unit-scoped change; null for a branch-variant change.
-  unitId    Bytes? @map("unit_id") @db.Binary(16)
+  unitId        Bytes?   @map("unit_id") @db.Binary(16)
   /// `unit` | `branch_variant` | `stock_item` — which rung of the ladder changed.
   /// `stock_item` covers a quantity product's branch price, which lives on
   /// `stock_items.price` rather than in a pricing table (CP3).
-  scope     String @db.VarChar(20)
+  scope         String   @db.VarChar(20)
   /// `user` | `system` — a person, or an automatic change such as a transfer
   /// retiring an override.
   ///
@@ -881,21 +967,21 @@ model PriceChangeEvent {
   /// role: `actorId` already says exactly who acted, a role can change
   /// afterwards while history must not, and copying a role into every row would
   /// be a second source of truth that drifts from the first.
-  initiator String @db.VarChar(20)
+  initiator     String   @db.VarChar(20)
   /// Null when the price is being set for the first time.
   previousPrice Decimal? @map("previous_price") @db.Decimal(14, 2)
   /// Null when the price is being removed and the row reverts to a fallback.
   newPrice      Decimal? @map("new_price") @db.Decimal(14, 2)
   /// Required by the service for a below-cost Owner change; free text otherwise.
-  reason    String?  @db.Text
-  actorId   Bytes?   @map("actor_id") @db.Binary(16)
-  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  reason        String?  @db.Text
+  actorId       Bytes?   @map("actor_id") @db.Binary(16)
+  createdAt     DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
-  company Company  @relation(fields: [companyId], references: [id])
-  branch  Branch   @relation(fields: [branchId], references: [id])
-  product Product  @relation(fields: [productId], references: [id])
-  unit    Unit?    @relation(fields: [unitId], references: [id])
-  actor   User?    @relation("PriceChangeActor", fields: [actorId], references: [id])
+  company Company @relation(fields: [companyId], references: [id])
+  branch  Branch  @relation(fields: [branchId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+  unit    Unit?   @relation(fields: [unitId], references: [id])
+  actor   User?   @relation("PriceChangeActor", fields: [actorId], references: [id])
 
   @@index([companyId, createdAt])
   @@index([productId])
@@ -904,28 +990,28 @@ model PriceChangeEvent {
 }
 
 model StockItem {
-  id        Bytes    @id @db.Binary(16)
-  companyId Bytes    @map("company_id") @db.Binary(16)
-  productId Bytes    @map("product_id") @db.Binary(16)
-  branchId  Bytes    @map("branch_id") @db.Binary(16)
-  quantity  Int      @default(0) // CHECK (>=0) in 0002
-  cost      Decimal  @db.Decimal(14, 2)
+  id               Bytes    @id @db.Binary(16)
+  companyId        Bytes    @map("company_id") @db.Binary(16)
+  productId        Bytes    @map("product_id") @db.Binary(16)
+  branchId         Bytes    @map("branch_id") @db.Binary(16)
+  quantity         Int      @default(0) // CHECK (>=0) in 0002
+  cost             Decimal  @db.Decimal(14, 2)
   /// Branch selling price. NULLABLE since `0034`: a transfer can deliver stock
   /// into a branch that has never priced it, and neither inventing a price nor
   /// refusing the goods is acceptable. NULL means "unpriced" and falls through
   /// to `Product.defaultPrice`, then to the `unpriced` state the price ladder
   /// already models. It is never treated as zero.
-  price     Decimal? @db.Decimal(14, 2)
+  price            Decimal? @db.Decimal(14, 2)
   /// Physically owned at this branch. NEVER reduced to express unavailability —
   /// reserved goods are still company property and still count in valuation.
   /// Promised to an open transfer and therefore NOT sellable (0030).
   /// Available to sell = `quantity - reservedQuantity`, enforced by CHECKs.
-  reservedQuantity Int @default(0) @map("reserved_quantity")
+  reservedQuantity Int      @default(0) @map("reserved_quantity")
   /// Optimistic concurrency for branch price edits (0029). `updatedAt` cannot
   /// serve: MySQL keeps microseconds, a JS Date only milliseconds.
-  version   Int      @default(0)
-  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+  version          Int      @default(0)
+  createdAt        DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
   product Product @relation(fields: [productId], references: [id])
@@ -957,10 +1043,10 @@ model Supplier {
   updatedAt DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
   deletedAt DateTime? @map("deleted_at") @db.DateTime(6)
 
-  company   Company           @relation(fields: [companyId], references: [id])
-  purchases Purchase[]
-  units     Unit[]
-  payments  SupplierPayment[]
+  company     Company              @relation(fields: [companyId], references: [id])
+  purchases   Purchase[]
+  units       Unit[]
+  payments    SupplierPayment[]
   settlements SupplierSettlement[]
 
   @@unique([companyId, name]) // company_id leftmost → covers company scans
@@ -968,40 +1054,40 @@ model Supplier {
 }
 
 model Purchase {
-  id          Bytes          @id @db.Binary(16)
-  companyId   Bytes          @map("company_id") @db.Binary(16)
-  branchId    Bytes          @map("branch_id") @db.Binary(16)
-  supplierId  Bytes          @map("supplier_id") @db.Binary(16)
-  userId      Bytes?         @map("user_id") @db.Binary(16)
-  referenceNo String?        @map("reference_no") @db.VarChar(40)
+  id                Bytes          @id @db.Binary(16)
+  companyId         Bytes          @map("company_id") @db.Binary(16)
+  branchId          Bytes          @map("branch_id") @db.Binary(16)
+  supplierId        Bytes          @map("supplier_id") @db.Binary(16)
+  userId            Bytes?         @map("user_id") @db.Binary(16)
+  referenceNo       String?        @map("reference_no") @db.VarChar(40)
   /// Client-generated request identity for safe retries (see 0013).
-  clientUuid  Bytes?         @map("client_uuid") @db.Binary(16)
+  clientUuid        Bytes?         @map("client_uuid") @db.Binary(16)
   /// sha256 of the request payload, so a replayed key with different content
   /// is a conflict rather than a wrong "already done".
-  clientRequestHash String?  @map("client_request_hash") @db.Char(64)
-  date        DateTime       @default(now()) @db.DateTime(6)
-  subtotal    Decimal        @db.Decimal(14, 2)
-  taxTotal    Decimal        @default(0) @map("tax_total") @db.Decimal(14, 2)
-  total       Decimal        @db.Decimal(14, 2)
-  amountPaid  Decimal        @default(0) @map("amount_paid") @db.Decimal(14, 2)
-  status      PurchaseStatus @default(unpaid)
-  dueDate     DateTime?      @map("due_date") @db.Date
-  createdAt   DateTime       @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt   DateTime       @updatedAt @map("updated_at") @db.DateTime(6)
+  clientRequestHash String?        @map("client_request_hash") @db.Char(64)
+  date              DateTime       @default(now()) @db.DateTime(6)
+  subtotal          Decimal        @db.Decimal(14, 2)
+  taxTotal          Decimal        @default(0) @map("tax_total") @db.Decimal(14, 2)
+  total             Decimal        @db.Decimal(14, 2)
+  amountPaid        Decimal        @default(0) @map("amount_paid") @db.Decimal(14, 2)
+  status            PurchaseStatus @default(unpaid)
+  dueDate           DateTime?      @map("due_date") @db.Date
+  createdAt         DateTime       @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company  Company           @relation(fields: [companyId], references: [id])
-  branch   Branch            @relation(fields: [branchId], references: [id])
-  supplier Supplier          @relation(fields: [supplierId], references: [id])
-  user     User?             @relation(fields: [userId], references: [id])
-  items    PurchaseItem[]
-  units    Unit[]
-  payments SupplierPayment[]
+  company     Company                        @relation(fields: [companyId], references: [id])
+  branch      Branch                         @relation(fields: [branchId], references: [id])
+  supplier    Supplier                       @relation(fields: [supplierId], references: [id])
+  user        User?                          @relation(fields: [userId], references: [id])
+  items       PurchaseItem[]
+  units       Unit[]
+  payments    SupplierPayment[]
   allocations SupplierSettlementAllocation[]
 
+  @@unique([companyId, clientUuid])
   @@index([companyId, branchId, date])
   @@index([supplierId])
   @@index([userId])
-  @@unique([companyId, clientUuid])
   @@map("purchases")
 }
 
@@ -1067,26 +1153,26 @@ model Customer {
 /// purchase so a crash cannot lose learning. Unique per (company, purchase,
 /// code) — replaying a purchase or a sweep cannot double-count evidence.
 model RecognitionOutbox {
-  id          Bytes     @id @db.Binary(16)
-  companyId   Bytes     @map("company_id") @db.Binary(16)
-  purchaseId  Bytes?    @map("purchase_id") @db.Binary(16)
-  codeType    String    @map("code_type") @db.VarChar(16)
-  code        String    @db.VarChar(64)
-  productId   Bytes     @map("product_id") @db.Binary(16)
-  supplierId  Bytes?    @map("supplier_id") @db.Binary(16)
-  source      String    @db.VarChar(32)
+  id            Bytes     @id @db.Binary(16)
+  companyId     Bytes     @map("company_id") @db.Binary(16)
+  purchaseId    Bytes?    @map("purchase_id") @db.Binary(16)
+  codeType      String    @map("code_type") @db.VarChar(16)
+  code          String    @db.VarChar(64)
+  productId     Bytes     @map("product_id") @db.Binary(16)
+  supplierId    Bytes?    @map("supplier_id") @db.Binary(16)
+  source        String    @db.VarChar(32)
   /// pending | processing | done | failed
-  status      String    @default("pending") @db.VarChar(16)
-  attempts    Int       @default(0)
-  lastError   String?   @map("last_error") @db.VarChar(500)
-  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
-  processedAt DateTime? @map("processed_at") @db.DateTime(6)
+  status        String    @default("pending") @db.VarChar(16)
+  attempts      Int       @default(0)
+  lastError     String?   @map("last_error") @db.VarChar(500)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  processedAt   DateTime? @map("processed_at") @db.DateTime(6)
   /// Lease deadline. An expired lease means the worker died; the row is
   /// claimable again without manual intervention.
-  claimedUntil DateTime? @map("claimed_until") @db.DateTime(6)
+  claimedUntil  DateTime? @map("claimed_until") @db.DateTime(6)
   /// Exponential backoff, so one permanently failing row cannot hammer the DB.
-  nextAttemptAt DateTime @default(now()) @map("next_attempt_at") @db.DateTime(6)
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
 
@@ -1121,30 +1207,30 @@ model Sale {
   /// `company_settings` at return time: an Owner shortening the window
   /// tomorrow must not retroactively cancel a right already promised, and
   /// lengthening it must not silently grant one nobody offered.
-  returnWindowHours Int @default(0) @map("return_window_hours")
+  returnWindowHours          Int       @default(0) @map("return_window_hours")
   /// `soldAt + returnWindowHours`, computed by the SERVER in UTC and never
   /// updated. NULL when the window is 0 — "no deadline" and "deadline passed"
   /// are different facts and must not share a representation. A CHECK keeps
   /// the pair consistent.
-  returnDeadlineAt DateTime? @map("return_deadline_at") @db.DateTime(6)
+  returnDeadlineAt           DateTime? @map("return_deadline_at") @db.DateTime(6)
   /// Set only when a Manager or Owner changed the policy at sale time.
-  returnPolicyOverriddenById Bytes?  @map("return_policy_overridden_by") @db.Binary(16)
-  returnPolicyOverrideReason String? @map("return_policy_override_reason") @db.VarChar(255)
+  returnPolicyOverriddenById Bytes?    @map("return_policy_overridden_by") @db.Binary(16)
+  returnPolicyOverrideReason String?   @map("return_policy_override_reason") @db.VarChar(255)
 
-  clientUuid Bytes?        @map("client_uuid") @db.Binary(16)
-  createdAt  DateTime      @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt  DateTime      @updatedAt @map("updated_at") @db.DateTime(6)
+  clientUuid Bytes?   @map("client_uuid") @db.Binary(16)
+  createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company  Company   @relation(fields: [companyId], references: [id])
-  branch   Branch    @relation(fields: [branchId], references: [id])
-  user     User      @relation(fields: [userId], references: [id])
-  customer Customer? @relation(fields: [customerId], references: [id])
-  returnPolicyOverriddenBy User? @relation("SaleReturnPolicyOverride", fields: [returnPolicyOverriddenById], references: [id])
-  items    SaleItem[]
-  payments Payment[]
-  returnRequests  ReturnRequest[]
-  returnReversals ReturnReversal[]
-    returns  Return[]
+  company                  Company          @relation(fields: [companyId], references: [id])
+  branch                   Branch           @relation(fields: [branchId], references: [id])
+  user                     User             @relation(fields: [userId], references: [id])
+  customer                 Customer?        @relation(fields: [customerId], references: [id])
+  returnPolicyOverriddenBy User?            @relation("SaleReturnPolicyOverride", fields: [returnPolicyOverriddenById], references: [id])
+  items                    SaleItem[]
+  payments                 Payment[]
+  returnRequests           ReturnRequest[]
+  returnReversals          ReturnReversal[]
+  returns                  Return[]
 
   @@unique([branchId, invoiceNo])
   @@unique([companyId, clientUuid])
@@ -1168,13 +1254,13 @@ model SaleItem {
   taxAmount Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
   voided    Boolean @default(false)
 
-  company Company  @relation(fields: [companyId], references: [id])
-  sale    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  unit    Unit?    @relation(fields: [unitId], references: [id], onDelete: Restrict)
-  product Product? @relation(fields: [productId], references: [id], onDelete: Restrict)
-  returnRequests  ReturnRequest[]
-  returnReversal  ReturnReversal?
-    returns Return[]
+  company        Company         @relation(fields: [companyId], references: [id])
+  sale           Sale            @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  unit           Unit?           @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  product        Product?        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  returnRequests ReturnRequest[]
+  returnReversal ReturnReversal?
+  returns        Return[]
 
   // sold-once: generated column `active_unit_id` + UNIQUE + CHECK added in 0002
   @@index([saleId])
@@ -1230,11 +1316,11 @@ model Return {
   returnedAt   DateTime @default(now()) @map("returned_at") @db.DateTime(6)
   createdById  Bytes?   @map("created_by") @db.Binary(16)
 
-  company  Company   @relation(fields: [companyId], references: [id])
-  sale     Sale      @relation(fields: [saleId], references: [id])
-  saleItem SaleItem? @relation(fields: [saleItemId], references: [id])
-  unit     Unit?     @relation(fields: [unitId], references: [id])
-  createdBy User?    @relation(fields: [createdById], references: [id])
+  company   Company   @relation(fields: [companyId], references: [id])
+  sale      Sale      @relation(fields: [saleId], references: [id])
+  saleItem  SaleItem? @relation(fields: [saleItemId], references: [id])
+  unit      Unit?     @relation(fields: [unitId], references: [id])
+  createdBy User?     @relation(fields: [createdById], references: [id])
 
   @@index([companyId, saleId])
   @@index([saleItemId])
@@ -1246,52 +1332,52 @@ model Return {
 // ---------------------------- Branch Transfers -----------------------------
 
 model StockTransfer {
-  id           Bytes          @id @db.Binary(16)
-  companyId    Bytes          @map("company_id") @db.Binary(16)
-  fromBranchId Bytes          @map("from_branch_id") @db.Binary(16)
-  toBranchId   Bytes          @map("to_branch_id") @db.Binary(16)
-  transferNo   String?        @map("transfer_no") @db.VarChar(24)
+  id                Bytes          @id @db.Binary(16)
+  companyId         Bytes          @map("company_id") @db.Binary(16)
+  fromBranchId      Bytes          @map("from_branch_id") @db.Binary(16)
+  toBranchId        Bytes          @map("to_branch_id") @db.Binary(16)
+  transferNo        String?        @map("transfer_no") @db.VarChar(24)
   /// Defaults to the UNAPPROVED state deliberately: a row that somehow reaches
   /// the database without the service choosing a status must not be shippable.
-  status       TransferStatus @default(pending_approval)
-  sentById     Bytes?         @map("sent_by") @db.Binary(16)
-  receivedById Bytes?         @map("received_by") @db.Binary(16)
-  sentAt       DateTime       @default(now()) @map("sent_at") @db.DateTime(6)
-  receivedAt   DateTime?      @map("received_at") @db.DateTime(6)
+  status            TransferStatus @default(pending_approval)
+  sentById          Bytes?         @map("sent_by") @db.Binary(16)
+  receivedById      Bytes?         @map("received_by") @db.Binary(16)
+  sentAt            DateTime       @default(now()) @map("sent_at") @db.DateTime(6)
+  receivedAt        DateTime?      @map("received_at") @db.DateTime(6)
   /// Client-generated request id (H1.1). Mandatory on create; nullable only so
   /// the column can be added to a database that already holds transfers.
-  clientUuid        Bytes?  @map("client_uuid") @db.Binary(16)
+  clientUuid        Bytes?         @map("client_uuid") @db.Binary(16)
   /// Fingerprint of the create payload, so replaying a key with a DIFFERENT
   /// request is a 409 rather than a silent no-op. Same pattern as Purchase.
-  clientRequestHash String? @map("client_request_hash") @db.Char(64)
+  clientRequestHash String?        @map("client_request_hash") @db.Char(64)
 
   /// Optimistic concurrency for every lifecycle transition (H1.2). Two managers
   /// acting on one request — approve vs reject, ship vs cancel — must not both
   /// succeed, and the loser must be told rather than silently overwritten.
-  version      Int       @default(0)
+  version        Int       @default(0)
   /// Who created the request. `sentById` records who SHIPPED it, which is a
   /// different person under the approval workflow.
-  requestedById Bytes?   @map("requested_by") @db.Binary(16)
-  approvedById Bytes?    @map("approved_by") @db.Binary(16)
-  approvedAt   DateTime? @map("approved_at") @db.DateTime(6)
+  requestedById  Bytes?    @map("requested_by") @db.Binary(16)
+  approvedById   Bytes?    @map("approved_by") @db.Binary(16)
+  approvedAt     DateTime? @map("approved_at") @db.DateTime(6)
   /// True when the requester already held `transfer.approve` in the source
   /// branch, so the request was born approved. Recorded because "approved with
   /// no approver" would otherwise look like a gap in the audit trail.
-  autoApproved Boolean   @default(false) @map("auto_approved")
+  autoApproved   Boolean   @default(false) @map("auto_approved")
   /// Why it was rejected or cancelled. Mandatory for both at the API.
-  decisionReason String? @map("decision_reason") @db.Text
-  decidedById  Bytes?    @map("decided_by") @db.Binary(16)
-  decidedAt    DateTime? @map("decided_at") @db.DateTime(6)
+  decisionReason String?   @map("decision_reason") @db.Text
+  decidedById    Bytes?    @map("decided_by") @db.Binary(16)
+  decidedAt      DateTime? @map("decided_at") @db.DateTime(6)
 
-  company    Company        @relation(fields: [companyId], references: [id])
-  fromBranch Branch         @relation("TransferFrom", fields: [fromBranchId], references: [id])
-  toBranch   Branch         @relation("TransferTo", fields: [toBranchId], references: [id])
-  sentBy      User?         @relation("TransferSentBy", fields: [sentById], references: [id])
-  receivedBy  User?         @relation("TransferReceivedBy", fields: [receivedById], references: [id])
-  requestedBy User?         @relation("TransferRequestedBy", fields: [requestedById], references: [id])
-  approvedBy  User?         @relation("TransferApprovedBy", fields: [approvedById], references: [id])
-  decidedBy   User?         @relation("TransferDecidedBy", fields: [decidedById], references: [id])
-  items      TransferItem[]
+  company     Company        @relation(fields: [companyId], references: [id])
+  fromBranch  Branch         @relation("TransferFrom", fields: [fromBranchId], references: [id])
+  toBranch    Branch         @relation("TransferTo", fields: [toBranchId], references: [id])
+  sentBy      User?          @relation("TransferSentBy", fields: [sentById], references: [id])
+  receivedBy  User?          @relation("TransferReceivedBy", fields: [receivedById], references: [id])
+  requestedBy User?          @relation("TransferRequestedBy", fields: [requestedById], references: [id])
+  approvedBy  User?          @relation("TransferApprovedBy", fields: [approvedById], references: [id])
+  decidedBy   User?          @relation("TransferDecidedBy", fields: [decidedById], references: [id])
+  items       TransferItem[]
 
   @@unique([fromBranchId, transferNo])
   /// One request id per company. MySQL permits many NULLs, so pre-H1.1 rows are
@@ -1317,12 +1403,12 @@ model StockTransfer {
 /// so the pair resolves to exactly one row and a second id column would only be
 /// a second source of truth for the same fact.
 model TransferItem {
-  id         Bytes  @id @db.Binary(16)
-  companyId  Bytes  @map("company_id") @db.Binary(16)
-  transferId Bytes  @map("transfer_id") @db.Binary(16)
-  unitId     Bytes? @map("unit_id") @db.Binary(16)
-  productId  Bytes? @map("product_id") @db.Binary(16)
-  quantity   Int    @default(1)
+  id              Bytes    @id @db.Binary(16)
+  companyId       Bytes    @map("company_id") @db.Binary(16)
+  transferId      Bytes    @map("transfer_id") @db.Binary(16)
+  unitId          Bytes?   @map("unit_id") @db.Binary(16)
+  productId       Bytes?   @map("product_id") @db.Binary(16)
+  quantity        Int      @default(1)
   /// Source cost captured AT SHIPMENT, on quantity lines only (`0034`).
   ///
   /// NULL until the transfer ships; set as part of the same transaction that
@@ -1384,54 +1470,54 @@ model ExpenseTemplate {
 }
 
 model Expense {
-  id          Bytes    @id @db.Binary(16)
-  companyId   Bytes    @map("company_id") @db.Binary(16)
-  branchId    Bytes?   @map("branch_id") @db.Binary(16)
-  templateId  Bytes?   @map("template_id") @db.Binary(16)
-  category    String   @db.VarChar(60)
-  amount      Decimal  @db.Decimal(14, 2)
-  spentOn     DateTime @map("spent_on") @db.Date
-  note        String?  @db.Text
+  id                   Bytes         @id @db.Binary(16)
+  companyId            Bytes         @map("company_id") @db.Binary(16)
+  branchId             Bytes?        @map("branch_id") @db.Binary(16)
+  templateId           Bytes?        @map("template_id") @db.Binary(16)
+  category             String        @db.VarChar(60)
+  amount               Decimal       @db.Decimal(14, 2)
+  spentOn              DateTime      @map("spent_on") @db.Date
+  note                 String?       @db.Text
   /// `reported` moves NO money and reaches no report. Only `confirmed` does.
-  status      ExpenseStatus @default(confirmed)
+  status               ExpenseStatus @default(confirmed)
   /// `variable` belongs to the day it is CONFIRMED; `fixed` to its DUE date,
   /// and is never spread across every day.
-  expenseClass ExpenseClass @default(variable) @map("expense_class")
+  expenseClass         ExpenseClass  @default(variable) @map("expense_class")
   /// Salaries stay separately reportable from other fixed costs.
-  isSalary    Boolean  @default(false) @map("is_salary")
+  isSalary             Boolean       @default(false) @map("is_salary")
   /// The date a FIXED expense is recognised on. Null for variable.
-  dueDate     DateTime? @map("due_date") @db.Date
+  dueDate              DateTime?     @map("due_date") @db.Date
   /// Only `cash` touches the drawer.
-  method      RefundMethod @default(cash)
-  receivingAccountId Bytes? @map("receiving_account_id") @db.Binary(16)
+  method               RefundMethod  @default(cash)
+  receivingAccountId   Bytes?        @map("receiving_account_id") @db.Binary(16)
   /// Frozen when REPORTED, so a later rename cannot retitle a movement that
   /// already happened, and deactivation cannot strand a confirmation.
-  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
-  reference   String?  @db.VarChar(120)
+  accountLabelSnapshot String?       @map("account_label_snapshot") @db.VarChar(80)
+  reference            String?       @db.VarChar(120)
   /// An explicit state, never invented placeholder copy: "Miscellaneous" in a
   /// ledger is indistinguishable from a real category a year later.
-  reasonOmitted Boolean @default(false) @map("reason_omitted")
-  reportedById Bytes?  @map("reported_by_id") @db.Binary(16)
-  reportedAt   DateTime? @map("reported_at") @db.DateTime(6)
-  confirmedById Bytes? @map("confirmed_by_id") @db.Binary(16)
-  confirmedAt   DateTime? @map("confirmed_at") @db.DateTime(6)
+  reasonOmitted        Boolean       @default(false) @map("reason_omitted")
+  reportedById         Bytes?        @map("reported_by_id") @db.Binary(16)
+  reportedAt           DateTime?     @map("reported_at") @db.DateTime(6)
+  confirmedById        Bytes?        @map("confirmed_by_id") @db.Binary(16)
+  confirmedAt          DateTime?     @map("confirmed_at") @db.DateTime(6)
   /// The business day the cash movement belongs to.
-  confirmationDate DateTime? @map("confirmation_date") @db.Date
-  rejectedReason String? @map("rejected_reason") @db.VarChar(255)
-  clientUuid   Bytes?  @map("client_uuid") @db.Binary(16)
-  clientRequestHash String? @map("client_request_hash") @db.Char(64)
-  version      Int     @default(0)
-  createdById Bytes?   @map("created_by") @db.Binary(16)
-  createdAt   DateTime @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+  confirmationDate     DateTime?     @map("confirmation_date") @db.Date
+  rejectedReason       String?       @map("rejected_reason") @db.VarChar(255)
+  clientUuid           Bytes?        @map("client_uuid") @db.Binary(16)
+  clientRequestHash    String?       @map("client_request_hash") @db.Char(64)
+  version              Int           @default(0)
+  createdById          Bytes?        @map("created_by") @db.Binary(16)
+  createdAt            DateTime      @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt            DateTime      @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company   Company          @relation(fields: [companyId], references: [id])
-  branch    Branch?          @relation(fields: [branchId], references: [id])
-  template  ExpenseTemplate? @relation(fields: [templateId], references: [id])
-  createdBy User?            @relation(fields: [createdById], references: [id])
+  company          Company           @relation(fields: [companyId], references: [id])
+  branch           Branch?           @relation(fields: [branchId], references: [id])
+  template         ExpenseTemplate?  @relation(fields: [templateId], references: [id])
+  createdBy        User?             @relation(fields: [createdById], references: [id])
   receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
-  reportedBy  User? @relation("ExpenseReportedBy", fields: [reportedById], references: [id])
-  confirmedBy User? @relation("ExpenseConfirmedBy", fields: [confirmedById], references: [id])
+  reportedBy       User?             @relation("ExpenseReportedBy", fields: [reportedById], references: [id])
+  confirmedBy      User?             @relation("ExpenseConfirmedBy", fields: [confirmedById], references: [id])
 
   @@unique([companyId, clientUuid])
   @@index([companyId, branchId, confirmationDate, status])
@@ -1458,40 +1544,40 @@ model DailyClosing {
   /// refused with a 409 rather than reopening anything. Existing closings keep
   /// 0, which is the literal truth — no return had been approved when they were
   /// written.
-  totalReturns             Decimal @default(0) @map("total_returns") @db.Decimal(14, 2)
-  totalReturnsProfitImpact Decimal @default(0) @map("total_returns_profit_impact") @db.Decimal(14, 2)
-  totalReturnAdjustments   Decimal @default(0) @map("total_return_adjustments") @db.Decimal(14, 2)
-  totalReturnsCogsCredited Decimal @default(0) @map("total_returns_cogs_credited") @db.Decimal(14, 2)
+  totalReturns             Decimal       @default(0) @map("total_returns") @db.Decimal(14, 2)
+  totalReturnsProfitImpact Decimal       @default(0) @map("total_returns_profit_impact") @db.Decimal(14, 2)
+  totalReturnAdjustments   Decimal       @default(0) @map("total_return_adjustments") @db.Decimal(14, 2)
+  totalReturnsCogsCredited Decimal       @default(0) @map("total_returns_cogs_credited") @db.Decimal(14, 2)
   /// Refunds confirmed on the day this closing locked. Cash movement only.
-  refundsPaidTotal         Decimal @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
-  refundsPaidCash          Decimal @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
+  refundsPaidTotal         Decimal       @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
+  refundsPaidCash          Decimal       @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
   /// Money returned to the till because a confirmed payment was corrected
   /// (Milestone B), keyed on the CORRECTION day — never the original payment's.
-  correctionsTotal         Decimal @default(0) @map("corrections_total") @db.Decimal(14, 2)
-  correctionsCash          Decimal @default(0) @map("corrections_cash") @db.Decimal(14, 2)
+  correctionsTotal         Decimal       @default(0) @map("corrections_total") @db.Decimal(14, 2)
+  correctionsCash          Decimal       @default(0) @map("corrections_cash") @db.Decimal(14, 2)
   /// Cash expenses confirmed on this day — the part that left the drawer.
-  expensesCash             Decimal @default(0) @map("expenses_cash") @db.Decimal(14, 2)
+  expensesCash             Decimal       @default(0) @map("expenses_cash") @db.Decimal(14, 2)
   /// Supplier payments CONFIRMED on this day (0039). A balance-sheet
   /// movement, never an expense and never COGS - it appears in no profit
   /// figure. Only the cash part left the drawer.
-  supplierPaidTotal Decimal @default(0) @map("supplier_paid_total") @db.Decimal(14, 2)
-  supplierPaidCash  Decimal @default(0) @map("supplier_paid_cash") @db.Decimal(14, 2)
+  supplierPaidTotal        Decimal       @default(0) @map("supplier_paid_total") @db.Decimal(14, 2)
+  supplierPaidCash         Decimal       @default(0) @map("supplier_paid_cash") @db.Decimal(14, 2)
   /// The closing lifecycle (0045). Counting and signing off became two acts,
   /// because `closing.perform` did both and the Employee holding the drawer
   /// held neither — so nobody junior could report what was in the till.
   ///
   /// `locked` is the DEFAULT so every closing written before 0045 keeps exactly
   /// the meaning it had: counted and signed off in one step.
-  status      ClosingStatus @default(locked)
-  countedById Bytes?        @map("counted_by_id") @db.Binary(16)
-  countedAt   DateTime?     @map("counted_at") @db.DateTime(6)
+  status                   ClosingStatus @default(locked)
+  countedById              Bytes?        @map("counted_by_id") @db.Binary(16)
+  countedAt                DateTime?     @map("counted_at") @db.DateTime(6)
   /// Optimistic concurrency: two people finishing one day, one winner.
-  version     Int           @default(0)
+  version                  Int           @default(0)
 
-  isLocked     Boolean  @default(true) @map("is_locked")
-  notes        String?  @db.Text
-  closedById   Bytes?   @map("closed_by") @db.Binary(16)
-  closedAt     DateTime @default(now()) @map("closed_at") @db.DateTime(6)
+  isLocked   Boolean  @default(true) @map("is_locked")
+  notes      String?  @db.Text
+  closedById Bytes?   @map("closed_by") @db.Binary(16)
+  closedAt   DateTime @default(now()) @map("closed_at") @db.DateTime(6)
 
   company   Company      @relation(fields: [companyId], references: [id])
   branch    Branch       @relation(fields: [branchId], references: [id])
@@ -1533,12 +1619,12 @@ model ClosingChannelCount {
   companyId Bytes @map("company_id") @db.Binary(16)
   closingId Bytes @map("closing_id") @db.Binary(16)
 
-  channel ClosingChannel
+  channel            ClosingChannel
   /// NULL for cash, and NULL for the unattributed bucket of a method whose
   /// payments never named an account.
-  receivingAccountId Bytes? @map("receiving_account_id") @db.Binary(16)
+  receivingAccountId Bytes?         @map("receiving_account_id") @db.Binary(16)
   /// Frozen. Renaming an account must not retitle a movement already recorded.
-  labelSnapshot      String @map("label_snapshot") @db.VarChar(80)
+  labelSnapshot      String         @map("label_snapshot") @db.VarChar(80)
 
   /// The same five movements the cash equation is built from, per channel:
   ///   expected = salesIn − refundsOut − supplierOut − expensesOut + correctionsIn
@@ -1550,7 +1636,7 @@ model ClosingChannelCount {
   expensesOut   Decimal @default(0) @map("expenses_out") @db.Decimal(14, 2)
   correctionsIn Decimal @default(0) @map("corrections_in") @db.Decimal(14, 2)
 
-  expected Decimal @default(0) @db.Decimal(14, 2)
+  expected   Decimal  @default(0) @db.Decimal(14, 2)
   /// NULL means genuinely not counted yet, which is not the same as counted as
   /// zero. A shop that has not checked its Bankily balance must not read as
   /// balanced.
@@ -1606,10 +1692,10 @@ enum DiscrepancyResolution {
 /// decision, no record of who was held responsible. So a shortage was either
 /// silently absorbed or settled verbally.
 model ClosingDiscrepancy {
-  id        Bytes @id @db.Binary(16)
-  companyId Bytes @map("company_id") @db.Binary(16)
-  branchId  Bytes @map("branch_id") @db.Binary(16)
-  closingId Bytes @map("closing_id") @db.Binary(16)
+  id             Bytes  @id @db.Binary(16)
+  companyId      Bytes  @map("company_id") @db.Binary(16)
+  branchId       Bytes  @map("branch_id") @db.Binary(16)
+  closingId      Bytes  @map("closing_id") @db.Binary(16)
   /// Which channel was out. NULL only for a legacy cash-only closing.
   channelCountId Bytes? @map("channel_count_id") @db.Binary(16)
 
@@ -1670,17 +1756,17 @@ enum DebtRepaymentMethod {
 ///   balance = charges − repayments − deductions − forgiveness
 /// A stored balance can disagree with its own history. A derived one cannot.
 model EmployeeDebtEntry {
-  id        Bytes @id @db.Binary(16)
-  companyId Bytes @map("company_id") @db.Binary(16)
-  branchId  Bytes @map("branch_id") @db.Binary(16)
-  userId    Bytes @map("user_id") @db.Binary(16)
+  id            Bytes  @id @db.Binary(16)
+  companyId     Bytes  @map("company_id") @db.Binary(16)
+  branchId      Bytes  @map("branch_id") @db.Binary(16)
+  userId        Bytes  @map("user_id") @db.Binary(16)
   /// Where it came from. NULL for a repayment against an older balance.
   discrepancyId Bytes? @map("discrepancy_id") @db.Binary(16)
 
-  kind DebtEntryKind
+  kind   DebtEntryKind
   /// Always a positive magnitude — `kind` carries the direction, so no row can
   /// be ambiguous about which way the money went.
-  amount Decimal @db.Decimal(14, 2)
+  amount Decimal       @db.Decimal(14, 2)
 
   /// Mandatory, every kind, no exception. A ledger row nobody can explain is
   /// worse than no ledger at all.
@@ -1820,18 +1906,18 @@ model ImportBatch {
   /// An offline retry must not import the same file twice.
   clientUuid       Bytes?      @map("client_uuid") @db.Binary(16)
   version          Int         @default(0)
-  createdAt DateTime     @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt DateTime     @updatedAt @map("updated_at") @db.DateTime(6)
+  createdAt        DateTime    @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt        DateTime    @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company Company     @relation(fields: [companyId], references: [id])
-  branch  Branch      @relation(fields: [branchId], references: [id])
+  company     Company     @relation(fields: [companyId], references: [id])
+  branch      Branch      @relation(fields: [branchId], references: [id])
   user        User?       @relation(fields: [userId], references: [id])
   committedBy User?       @relation("ImportCommittedBy", fields: [committedById], references: [id])
   rows        ImportRow[]
 
+  @@unique([companyId, clientUuid], map: "ux_import_batches_client_uuid")
   @@index([companyId])
   @@index([branchId])
-  @@unique([companyId, clientUuid], map: "ux_import_batches_client_uuid")
   @@index([userId])
   @@index([companyId, branchId, status, createdAt], map: "ix_import_batches_status")
   @@map("import_batches")
@@ -1853,11 +1939,11 @@ model ImportRow {
   ///
   /// Not a relation: it points at one of two tables depending on the batch
   /// kind, and a row that produced nothing keeps null.
-  createdEntityId Bytes?              @map("created_entity_id") @db.Binary(16)
-  createdKind     ImportCreatedKind?  @map("created_kind")
+  createdEntityId Bytes?             @map("created_entity_id") @db.Binary(16)
+  createdKind     ImportCreatedKind? @map("created_kind")
   /// The identifier this row claimed, extracted so duplicate detection and the
   /// commit need not re-read the JSON.
-  identifier      String?             @db.VarChar(64)
+  identifier      String?            @db.VarChar(64)
 
   company Company     @relation(fields: [companyId], references: [id])
   batch   ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
@@ -2001,11 +2087,11 @@ model CompanySettings {
 ///
 /// Cash is not represented: it is always available and needs no configuration.
 model ReceivingAccount {
-  expenses      Expense[]
+  expenses          Expense[]
   consignmentLedger ConsignmentLedgerEntry[]
   loanLedger        LoanLedgerEntry[]
-  payments      Payment[]
-  channelCounts ClosingChannelCount[]
+  payments          Payment[]
+  channelCounts     ClosingChannelCount[]
 
   id        Bytes             @id @db.Binary(16)
   companyId Bytes             @map("company_id") @db.Binary(16)
@@ -2028,13 +2114,13 @@ model ReceivingAccount {
   updatedAt   DateTime @updatedAt @map("updated_at") @db.DateTime(6)
   createdById Bytes?   @map("created_by") @db.Binary(16)
 
-  company Company @relation(fields: [companyId], references: [id])
-  refundPayouts RefundPayout[]
+  company             Company              @relation(fields: [companyId], references: [id])
+  refundPayouts       RefundPayout[]
+  supplierSettlements SupplierSettlement[]
 
   @@unique([companyId, label])
   @@index([companyId, isActive, sortOrder])
   @@map("receiving_accounts")
-  supplierSettlements SupplierSettlement[]
 }
 
 model SyncDevice {
@@ -2142,9 +2228,9 @@ model UserDevice {
   revokedAt   DateTime? @map("revoked_at") @db.DateTime(6)
   revokedById Bytes?    @map("revoked_by_id") @db.Binary(16)
 
-  company  Company @relation(fields: [companyId], references: [id])
-  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sessions AuthSession[]
+  company             Company              @relation(fields: [companyId], references: [id])
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions            AuthSession[]
   otpChallenges       OtpChallenge[]
   verificationIntents VerificationIntent[]
 
@@ -2167,7 +2253,7 @@ model AuthSession {
   /// LEGACY: the old client-supplied, unverified device string. Superseded by
   /// `deviceRecordId` and kept only so existing rows stay readable. Nothing
   /// authenticates from it.
-  deviceId String? @map("device_id") @db.VarChar(120)
+  deviceId         String?   @map("device_id") @db.VarChar(120)
   deviceName       String?   @map("device_name") @db.VarChar(120)
   platform         String?   @db.VarChar(40)
   appVersion       String?   @map("app_version") @db.VarChar(40)
@@ -2242,23 +2328,23 @@ model DailyRollup {
 
   /// Refunds CONFIRMED on this day — cash and account movement, not profit.
   /// Profit was reversed at approval; taking it again here would double-count.
-  refundsPaidTotal Decimal @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
-  refundsPaidCash  Decimal @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
-  refundsPaidCount Int     @default(0) @map("refunds_paid_count")
+  refundsPaidTotal Decimal  @default(0) @map("refunds_paid_total") @db.Decimal(14, 2)
+  refundsPaidCash  Decimal  @default(0) @map("refunds_paid_cash") @db.Decimal(14, 2)
+  refundsPaidCount Int      @default(0) @map("refunds_paid_count")
   /// Expenses CONFIRMED for this day (Milestone D). Variable ones are keyed on
   /// their confirmation date, fixed ones on their due date — a fixed cost is
   /// never spread across every day.
-  expensesCash    Decimal @default(0) @map("expenses_cash") @db.Decimal(14, 2)
-  expensesCount   Int     @default(0) @map("expenses_count")
-  expensesFixed   Decimal @default(0) @map("expenses_fixed") @db.Decimal(14, 2)
+  expensesCash     Decimal  @default(0) @map("expenses_cash") @db.Decimal(14, 2)
+  expensesCount    Int      @default(0) @map("expenses_count")
+  expensesFixed    Decimal  @default(0) @map("expenses_fixed") @db.Decimal(14, 2)
   /// Salaries, separately reportable from other fixed costs.
-  expensesSalary  Decimal @default(0) @map("expenses_salary") @db.Decimal(14, 2)
+  expensesSalary   Decimal  @default(0) @map("expenses_salary") @db.Decimal(14, 2)
   /// Corrections approved on this day. No profit component: a correction moves
   /// cash and liability only.
-  correctionsTotal Decimal @default(0) @map("corrections_total") @db.Decimal(14, 2)
-  correctionsCash  Decimal @default(0) @map("corrections_cash") @db.Decimal(14, 2)
-  correctionsCount Int     @default(0) @map("corrections_count")
-  refreshedAt DateTime @map("refreshed_at") @db.DateTime(6)
+  correctionsTotal Decimal  @default(0) @map("corrections_total") @db.Decimal(14, 2)
+  correctionsCash  Decimal  @default(0) @map("corrections_cash") @db.Decimal(14, 2)
+  correctionsCount Int      @default(0) @map("corrections_count")
+  refreshedAt      DateTime @map("refreshed_at") @db.DateTime(6)
 
   @@unique([branchId, day])
   @@index([companyId, day])
@@ -2540,12 +2626,12 @@ enum ReturnAdjustmentKind {
 
 /// A reviewed return request against exactly ONE serialized sale line.
 model ReturnRequest {
-  id           Bytes @id @db.Binary(16)
-  companyId    Bytes @map("company_id") @db.Binary(16)
-  branchId     Bytes @map("branch_id") @db.Binary(16)
-  saleId       Bytes @map("sale_id") @db.Binary(16)
-  saleItemId   Bytes @map("sale_item_id") @db.Binary(16)
-  unitId       Bytes @map("unit_id") @db.Binary(16)
+  id         Bytes @id @db.Binary(16)
+  companyId  Bytes @map("company_id") @db.Binary(16)
+  branchId   Bytes @map("branch_id") @db.Binary(16)
+  saleId     Bytes @map("sale_id") @db.Binary(16)
+  saleItemId Bytes @map("sale_item_id") @db.Binary(16)
+  unitId     Bytes @map("unit_id") @db.Binary(16)
 
   status ReturnStatus @default(pending_investigation)
 
@@ -2722,18 +2808,18 @@ model RefundPayout {
   reportedAmount Decimal @map("reported_amount") @db.Decimal(14, 2)
 
   method               RefundMethod
-  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  receivingAccountId   Bytes?       @map("receiving_account_id") @db.Binary(16)
   /// Snapshotted at confirmation, so a receipt printed months later still reads
   /// what the employee chose even if the account was later renamed.
-  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+  accountLabelSnapshot String?      @map("account_label_snapshot") @db.VarChar(80)
 
   transactionReference String? @map("transaction_reference") @db.VarChar(120)
   note                 String? @db.VarChar(255)
 
-  reportedById  Bytes?    @map("reported_by_id") @db.Binary(16)
-  reportedAt    DateTime  @default(now()) @map("reported_at") @db.DateTime(6)
-  confirmedById Bytes?    @map("confirmed_by_id") @db.Binary(16)
-  confirmedAt   DateTime? @map("confirmed_at") @db.DateTime(6)
+  reportedById     Bytes?    @map("reported_by_id") @db.Binary(16)
+  reportedAt       DateTime  @default(now()) @map("reported_at") @db.DateTime(6)
+  confirmedById    Bytes?    @map("confirmed_by_id") @db.Binary(16)
+  confirmedAt      DateTime? @map("confirmed_at") @db.DateTime(6)
   /// The business date the cash movement belongs to — the confirmation day.
   confirmationDate DateTime? @map("confirmation_date") @db.Date
 
@@ -2762,7 +2848,8 @@ model RefundPayout {
   reportedBy       User?             @relation("RefundReportedBy", fields: [reportedById], references: [id])
   confirmedBy      User?             @relation("RefundConfirmedBy", fields: [confirmedById], references: [id])
 
-  correctedBy      FinancialCorrection? @relation("PayoutSupersededBy", fields: [correctedById], references: [id])
+  correctedBy FinancialCorrection?  @relation("PayoutSupersededBy", fields: [correctedById], references: [id])
+  corrections FinancialCorrection[]
 
   @@unique([returnRequestId])
   @@unique([returnReversalId])
@@ -2771,7 +2858,6 @@ model RefundPayout {
   @@index([branchId, confirmationDate])
   @@index([companyId, status])
   @@map("refund_payouts")
-  corrections FinancialCorrection[]
 }
 
 // ───────────────────────── Supplier settlement (J1) ─────────────────────────
@@ -2798,19 +2884,19 @@ enum SupplierSettlementStatus {
 /// The app RECORDS a payment. It moves no money, calls no provider and holds no
 /// credential.
 model SupplierSettlement {
-  id         Bytes  @id @db.Binary(16)
-  companyId  Bytes  @map("company_id") @db.Binary(16)
+  id         Bytes @id @db.Binary(16)
+  companyId  Bytes @map("company_id") @db.Binary(16)
   /// The branch that paid. The debt is company-wide; the till is not.
-  branchId   Bytes  @map("branch_id") @db.Binary(16)
-  supplierId Bytes  @map("supplier_id") @db.Binary(16)
+  branchId   Bytes @map("branch_id") @db.Binary(16)
+  supplierId Bytes @map("supplier_id") @db.Binary(16)
 
   status SupplierSettlementStatus @default(reported)
   /// Total handed over. Must equal the sum of its allocations, and may never
   /// exceed what is outstanding — checked against committed rows at confirmation.
-  amount Decimal @db.Decimal(14, 2)
+  amount Decimal                  @db.Decimal(14, 2)
   method RefundMethod
 
-  receivingAccountId Bytes? @map("receiving_account_id") @db.Binary(16)
+  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
   /// The account label as it read when the settlement was REPORTED, frozen at
   /// confirmation. A later rename must not retitle a movement that happened.
   accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
@@ -2825,10 +2911,10 @@ model SupplierSettlement {
   clientUuid        Bytes  @map("client_uuid") @db.Binary(16)
   clientRequestHash String @map("client_request_hash") @db.Char(64)
 
-  reportedById Bytes?    @map("reported_by") @db.Binary(16)
-  reportedAt   DateTime  @default(now()) @map("reported_at") @db.DateTime(6)
-  confirmedById Bytes?   @map("confirmed_by") @db.Binary(16)
-  confirmedAt   DateTime? @map("confirmed_at") @db.DateTime(6)
+  reportedById     Bytes?    @map("reported_by") @db.Binary(16)
+  reportedAt       DateTime  @default(now()) @map("reported_at") @db.DateTime(6)
+  confirmedById    Bytes?    @map("confirmed_by") @db.Binary(16)
+  confirmedAt      DateTime? @map("confirmed_at") @db.DateTime(6)
   /// The business date the cash movement belongs to — the CONFIRMATION day,
   /// never the report day. That is what reconciliation reads.
   confirmationDate DateTime? @map("confirmation_date") @db.Date
@@ -2836,20 +2922,20 @@ model SupplierSettlement {
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company         Company          @relation(fields: [companyId], references: [id])
-  branch          Branch           @relation(fields: [branchId], references: [id])
-  supplier        Supplier         @relation(fields: [supplierId], references: [id])
+  company          Company           @relation(fields: [companyId], references: [id])
+  branch           Branch            @relation(fields: [branchId], references: [id])
+  supplier         Supplier          @relation(fields: [supplierId], references: [id])
   receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
-  reportedBy      User?            @relation("SettlementReportedBy", fields: [reportedById], references: [id])
-  confirmedBy     User?            @relation("SettlementConfirmedBy", fields: [confirmedById], references: [id])
+  reportedBy       User?             @relation("SettlementReportedBy", fields: [reportedById], references: [id])
+  confirmedBy      User?             @relation("SettlementConfirmedBy", fields: [confirmedById], references: [id])
 
   allocations SupplierSettlementAllocation[]
+  corrections FinancialCorrection[]
 
   @@unique([companyId, clientUuid])
   @@index([companyId, supplierId, status])
   @@index([companyId, branchId, confirmationDate])
   @@map("supplier_settlements")
-  corrections FinancialCorrection[]
 }
 
 /// How much of one settlement paid down one purchase.
@@ -2908,11 +2994,11 @@ model FinancialCorrection {
   /// original payment, so a correction cannot post against a different drawer.
   branchId  Bytes @map("branch_id") @db.Binary(16)
 
-  targetKind FinancialCorrectionKind @map("target_kind")
+  targetKind                 FinancialCorrectionKind @map("target_kind")
   /// Exactly one is set, matching `targetKind`. Two nullable columns rather
   /// than one polymorphic id, so both keep a real foreign key.
-  targetRefundPayoutId       Bytes? @map("target_refund_payout_id") @db.Binary(16)
-  targetSupplierSettlementId Bytes? @map("target_supplier_settlement_id") @db.Binary(16)
+  targetRefundPayoutId       Bytes?                  @map("target_refund_payout_id") @db.Binary(16)
+  targetSupplierSettlementId Bytes?                  @map("target_supplier_settlement_id") @db.Binary(16)
 
   status FinancialCorrectionStatus @default(requested)
 
@@ -2923,14 +3009,14 @@ model FinancialCorrection {
 
   /// Copied from the target, never typed. The compensating movement is exactly
   /// the opposite of what was paid, so it cannot disagree with it.
-  amount Decimal     @db.Decimal(14, 2)
-  method RefundMethod
-  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+  amount               Decimal      @db.Decimal(14, 2)
+  method               RefundMethod
+  accountLabelSnapshot String?      @map("account_label_snapshot") @db.VarChar(80)
 
-  requestedById Bytes?    @map("requested_by_id") @db.Binary(16)
-  requestedAt   DateTime  @default(now()) @map("requested_at") @db.DateTime(6)
-  decidedById   Bytes?    @map("decided_by_id") @db.Binary(16)
-  decidedAt     DateTime? @map("decided_at") @db.DateTime(6)
+  requestedById  Bytes?    @map("requested_by_id") @db.Binary(16)
+  requestedAt    DateTime  @default(now()) @map("requested_at") @db.DateTime(6)
+  decidedById    Bytes?    @map("decided_by_id") @db.Binary(16)
+  decidedAt      DateTime? @map("decided_at") @db.DateTime(6)
   /// The CURRENT open business day at approval — never the original payment's
   /// day. Old closings stay shut.
   correctionDate DateTime? @map("correction_date") @db.Date
@@ -2944,12 +3030,12 @@ model FinancialCorrection {
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company     Company             @relation(fields: [companyId], references: [id])
-  branch      Branch              @relation(fields: [branchId], references: [id])
+  company          Company             @relation(fields: [companyId], references: [id])
+  branch           Branch              @relation(fields: [branchId], references: [id])
   targetPayout     RefundPayout?       @relation(fields: [targetRefundPayoutId], references: [id])
   targetSettlement SupplierSettlement? @relation(fields: [targetSupplierSettlementId], references: [id])
-  requestedBy User?               @relation("CorrectionRequestedBy", fields: [requestedById], references: [id])
-  decidedBy   User?               @relation("CorrectionDecidedBy", fields: [decidedById], references: [id])
+  requestedBy      User?               @relation("CorrectionRequestedBy", fields: [requestedById], references: [id])
+  decidedBy        User?               @relation("CorrectionDecidedBy", fields: [decidedById], references: [id])
 
   supersededPayouts RefundPayout[] @relation("PayoutSupersededBy")
 
@@ -3006,8 +3092,8 @@ model Goal {
   companyId Bytes @map("company_id") @db.Binary(16)
 
   scope        GoalScope
-  branchId     Bytes? @map("branch_id") @db.Binary(16)
-  targetUserId Bytes? @map("target_user_id") @db.Binary(16)
+  branchId     Bytes?    @map("branch_id") @db.Binary(16)
+  targetUserId Bytes?    @map("target_user_id") @db.Binary(16)
 
   metric GoalMetric
 
@@ -3200,8 +3286,8 @@ model Consignment {
   /// what makes the record cross-tenant.
   destinationCompanyId Bytes? @map("destination_company_id") @db.Binary(16)
   /// The source's own view of who this went to, always set.
-  counterpartyId Bytes  @map("counterparty_id") @db.Binary(16)
-  connectionId   Bytes? @map("connection_id") @db.Binary(16)
+  counterpartyId       Bytes  @map("counterparty_id") @db.Binary(16)
+  connectionId         Bytes? @map("connection_id") @db.Binary(16)
 
   status ConsignmentStatus @default(draft)
 
@@ -3275,8 +3361,8 @@ enum ConsignmentReturnCondition {
 /// ownership, and a second owned row could be sold independently — the
 /// double-sale this whole design exists to make impossible.
 model ConsignmentLine {
-  id            Bytes @id @db.Binary(16)
-  consignmentId Bytes @map("consignment_id") @db.Binary(16)
+  id              Bytes @id @db.Binary(16)
+  consignmentId   Bytes @map("consignment_id") @db.Binary(16)
   /// Denormalised so a line can be scoped without joining its parent.
   sourceCompanyId Bytes @map("source_company_id") @db.Binary(16)
 
@@ -3332,48 +3418,48 @@ enum ConsignmentLedgerKind {
 /// The money, append-only. What is owed is DERIVED from these rows and stored
 /// nowhere, the same rule the employee debt ledger follows.
 model ConsignmentLedgerEntry {
-  id            Bytes @id @db.Binary(16)
-  consignmentId Bytes @map("consignment_id") @db.Binary(16)
+  id                   Bytes  @id @db.Binary(16)
+  consignmentId        Bytes  @map("consignment_id") @db.Binary(16)
   /// Both sides, so either company can read its own ledger without a join.
   sourceCompanyId      Bytes  @map("source_company_id") @db.Binary(16)
   destinationCompanyId Bytes? @map("destination_company_id") @db.Binary(16)
 
-  kind ConsignmentLedgerKind
+  kind   ConsignmentLedgerKind
   /// Always a positive magnitude; `kind` carries the direction.
-  amount Decimal @db.Decimal(14, 2)
+  amount Decimal               @db.Decimal(14, 2)
 
   lineId Bytes? @map("line_id") @db.Binary(16)
 
   method               RefundMethod?
-  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  receivingAccountId   Bytes?        @map("receiving_account_id") @db.Binary(16)
   /// Frozen: renaming an account later must not retitle a movement.
-  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
-  reference            String? @db.VarChar(120)
-  evidenceRef          String? @map("evidence_ref") @db.VarChar(512)
+  accountLabelSnapshot String?       @map("account_label_snapshot") @db.VarChar(80)
+  reference            String?       @db.VarChar(120)
+  evidenceRef          String?       @map("evidence_ref") @db.VarChar(512)
 
   /// Mandatory for forgiveness and correction.
   reason String? @db.VarChar(255)
 
   /// Which side wrote this, so a two-party flow can tell report from confirm.
-  actingCompanyId Bytes    @map("acting_company_id") @db.Binary(16)
-  actingUserId    Bytes?   @map("acting_user_id") @db.Binary(16)
-  entryDate       DateTime @map("entry_date") @db.Date
-  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(6)
-  clientUuid      Bytes?   @map("client_uuid") @db.Binary(16)
+  actingCompanyId   Bytes    @map("acting_company_id") @db.Binary(16)
+  actingUserId      Bytes?   @map("acting_user_id") @db.Binary(16)
+  entryDate         DateTime @map("entry_date") @db.Date
+  createdAt         DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  clientUuid        Bytes?   @map("client_uuid") @db.Binary(16)
   /// Payload fingerprint (J). A replay carrying the same key with a different
   /// payload is a conflict, not a retry. Nullable: rows written before J
   /// have none, and must keep replaying as they always did.
-  clientRequestHash String? @map("client_request_hash") @db.Char(64)
+  clientRequestHash String?  @map("client_request_hash") @db.Char(64)
   /// The reported entry a confirmation or correction refers to.
-  refersToId      Bytes?   @map("refers_to_id") @db.Binary(16)
+  refersToId        Bytes?   @map("refers_to_id") @db.Binary(16)
 
-  consignment        Consignment       @relation(fields: [consignmentId], references: [id])
-  sourceCompany      Company           @relation("LedgerSource", fields: [sourceCompanyId], references: [id])
-  destinationCompany Company?          @relation("LedgerDestination", fields: [destinationCompanyId], references: [id])
-  actingCompany      Company           @relation("LedgerActing", fields: [actingCompanyId], references: [id])
-  line               ConsignmentLine?  @relation(fields: [lineId], references: [id])
-  receivingAccount   ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
-  actingUser         User?             @relation(fields: [actingUserId], references: [id])
+  consignment        Consignment              @relation(fields: [consignmentId], references: [id])
+  sourceCompany      Company                  @relation("LedgerSource", fields: [sourceCompanyId], references: [id])
+  destinationCompany Company?                 @relation("LedgerDestination", fields: [destinationCompanyId], references: [id])
+  actingCompany      Company                  @relation("LedgerActing", fields: [actingCompanyId], references: [id])
+  line               ConsignmentLine?         @relation(fields: [lineId], references: [id])
+  receivingAccount   ReceivingAccount?        @relation(fields: [receivingAccountId], references: [id])
+  actingUser         User?                    @relation(fields: [actingUserId], references: [id])
   refersTo           ConsignmentLedgerEntry?  @relation("LedgerRefers", fields: [refersToId], references: [id])
   referredBy         ConsignmentLedgerEntry[] @relation("LedgerRefers")
 
@@ -3432,7 +3518,7 @@ model Loan {
   companyId Bytes  @map("company_id") @db.Binary(16)
   branchId  Bytes? @map("branch_id") @db.Binary(16)
 
-  counterpartyId Bytes @map("counterparty_id") @db.Binary(16)
+  counterpartyId        Bytes  @map("counterparty_id") @db.Binary(16)
   /// Set only when the counterparty is a company on this platform.
   counterpartyCompanyId Bytes? @map("counterparty_company_id") @db.Binary(16)
   connectionId          Bytes? @map("connection_id") @db.Binary(16)
@@ -3501,40 +3587,40 @@ enum LoanLedgerKind {
 /// The money, append-only. What remains is DERIVED from these rows and stored
 /// nowhere — a stored balance can disagree with its own history.
 model LoanLedgerEntry {
-  id     Bytes @id @db.Binary(16)
-  loanId Bytes @map("loan_id") @db.Binary(16)
+  id                    Bytes  @id @db.Binary(16)
+  loanId                Bytes  @map("loan_id") @db.Binary(16)
   /// Both sides, so either party reads its own ledger without a join.
   companyId             Bytes  @map("company_id") @db.Binary(16)
   counterpartyCompanyId Bytes? @map("counterparty_company_id") @db.Binary(16)
 
-  kind LoanLedgerKind
+  kind   LoanLedgerKind
   /// Always a positive magnitude; `kind` carries the direction.
-  amount Decimal @db.Decimal(14, 2)
+  amount Decimal        @db.Decimal(14, 2)
 
   method               RefundMethod?
-  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  receivingAccountId   Bytes?        @map("receiving_account_id") @db.Binary(16)
   /// Frozen: renaming an account later must not retitle a movement.
-  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
-  reference            String? @db.VarChar(120)
+  accountLabelSnapshot String?       @map("account_label_snapshot") @db.VarChar(80)
+  reference            String?       @db.VarChar(120)
   /// A photo or document reference. **Not proof** — nothing is verified, and
   /// the screens must never present it as confirmation.
-  evidenceRef          String? @map("evidence_ref") @db.VarChar(512)
+  evidenceRef          String?       @map("evidence_ref") @db.VarChar(512)
 
   /// Mandatory for forgiveness and correction.
   reason String? @db.VarChar(255)
   note   String? @db.VarChar(255)
 
-  actingCompanyId Bytes    @map("acting_company_id") @db.Binary(16)
-  actingUserId    Bytes?   @map("acting_user_id") @db.Binary(16)
-  entryDate       DateTime @map("entry_date") @db.Date
-  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(6)
-  clientUuid      Bytes?   @map("client_uuid") @db.Binary(16)
+  actingCompanyId   Bytes    @map("acting_company_id") @db.Binary(16)
+  actingUserId      Bytes?   @map("acting_user_id") @db.Binary(16)
+  entryDate         DateTime @map("entry_date") @db.Date
+  createdAt         DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  clientUuid        Bytes?   @map("client_uuid") @db.Binary(16)
   /// Payload fingerprint (J). A replay carrying the same key with a different
   /// payload is a conflict, not a retry — it is a second report wearing the
   /// first one's id. Nullable: rows written before J have none.
-  clientRequestHash String? @map("client_request_hash") @db.Char(64)
+  clientRequestHash String?  @map("client_request_hash") @db.Char(64)
   /// The reported entry a confirmation or correction answers.
-  refersToId      Bytes?   @map("refers_to_id") @db.Binary(16)
+  refersToId        Bytes?   @map("refers_to_id") @db.Binary(16)
 
   loan                Loan              @relation(fields: [loanId], references: [id])
   company             Company           @relation("LoanLedgerCompany", fields: [companyId], references: [id])
@@ -3604,11 +3690,11 @@ model Subscription {
 /// when" is exactly the question somebody eventually asks, and a record that
 /// can be quietly rewritten is worth nothing as an answer.
 model SubscriptionEvent {
-  id             Bytes  @id @db.Binary(16)
-  companyId      Bytes  @map("company_id") @db.Binary(16)
-  subscriptionId Bytes  @map("subscription_id") @db.Binary(16)
+  id             Bytes                 @id @db.Binary(16)
+  companyId      Bytes                 @map("company_id") @db.Binary(16)
+  subscriptionId Bytes                 @map("subscription_id") @db.Binary(16)
   kind           SubscriptionEventKind
-  note           String? @db.VarChar(255)
+  note           String?               @db.VarChar(255)
 
   periodEndAfter DateTime? @map("period_end_after") @db.DateTime(6)
   branchesAfter  Int?      @map("branches_after") @db.UnsignedInt
@@ -3624,7 +3710,6 @@ model SubscriptionEvent {
   @@index([companyId, createdAt], map: "ix_subevents_company")
   @@map("subscription_events")
 }
-
 
 // ───────────────────────────────────────────────────────────────────────────
 // Platform control (0056)
@@ -3703,9 +3788,9 @@ model PlatformAuditEvent {
   /// Kept as text as well, so the record still reads after an admin row is gone.
   actor   String @db.VarChar(160)
 
-  action     String  @db.VarChar(60)
-  targetType String  @map("target_type") @db.VarChar(40)
-  targetId   Bytes?  @map("target_id") @db.Binary(16)
+  action      String  @db.VarChar(60)
+  targetType  String  @map("target_type") @db.VarChar(40)
+  targetId    Bytes?  @map("target_id") @db.Binary(16)
   /// Human-readable target, so the log is legible without joining.
   targetLabel String? @map("target_label") @db.VarChar(200)
 
@@ -3757,9 +3842,9 @@ model SubscriptionPayment {
 
   /// Who typed it in, and who says the money is real. Often the same person;
   /// kept apart so a two-person process is possible without a migration.
-  recordedBy    String    @map("recorded_by") @db.VarChar(160)
-  confirmedBy   String?   @map("confirmed_by") @db.VarChar(160)
-  confirmedAt   DateTime? @map("confirmed_at") @db.DateTime(6)
+  recordedBy  String    @map("recorded_by") @db.VarChar(160)
+  confirmedBy String?   @map("confirmed_by") @db.VarChar(160)
+  confirmedAt DateTime? @map("confirmed_at") @db.DateTime(6)
 
   /// Set when this row exists to cancel out an earlier one.
   reversesId Bytes? @map("reverses_id") @db.Binary(16)

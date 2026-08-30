@@ -14,6 +14,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { isValidTac, resolveTac, type CompanyMapping } from './tac-resolution';
+import { isStagingEnvironment } from '../common/config/environment';
 
 /**
  * A company teaching its own TAC→Product mapping (Milestone C).
@@ -75,7 +76,22 @@ export class TacMappingService {
         },
         orderBy: { id: 'desc' },
       }),
-      this.db.tacCatalog.findUnique({ where: { tac } }),
+      /*
+       * Synthetic fixture mappings are readable in staging and nowhere else.
+       *
+       * They exist so the recognition ladder can be exercised end to end
+       * against the retained test shop. If those rows ever travelled — a dump
+       * restored into the wrong place, a copied database — they must not become
+       * suggestions somebody acts on, so the guard is here at the read rather
+       * than only in the command that writes them.
+       */
+      this.db.tacCatalog.findFirst({
+        where: {
+          tac,
+          isActive: true,
+          ...(isStagingEnvironment() ? {} : { source: { not: 'synthetic_staging' } }),
+        },
+      }),
     ]);
 
     const mappings: CompanyMapping[] = rows.map((r) => ({
