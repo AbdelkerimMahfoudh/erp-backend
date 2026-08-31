@@ -236,23 +236,80 @@ async function main(): Promise<void> {
       throw new Error('could not build an unknown-TAC IMEI');
     })();
 
+    /*
+     * Every card also gets a full-screen view of its own.
+     *
+     * The third device test found the decoder taking a NEIGHBOURING card: with
+     * thirty-two barcodes on one page, several are in frame at once, and the
+     * scanner reports whichever resolves first. That makes the grid useless for
+     * judging the scanner — a wrong result might be the scanner's fault or the
+     * page's, and there is no way to tell which.
+     *
+     * Physical QA uses the solo view. One code, a wide quiet margin, and the
+     * expected result underneath.
+     *
+     * The solo view reuses the SAME generated strings — no identifier is
+     * regenerated, so what is printed in the grid and what is shown alone are
+     * the same bytes by construction rather than by coincidence. Everything is
+     * inline: no network, no script, staging-only, exactly as before.
+     */
+    const solos: string[] = [];
+
     const card = (opts: {
       title: string;
       expect: string;
       tone?: 'good' | 'refuse';
       codes: { cap: string; value: string; height?: number }[];
       note?: string;
-    }) => `<article class="${opts.tone === 'refuse' ? 'refuse' : ''}">
-  <h2>${esc(opts.title)}</h2>
-  ${opts.codes
-    .map(
-      (c) =>
-        `<div class="cap">${esc(c.cap)}</div>${barcodeSvg(c.value, c.height ?? 48)}<div class="num">${esc(c.value)}</div>`,
-    )
-    .join('')}
+    }) => {
+      const base = solos.length;
+
+      // Built once, used in both views.
+      const parts = opts.codes.map((c) => ({
+        cap: esc(c.cap),
+        value: esc(c.value),
+        grid: barcodeSvg(c.value, c.height ?? 48),
+        // Twice the height alone: the whole point is that it is easy to aim at.
+        solo: barcodeSvg(c.value, (c.height ?? 48) * 2),
+      }));
+
+      /*
+       * ONE code per solo view, even for a dual-SIM card.
+       *
+       * Putting both of a phone's identifiers on one full-screen page would
+       * reintroduce the exact problem this view exists to remove: two barcodes
+       * in frame, and the decoder reporting whichever resolves first. A card
+       * with two codes therefore gets two solo views, and the fixture is still
+       * fully testable — the point of the dual-SIM case is that EITHER code
+       * finds the same one phone, which is a pair of separate scans anyway.
+       */
+      const slugs = parts.map((_, i) => `fx-${base + i + 1}`);
+
+      parts.forEach((p, i) => {
+        solos.push(`<section class="solo" id="${slugs[i]}">
+  <a class="back" href="#top">← Back to the full sheet</a>
+  <h2>${esc(opts.title)}${parts.length > 1 ? ` — ${p.cap}` : ''}</h2>
+  <div class="stage">
+    <div class="cap">${p.cap}</div>${p.solo}<div class="num">${p.value}</div>
+  </div>
   ${opts.note ? `<p class="note">${esc(opts.note)}</p>` : ''}
   <p class="expect"><span>Expected</span> ${esc(opts.expect)}</p>
+</section>`);
+      });
+
+      return `<article class="${opts.tone === 'refuse' ? 'refuse' : ''}">
+  <h2>${esc(opts.title)}</h2>
+  ${parts.map((p) => `<div class="cap">${p.cap}</div>${p.grid}<div class="num">${p.value}</div>`).join('')}
+  ${opts.note ? `<p class="note">${esc(opts.note)}</p>` : ''}
+  <p class="expect"><span>Expected</span> ${esc(opts.expect)}</p>
+  <p class="alone">${parts
+    .map(
+      (p, i) =>
+        `<a href="#${slugs[i]}">Open ${parts.length > 1 ? p.cap : 'this one'} alone →</a>`,
+    )
+    .join(' &nbsp; ')}</p>
 </article>`;
+    };
 
     // ── The twenty stock phones ───────────────────────────────────────────
     const stock = units
@@ -382,8 +439,29 @@ async function main(): Promise<void> {
       }),
     ].join(String.fromCharCode(10));
 
+    /*
+     * The two QR cards are written out by hand rather than through `card()`, so
+     * their solo views are registered here — from the SAME `qrSingle` and
+     * `qrDual` strings, so nothing is regenerated.
+     */
+    solos.push(
+      `<section class="solo" id="fx-qr-single">
+  <a class="back" href="#top">← Back to the full sheet</a>
+  <h2>2 · Labelled single IMEI in QR</h2>
+  <div class="stage stage-qr">${qrSingle}<div class="num">IMEI: ${esc(first.imeiPrimary ?? '')}</div></div>
+  <p class="expect"><span>Expected</span> Apple ${esc(first.product.model)}, as a suggestion you still confirm.</p>
+</section>`,
+      `<section class="solo" id="fx-qr-dual">
+  <a class="back" href="#top">← Back to the full sheet</a>
+  <h2>3 · One QR carrying both IMEIs</h2>
+  <div class="stage stage-qr">${qrDual}<div class="num">IMEI1: ${esc(dual.imeiPrimary ?? '')}<br>IMEI2: ${esc(dual.imeiSecondary ?? '')}</div></div>
+  <p class="expect"><span>Expected</span> ONE phone with two identifiers — never two units, and never a second stock line.</p>
+</section>`,
+    );
+
     const rows = `<h3>Cases to test</h3><div class="grid">${special}</div>
-<h3>Stock — the twenty phones in Test Store</h3><div class="grid">${stock}</div>`;
+<h3>Stock — the twenty phones in Test Store</h3><div class="grid">${stock}</div>
+${solos.join('\n')}`;
 
     process.stdout.write(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -415,8 +493,62 @@ async function main(): Promise<void> {
             border-top: 1px dashed #d4d4d8; color: #18181b; }
   .expect span { display: inline-block; font-size: 10px; letter-spacing: .08em;
                  text-transform: uppercase; color: #71717a; margin-right: 6px; }
+  .alone { margin: 10px 0 0; font-size: 12px; }
+  .alone a { color: #1d4ed8; }
+
+  /*
+   * One fixture, alone, full screen.
+   *
+   * The CSS :target selector and nothing else — no script, no framework and no
+   * network, so this stays as local and as inert as the rest of the sheet. The
+   * card
+   * is hidden until its own link is followed, and following "Back" (to #top)
+   * un-targets it, so the sheet returns.
+   *
+   * This exists because the grid is unusable for judging the scanner: with
+   * thirty-two barcodes on a page, several are in frame at once and the decoder
+   * reports whichever resolves first — so a wrong result could be the scanner's
+   * fault or the page's, with no way to tell.
+   */
+  .solo { display: none; }
+  .solo:target {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    /* Pure white, edge to edge: maximum contrast and no neighbour in frame. */
+    background: #fff;
+    padding: 4vmin;
+    overflow: auto;
+  }
+  .solo:target h2 { font-size: 18px; margin: 0 0 4vmin; text-align: center; }
+  .solo .stage {
+    /*
+     * The quiet margin. A barcode needs clear space around it to decode, and a
+     * generous one also stops anything else being in shot.
+     */
+    padding: 6vmin 8vmin;
+    background: #fff;
+    text-align: center;
+  }
+  .solo .stage svg { width: 100%; height: auto; max-width: 82vw; }
+  .solo .stage-qr svg { width: auto; max-width: 64vmin; }
+  .solo .num { font-size: 18px; margin-top: 3vmin; }
+  .solo .expect, .solo .note { max-width: 62ch; text-align: center; font-size: 14px; }
+  .solo .back {
+    position: fixed; top: 3vmin; left: 3vmin;
+    font-size: 15px; color: #1d4ed8; text-decoration: none;
+    padding: 10px 14px; border: 1px solid #d4d4d8; border-radius: 8px;
+    background: #fff;
+  }
+  /* The solo views are a screen tool; printing the sheet prints the sheet. */
+  @media print { .solo, .alone { display: none !important; } }
+
   @media print { .warn { border-color: #000; } body { margin: 8mm; } }
-</style></head><body>
+</style></head><body id="top">
 <div class="warn">
   <strong>Synthetic staging fixture — not real devices</strong>
   Every identifier below was generated locally from a non-allocated test range

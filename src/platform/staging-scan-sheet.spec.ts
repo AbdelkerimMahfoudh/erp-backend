@@ -202,6 +202,65 @@ describe('the QR fixtures', () => {
   });
 });
 
+describe('the individual fixture view', () => {
+  /*
+   * The third physical test failed 3/3, and part of why is this page: with
+   * thirty-two barcodes on it, several are in frame at once and the decoder
+   * reports whichever resolves first. A wrong result could then be the
+   * scanner's fault or the sheet's, with no way to tell them apart.
+   *
+   * Physical QA uses the solo view. The grid stays, for choosing a fixture.
+   */
+
+  it('gives every code a full-screen view of its own', () => {
+    expect(source).toMatch(/const solos: string\[\] = \[\]/);
+    expect(source).toMatch(/<section class="solo" id="\$\{slugs\[i\]\}">/);
+    expect(source).toMatch(/Open \$\{parts\.length > 1 \? p\.cap : 'this one'\} alone/);
+  });
+
+  it('shows exactly one code per view, dual-SIM cards included', () => {
+    // Two identifiers on one full-screen page would reintroduce the exact
+    // problem the view exists to remove.
+    expect(source).toMatch(/const slugs = parts\.map\(\(_, i\) => `fx-\$\{base \+ i \+ 1\}`\)/);
+    expect(source).toMatch(/parts\.forEach\(\(p, i\) => \{/);
+    expect(source).toMatch(/ONE code per solo view, even for a dual-SIM card/);
+  });
+
+  it('regenerates no identifier — the grid and the solo view share their bytes', () => {
+    // `parts` is built once and both views read from it, so the two cannot
+    // disagree by construction rather than by luck.
+    expect(source).toMatch(/\/\/ Built once, used in both views\./);
+    expect(source).toMatch(/grid: barcodeSvg\(c\.value, c\.height \?\? 48\)/);
+    expect(source).toMatch(/solo: barcodeSvg\(c\.value, \(c\.height \?\? 48\) \* 2\)/);
+  });
+
+  it('carries the expected result and a way back', () => {
+    expect(source).toMatch(/<a class="back" href="#top">/);
+    expect(source).toMatch(/<body id="top">/);
+    expect(source).toMatch(/<p class="expect"><span>Expected<\/span>/);
+  });
+
+  it('uses CSS alone — no script, and nothing off the machine', () => {
+    // Staging-only and entirely local, exactly like the rest of the sheet.
+    expect(source).toMatch(/\.solo \{ display: none; \}/);
+    expect(source).toMatch(/\.solo:target \{/);
+    expect(source).not.toMatch(/<script/i);
+    expect(source).toMatch(/no script, no framework and no\s+\* network/);
+  });
+
+  it('leaves a wide quiet margin and high contrast', () => {
+    // A barcode needs clear space to decode, and a generous one also keeps
+    // anything else out of shot.
+    expect(source).toMatch(/padding: 6vmin 8vmin;/);
+    expect(source).toMatch(/The quiet margin\./);
+    expect(source).toMatch(/background: #fff;/);
+  });
+
+  it('does not print — the solo views are a screen tool', () => {
+    expect(source).toMatch(/@media print \{ \.solo, \.alone \{ display: none !important; \} \}/);
+  });
+});
+
 describe('case 12 — the one card that can actually be booked in', () => {
   /*
    * Every other IMEI on this sheet already exists in Test Store. Scanning one
