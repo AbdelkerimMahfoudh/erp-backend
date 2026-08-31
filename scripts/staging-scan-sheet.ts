@@ -19,6 +19,7 @@ import { config as loadEnv } from 'dotenv';
 loadEnv({ path: '.env.staging', override: true });
 
 import { PrismaClient } from '@prisma/client';
+import * as QRCode from 'qrcode';
 import { isValidImei } from '../src/inventory/imei.util';
 
 /**
@@ -102,6 +103,29 @@ function ean13(twelve: string): string {
  */
 const SYNTHETIC_ICCID = '8988303000000000001';
 const SYNTHETIC_EID = '89049032000000000000000000000001';
+
+/**
+ * A QR code, as SVG.
+ *
+ * Medium error correction, a four-module quiet zone, black on white. The quiet
+ * zone is not decoration: a QR printed hard against a border is a QR many
+ * decoders will not see at all.
+ *
+ * Unlike Code 128 above, this is NOT hand-rolled. QR needs Reed–Solomon error
+ * correction, data masking and format information, and a hand-written one that
+ * looked right but did not decode would be the worst possible fixture — it
+ * would fail a test the scanner had actually passed.
+ */
+async function qrSvg(payload: string, size = 150): Promise<string> {
+  const svg = await QRCode.toString(payload, {
+    type: 'svg',
+    errorCorrectionLevel: 'M',
+    margin: 4,
+    color: { dark: '#000000ff', light: '#ffffffff' },
+  });
+  // Sized here rather than in the encoder, so the module grid stays exact.
+  return svg.replace('<svg ', `<svg width="${size}" height="${size}" `);
+}
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 
@@ -198,6 +222,15 @@ async function main(): Promise<void> {
       })
       .join(String.fromCharCode(10));
 
+    /*
+     * The two QR payloads. Both are built from the fixture's OWN synthetic
+     * identifiers — nothing new is invented, and no real IMEI is ever involved.
+     */
+    const qrSingle = await qrSvg(`IMEI: ${first.imeiPrimary}`);
+    // Two lines, one symbol. The newline is escaped rather than typed, so the
+    // payload cannot change if this file is ever reindented.
+    const qrDual = await qrSvg(`IMEI1: ${dual.imeiPrimary}\nIMEI2: ${dual.imeiSecondary}`);
+
     // ── The cases that are not ordinary stock ─────────────────────────────
     const special = [
       card({
@@ -205,25 +238,23 @@ async function main(): Promise<void> {
         codes: [{ cap: 'Code 128', value: first.imeiPrimary ?? '' }],
         expect: `Recognised as Apple ${first.product.model}. A bare 15-digit code is still an IMEI.`,
       }),
-      /*
-       * Cases 2 and 3 need QR, and QR needs an encoder this repository does not
-       * have. Code 128 is small and entirely mechanical, so it is hand-rolled
-       * above; QR needs Reed–Solomon error correction, masking and format
-       * information, and a hand-rolled one that LOOKS right but does not decode
-       * would be worse than none — it would be a fixture that fails a test the
-       * scanner actually passed.
-       *
-       * Left visible rather than silently absent: a printed sheet that is
-       * quietly missing two of the ten cases is a sheet somebody signs off as
-       * complete.
-       */
-      `<article class="pending">
+      `<article>
   <h2>2 · Labelled single IMEI in QR</h2>
-  <h2>3 · One QR carrying IMEI1 and IMEI2</h2>
-  <p class="note">Not on this sheet yet. Both need a QR encoder, and a
-  hand-rolled one that cannot be verified here would be a fixture that fails a
-  test the scanner passed.</p>
-  <p class="expect"><span>Pending</span> add a QR encoder, then regenerate.</p>
+  <div class="cap">QR · IMEI: &lt;imei&gt;</div>
+  ${qrSingle}
+  <div class="num">IMEI: ${esc(first.imeiPrimary ?? '')}</div>
+  <p class="note">The label matters: a bare 15-digit QR and a labelled one are
+  the same phone, and both are seen in the wild.</p>
+  <p class="expect"><span>Expected</span> Same result as case 1 — Apple
+  ${esc(first.product.model)}, as a suggestion.</p>
+</article>`,
+      `<article>
+  <h2>3 · One QR carrying both IMEIs</h2>
+  <div class="cap">QR · IMEI1 + IMEI2, two lines</div>
+  ${qrDual}
+  <div class="num">IMEI1: ${esc(dual.imeiPrimary ?? '')}<br>IMEI2: ${esc(dual.imeiSecondary ?? '')}</div>
+  <p class="expect"><span>Expected</span> ONE phone with two identifiers — never
+  two units, and never a second stock line.</p>
 </article>`,
       card({
         title: '4 · Same phone, both SIMs',
