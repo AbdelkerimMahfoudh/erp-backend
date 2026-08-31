@@ -70,6 +70,39 @@ function barcodeSvg(text: string, height = 56): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${x.toFixed(0)}" height="${height}" viewBox="0 0 ${x.toFixed(0)} ${height}" fill="#000">${bars.join('')}</svg>`;
 }
 
+
+/**
+ * Negative and special fixtures.
+ *
+ * Every one of these is generated here and **never written to a database**. An
+ * invalid checksum, a wrong length, an ICCID or an EID exist so the scanner can
+ * be seen REFUSING them; a fixture that could be booked into inventory would
+ * defeat its own purpose.
+ */
+function breakCheckDigit(imei: string): string {
+  // One digit different, so the length is right and the checksum is not — the
+  // near-miss a real mistyped IMEI looks like.
+  const last = Number(imei[14]);
+  return imei.slice(0, 14) + String((last + 1) % 10);
+}
+
+/** EAN-13 check digit: 1,3,1,3… weighting. */
+function ean13(twelve: string): string {
+  const sum = [...twelve].reduce((acc, d, i) => acc + Number(d) * (i % 2 === 0 ? 1 : 3), 0);
+  return twelve + String((10 - (sum % 10)) % 10);
+}
+
+/**
+ * A synthetic ICCID and EID.
+ *
+ * Both are printed on a phone or its packaging beside the IMEI, and both are
+ * long strings of digits — which is exactly why they get scanned by mistake. An
+ * ICCID identifies a SIM, an EID identifies an eSIM chip, and neither is an
+ * IMEI. `89` is the telecom major industry identifier; the rest is invented.
+ */
+const SYNTHETIC_ICCID = '8988303000000000001';
+const SYNTHETIC_EID = '89049032000000000000000000000001';
+
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 
 async function main(): Promise<void> {
@@ -109,21 +142,147 @@ async function main(): Promise<void> {
       }
     }
 
-    const rows = units
+    /*
+     * Two phones whose TACs disagree, for the conflict case; a valid IMEI on a
+     * TAC nothing maps, for the unknown case. Both are built from the fixture's
+     * own identifiers so nothing new is invented.
+     */
+    const first = units[0];
+    const dual = units.find((u) => u.imeiSecondary) ?? units[0];
+    const conflictA = units[0].imeiPrimary!;
+    const conflictB = units.find((u) => u.imeiPrimary !== conflictA)!.imeiPrimary!;
+
+    // A valid IMEI whose TAC (09990999) is deliberately in no catalogue.
+    const unknownBase = '0999099910000';
+    const unknownTacImei = (() => {
+      for (let d = 0; d <= 9; d++) {
+        const candidate = unknownBase + '0' + String(d);
+        if (isValidImei(candidate)) return candidate;
+      }
+      throw new Error('could not build an unknown-TAC IMEI');
+    })();
+
+    const card = (opts: {
+      title: string;
+      expect: string;
+      tone?: 'good' | 'refuse';
+      codes: { cap: string; value: string; height?: number }[];
+      note?: string;
+    }) => `<article class="${opts.tone === 'refuse' ? 'refuse' : ''}">
+  <h2>${esc(opts.title)}</h2>
+  ${opts.codes
+    .map(
+      (c) =>
+        `<div class="cap">${esc(c.cap)}</div>${barcodeSvg(c.value, c.height ?? 48)}<div class="num">${esc(c.value)}</div>`,
+    )
+    .join('')}
+  ${opts.note ? `<p class="note">${esc(opts.note)}</p>` : ''}
+  <p class="expect"><span>Expected</span> ${esc(opts.expect)}</p>
+</article>`;
+
+    // ── The twenty stock phones ───────────────────────────────────────────
+    const stock = units
       .map((u) => {
         const label = [u.product.brand, u.product.model, u.product.variant].filter(Boolean).join(' ');
-        const second = u.imeiSecondary
-          ? `<div class="second"><div class="cap">IMEI 2</div>${barcodeSvg(u.imeiSecondary, 40)}<div class="num">${esc(u.imeiSecondary)}</div></div>`
-          : '';
-        return `<article>
-  <h2>${esc(label)}</h2>
-  <div class="cap">IMEI 1</div>
-  ${barcodeSvg(u.imeiPrimary ?? '')}
-  <div class="num">${esc(u.imeiPrimary ?? '')}</div>
-  ${second}
-</article>`;
+        const codes: { cap: string; value: string; height?: number }[] = [
+          { cap: 'IMEI 1', value: u.imeiPrimary ?? '' },
+        ];
+        if (u.imeiSecondary) codes.push({ cap: 'IMEI 2', value: u.imeiSecondary, height: 40 });
+        return card({
+          title: label,
+          codes,
+          expect: u.imeiSecondary
+            ? 'Apple + this model, as a suggestion. Both codes find the SAME one phone.'
+            : 'Apple + this model, as a suggestion you still confirm.',
+        });
       })
-      .join('\n');
+      .join(String.fromCharCode(10));
+
+    // ── The cases that are not ordinary stock ─────────────────────────────
+    const special = [
+      card({
+        title: '1 · Raw IMEI, no label',
+        codes: [{ cap: 'Code 128', value: first.imeiPrimary ?? '' }],
+        expect: `Recognised as Apple ${first.product.model}. A bare 15-digit code is still an IMEI.`,
+      }),
+      /*
+       * Cases 2 and 3 need QR, and QR needs an encoder this repository does not
+       * have. Code 128 is small and entirely mechanical, so it is hand-rolled
+       * above; QR needs Reed–Solomon error correction, masking and format
+       * information, and a hand-rolled one that LOOKS right but does not decode
+       * would be worse than none — it would be a fixture that fails a test the
+       * scanner actually passed.
+       *
+       * Left visible rather than silently absent: a printed sheet that is
+       * quietly missing two of the ten cases is a sheet somebody signs off as
+       * complete.
+       */
+      `<article class="pending">
+  <h2>2 · Labelled single IMEI in QR</h2>
+  <h2>3 · One QR carrying IMEI1 and IMEI2</h2>
+  <p class="note">Not on this sheet yet. Both need a QR encoder, and a
+  hand-rolled one that cannot be verified here would be a fixture that fails a
+  test the scanner passed.</p>
+  <p class="expect"><span>Pending</span> add a QR encoder, then regenerate.</p>
+</article>`,
+      card({
+        title: '4 · Same phone, both SIMs',
+        codes: [
+          { cap: 'IMEI 1', value: dual.imeiPrimary ?? '' },
+          { cap: 'IMEI 2', value: dual.imeiSecondary ?? '', height: 40 },
+        ],
+        expect: 'Either code finds the SAME existing unit. One phone, never two.',
+      }),
+      card({
+        title: '5 · Two phones, disagreeing TACs',
+        codes: [
+          { cap: 'Phone A', value: conflictA },
+          { cap: 'Phone B', value: conflictB, height: 40 },
+        ],
+        note: 'Scan these as if they were IMEI 1 and IMEI 2 of one handset.',
+        expect: 'No automatic selection. It must ASK which phone this is.',
+      }),
+      card({
+        title: '6 · Valid IMEI, unknown TAC',
+        codes: [{ cap: 'TAC 09990999', value: unknownTacImei }],
+        expect: 'Accepted as an identifier, but NO brand and NO model guessed.',
+      }),
+      card({
+        title: '7 · Invalid checksum',
+        tone: 'refuse',
+        codes: [{ cap: 'One digit wrong', value: breakCheckDigit(first.imeiPrimary ?? '') }],
+        note: 'Right length, wrong check digit — what a mistyped IMEI looks like.',
+        expect: 'REFUSED as not a valid IMEI. Never stored.',
+      }),
+      card({
+        title: '8 · Wrong length',
+        tone: 'refuse',
+        codes: [{ cap: '14 digits', value: (first.imeiPrimary ?? '').slice(0, 14) }],
+        expect: 'REFUSED. An IMEI is exactly 15 digits.',
+      }),
+      card({
+        title: '9 · ICCID — a SIM, not a phone',
+        tone: 'refuse',
+        codes: [{ cap: 'ICCID (19 digits)', value: SYNTHETIC_ICCID }],
+        note: 'Printed beside the IMEI, which is why it gets scanned by mistake.',
+        expect: 'NOT accepted as an IMEI.',
+      }),
+      card({
+        title: '10 · EID — an eSIM chip, not a phone',
+        tone: 'refuse',
+        codes: [{ cap: 'EID (32 digits)', value: SYNTHETIC_EID }],
+        expect: 'NOT accepted as an IMEI.',
+      }),
+      card({
+        title: '11 · Ordinary product barcode',
+        codes: [{ cap: 'EAN-13', value: ean13('600123450000') }],
+        note: 'A charger or a case — the everyday non-phone scan.',
+        expect: 'Treated as a product barcode. Never as an IMEI.',
+      }),
+    ].join(String.fromCharCode(10));
+
+    const rows = `<h3>Cases to test</h3><div class="grid">${special}</div>
+<h3>Stock — the twenty phones in Test Store</h3><div class="grid">${stock}</div>`;
 
     process.stdout.write(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -146,7 +305,15 @@ async function main(): Promise<void> {
   h2 { font-size: 14px; margin: 0 0 8px; }
   .cap { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #71717a; }
   .num { font-family: ui-monospace, monospace; font-size: 13px; letter-spacing: .06em; margin-top: 2px; }
-  .second { margin-top: 10px; }
+  h3 { font-size: 15px; margin: 26px 0 10px; padding-bottom: 6px;
+       border-bottom: 1px solid #d4d4d8; }
+  article.refuse { border-color: #b45309; background: #fffdf7; }
+  article.pending { border-style: dashed; background: #fafafa; }
+  .note { font-size: 12px; color: #52525b; margin: 8px 0 0; }
+  .expect { font-size: 12px; margin: 8px 0 0; padding-top: 8px;
+            border-top: 1px dashed #d4d4d8; color: #18181b; }
+  .expect span { display: inline-block; font-size: 10px; letter-spacing: .08em;
+                 text-transform: uppercase; color: #71717a; margin-right: 6px; }
   @media print { .warn { border-color: #000; } body { margin: 8mm; } }
 </style></head><body>
 <div class="warn">
@@ -160,9 +327,7 @@ async function main(): Promise<void> {
   has been checked. Until then <code>docs/24</code> records camera verification
   as pending.
 </div>
-<div class="grid">
 ${rows}
-</div>
 </body></html>
 `);
   } finally {
