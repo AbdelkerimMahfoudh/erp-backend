@@ -292,3 +292,91 @@ describe('permissions and the two layers', () => {
     expect(fn).toMatch(/status: 'confirmed'/);
   });
 });
+
+/**
+ * Does a confirmed company mapping need a global TAC row to resolve?
+ *
+ * It does not, and a coverage report said otherwise. Development holds three
+ * confirmed `tac` mappings and **zero** `tac_catalog` rows, and the report
+ * concluded "no IMEI resolves in development". That was wrong twice: four of
+ * the seven records it counted are BARCODE mappings and not TAC recognition at
+ * all, and the three that are `tac` resolve perfectly well on their own.
+ *
+ * What a missing global row costs is the generic brand and model LABELS, not
+ * the resolution — and the company's own answer is the stronger one anyway,
+ * because it names an exact product rather than a manufacturer.
+ */
+describe('a confirmed company mapping stands on its own', () => {
+  it('resolves with no global catalogue row at all', () => {
+    const out = resolveTac({ tac: '35328511', companyMappings: [confirmed()], globalEntry: null });
+    expect(out.source).toBe('company_confirmed');
+    expect(out.productId).toBe(P1);
+    expect(out.needsReview).toBe(false);
+  });
+
+  it('loses only the generic labels, never the product', () => {
+    const withGlobal = resolveTac({ tac: '35328511', companyMappings: [confirmed()], globalEntry: GLOBAL });
+    const without = resolveTac({ tac: '35328511', companyMappings: [confirmed()], globalEntry: null });
+    // Same product either way…
+    expect(without.productId).toBe(withGlobal.productId);
+    // …and the brand/model are the only difference.
+    expect(withGlobal.brand).toBe('Samsung');
+    expect(without.brand).toBeNull();
+    expect(without.model).toBeNull();
+  });
+
+  it('is never overridden by the generic catalogue', () => {
+    /*
+     * The whole point of the ladder. A global row saying "Samsung Galaxy A14"
+     * cannot displace a shop's confirmed decision about what that code means in
+     * their stock — the company answer wins and keeps its product.
+     */
+    const out = resolveTac({ tac: '35328511', companyMappings: [confirmed()], globalEntry: GLOBAL });
+    expect(out.source).toBe('company_confirmed');
+    expect(out.productId).toBe(P1);
+    expect(out.source).not.toBe('global_catalog');
+  });
+
+  it('another company inherits nothing, because it never sees the row', () => {
+    /*
+     * Isolation is not a filter inside this function — it is upstream, and that
+     * is stronger. `TacMappingService` reads `productRecognition` through the
+     * TENANT client, so another company's query returns no rows at all and this
+     * function is handed an empty list.
+     */
+    const source = readFileSync(join(__dirname, 'tac-mapping.service.ts'), 'utf8');
+    expect(source).toMatch(/@Inject\(TENANT_PRISMA\)/);
+    expect(source).toMatch(/this\.db\.productRecognition\.findMany/);
+
+    // And with no rows, a confirmed mapping elsewhere changes nothing here.
+    const out = resolveTac({ tac: '35328511', companyMappings: [], globalEntry: null });
+    expect(out.source).toBe('none');
+    expect(out.productId).toBeNull();
+  });
+
+  it('a TAC nobody has mapped stays unknown, and guesses nothing', () => {
+    const out = resolveTac({ tac: '99999999', companyMappings: [], globalEntry: null });
+    expect(out.source).toBe('none');
+    expect(out.brand).toBeNull();
+    expect(out.model).toBeNull();
+    expect(out.productId).toBeNull();
+    expect(out.needsReview).toBe(false);
+  });
+
+  it('a proposal still selects nothing, even with no global row to fall back on', () => {
+    const out = resolveTac({ tac: '35328511', companyMappings: [proposed()], globalEntry: null });
+    expect(out.source).toBe('company_proposed');
+    expect(out.productId).toBeNull();
+    expect(out.needsReview).toBe(true);
+  });
+
+  it('only `tac` records are TAC recognition — barcodes are a different question', () => {
+    /*
+     * The counting error that produced the wrong report. `product_recognition`
+     * holds `tac`, `barcode` and `serial_prefix` rows, and only the first kind
+     * answers "what phone is this IMEI".
+     */
+    const service = readFileSync(join(__dirname, 'tac-mapping.service.ts'), 'utf8');
+    expect(service).toMatch(/codeType: 'tac', code: tac/);
+  });
+});
