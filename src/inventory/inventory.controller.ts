@@ -28,6 +28,22 @@ export class InventoryController {
     return this.inventory.listStock(query);
   }
 
+  @Get('inventory/by-model')
+  @ApiOperation({
+    summary: 'Stock counted by model, from the Unit rows themselves',
+    description:
+      'One row per product with the number of `in_stock` units in the active ' +
+      'branch — "iPhone 17 Pro Max, 4 in stock". Every phone remains an ' +
+      'individual Unit with its own IMEI and stays searchable by either ' +
+      'identifier; this only changes how the shelf is PRESENTED. The count is ' +
+      'derived on every request, never stored and never maintained by a ' +
+      'client, so a sale or a transfer moves it through the existing status ' +
+      'model without anything else being told.',
+  })
+  byModel() {
+    return this.inventory.countByModel();
+  }
+
   @Get('units/:identifier')
   @ApiOperation({ summary: 'Unit detail by identifier (IMEI or serial), with audit-derived timeline' })
   byIdentifier(@Param('identifier') identifier: string) {

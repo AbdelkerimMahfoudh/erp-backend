@@ -58,6 +58,27 @@ export interface InventoryFilter {
   limit?: number;
 }
 
+/** One model, and how many of it are on the shelf right now. */
+export interface ModelStockRow {
+  brand: string;
+  model: string;
+  trackingType: string;
+  /** Every unit of this model in the branch, whatever its storage or colour. */
+  inStock: number;
+  /**
+   * The product rows folded into this one line.
+   *
+   * More than one is normal, not a fault: `products.variant` carries storage
+   * and colour and sits in the `(company, brand, model, variant)` unique key,
+   * so a 256 GB black and a 512 GB blue are two products of one model. It is
+   * also how a legacy duplicate shows itself, which is why the ids are
+   * reported rather than hidden.
+   */
+  productIds: string[];
+  /** Storage and colour, for the detail view. Never splits the headline. */
+  variants: { variant: string | null; inStock: number }[];
+}
+
 export interface InventoryPage {
   rows: InventoryRow[];
   /** Opaque; pass back verbatim to fetch the next page. Null at the end. */
@@ -427,6 +448,87 @@ export class InventoryService {
    * `cost` on either shape is removed by the global cost-gating interceptor
    * for callers without `cost.view`; nothing extra is needed here.
    */
+  /**
+   * Stock counted the way a shopkeeper counts it: by model.
+   *
+   * A phone is one `Unit` with its own IMEI, and that never changes — it is how
+   * a specific handset is found, sold and warranted. But nobody stands in a
+   * shop and says "I have IMEI 01000004… and IMEI 01000012…"; they say "I have
+   * four 17 Pro Max". Both are true, and the list has only ever shown the
+   * first.
+   *
+   * Counted from the Unit rows themselves, server-side, every time. There is
+   * deliberately no stored total and no client-side counter: a number that is
+   * maintained rather than derived is a number that drifts the first time a
+   * sale, a transfer or a refusal takes a path nobody remembered to update.
+   *
+   * Scoped to the company by the tenant client, and to the active branch — with
+   * the same branch-assignment check `listStock` makes, for the same reason.
+   */
+  async countByModel(): Promise<ModelStockRow[]> {
+    const branchId = this.tenant.branchId();
+    if (branchId) {
+      await assertAssignedToBranch(this.db, this.tenant.requireUserId(), branchId);
+    }
+
+    /*
+     * `in_stock` and nothing else. A reserved, sold, faulty, in-transit or
+     * consigned unit is not stock somebody can sell today, and the existing
+     * status model already carries every one of those transitions — so a sale
+     * moves the count without anything here being told about it.
+     */
+    const grouped = await this.db.unit.groupBy({
+      by: ['productId'],
+      where: { status: 'in_stock', ...(branchId ? { branchId } : {}) },
+      _count: { _all: true },
+    });
+
+    if (grouped.length === 0) return [];
+
+    const products = await this.db.product.findMany({
+      where: { id: { in: grouped.map((g) => g.productId) } },
+      select: { id: true, brand: true, model: true, variant: true, trackingType: true },
+    });
+    const byId = new Map(products.map((p) => [p.id.toString('hex'), p]));
+
+    /*
+     * Folded by brand and model, NOT by product id.
+     *
+     * Storage and colour live in `products.variant`, which is part of the
+     * `(company, brand, model, variant)` unique key — so four 17 Pro Max in
+     * four colours are four product rows. Grouping by product id would report
+     * that as "1, 1, 1, 1", which is arithmetically true and useless: the
+     * shopkeeper has four of that phone. The colours are still there, one level
+     * down, for whoever needs to know which four.
+     */
+    const rows = new Map<string, ModelStockRow>();
+    for (const g of grouped) {
+      const product = byId.get(g.productId.toString('hex'));
+      if (!product) continue; // deleted mid-read; the unit is counted next time
+      const key = `${product.brand} ${product.model}`;
+      const row = rows.get(key) ?? {
+        brand: product.brand,
+        model: product.model,
+        trackingType: product.trackingType,
+        inStock: 0,
+        productIds: [],
+        variants: [],
+      };
+      row.inStock += g._count._all;
+      row.productIds.push(binToUuid(g.productId));
+      row.variants.push({ variant: product.variant, inStock: g._count._all });
+      rows.set(key, row);
+    }
+
+    for (const row of rows.values()) {
+      row.variants.sort((a, b) => (a.variant ?? '').localeCompare(b.variant ?? ''));
+    }
+
+    return [...rows.values()].sort(
+      (a, b) => a.brand.localeCompare(b.brand) || a.model.localeCompare(b.model),
+    );
+  }
+
   async listStock(filter: InventoryFilter): Promise<InventoryPage> {
     const branchId = this.tenant.branchId();
     /**
