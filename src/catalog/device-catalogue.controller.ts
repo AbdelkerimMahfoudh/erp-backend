@@ -41,6 +41,24 @@ export class DeviceCatalogueController {
     return this.catalogue.models(brandKey, q);
   }
 
+  @Get('attributes')
+  @ApiOperation({
+    summary: 'Storage and colour options for the variant selectors',
+    description:
+      'The values `products.variant` has always held, as pickable lists instead ' +
+      'of a free-text box — the same cure the brand and model selectors already ' +
+      'applied to `128GB` / `128 gb` / `128 Go`. Served from here so the client ' +
+      'has no list of its own to drift from. Both lists end with `Other`, which ' +
+      'is an ordinary row: choosing it reveals a text field and the typed value ' +
+      'is stored verbatim, so a product saved before these lists existed still ' +
+      'opens, edits and saves unchanged. There is deliberately no market or ' +
+      'region list: `variant` records storage and colour, and nothing in the ' +
+      'schema has ever recorded a region.',
+  })
+  attributes() {
+    return this.catalogue.attributes();
+  }
+
   @Get('version')
   @ApiOperation({
     summary: 'Whether a cached catalogue is stale',

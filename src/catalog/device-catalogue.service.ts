@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { normaliseSearch } from './device-catalogue';
+import { COLOUR_OPTIONS, STORAGE_OPTIONS, VARIANT_SEPARATOR } from './device-attributes';
 
 /**
  * Reading the device catalogue.
@@ -94,6 +95,29 @@ export class DeviceCatalogueService {
       /** Its position. Returned so a client can prove it did not re-sort. */
       displayRank: r.displayRank,
     }));
+  }
+
+  /**
+   * The storage and colour lists, straight from source.
+   *
+   * Not stored in a table and not migrated, unlike brands and models. Those are
+   * curated data that changes as phones ship; these are sixteen colours and ten
+   * capacities that will read the same next year. A table would add a migration,
+   * a drift spec and a sync step to protect a list with no upkeep, and the cost
+   * would buy nothing.
+   */
+  attributes() {
+    return {
+      storage: STORAGE_OPTIONS,
+      colour: COLOUR_OPTIONS,
+      /**
+       * Said in the payload so no client has to infer it: this is what the
+       * `variant` column means. A client that assumed it meant "region" would
+       * quietly create a product row per market.
+       */
+      describes: ['storage', 'colour'] as const,
+      separator: VARIANT_SEPARATOR,
+    };
   }
 
   /**
