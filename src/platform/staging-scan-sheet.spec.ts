@@ -201,3 +201,48 @@ describe('the QR fixtures', () => {
     expect(checklist).toMatch(/no camera has read anything/i);
   });
 });
+
+describe('case 12 — the one card that can actually be booked in', () => {
+  /*
+   * Every other IMEI on this sheet already exists in Test Store. Scanning one
+   * proves recognition, and can never prove that adding a phone moves the
+   * shelf: the duplicate is refused long before it gets that far. Case 12 is
+   * the only card that closes that loop on a real device.
+   */
+
+  it('is built from the fixture TAC, so recognition resolves it to a stocked model', () => {
+    expect(source).toMatch(/const tac = \(first\.imeiPrimary \?\? ''\)\.slice\(0, 8\)/);
+    expect(source).toContain('12 · A phone that is NOT yet in stock');
+  });
+
+  it('computes a real check digit rather than inventing one', () => {
+    // A test caught exactly this mistake once already, on this same sheet: an
+    // invented secondary IMEI whose check digit was wrong.
+    expect(source).toMatch(/function luhnCheckDigit/);
+    expect(source).toMatch(/luhnCheckDigit\(fourteen\)/);
+  });
+
+  it('asks the database instead of assuming the serial is free', () => {
+    // A card that claims "not yet in stock" and turns out to be a duplicate
+    // tests the opposite of what it says, and fails as a pass.
+    expect(source).toMatch(/imeiPrimary: candidate/);
+    expect(source).toMatch(/if \(inUse === 0\)/);
+    // A count rather than a row: this script reads no database id at all, and
+    // the assertion above about labels depends on that staying true.
+    expect(source).toMatch(/prisma\.unit\.count/);
+    expect(source).toMatch(/Could not build an unused synthetic IMEI/);
+  });
+
+  it('says what the count must do, both times it is scanned', () => {
+    expect(source).toMatch(/count goes from N to N\+1/);
+    expect(source).toMatch(/refused as a duplicate, and the count does not move/);
+  });
+
+  it('invents no identifier of its own — the TAC comes from the fixture', () => {
+    // The rule for this whole sheet: synthetic identifiers only, and never one
+    // retrieved from anywhere. The TAC is read from a fixture unit, the serial
+    // is arbitrary, the check digit is computed.
+    const case12 = source.slice(source.indexOf('const tac ='), source.indexOf('const tempCard') + 1 || undefined);
+    expect(case12).not.toMatch(/\b\d{15}\b/);
+  });
+});

@@ -87,6 +87,26 @@ function breakCheckDigit(imei: string): string {
   return imei.slice(0, 14) + String((last + 1) % 10);
 }
 
+/**
+ * The IMEI check digit — Luhn over the first fourteen.
+ *
+ * The inverse of `breakCheckDigit` above: that one makes a near-miss on
+ * purpose, this one makes a well-formed identifier, and having both in the same
+ * file is what stops case 12 accidentally printing an invalid code.
+ */
+function luhnCheckDigit(fourteen: string): string {
+  let sum = 0;
+  for (let i = 0; i < 14; i++) {
+    let d = Number(fourteen[13 - i]);
+    if (i % 2 === 0) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+  }
+  return String((10 - (sum % 10)) % 10);
+}
+
 /** EAN-13 check digit: 1,3,1,3… weighting. */
 function ean13(twelve: string): string {
   const sum = [...twelve].reduce((acc, d, i) => acc + Number(d) * (i % 2 === 0 ? 1 : 3), 0);
@@ -173,6 +193,36 @@ async function main(): Promise<void> {
      */
     const first = units[0];
     const dual = units.find((u) => u.imeiSecondary) ?? units[0];
+
+    /*
+     * One synthetic IMEI that is valid, recognised, and NOT in stock.
+     *
+     * Built from the fixture's own TAC so recognition resolves it to a Test
+     * Store model, with a serial no existing unit uses and a computed check
+     * digit. It is checked against the database rather than assumed free — a
+     * "not yet in stock" card that turns out to be a duplicate tests the
+     * opposite of what it claims.
+     */
+    const tac = (first.imeiPrimary ?? '').slice(0, 8);
+    const taken = new Set(
+      units.flatMap((u) => [u.imeiPrimary, u.imeiSecondary].filter((v): v is string => Boolean(v))),
+    );
+    let unusedImei = '';
+    for (let serial = 900_001; serial < 900_200; serial++) {
+      const fourteen = `${tac}${String(serial).padStart(6, '0')}`;
+      const candidate = fourteen + luhnCheckDigit(fourteen);
+      if (taken.has(candidate)) continue;
+      // A count, not a row: this script reads no database id, because nothing
+      // printed on the sheet may ever be derived from one.
+      const inUse = await prisma.unit.count({
+        where: { OR: [{ imeiPrimary: candidate }, { imeiSecondary: candidate }] },
+      });
+      if (inUse === 0) {
+        unusedImei = candidate;
+        break;
+      }
+    }
+    if (!unusedImei) throw new Error('Could not build an unused synthetic IMEI for case 12.');
     const conflictA = units[0].imeiPrimary!;
     const conflictB = units.find((u) => u.imeiPrimary !== conflictA)!.imeiPrimary!;
 
@@ -309,6 +359,26 @@ async function main(): Promise<void> {
         codes: [{ cap: 'EAN-13', value: ean13('600123450000') }],
         note: 'A charger or a case — the everyday non-phone scan.',
         expect: 'Treated as a product barcode. Never as an IMEI.',
+      }),
+      /*
+       * The only card on this sheet that is meant to be BOOKED IN rather than
+       * merely recognised. Every other IMEI here already exists, so scanning it
+       * proves recognition and can never prove that adding a phone moves the
+       * shelf — the duplicate is refused before it gets that far.
+       *
+       * This one shares the fixture's TAC, so it resolves to a Test Store model
+       * exactly like the twenty do, and its serial is not in use. Scan it,
+       * complete the intake, and the model's count goes up by one on a real
+       * phone. Nothing short of that closes the loop.
+       *
+       * Synthetic throughout: the TAC is the fixture's own, the serial is
+       * arbitrary, and the check digit is computed. It belongs to no handset.
+       */
+      card({
+        title: '12 · A phone that is NOT yet in stock',
+        codes: [{ cap: 'IMEI 1', value: unusedImei }],
+        note: `Same TAC as the fixture, so it is recognised as an Apple ${esc(first.product.model)} — but this exact phone has never been booked in.`,
+        expect: `Accepted, and after Save the model count goes from N to N+1. Scanning it AGAIN is refused as a duplicate, and the count does not move a second time.`,
       }),
     ].join(String.fromCharCode(10));
 
