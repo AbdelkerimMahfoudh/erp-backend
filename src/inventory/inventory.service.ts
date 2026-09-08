@@ -24,6 +24,14 @@ import { unitIdentifier } from './unit-identifier.util';
 import { receiveQuantityAtCost } from './stock-cost';
 import { assertAssignedToBranch } from '../rbac/active-branch';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
+import { fingerprintReceipt } from './receipt-fingerprint';
+
+/** What a counted-goods receipt reports back: no unit, just the new arrival. */
+export interface QuantityReceiptResult {
+  productId: string;
+  quantity: number;
+  tracking: 'quantity';
+}
 
 /** Transaction client shape needed to create a unit (+ its audit row). */
 export type UnitTxClient = Pick<TenantPrisma, 'unit' | 'auditLog'>;
@@ -318,17 +326,42 @@ export class InventoryService {
    * type drives the workflow: perUnit types create one unit from an identifier;
    * quantity types increment the branch StockItem.
    */
-  async quickAdd(dto: QuickAddUnitDto): Promise<Unit | { productId: string; quantity: number; tracking: 'quantity' }> {
+  async quickAdd(dto: QuickAddUnitDto): Promise<Unit | QuantityReceiptResult> {
     const branchId = this.tenant.requireBranchId();
     const product = await this.db.product.findUnique({ where: { id: uuidToBin(dto.productId) } });
     if (!product) throw new NotFoundException('Product not found');
     const strategy = this.strategies.get(product.trackingType);
 
     if (!strategy.perUnit) {
+      /**
+       * Counted goods, so per-unit identity is meaningless here. Sending one is
+       * refused rather than dropped: these fields used to be silently ignored,
+       * which meant a client that believed it was registering an IMEI got a
+       * cheerful success and no IMEI anywhere. Refusing says which of the two
+       * of us is wrong.
+       */
+      if (dto.identifier !== undefined || dto.imeiSecondary !== undefined) {
+        throw new BadRequestException(
+          'This product is counted by quantity, so it has no IMEI or serial number. Send a quantity instead.',
+        );
+      }
       const quantity = dto.quantity ?? 0;
-      if (quantity < 1) throw new BadRequestException(`${product.trackingType} products require a quantity`);
-      await this.upsertStock(product.id, branchId, quantity, dto.cost, dto.price ?? (product.defaultPrice === null ? null : Number(product.defaultPrice)));
-      return { productId: binToUuid(product.id), quantity, tracking: 'quantity' };
+      if (!Number.isInteger(quantity) || quantity < 1) {
+        throw new BadRequestException('Receiving stock needs a whole quantity of at least one.');
+      }
+      return this.receiveQuantity(product, branchId, quantity, dto);
+    }
+
+    /**
+     * Serialized goods arrive one at a time, each with its own identifier and
+     * its own cost. A quantity above one has no meaning on this path and used
+     * to be discarded — "receive 50" created a single phone and threw the other
+     * 49 away, reporting success. It is now refused.
+     */
+    if (dto.quantity !== undefined && dto.quantity > 1) {
+      throw new BadRequestException(
+        `${strategy.identifierLabel} products are registered one at a time, each with its own identifier. Send them individually.`,
+      );
     }
 
     if (!dto.identifier) throw new BadRequestException(`${strategy.identifierLabel} is required`);
@@ -355,6 +388,101 @@ export class InventoryService {
     } catch (e) {
       throw this.mapDuplicate(e);
     }
+  }
+
+  /**
+   * Receive counted goods once, even if the request arrives twice.
+   *
+   * The balance in `stock_items` cannot tell a retry from a second delivery —
+   * fifteen cables look like fifteen cables. So the receipt is written as an
+   * event carrying the client's key, in the SAME transaction as the balance
+   * change, and the unique index on `(company_id, client_uuid)` is what decides
+   * the race. Two retries arriving together both find no prior receipt, both
+   * insert, and exactly one survives; the loser is caught below and replays.
+   *
+   * Without a key the behaviour is exactly what it was before: a receipt is
+   * recorded, stock moves, and a retry would move it again. That is the honest
+   * outcome for a caller that did not ask for protection, and it keeps every
+   * existing integration working.
+   */
+  private async receiveQuantity(
+    product: Product,
+    branchId: Buffer,
+    quantity: number,
+    dto: QuickAddUnitDto,
+  ): Promise<QuantityReceiptResult> {
+    const companyId = this.tenant.companyId();
+    const price = dto.price ?? (product.defaultPrice === null ? null : Number(product.defaultPrice));
+    const fingerprint = fingerprintReceipt({
+      productId: binToUuid(product.id),
+      branchId: branchId.toString('hex'),
+      quantity,
+      cost: dto.cost,
+      price,
+    });
+    const clientUuid = dto.clientUuid ? uuidToBin(dto.clientUuid) : null;
+
+    if (clientUuid) {
+      const replay = await this.db.stockReceipt.findFirst({ where: { companyId, clientUuid } });
+      if (replay) return this.replayOf(replay, fingerprint);
+    }
+
+    try {
+      return await this.db.$transaction(async (tx) => {
+        /*
+         * Order matters. The receipt is inserted FIRST, so a duplicate key
+         * aborts the transaction before the balance moves. Receiving first and
+         * recording second would let the goods land and the guard fail after.
+         */
+        await tx.stockReceipt.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            branchId,
+            productId: product.id,
+            userId: this.tenant.userId() ?? null,
+            clientUuid,
+            clientRequestHash: clientUuid ? fingerprint : null,
+            quantity,
+            unitCost: dto.cost,
+          },
+        });
+        // Unchanged rule, unchanged single statement (H1.4.1) — see stock-cost.ts.
+        await receiveQuantityAtCost(tx, {
+          companyId,
+          productId: product.id,
+          branchId,
+          received: quantity,
+          unitCost: dto.cost,
+          priceIfNew: price,
+        });
+        return { productId: binToUuid(product.id), quantity, tracking: 'quantity' as const };
+      });
+    } catch (e) {
+      /*
+       * Lost the insert race against a simultaneous retry. The winner's receipt
+       * is now committed, so this is the replay path, not an error.
+       */
+      if (clientUuid && e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        const winner = await this.db.stockReceipt.findFirst({ where: { companyId, clientUuid } });
+        if (winner) return this.replayOf(winner, fingerprint);
+      }
+      throw e;
+    }
+  }
+
+  /** Same key, same payload → the original answer. Same key, different payload → a conflict. */
+  private replayOf(
+    receipt: { productId: Buffer; quantity: number; clientRequestHash: string | null },
+    fingerprint: string,
+  ): QuantityReceiptResult {
+    if (receipt.clientRequestHash !== fingerprint) {
+      throw new ConflictException({
+        code: 'idempotency_conflict',
+        message: 'That request id was already used to receive different stock.',
+      });
+    }
+    return { productId: binToUuid(receipt.productId), quantity: receipt.quantity, tracking: 'quantity' };
   }
 
   /**

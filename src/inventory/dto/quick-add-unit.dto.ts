@@ -39,4 +39,21 @@ export class QuickAddUnitDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   price?: number;
+
+  /**
+   * Retry identity, generated on the device BEFORE the request.
+   *
+   * A phone registration is naturally retry-safe — the IMEI is unique, so the
+   * second attempt is refused by the index. Counted goods have no such key, so
+   * the client supplies one. Same key + same payload replays the first answer;
+   * same key + a different payload is a 409, because that is a second receipt
+   * wearing the first one's identity, not a retry.
+   *
+   * Optional, so existing callers keep working exactly as they did — they
+   * simply get no retry protection.
+   */
+  @ApiPropertyOptional({ format: 'uuid', description: 'Idempotency key so a network retry cannot receive stock twice' })
+  @IsOptional()
+  @IsUUID()
+  clientUuid?: string;
 }
