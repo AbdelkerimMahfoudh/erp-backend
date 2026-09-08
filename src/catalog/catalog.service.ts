@@ -15,6 +15,11 @@ import { AuditService } from '../common/audit/audit.service';
 import { AccessService } from '../rbac/access.service';
 import { AppClsStore } from '../common/context/request-context';
 import { ProductAttributesService } from '../tracking/product-attributes.service';
+import {
+  assertSelectableTrackingType,
+  assertTrackingChangeSafe,
+  resolveTrackingType,
+} from '../tracking/tracking-modes';
 import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
 import { newUuidV7Bin, binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
@@ -228,8 +233,27 @@ export class CatalogService {
       const category = await this.db.productCategory.findUnique({ where: { id: uuidToBin(dto.categoryId) } });
       if (!category) throw new NotFoundException('Category not found');
       categoryId = category.id;
-      trackingType = trackingType ?? category.defaultTrackingType; // category drives the default
+      /**
+       * The category **decides** the mode; it is not merely a default.
+       *
+       * This used to read `trackingType ?? category.defaultTrackingType`, which
+       * said the opposite of what its own comment claimed: the client won and
+       * the category was the fallback. A request could therefore name the Phone
+       * category and ask for `quantity` — a phone received in bulk that never
+       * gets an IMEI — or name Accessories and ask for `imei`, demanding a
+       * serial number for a charging cable. Neither is reachable now: a
+       * contradiction is a 400, and agreement is redundant but harmless.
+       */
+      trackingType = resolveTrackingType(category.defaultTrackingType, dto.trackingType);
       schemaRaw = category.attributeSchema;
+    } else if (trackingType !== undefined) {
+      /**
+       * No category to derive from — the uncategorised product still exists in
+       * the API. The mode is then the client's to state, but only from the
+       * modes the product actually offers, so this door cannot be used to
+       * reintroduce `serial` past the category rule.
+       */
+      assertSelectableTrackingType(trackingType);
     }
 
     // Strict on required + wrong type; unknown keys are allowed and flagged.
@@ -539,11 +563,18 @@ export class CatalogService {
       changed.push('specifications');
     }
 
+    /**
+     * The mode of the category this product will belong to once the update
+     * lands — the one the tracking type is then derived from. `null` means it
+     * will have no category, so there is nothing to derive from.
+     */
+    let categoryMode: TrackingType | null = null;
     if (dto.categoryId !== undefined) {
       const nextId = dto.categoryId === null ? null : uuidToBin(dto.categoryId);
       if (nextId) {
         const category = await this.db.productCategory.findUnique({ where: { id: nextId } });
         if (!category) throw new NotFoundException('Category not found');
+        categoryMode = category.defaultTrackingType;
       }
       const sameCategory =
         (nextId === null && before.categoryId === null) ||
@@ -552,18 +583,27 @@ export class CatalogService {
         data.category = nextId ? { connect: { id: nextId } } : { disconnect: true };
         changed.push('categoryId');
       }
+    } else if (before.categoryId) {
+      // Category untouched: the one it already has still governs the mode.
+      const category = await this.db.productCategory.findUnique({ where: { id: before.categoryId } });
+      categoryMode = category?.defaultTrackingType ?? null;
     }
 
-    // Tracking mode decides how stock is counted. Once anything has been
-    // received, purchased or sold under it, changing it would silently
-    // reinterpret existing history.
-    if (dto.trackingType !== undefined && dto.trackingType !== before.trackingType) {
-      if (await this.hasHistory(before.id)) {
-        throw new ConflictException(
-          'Tracking mode cannot change once this product has stock, purchase or sale history. Create a new product instead.',
-        );
-      }
-      data.trackingType = dto.trackingType;
+    /**
+     * Tracking mode decides how stock is counted, and the category decides the
+     * tracking mode — so a category change is a tracking change whenever the
+     * two categories disagree, even though the request never mentioned one.
+     * Deriving it here is what stops "just re-file this under Accessories" from
+     * leaving a quantity product whose rows are all `Unit`s.
+     */
+    const nextTracking =
+      categoryMode !== null ? resolveTrackingType(categoryMode, dto.trackingType) : (dto.trackingType ?? before.trackingType);
+
+    if (nextTracking !== before.trackingType) {
+      // Historical `serial` may persist, but may not be newly chosen.
+      assertSelectableTrackingType(nextTracking, before.trackingType);
+      assertTrackingChangeSafe(await this.hasHistory(before.id), before.trackingType, nextTracking);
+      data.trackingType = nextTracking;
       changed.push('trackingType');
     }
 
@@ -670,15 +710,25 @@ export class CatalogService {
     return product;
   }
 
-  /** Any stock, purchase or sale history that a tracking-mode change would reinterpret. */
+  /**
+   * Any history a tracking-mode change would reinterpret.
+   *
+   * `stockItem` covers reservations too: `reservedQuantity` lives on that row,
+   * so a product with something promised to a transfer necessarily has a row
+   * here and is already blocked. Returns are reached through `saleItem` — a
+   * return cannot exist without the sale line it reverses — so counting sale
+   * items covers them without a fourth join. `transferItem` is counted in its
+   * own right because stock can move between branches without ever being sold.
+   */
   private async hasHistory(productId: Buffer): Promise<boolean> {
-    const [units, stock, purchases, sales] = await Promise.all([
+    const [units, stock, purchases, sales, transfers] = await Promise.all([
       this.db.unit.count({ where: { productId } }),
       this.db.stockItem.count({ where: { productId } }),
       this.db.purchaseItem.count({ where: { productId } }),
       this.db.saleItem.count({ where: { productId } }),
+      this.db.transferItem.count({ where: { productId } }),
     ]);
-    return units + stock + purchases + sales > 0;
+    return units + stock + purchases + sales + transfers > 0;
   }
 
   /** Branches the caller is actually assigned to — the stock-summary boundary. */

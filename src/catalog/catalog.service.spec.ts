@@ -92,6 +92,7 @@ function makeService(
     stock?: { productId: Buffer; branchId: Buffer; quantity: number; price: number }[];
     purchaseItems?: { productId: Buffer }[];
     saleItems?: { productId: Buffer; price: number }[];
+    transferItems?: { productId: Buffer }[];
   } = {},
 ) {
   const companyId = seed.companyId ?? COMPANY;
@@ -101,6 +102,7 @@ function makeService(
   const stock = seed.stock ?? [];
   const purchaseItems = seed.purchaseItems ?? [];
   const saleItems = seed.saleItems ?? [];
+  const transferItems = seed.transferItems ?? [];
   const audits: any[] = [];
   const recognitions: { codeType: string; code: string; productId: Buffer }[] = [];
   const enqueued: any[] = [];
@@ -215,6 +217,9 @@ function makeService(
         stock.filter((s) => s.productId.equals(where.productId)).map((s) => ({ ...s })),
       ),
       count: jest.fn(async ({ where }: any) => stock.filter((s) => s.productId.equals(where.productId)).length),
+    },
+    transferItem: {
+      count: jest.fn(async ({ where }: any) => transferItems.filter((t: any) => t.productId.equals(where.productId)).length),
     },
     purchaseItem: {
       count: jest.fn(async ({ where }: any) => purchaseItems.filter((p) => p.productId.equals(where.productId)).length),
@@ -730,5 +735,125 @@ describe('metadata update', () => {
     const recorded = JSON.stringify({ before: entry?.before, after: entry?.after, reason: entry?.reason });
     expect(recorded).not.toMatch(/defaultPrice|defaultCost/);
     expect(recorded).not.toMatch(/\b100\b|\b60\b/);
+  });
+});
+
+// ───────────────────── the category owns the tracking mode ──────────────────
+
+/**
+ * The defect these cover: `trackingType ?? category.defaultTrackingType` said
+ * "the category is a fallback" while its own comment claimed the category
+ * drives it. A client that sent a mode won, so the Phone category could be
+ * asked for `quantity` — a phone received in bulk that never gets an IMEI.
+ */
+describe('the category decides how its products are received', () => {
+  const category = (defaultTrackingType: string, name = 'Cat'): CategoryRow => ({
+    id: newUuidV7Bin(),
+    companyId: COMPANY,
+    name,
+    defaultTrackingType,
+    attributeSchema: null,
+    isActive: true,
+  });
+
+  it('refuses a phone category asked to skip IMEI tracking', async () => {
+    const cat = category('imei', 'Phones');
+    const { service, products } = makeService({ categories: [cat] });
+
+    await expect(
+      service.create(baseDto({ categoryId: binToUuid(cat.id), trackingType: 'quantity' as never })),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(products).toHaveLength(0);
+  });
+
+  it('refuses a counted category asked to demand IMEIs', async () => {
+    const cat = category('quantity', 'Accessories');
+    const { service, products } = makeService({ categories: [cat] });
+
+    await expect(
+      service.create(baseDto({ categoryId: binToUuid(cat.id), trackingType: 'imei' as never })),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(products).toHaveLength(0);
+  });
+
+  it('accepts a client that agrees with the category', async () => {
+    const cat = category('quantity');
+    const { service, products } = makeService({ categories: [cat] });
+
+    await service.create(baseDto({ categoryId: binToUuid(cat.id), trackingType: 'quantity' as never }));
+
+    expect(products[0].trackingType).toBe('quantity');
+  });
+
+  it('refuses serial as a newly chosen mode on an uncategorised product', async () => {
+    const { service, products } = makeService();
+
+    await expect(service.create(baseDto({ trackingType: 'serial' as never }))).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(products).toHaveLength(0);
+  });
+
+  /**
+   * Re-filing a product is a tracking change even though the request never
+   * mentions one — which is exactly how a shelf of counted accessories could
+   * otherwise end up demanding IMEIs.
+   */
+  it('re-derives the mode when the product moves to a different category', async () => {
+    const phones = category('imei', 'Phones');
+    const accessories = category('quantity', 'Accessories');
+    const p = product({ trackingType: 'imei', categoryId: phones.id });
+    const { service } = makeService({ products: [p], categories: [phones, accessories] });
+
+    await service.update(binToUuid(p.id), { categoryId: binToUuid(accessories.id) } as UpdateProductDto);
+
+    expect(p.trackingType).toBe('quantity');
+  });
+
+  it('blocks that re-derivation when the product already holds stock', async () => {
+    const phones = category('imei', 'Phones');
+    const accessories = category('quantity', 'Accessories');
+    const p = product({ trackingType: 'imei', categoryId: phones.id });
+    const { service } = makeService({
+      products: [p],
+      categories: [phones, accessories],
+      units: [{ productId: p.id, branchId: BRANCH, status: 'in_stock' }],
+    });
+
+    await expect(
+      service.update(binToUuid(p.id), { categoryId: binToUuid(accessories.id) } as UpdateProductDto),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(p.trackingType).toBe('imei');
+  });
+
+  it('leaves the mode alone when the category does not change', async () => {
+    const accessories = category('quantity', 'Accessories');
+    const p = product({ trackingType: 'quantity', categoryId: accessories.id });
+    const { service } = makeService({ products: [p], categories: [accessories] });
+
+    await service.update(binToUuid(p.id), { brand: 'Anker' } as UpdateProductDto);
+
+    expect(p.trackingType).toBe('quantity');
+  });
+
+  it('refuses a mode that contradicts the category the product already has', async () => {
+    const phones = category('imei', 'Phones');
+    const p = product({ trackingType: 'imei', categoryId: phones.id });
+    const { service } = makeService({ products: [p], categories: [phones] });
+
+    await expect(
+      service.update(binToUuid(p.id), { trackingType: 'quantity' } as UpdateProductDto),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('a transfer counts as history', () => {
+  it('blocks a tracking change for a product that has only ever been transferred', async () => {
+    const p = product({ trackingType: 'imei' });
+    const { service } = makeService({ products: [p], transferItems: [{ productId: p.id }] });
+
+    await expect(
+      service.update(binToUuid(p.id), { trackingType: 'quantity' } as UpdateProductDto),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 });

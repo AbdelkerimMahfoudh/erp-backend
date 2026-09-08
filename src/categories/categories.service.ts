@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, ProductCategory } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -8,6 +8,7 @@ import { ProductAttributesService } from '../tracking/product-attributes.service
 import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { assertSelectableTrackingType } from '../tracking/tracking-modes';
 
 @Injectable()
 export class CategoriesService {
@@ -34,6 +35,7 @@ export class CategoriesService {
   }
 
   async create(dto: CreateCategoryDto): Promise<ProductCategory> {
+    assertSelectableTrackingType(dto.defaultTrackingType);
     const schema = this.attributes.validateSchema(dto.attributeSchema);
     const category = await this.db.productCategory.create({
       data: {
@@ -58,8 +60,34 @@ export class CategoriesService {
 
     const data: Prisma.ProductCategoryUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name;
-    if (dto.defaultTrackingType !== undefined) data.defaultTrackingType = dto.defaultTrackingType;
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
+
+    /**
+     * Changing a category's mode is the real misconfiguration risk.
+     *
+     * The category is what every product in it derives its intake workflow
+     * from, so flipping it does not change one product — it changes the meaning
+     * of all of them at once, including their existing units and stock rows.
+     * A shop owner tidying up category names must not be able to turn a shelf of
+     * counted accessories into things the app demands IMEIs for.
+     *
+     * So it may only move while the category is still empty. After that the
+     * answer is a new category, which costs nothing and reinterprets nothing.
+     */
+    if (dto.defaultTrackingType !== undefined && dto.defaultTrackingType !== existing.defaultTrackingType) {
+      assertSelectableTrackingType(dto.defaultTrackingType, existing.defaultTrackingType);
+      const inUse = await this.db.product.count({ where: { categoryId: existing.id } });
+      if (inUse > 0) {
+        throw new ConflictException({
+          code: 'category_tracking_change_blocked',
+          message:
+            `${inUse} product(s) already use this category, so its tracking mode cannot change from ` +
+            `'${existing.defaultTrackingType}' to '${dto.defaultTrackingType}'. Create a new category instead.`,
+        });
+      }
+      data.defaultTrackingType = dto.defaultTrackingType;
+    }
+
     if (dto.attributeSchema !== undefined) {
       data.attributeSchema = this.attributes.validateSchema(dto.attributeSchema) as unknown as Prisma.InputJsonValue;
     }
@@ -69,8 +97,8 @@ export class CategoriesService {
       entityType: 'ProductCategory',
       entityId: category.id,
       action: 'update',
-      before: { name: existing.name, isActive: existing.isActive },
-      after: { name: category.name, isActive: category.isActive },
+      before: { name: existing.name, isActive: existing.isActive, defaultTrackingType: existing.defaultTrackingType },
+      after: { name: category.name, isActive: category.isActive, defaultTrackingType: category.defaultTrackingType },
     });
     return category;
   }
