@@ -124,7 +124,15 @@ export class LoansService {
     return this.get(binToUuid(id));
   }
 
-  async list(group?: 'pending' | 'accepted' | 'confirmed') {
+  /**
+   * Browse loans.
+   *
+   * `opts.all` lifts the 200-row cap, for the report export only. The cap is
+   * right for a screen — nobody scrolls two hundred debts — and wrong for a
+   * file, where a silent stop at row 200 is a balance sheet missing debts
+   * nothing in the file mentions.
+   */
+  async list(group?: 'pending' | 'accepted' | 'confirmed', opts?: { all?: boolean }) {
     const me = this.tenant.companyId();
     const rows = await this.prisma.loan.findMany({
       where: this.visible(me),
@@ -134,7 +142,7 @@ export class LoansService {
         ledger: { select: { kind: true, amount: true } },
       },
       orderBy: { createdAt: 'desc' },
-      take: 200,
+      ...(opts?.all ? {} : { take: 200 }),
     });
     return {
       rows: rows.map((l) => this.summarise(l, me)).filter((r) => !group || r.group === group),

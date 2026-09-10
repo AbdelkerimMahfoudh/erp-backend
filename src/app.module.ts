@@ -41,6 +41,7 @@ import { SalesModule } from './sales/sales.module';
 import { TransfersModule } from './transfers/transfers.module';
 import { ReturnsModule } from './returns/returns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { ReportsModule } from './reports/reports.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { ClosingModule } from './closing/closing.module';
 import { GoalsModule } from './goals/goals.module';
@@ -156,6 +157,7 @@ import { LoansModule } from './loans/loans.module';
     TransfersModule,
     ReturnsModule,
     AnalyticsModule,
+    ReportsModule,
     ExpensesModule,
     ClosingModule,
     GoalsModule,

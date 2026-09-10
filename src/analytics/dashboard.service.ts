@@ -71,7 +71,7 @@ export class DashboardService {
     const [home, performance, deadStock, lowStock, branchComparison, employeePerformance] = await Promise.all([
       this.home(),
       this.analytics.productPerformance(30),
-      this.deadStock(),
+      this.deadStock(10),
       this.lowStock(),
       this.branchComparison(30),
       this.employeePerformance(30),
@@ -92,8 +92,14 @@ export class DashboardService {
 
   // --- components -----------------------------------------------------------
 
-  /** Products with stock but no recent sale (older than dead_stock_days). */
-  private async deadStock() {
+  /**
+   * Products with stock but no recent sale (older than `dead_stock_days`).
+   *
+   * `limit` is the DASHBOARD's limit, not the report's. Ten is what fits on a
+   * card; an export of the ten worst is not a dead-stock report, it is the
+   * dashboard saved to a file. The export passes no limit and gets all of them.
+   */
+  async deadStock(limit?: number) {
     const branchId = this.tenant.branchId();
     const days = await this.numberSetting('dead_stock_days', 60);
     const cutoff = new Date(Date.now() - days * 86_400_000);
@@ -120,7 +126,7 @@ export class DashboardService {
         lastSoldAt: lastSoldByHex.get(r.productId.toString('hex')) ?? null,
       }))
       .sort((a, b) => b.inventoryValue - a.inventoryValue)
-      .slice(0, 10);
+      .slice(0, limit ?? Number.MAX_SAFE_INTEGER);
   }
 
   /** Products at/below the low-stock threshold (units + quantity stock). */
@@ -154,7 +160,7 @@ export class DashboardService {
   }
 
   /** Revenue/profit per branch over a window (always company-wide). */
-  private async branchComparison(days: number) {
+  async branchComparison(days: number) {
     const from = this.windowStart(days);
     const grouped = await this.db.dailyRollup.groupBy({
       by: ['branchId'],
@@ -177,7 +183,7 @@ export class DashboardService {
   }
 
   /** Sales/revenue/margin per employee over a window (live over sales). */
-  private async employeePerformance(days: number) {
+  async employeePerformance(days: number) {
     const branchId = this.tenant.branchId();
     const from = this.windowStart(days);
     const grouped = await this.db.sale.groupBy({

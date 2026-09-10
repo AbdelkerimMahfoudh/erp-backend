@@ -28,6 +28,6 @@ import { HealthController } from './health.controller';
     DashboardService,
     HealthService,
   ],
-  exports: [RollupService, ROLLUP_QUEUE],
+  exports: [RollupService, ROLLUP_QUEUE, AnalyticsService, DashboardService],
 })
 export class AnalyticsModule {}
