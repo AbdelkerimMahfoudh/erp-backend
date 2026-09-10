@@ -270,6 +270,29 @@ describe('the pieces', () => {
     expect(fingerprintWarnings(a)).not.toBe(fingerprintWarnings(b));
   });
 
+  it('distinguishes the same code at a different severity', () => {
+    /*
+     * The hole a code-only fingerprint left open: "ten times too high" at
+     * caution and "ten times too low" at info are different statements, and
+     * confirming one must not silently cover the other.
+     */
+    const high: Warning[] = [WARNINGS[0]];
+    const low: Warning[] = [{ ...WARNINGS[0], severity: 'info' }];
+    expect(fingerprintWarnings(high)).not.toBe(fingerprintWarnings(low));
+  });
+
+  it('distinguishes the same code with different parameters', () => {
+    const tenfold: Warning[] = [WARNINGS[0]];
+    const hundredfold: Warning[] = [{ ...WARNINGS[0], params: { factor: 100 } }];
+    expect(fingerprintWarnings(tenfold)).not.toBe(fingerprintWarnings(hundredfold));
+  });
+
+  it('does not care about parameter key order', () => {
+    const a: Warning[] = [{ ...WARNINGS[0], params: { factor: 10, direction: 'high' } }];
+    const b: Warning[] = [{ ...WARNINGS[0], params: { direction: 'high', factor: 10 } }];
+    expect(fingerprintWarnings(a)).toBe(fingerprintWarnings(b));
+  });
+
   it('an empty warning set is its own fingerprint', () => {
     expect(fingerprintWarnings([])).toBe('');
     expect(fingerprintWarnings([])).not.toBe(fingerprintWarnings(WARNINGS));
