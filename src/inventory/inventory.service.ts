@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Prisma, Product, Unit, UnitStatus } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
+import { PrismaService } from '../prisma/prisma.service';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
@@ -32,6 +33,32 @@ export interface QuantityReceiptResult {
   quantity: number;
   tracking: 'quantity';
 }
+
+/**
+ * What a scanned identifier already is, if anything.
+ *
+ * `elsewhere` is the deliberately empty answer: the identifier is taken by a
+ * unit this caller may not see — another company's, or another branch's — so
+ * intake must be refused and nothing else may be said about it.
+ */
+export interface IdentifierConflict {
+  alreadyInInventory: boolean;
+  matchedIdentifierPosition: 'primary' | 'secondary' | null;
+  /** Safe summary, only for a unit this caller can actually reach. */
+  unit: { productLabel: string; branchName: string; status: UnitStatus } | null;
+  /** Taken, but outside this caller's reach. Carries nothing else. */
+  elsewhere: boolean;
+  /** Two identifiers matched two different units — never one phone. */
+  conflictingUnits: boolean;
+}
+
+const NO_CONFLICT: IdentifierConflict = {
+  alreadyInInventory: false,
+  matchedIdentifierPosition: null,
+  unit: null,
+  elsewhere: false,
+  conflictingUnits: false,
+};
 
 /** Transaction client shape needed to create a unit (+ its audit row). */
 export type UnitTxClient = Pick<TenantPrisma, 'unit' | 'auditLog'>;
@@ -259,6 +286,11 @@ export class InventoryService {
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
     private readonly strategies: TrackingStrategyRegistry,
+    /**
+     * The UNSCOPED client, used for exactly one thing: counting whether an
+     * identifier exists outside this company. It never selects a row.
+     */
+    private readonly system: PrismaService,
   ) {}
 
   /** Same-company identifier pre-check (the global unique index is the backstop). */
@@ -281,6 +313,131 @@ export class InventoryService {
       if (u.serialNo) set.add(u.serialNo);
     }
     return set;
+  }
+
+  /**
+   * Is this identifier already a phone we hold — and if not ours, is it taken?
+   *
+   * The authoritative answer to "can this be received", asked BEFORE anybody
+   * types a cost. Until now the only answer came from the database trigger at
+   * insert time, so a duplicate was discovered after the whole intake form had
+   * been filled in.
+   *
+   * ## Two different questions, deliberately
+   *
+   * IMEI uniqueness in this database is **global** — migration 0042's trigger
+   * queries `units` with no company filter, and the generated `identifier`
+   * index is global too. The tenant client, meanwhile, is company-scoped. So a
+   * phone belonging to another shop is invisible to a normal read and still
+   * impossible to receive, which is the worst of both.
+   *
+   * This therefore asks twice:
+   *
+   *  1. **Scoped** — is it ours? Then the caller may see a safe summary: what
+   *     the product is, which branch holds it, what state it is in.
+   *  2. **Unscoped, count only** — is it anyone's? Then the caller learns
+   *     nothing but `elsewhere: true`.
+   *
+   * The second query returns a NUMBER. Not a row, not an id, not a name — so
+   * there is no shape for another company's data to travel in. That it reveals
+   * "this IMEI exists somewhere" is not new: the insert trigger already says
+   * exactly that, in words, a minute later. Saying it earlier costs the same
+   * information and saves the typing.
+   *
+   * A unit in a branch this user is not assigned to is treated the same as
+   * another company's: the duplicate is real, the details are not theirs.
+   */
+  async describeIdentifierConflict(identifiers: string[]): Promise<IdentifierConflict> {
+    const wanted = identifiers.map((i) => i.trim()).filter(Boolean);
+    if (wanted.length === 0) return NO_CONFLICT;
+
+    // Same company: the authoritative columns, exactly as `findByIdentifier`
+    // searches them — either IMEI finds the phone, and a serial does too.
+    const ours = await this.db.unit.findMany({
+      where: {
+        OR: [
+          { imeiPrimary: { in: wanted } },
+          { imeiSecondary: { in: wanted } },
+          { serialNo: { in: wanted } },
+        ],
+      },
+      select: {
+        id: true,
+        status: true,
+        imeiPrimary: true,
+        imeiSecondary: true,
+        branchId: true,
+        branch: { select: { name: true } },
+        product: { select: { brand: true, model: true, variant: true } },
+      },
+      take: 3,
+    });
+
+    /*
+     * Two identifiers that resolve to two DIFFERENT units are not one phone.
+     * Saying "already in inventory" and showing one of them would quietly pick
+     * a winner, and the pair being scanned is then attached to whichever the
+     * query happened to return first.
+     */
+    const distinct = new Set(ours.map((u) => u.id.toString('hex')));
+    if (distinct.size > 1) {
+      return { ...NO_CONFLICT, alreadyInInventory: true, conflictingUnits: true };
+    }
+
+    const match = ours[0];
+    if (match) {
+      const visible = await this.accessibleBranchIds();
+      const inReach = visible.some((b) => b.equals(match.branchId));
+      if (!inReach) {
+        // Ours, but not this user's branch. Real duplicate, none of their business.
+        return { ...NO_CONFLICT, alreadyInInventory: true, elsewhere: true };
+      }
+      return {
+        alreadyInInventory: true,
+        // Which column matched the FIRST identifier — the one that was scanned.
+        matchedIdentifierPosition:
+          match.imeiPrimary && wanted.includes(match.imeiPrimary)
+            ? 'primary'
+            : match.imeiSecondary && wanted.includes(match.imeiSecondary)
+              ? 'secondary'
+              : null,
+        unit: {
+          productLabel: [match.product.brand, match.product.model, match.product.variant]
+            .filter(Boolean)
+            .join(' '),
+          branchName: match.branch.name,
+          status: match.status,
+        },
+        elsewhere: false,
+        conflictingUnits: false,
+      };
+    }
+
+    /*
+     * Not ours. Ask the unscoped client whether it exists at all — and ask for
+     * a COUNT, so the answer cannot carry anything but a number.
+     */
+    const taken = await this.system.unit.count({
+      where: {
+        OR: [
+          { imeiPrimary: { in: wanted } },
+          { imeiSecondary: { in: wanted } },
+          { serialNo: { in: wanted } },
+        ],
+      },
+    });
+    return taken > 0 ? { ...NO_CONFLICT, alreadyInInventory: true, elsewhere: true } : NO_CONFLICT;
+  }
+
+  /** Branches this user is actually assigned to — the visibility boundary. */
+  private async accessibleBranchIds(): Promise<Buffer[]> {
+    const userId = this.tenant.userId();
+    if (!userId) return [];
+    const rows = await this.db.userBranch.findMany({
+      where: { userId },
+      select: { branchId: true },
+    });
+    return rows.map((r) => r.branchId);
   }
 
   /**

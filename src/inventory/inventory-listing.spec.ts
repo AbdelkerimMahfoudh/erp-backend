@@ -141,7 +141,7 @@ function makeStore(units: any[], stock: any[], branchId: Buffer | null = BRANCH)
    */
   const tenant = { branchId: () => branchId, requireUserId: () => USER };
   (db as unknown as Record<string, unknown>).userBranch = { findFirst: async () => ({ id: USER }) };
-  const service = new InventoryService(db as never, tenant as never, {} as never, {} as never);
+  const service = new InventoryService(db as never, tenant as never, {} as never, {} as never, {} as never);
   return { service, db };
 }
 
@@ -228,6 +228,7 @@ describe('listStock — branch isolation', () => {
       { branchId: () => Buffer.alloc(16, 7), requireUserId: () => USER } as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     await expect(service.listStock({})).rejects.toThrow(/No access to the requested branch/);
   });
@@ -241,6 +242,7 @@ describe('listStock — branch isolation', () => {
     const service = new InventoryService(
       db as never,
       { branchId: () => Buffer.alloc(16, 7), requireUserId: () => USER } as never,
+      {} as never,
       {} as never,
       {} as never,
     );

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { CodeType } from '@prisma/client';
 import { binToUuid } from '../common/utils/uuid.util';
+import { InventoryService } from '../inventory/inventory.service';
 import { CatalogService } from '../catalog/catalog.service';
 import { TrackingStrategyRegistry } from '../tracking/tracking-strategy.registry';
 import { RecognitionService } from './recognition.service';
@@ -25,11 +26,35 @@ export class ScannerService {
     private readonly recognition: RecognitionService,
     private readonly catalog: CatalogService,
     private readonly registry: TrackingStrategyRegistry,
+    private readonly inventory: InventoryService,
   ) {}
 
-  async scan(rawCode: string): Promise<ScanResult> {
+  async scan(rawCode: string, rawSecondary?: string): Promise<ScanResult> {
     const { kind, normalized } = classifyCode(rawCode);
     const recognitionKey = this.recognitionKeyFor(kind, normalized);
+
+    /**
+     * Does this handset already exist here?
+     *
+     * Asked for per-unit identifiers only. A barcode names a reusable product,
+     * so "is this already in inventory" is not a question about it — every
+     * cable shares one.
+     *
+     * Both IMEIs of a dual-SIM phone go in together. They are one physical
+     * thing, and checking them separately is how two numbers off one box end up
+     * attached to two different units.
+     *
+     * The answer comes from `InventoryService`, which already owns the
+     * authoritative both-columns lookup that `findByIdentifier` uses. Writing a
+     * second query here would be a second definition of "already have it".
+     */
+    const inventory =
+      kind === 'imei' || kind === 'serial'
+        ? await this.inventory.describeIdentifierConflict(
+            [normalized, ...(rawSecondary ? [rawSecondary.trim()] : [])],
+          )
+        : null;
+
     const base: ScanResult = {
       code: normalized,
       kind,
@@ -37,6 +62,7 @@ export class ScannerService {
       confidence: 0,
       recognitionKey,
       suggestion: null,
+      inventory,
     };
 
     if (kind === 'unknown') {

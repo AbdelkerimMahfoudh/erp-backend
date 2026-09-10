@@ -1,6 +1,14 @@
 import { ScannerService } from './scanner.service';
 import { DefaultConfidenceScorer } from './confidence/default-confidence.scorer';
 
+const NO_MATCH = {
+  alreadyInInventory: false,
+  matchedIdentifierPosition: null,
+  unit: null,
+  elsewhere: false,
+  conflictingUnits: false,
+};
+
 /**
  * Teaching the scanner must never make it less sure.
  *
@@ -72,7 +80,20 @@ function makeScanner(
 
   const registry = { get: () => ({ recognitionKey: (c: string) => ({ codeType: 'tac', code: c.slice(0, 8) }) }) };
 
-  return new ScannerService(recognition as never, catalog as never, registry as never);
+  /*
+   * The inventory lookup is stubbed to "nothing found": these tests are about
+   * CONFIDENCE in a product suggestion, which is a different question from
+   * whether the handset is already on the shelf. Conflating the two is exactly
+   * what the contract now keeps apart.
+   */
+  const inventory = { describeIdentifierConflict: jest.fn(async () => NO_MATCH) };
+
+  return new ScannerService(
+    recognition as never,
+    catalog as never,
+    registry as never,
+    inventory as never,
+  );
 }
 
 describe('scanner confidence — teaching must not reduce certainty', () => {

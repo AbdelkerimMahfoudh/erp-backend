@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TrackingModule } from '../tracking/tracking.module';
+import { InventoryModule } from '../inventory/inventory.module';
 import { CatalogModule } from '../catalog/catalog.module';
 import { RecognitionModule } from './recognition.module';
 import { ScannerController } from './scanner.controller';
@@ -8,7 +9,7 @@ import { TacMappingService } from './tac-mapping.service';
 import { ScannerService } from './scanner.service';
 
 @Module({
-  imports: [TrackingModule, CatalogModule, RecognitionModule],
+  imports: [TrackingModule, CatalogModule, RecognitionModule, InventoryModule],
   controllers: [ScannerController, TacMappingController],
   providers: [ScannerService, TacMappingService],
 })

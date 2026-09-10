@@ -12,6 +12,6 @@ export class ScannerController {
   @Post()
   @ApiOperation({ summary: 'Scan any identifier (IMEI/barcode/serial) → instant product suggestion' })
   scan(@Body() dto: ScanDto) {
-    return this.scanner.scan(dto.code);
+    return this.scanner.scan(dto.code, dto.secondary);
   }
 }

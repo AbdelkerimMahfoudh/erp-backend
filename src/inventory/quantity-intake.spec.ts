@@ -94,7 +94,7 @@ function harness() {
   };
   const audit: any = { record: jest.fn(), recordTx: jest.fn() };
 
-  const service = new InventoryService(db, tenant, audit, new TrackingStrategyRegistry());
+  const service = new InventoryService(db, tenant, audit, new TrackingStrategyRegistry(), db);
   return { service, receipts, stockCalls, units, db, tx };
 }
 

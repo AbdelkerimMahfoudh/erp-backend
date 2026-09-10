@@ -106,6 +106,7 @@ async function drain(units: any[], limit: number): Promise<Stats> {
     { branchId: () => BRANCH, requireUserId: () => BRANCH } as never,
     {} as never,
     {} as never,
+    {} as never,
   );
 
   const seen: string[] = [];
