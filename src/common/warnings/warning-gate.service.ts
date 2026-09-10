@@ -101,7 +101,9 @@ export class WarningGate {
     if (!REISSUE.has(verdict.reason)) {
       throw new ConflictException({
         code: 'acknowledgement_rejected',
-        reason: verdict.reason,
+        // Not `reason`: that word is free text on half the mutations here, and
+        // the error filter's allowlist has to stay narrow enough to be read.
+        acknowledgement: verdict.reason,
         message: 'That confirmation does not belong to this request. Please try again.',
       });
     }

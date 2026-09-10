@@ -1,4 +1,10 @@
-import { BadRequestException, ConflictException, HttpException, HttpStatus } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
 import { AllExceptionsFilter } from './all-exceptions.filter';
 
 /**
@@ -104,6 +110,50 @@ describe('per-item detail survives the filter', () => {
     const body = runFilter(new ConflictException({ message: 'plain' }));
     expect(body).not.toHaveProperty('problems');
     expect(body).not.toHaveProperty('units');
+  });
+
+  it('carries the fields a price refusal needs to be acted on', () => {
+    /*
+     * Found live in CP6, and it is the second time this exact failure has
+     * happened here — the fields were attached by the service, the filter
+     * dropped them, and every unit test passed because they all asserted that
+     * an exception was thrown rather than what a client receives.
+     *
+     * Without these the phone knows only that SOMETHING needs approval, and
+     * cannot say which item or at what set price.
+     */
+    const body = runFilter(
+      new ForbiddenException({
+        code: 'approval_required',
+        message: 'needs approval',
+        belowCost: true,
+        configuredPrice: 17000,
+        lineIndex: 0,
+        unitId: '019f0000-0000-7000-8000-000000000001',
+        identifier: '359111000000001',
+      }),
+    );
+    expect(body.code).toBe('approval_required');
+    expect(body.belowCost).toBe(true);
+    expect(body.configuredPrice).toBe(17000);
+    expect(body.lineIndex).toBe(0);
+    expect(body.unitId).toBe('019f0000-0000-7000-8000-000000000001');
+    expect(body.identifier).toBe('359111000000001');
+  });
+
+  it('carries why an acknowledgement was refused, under its own name', () => {
+    // Deliberately not `reason`: that word is free text on half the mutations
+    // in this app, and allowlisting it would pass whatever any of them attached.
+    const body = runFilter(
+      new ConflictException({
+        code: 'acknowledgement_rejected',
+        message: 'no',
+        acknowledgement: 'bad_signature',
+        reason: 'a free-text field that must NOT travel',
+      }),
+    );
+    expect(body.acknowledgement).toBe('bad_signature');
+    expect(body).not.toHaveProperty('reason');
   });
 
   it('still reveals nothing about an unexpected error', () => {

@@ -22,7 +22,26 @@
 // ===========================================================================
 
 import { PrismaClient } from '@prisma/client';
-import { ALL_PERMISSION_KEYS, PERMISSIONS } from '../src/rbac/role-permissions';
+import { ALL_PERMISSION_KEYS, PERMISSIONS, ROLE_LABELS, ROLE_PERMISSIONS, type RoleKey } from '../src/rbac/role-permissions';
+
+/**
+ * A role holding a permission the codebase does not grant it.
+ *
+ * Found in the CP6 live run: `discount.override` was removed from
+ * `branch_manager` in code when A2 made approval Owner-only, and the
+ * `role_permissions` row stayed. `AccessService` resolves authority from that
+ * table alone, so the retired role could still approve a discount — and this
+ * command reported "61/61, catalogue complete", because it only ever checked
+ * that the KEYS exist. A catalogue can be perfect while the grants are wrong.
+ */
+interface GrantDrift {
+  role: string;
+  roleKey: RoleKey;
+  /** Held in the database, not granted by the codebase. Authority nobody meant. */
+  extra: string[];
+  /** Granted by the codebase, absent here. Authority somebody is missing. */
+  missing: string[];
+}
 
 interface Report {
   ok: boolean;
@@ -32,6 +51,7 @@ interface Report {
   unknown: string[];
   duplicated: string[];
   relabelled: { key: string; database: string; canonical: string }[];
+  grants: GrantDrift[];
 }
 
 export async function verifyCatalogue(prisma: PrismaClient): Promise<Report> {
@@ -58,15 +78,66 @@ export async function verifyCatalogue(prisma: PrismaClient): Promise<Report> {
     .filter((r) => canonical.has(r.key) && labels.get(r.key) !== r.label)
     .map((r) => ({ key: r.key, database: r.label, canonical: labels.get(r.key)! }));
 
+  const grants = await verifyGrants(prisma);
+
   return {
-    ok: missing.length === 0 && unknown.length === 0 && duplicated.length === 0,
+    ok:
+      missing.length === 0 &&
+      unknown.length === 0 &&
+      duplicated.length === 0 &&
+      /*
+       * An EXTRA grant fails the gate; a missing one does not.
+       *
+       * They are not symmetrical. An extra grant is authority nobody decided
+       * to give, which is the shape of every privilege escalation — and it is
+       * exactly what a retired role kept after the code took it away. A missing
+       * grant is a shop that deliberately narrowed a role, which this command
+       * has no business overruling.
+       */
+      grants.every((g) => g.extra.length === 0),
     inDatabase: seen.size,
     canonical: canonical.size,
     missing,
     unknown,
     duplicated,
     relabelled,
+    grants,
   };
+}
+
+/**
+ * What each role is actually granted, against what the codebase grants it.
+ *
+ * Compared by role NAME, because that is the only thing the two sides share:
+ * the database stores a display name and the codebase keys by `RoleKey`.
+ * A role the codebase does not know is left alone and not reported — a tenant
+ * may legitimately have invented one, and judging it would be inventing policy.
+ */
+async function verifyGrants(prisma: PrismaClient): Promise<GrantDrift[]> {
+  const roles = await prisma.role.findMany({
+    select: {
+      name: true,
+      rolePermissions: { select: { permission: { select: { key: true } } } },
+    },
+  });
+
+  const byLabel = new Map<string, RoleKey>(
+    (Object.entries(ROLE_LABELS) as [RoleKey, string][]).map(([key, label]) => [label, key]),
+  );
+
+  const drift: GrantDrift[] = [];
+  for (const role of roles) {
+    const roleKey = byLabel.get(role.name);
+    if (!roleKey) continue;
+
+    const held = new Set(role.rolePermissions.map((rp) => rp.permission.key));
+    const granted = new Set(ROLE_PERMISSIONS[roleKey]);
+
+    const extra = [...held].filter((k) => !granted.has(k)).sort();
+    const missing = [...granted].filter((k) => !held.has(k)).sort();
+    if (extra.length || missing.length) drift.push({ role: role.name, roleKey, extra, missing });
+  }
+  return drift;
 }
 
 async function main() {
@@ -103,7 +174,21 @@ async function main() {
       for (const x of r.relabelled) console.log(`    ~ ${x.key}`);
     }
 
-    console.log(r.ok ? '  catalogue complete ✓' : '  CATALOGUE INCOMPLETE — refusing');
+    const escalations = r.grants.filter((g) => g.extra.length);
+    if (escalations.length) {
+      console.log(`  EXTRA GRANTS (${escalations.length}) — authority the codebase does not give:`);
+      for (const g of escalations) {
+        console.log(`    ! ${g.role} (${g.roleKey}) holds: ${g.extra.join(', ')}`);
+      }
+      console.log('    Nothing was deleted. Remove the grant deliberately, or grant it in code.');
+    }
+    const narrowed = r.grants.filter((g) => g.missing.length && !g.extra.length);
+    if (narrowed.length) {
+      console.log(`  narrowed (${narrowed.length}, not a failure — a shop may mean this):`);
+      for (const g of narrowed) console.log(`    ~ ${g.role} lacks: ${g.missing.join(', ')}`);
+    }
+
+    console.log(r.ok ? '  catalogue and grants complete ✓' : '  PERMISSION DRIFT — refusing');
     console.log('');
     process.exitCode = r.ok ? 0 : 1;
   } finally {

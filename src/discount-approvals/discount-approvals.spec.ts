@@ -334,3 +334,21 @@ describe('reading a request', () => {
     expect(SERVICE).toContain('branchName: row.branch?.name ?? null,');
   });
 });
+
+describe('the query actually runs', () => {
+  it('selects a product by brand and model, because it has no name', () => {
+    /*
+     * Found live in CP6. Selecting `name` made Prisma refuse the whole query,
+     * so BOTH reads of an approval answered 400 "Invalid query parameters" —
+     * and every test here passed, because they read the source rather than
+     * running it. Pinning the field names is the cheapest guard that survives
+     * a schema rename.
+     */
+    expect(SERVICE).toContain('product: { select: { brand: true, model: true, variant: true } }');
+    expect(SERVICE).not.toMatch(/product: \{ select: \{ name: true/);
+    const product = SCHEMA.slice(SCHEMA.indexOf('model Product {'));
+    const fields = product.slice(0, product.indexOf('\n}'));
+    expect(fields).toMatch(/\n  brand\s+String/);
+    expect(fields).not.toMatch(/\n  name\s+String/);
+  });
+});

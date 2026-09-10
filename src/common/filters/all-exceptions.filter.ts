@@ -25,6 +25,12 @@ interface ErrorBody {
    */
   problems?: unknown;
   units?: unknown;
+  belowCost?: unknown;
+  configuredPrice?: unknown;
+  lineIndex?: unknown;
+  unitId?: unknown;
+  identifier?: unknown;
+  acknowledgement?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -45,7 +51,27 @@ interface ErrorBody {
  * exception body may carry internals, and passing whatever a service happened
  * to attach would give that back.
  */
-const DETAIL_KEYS = ['problems', 'units'] as const;
+const DETAIL_KEYS = [
+  'problems',
+  'units',
+  /*
+   * A2/CP4. `approval_required` has to say WHICH phone and at what set price,
+   * or the phone cannot open the right request — and the same failure the
+   * comment above describes happened again: the fields were attached, the
+   * filter dropped them, and every unit test passed because they all asserted
+   * that an exception was thrown rather than what a client receives. The live
+   * run is what noticed.
+   */
+  'belowCost',
+  'configuredPrice',
+  'lineIndex',
+  'unitId',
+  'identifier',
+  /* Why an acknowledgement was refused. Deliberately not named `reason`: that
+   * word is free text on half the mutations in this app, and allowlisting it
+   * would pass whatever any of them happened to attach. */
+  'acknowledgement',
+] as const;
 
 /**
  * Single global exception filter. Produces a consistent error body, maps Prisma

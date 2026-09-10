@@ -636,7 +636,12 @@ export class DiscountApprovalsService {
       unitCost: Number(row.unitCost),
       /** What the request is about, in the words the shop uses. */
       product: row.unit?.product
-        ? { name: row.unit.product.name, variant: row.variant ?? row.unit.product.variant ?? null }
+        ? {
+            name: `${row.unit.product.brand} ${row.unit.product.model}`,
+            // The variant AS IT WAS when the request was made, so a later
+            // catalogue edit cannot silently change what was approved.
+            variant: row.variant ?? row.unit.product.variant ?? null,
+          }
         : null,
       identifier: row.unit?.imeiPrimary ?? row.unit?.serialNo ?? null,
       branchName: row.branch?.name ?? null,
@@ -655,7 +660,19 @@ export class DiscountApprovalsService {
  * asked to make quickly.
  */
 const DETAIL = {
-  unit: { select: { imeiPrimary: true, serialNo: true, product: { select: { name: true, variant: true } } } },
+  /*
+   * Brand and model, because a product has never had a `name`. Selecting one
+   * made Prisma refuse the whole query, and the global filter reported it as
+   * "Invalid query parameters" — so BOTH reads of an approval answered 400 and
+   * the source-text tests could not see it. The live run could.
+   */
+  unit: {
+    select: {
+      imeiPrimary: true,
+      serialNo: true,
+      product: { select: { brand: true, model: true, variant: true } },
+    },
+  },
   branch: { select: { name: true } },
   requester: { select: { name: true } },
   approver: { select: { name: true } },
@@ -680,7 +697,11 @@ interface PresentableApproval {
   unitId: Buffer;
   requesterId: Buffer;
   approverId: Buffer | null;
-  unit?: { imeiPrimary: string | null; serialNo: string | null; product?: { name: string; variant: string | null } | null } | null;
+  unit?: {
+    imeiPrimary: string | null;
+    serialNo: string | null;
+    product?: { brand: string; model: string; variant: string | null } | null;
+  } | null;
   branch?: { name: string } | null;
   requester?: { name: string } | null;
   approver?: { name: string } | null;
