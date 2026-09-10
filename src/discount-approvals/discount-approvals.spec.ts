@@ -54,7 +54,7 @@ describe('the floor is the configured selling price', () => {
      * good accessory margin and a phone far below its price still totals
      * positive. The configured price is a decision about one product.
      */
-    expect(SALES).toMatch(/for \(const line of prepared\)/);
+    expect(SALES).toMatch(/for \(const \[index, line\] of prepared\.entries\(\)\)/);
     expect(SALES).toMatch(/assertPriceAllowed/);
   });
 

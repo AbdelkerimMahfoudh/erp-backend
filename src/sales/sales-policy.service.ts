@@ -89,6 +89,15 @@ export class SalesPolicyService {
     approval: { approvedPrice: number; belowCost: boolean } | null;
     /** Required when the price is below cost. */
     reason: string | undefined;
+    /**
+     * Which line this is, and which physical unit.
+     *
+     * Carried into the refusal so the phone can open the right request. A sale
+     * with three lines and one refusal otherwise leaves the seller to guess
+     * which item the Owner is being asked about — and guessing wrong asks for
+     * an approval that will never fit the sale.
+     */
+    line?: { index: number; unitId: string | null; identifier: string | null };
   }): void {
     const { price, configuredPrice, cost, approval, reason } = input;
 
@@ -118,6 +127,9 @@ export class SalesPolicyService {
         code: 'approval_required',
         belowCost,
         configuredPrice,
+        lineIndex: input.line?.index ?? null,
+        unitId: input.line?.unitId ?? null,
+        identifier: input.line?.identifier ?? null,
         message: belowCost
           ? 'Selling below cost needs an Owner approval for this exact unit and price'
           : 'Selling below the set price needs an Owner approval for this exact unit and price',

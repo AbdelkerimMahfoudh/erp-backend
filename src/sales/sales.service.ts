@@ -272,7 +272,7 @@ export class SalesService {
          * total still looks positive. The configured price is a decision about
          * one product, so it has to be enforced about one product.
          */
-        for (const line of prepared) {
+        for (const [index, line] of prepared.entries()) {
           /*
            * An approval is spent HERE, inside the sale's transaction, by a
            * conditional update. Two concurrent sales racing for one approval
@@ -297,6 +297,11 @@ export class SalesService {
             cost: line.cost,
             approval,
             reason: dto.overrideReason,
+            line: {
+              index,
+              unitId: line.unitId ? binToUuid(line.unitId) : null,
+              identifier: dto.lines[index]?.identifier ?? null,
+            },
           });
         }
         const { amountPaid, balanceDue, payStatus } = this.policy.reconcilePayments(dto.payments, total);
