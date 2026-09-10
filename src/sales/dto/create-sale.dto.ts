@@ -148,4 +148,18 @@ export class CreateSaleDto {
   @IsOptional()
   @IsUUID()
   clientUuid?: string;
+
+  /**
+   * "Yes, I meant that" — the token the server issued with the warnings.
+   *
+   * Not a boolean. A flag in a body authorises nothing, because any client can
+   * send one; this is signed over the exact payload and the exact warnings the
+   * person was shown, so a changed price cannot reuse an old confirmation. See
+   * `common/warnings/acknowledgement.ts`.
+   */
+  @ApiPropertyOptional({ description: 'Acknowledgement token returned with warnings_pending' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  acknowledgementToken?: string;
 }

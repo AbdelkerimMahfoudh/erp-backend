@@ -24,6 +24,10 @@ import { ListSalesDto } from './dto/list-sales.dto';
 import { evaluateEligibility, NO_RETURNS, resolveWindowForSale, snapshotPolicy } from './return-policy';
 import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
 import { DiscountApprovalsService } from '../discount-approvals/discount-approvals.service';
+import { MagnitudeReads, MagnitudeService, SALE_PRICE_MIN_SAMPLE } from '../common/warnings/magnitude.service';
+import { magnitudeWarning } from '../common/warnings/magnitude';
+import { WarningGate } from '../common/warnings/warning-gate.service';
+import { Warning, WarningResponse } from '../common/warnings/warning.types';
 
 /** Every value the filters accept, kept next to the enums they mirror. */
 const PAY_STATUSES = ['paid', 'partial', 'credit'] as const satisfies readonly SalePayStatus[];
@@ -45,6 +49,22 @@ interface PreparedLine {
   configuredPrice: number | null;
 }
 
+/**
+ * Thrown to abandon the sale's transaction when the server has something to say
+ * and the person has not yet answered it.
+ *
+ * A warned sale must write **nothing** — not the sale, not the invoice number,
+ * not the unit's new status. The cheapest way to guarantee that is to let the
+ * transaction roll back, which means leaving it by throwing. It is caught two
+ * lines later and turned into an ordinary 200 carrying the warnings, so the
+ * throw never reaches a client as an error.
+ */
+class WarningsPending extends Error {
+  constructor(readonly response: WarningResponse) {
+    super('warnings_pending');
+  }
+}
+
 @Injectable()
 export class SalesService {
   constructor(
@@ -57,6 +77,8 @@ export class SalesService {
     private readonly events: SpineEventBus,
     private readonly cls: ClsService<AppClsStore>,
     private readonly approvals: DiscountApprovalsService,
+    private readonly magnitude: MagnitudeService,
+    private readonly gate: WarningGate,
   ) {}
 
   async createSale(dto: CreateSaleDto) {
@@ -201,6 +223,30 @@ export class SalesService {
             });
           }
         }
+
+        /*
+         * A missing or extra zero, caught BEFORE the first write (A1).
+         *
+         * This sits here, after every line has been resolved and before
+         * anything is created, for one reason: a warned sale must leave no
+         * trace. Warning after the row exists would make the warning
+         * decorative — the mistake is already recorded and the person is being
+         * told about their own history.
+         *
+         * It is advisory. It never refuses the sale; it asks once, and a
+         * confirmation bound to this exact payload lets it through.
+         */
+        const warnings = await this.magnitudeWarnings(tx, prepared, branchId);
+        const verdict = this.gate.check({
+          operation: 'sale.create',
+          // The token is excluded from what the token is bound to. Including it
+          // would change the hash the moment it is sent back, so no
+          // acknowledgement could ever verify.
+          payload: { ...dto, acknowledgementToken: undefined },
+          warnings,
+          token: dto.acknowledgementToken,
+        });
+        if (!verdict.ok && verdict.response) throw new WarningsPending(verdict.response);
 
         const subtotal = this.policy.round(prepared.reduce((s, p) => s + p.price * p.quantity, 0));
         const discountTotal = this.policy.round(
@@ -513,6 +559,12 @@ export class SalesService {
         };
       });
     } catch (e) {
+      /*
+       * Not an error. The transaction was abandoned on purpose so that a sale
+       * nobody has confirmed leaves nothing behind, and the caller gets the
+       * warnings with a token to come back with.
+       */
+      if (e instanceof WarningsPending) return e.response;
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
         throw new ConflictException('A unit in this sale was just sold — please refresh and retry');
       }
@@ -829,6 +881,41 @@ export class SalesService {
    * would let a retry print a different promise from the one already given to
    * the customer.
    */
+  /**
+   * What the server thinks looks wrong about the prices on this sale (A1).
+   *
+   * The reference is the **configured selling price** where the shop has set
+   * one — the same ladder the sale itself priced from, never a second answer to
+   * "what does this sell for?". Where it has not, the fallback is what this
+   * product has actually been selling for at this branch over ninety days, and
+   * below five sales that is not a median and nothing is said.
+   *
+   * Silence is the common case and the correct one. A new product has no
+   * history, and inventing a reference for it would fire on every genuinely new
+   * item until people learned to tap through the dialog.
+   */
+  private async magnitudeWarnings(
+    tx: MagnitudeReads,
+    prepared: readonly PreparedLine[],
+    branchId: Buffer,
+  ): Promise<Warning[]> {
+    const out: Warning[] = [];
+    for (const [index, line] of prepared.entries()) {
+      const reference =
+        this.magnitude.configuredPrice(line.configuredPrice) ??
+        (await this.magnitude.medianSalePrice(tx, line.productId, branchId));
+      const warning = magnitudeWarning({
+        code: 'magnitude.sale_price',
+        field: `lines.${index}.price`,
+        submitted: line.price,
+        reference,
+        minSample: SALE_PRICE_MIN_SAMPLE,
+      });
+      if (warning) out.push(warning);
+    }
+    return out;
+  }
+
   private toResponse(sale: Sale) {
     return {
       id: binToUuid(sale.id),

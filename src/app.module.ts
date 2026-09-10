@@ -21,6 +21,7 @@ import { AuditModule } from './common/audit/audit.module';
 import { NumberingModule } from './common/numbering/numbering.module';
 import { EventsModule } from './common/events/events.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { WarningsModule } from './common/warnings/warnings.module';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
 import { RbacModule } from './rbac/rbac.module';
@@ -138,6 +139,7 @@ import { LoansModule } from './loans/loans.module';
     NumberingModule,
     EventsModule,
     PrismaModule,
+    WarningsModule,
     RbacModule,
     StorageModule,
     HealthModule,
