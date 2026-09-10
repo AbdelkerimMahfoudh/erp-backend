@@ -42,6 +42,7 @@ import { TransfersModule } from './transfers/transfers.module';
 import { ReturnsModule } from './returns/returns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { ReportsModule } from './reports/reports.module';
+import { DiscountApprovalsModule } from './discount-approvals/discount-approvals.module';
 import { ExpensesModule } from './expenses/expenses.module';
 import { ClosingModule } from './closing/closing.module';
 import { GoalsModule } from './goals/goals.module';
@@ -158,6 +159,7 @@ import { LoansModule } from './loans/loans.module';
     ReturnsModule,
     AnalyticsModule,
     ReportsModule,
+    DiscountApprovalsModule,
     ExpensesModule,
     ClosingModule,
     GoalsModule,

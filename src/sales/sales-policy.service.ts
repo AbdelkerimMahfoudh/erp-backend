@@ -51,19 +51,79 @@ export class SalesPolicyService {
     return { amountPaid, balanceDue, payStatus };
   }
 
-  /** Selling below cost requires `discount.override` + a reason (WF13 soft-block). */
-  assertBelowCostAllowed(
-    margin: number,
-    hasOverride: boolean,
-    reason: string | undefined,
-  ): void {
-    if (margin < -EPSILON) {
-      if (!hasOverride) {
-        throw new ForbiddenException('Selling below cost requires the discount.override permission');
-      }
-      if (!reason || reason.trim().length === 0) {
-        throw new BadRequestException('An override reason is required to sell below cost');
-      }
+  /**
+   * The two thresholds a sale price can cross (A2).
+   *
+   * **The floor is the CONFIGURED SELLING PRICE**, not cost. That is the
+   * approved product rule, and it is the price the ladder in
+   * `price-resolution.ts` resolves — unit override, then branch variant, then
+   * the product default. Selling below it needs an Owner-approved exception
+   * **even when the sale is still profitable**, because the configured price is
+   * the shop's decision about what this thing sells for.
+   *
+   * Below **cost** is a high-risk subset of the same thing, not a separate
+   * gate: the same Owner approval, plus a reason, plus a loss warning for
+   * whoever may see cost.
+   *
+   * ## What changed, and why it is not the old rule
+   *
+   * The previous version checked only `margin < 0` and let anyone holding
+   * `discount.override` sell below cost directly. Two problems: it treated cost
+   * as the floor, which is not the rule; and it made the permission a bypass,
+   * so the person who wanted the discount was the person who granted it.
+   *
+   * `discount.override` is now **approval authority, held by the Owner alone**.
+   * It does not authorise a sale here at all — only a consumed
+   * `DiscountApproval` does. An Owner selling below the floor goes through the
+   * same workflow, which is what makes their own discount as traceable as
+   * anybody else's.
+   */
+  assertPriceAllowed(input: {
+    /** What the line is actually being sold for. */
+    price: number;
+    /** The ladder's answer. Null when the product has no configured price. */
+    configuredPrice: number | null;
+    /** The unit's confirmed cost. */
+    cost: number;
+    /** A consumed approval covering exactly this unit at exactly this price. */
+    approval: { approvedPrice: number; belowCost: boolean } | null;
+    /** Required when the price is below cost. */
+    reason: string | undefined;
+  }): void {
+    const { price, configuredPrice, cost, approval, reason } = input;
+
+    /*
+     * No configured price means the ladder reached `unpriced`. There is no
+     * floor to be below, so there is nothing to approve — the shop has simply
+     * never said what this sells for. Inventing a floor from cost here would be
+     * the exact substitution this rule exists to remove.
+     */
+    const belowFloor = configuredPrice !== null && price < configuredPrice - EPSILON;
+    const belowCost = price < cost - EPSILON;
+
+    if (!belowFloor && !belowCost) return;
+
+    if (!approval) {
+      throw new ForbiddenException(
+        belowCost
+          ? 'Selling below cost needs an Owner approval for this exact unit and price'
+          : 'Selling below the set price needs an Owner approval for this exact unit and price',
+      );
+    }
+
+    /*
+     * The approval names a price. The sale must use THAT price, not the one in
+     * the request — otherwise an approval for 15 000 would authorise a sale at
+     * 1 500, which is the whole reuse problem in miniature.
+     */
+    if (Math.abs(approval.approvedPrice - price) > EPSILON) {
+      throw new ConflictException(
+        'This approval was granted for a different price. Ask again for the price you want.',
+      );
+    }
+
+    if (belowCost && (!reason || reason.trim().length === 0)) {
+      throw new BadRequestException('A reason is required to sell below cost');
     }
   }
 

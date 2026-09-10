@@ -252,24 +252,25 @@ enum SyncStatus {
 // ------------------------- Tenancy & Access --------------------------------
 
 model Company {
-  id             Bytes   @id @db.Binary(16)
-  name           String  @db.VarChar(160)
+  discountApprovals DiscountApproval[]
+  id                Bytes              @id @db.Binary(16)
+  name              String             @db.VarChar(160)
   /// Public Store Account ID (F1 Stage 3.2): the human-typable, NON-secret code
   /// that selects this company before login. Canonical = 10 uppercase hex chars.
   /// Not the binary `id`, a branch id, a device id or a subscription id.
   /// Generated on create, unique, immutable through store-facing APIs.
-  publicStoreId  String  @unique @map("public_store_id") @db.VarChar(16)
+  publicStoreId     String             @unique @map("public_store_id") @db.VarChar(16)
   /// Discovery (0049). Off until the Owner turns it on: a shop that never
   /// heard of consignment must not be searchable by every other shop by
   /// default. Publication is a decision, not a default.
-  isDiscoverable Boolean @default(false) @map("is_discoverable")
+  isDiscoverable    Boolean            @default(false) @map("is_discoverable")
   /// Coarse location only. Never an address — a city narrows a search, an
   /// address identifies a building full of stock.
-  city           String? @db.VarChar(120)
-  logoRef        String? @map("logo_ref") @db.VarChar(512)
+  city              String?            @db.VarChar(120)
+  logoRef           String?            @map("logo_ref") @db.VarChar(512)
   /// Shown only AFTER a connection is accepted, so a connection request cannot
   /// be used to harvest phone numbers.
-  publicPhone    String? @map("public_phone") @db.VarChar(40)
+  publicPhone       String?            @map("public_phone") @db.VarChar(40)
 
   currency     String   @default("USD") @db.Char(3)
   timezone     String   @default("UTC") @db.VarChar(64)
@@ -363,16 +364,17 @@ model Company {
 }
 
 model Branch {
-  id        Bytes      @id @db.Binary(16)
-  companyId Bytes      @map("company_id") @db.Binary(16)
-  name      String     @db.VarChar(160)
-  type      BranchType @default(store)
-  address   String?    @db.VarChar(255)
-  phone     String?    @db.VarChar(40)
-  isActive  Boolean    @default(true) @map("is_active")
-  createdAt DateTime   @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt DateTime   @updatedAt @map("updated_at") @db.DateTime(6)
-  deletedAt DateTime?  @map("deleted_at") @db.DateTime(6)
+  discountApprovals DiscountApproval[]
+  id                Bytes              @id @db.Binary(16)
+  companyId         Bytes              @map("company_id") @db.Binary(16)
+  name              String             @db.VarChar(160)
+  type              BranchType         @default(store)
+  address           String?            @db.VarChar(255)
+  phone             String?            @db.VarChar(40)
+  isActive          Boolean            @default(true) @map("is_active")
+  createdAt         DateTime           @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt         DateTime           @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt         DateTime?          @map("deleted_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
 
@@ -411,8 +413,10 @@ model Branch {
 }
 
 model User {
-  expensesReported  Expense[] @relation("ExpenseReportedBy")
-  expensesConfirmed Expense[] @relation("ExpenseConfirmedBy")
+  discountApprovalsRequested DiscountApproval[] @relation("DiscountApprovalRequester")
+  discountApprovalsApproved  DiscountApproval[] @relation("DiscountApprovalApprover")
+  expensesReported           Expense[]          @relation("ExpenseReportedBy")
+  expensesConfirmed          Expense[]          @relation("ExpenseConfirmedBy")
 
   /// TAC mappings this user proposed, and those they confirmed. Two relations,
   /// because who suggested and who decided must stay distinguishable.
@@ -506,7 +510,7 @@ model User {
   priceChanges          PriceChangeEvent[]     @relation("PriceChangeActor")
   unitsCreated          Unit[]                 @relation("UnitCreatedBy")
   unitsUpdated          Unit[]                 @relation("UnitUpdatedBy")
-  stockReceipts StockReceipt[]
+  stockReceipts         StockReceipt[]
   purchases             Purchase[]
   supplierPayments      SupplierPayment[]
   sales                 Sale[]
@@ -835,9 +839,10 @@ model TacCatalog {
 }
 
 model Unit {
+  discountApprovals DiscountApproval[]
   /// Consignment lines this unit has been on. Ownership never leaves this
   /// company — a consigned phone is in somebody else's shop, not their books.
-  consignmentLines ConsignmentLine[]
+  consignmentLines  ConsignmentLine[]
 
   id            Bytes      @id @db.Binary(16)
   companyId     Bytes      @map("company_id") @db.Binary(16)
@@ -4039,22 +4044,22 @@ model BillingPeriod {
 /// the pattern purchases, transfers and corrections already use (0013), rather
 /// than inventing a second idempotency mechanism.
 model StockReceipt {
-  id        Bytes  @id @db.Binary(16)
-  companyId Bytes  @map("company_id") @db.Binary(16)
-  branchId  Bytes  @map("branch_id") @db.Binary(16)
-  productId Bytes  @map("product_id") @db.Binary(16)
-  userId    Bytes? @map("user_id") @db.Binary(16)
+  id                Bytes    @id @db.Binary(16)
+  companyId         Bytes    @map("company_id") @db.Binary(16)
+  branchId          Bytes    @map("branch_id") @db.Binary(16)
+  productId         Bytes    @map("product_id") @db.Binary(16)
+  userId            Bytes?   @map("user_id") @db.Binary(16)
   /// Client-generated request identity for safe retries (see 0013).
-  clientUuid Bytes? @map("client_uuid") @db.Binary(16)
+  clientUuid        Bytes?   @map("client_uuid") @db.Binary(16)
   /// sha256 of the request payload, so a replayed key with different content
   /// is a conflict rather than a wrong "already done".
-  clientRequestHash String? @map("client_request_hash") @db.Char(64)
+  clientRequestHash String?  @map("client_request_hash") @db.Char(64)
   /// Always >= 1; a receipt of nothing is not a receipt. CHECK in the migration.
-  quantity  Int      @db.Int
+  quantity          Int      @db.Int
   /// What this delivery cost per item — the input to the weighted average, kept
   /// so the average can be explained after the fact.
-  unitCost  Decimal  @map("unit_cost") @db.Decimal(14, 2)
-  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  unitCost          Decimal  @map("unit_cost") @db.Decimal(14, 2)
+  createdAt         DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
   branch  Branch  @relation(fields: [branchId], references: [id])
@@ -4065,4 +4070,115 @@ model StockReceipt {
   @@index([companyId, branchId, createdAt])
   @@index([productId])
   @@map("stock_receipts")
+}
+
+/// One Owner-approved exception to the configured selling price (A2).
+///
+/// The floor in this project is the **configured selling price** resolved by
+/// the price ladder (`UnitPriceOverride` → `BranchVariantPrice` →
+/// `Product.defaultPrice`), not cost. Selling below it needs an Owner's
+/// approval even when the sale is still profitable. Selling below *cost* is a
+/// high-risk subset of the same thing: the same approval, plus a reason.
+///
+/// **An approval is not a permission.** It authorises ONE sale, of ONE unit, at
+/// ONE exact price, in ONE branch, for thirty minutes, and is then spent. A
+/// reusable licence to sell below the floor is exactly what this must never
+/// become — which is why every field below is a snapshot rather than a join.
+///
+/// The snapshots are what make voiding decidable without re-deriving anything:
+/// if the configured price or the confirmed cost has moved since the Owner
+/// looked, the decision they made was about a different sale.
+model DiscountApproval {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  branchId  Bytes @map("branch_id") @db.Binary(16)
+
+  /// The exact physical unit. Serialized stock only — a quantity line has no
+  /// single thing to hold an approval against.
+  unitId    Bytes   @map("unit_id") @db.Binary(16)
+  productId Bytes   @map("product_id") @db.Binary(16)
+  /// The variant as it was, so a later edit cannot silently change what was
+  /// approved.
+  variant   String? @db.VarChar(120)
+
+  /// ── Immutable snapshots, taken when the request is made ──────────────────
+  /// What the ladder said the price was. The floor being excepted.
+  configuredPrice Decimal @map("configured_price") @db.Decimal(14, 2)
+  /// Which rung produced it, so the reason is explainable later.
+  priceSource     String  @map("price_source") @db.VarChar(32)
+  /// The version of the row that produced the price. A change voids this.
+  priceVersion    Int     @map("price_version")
+  /// The unit's confirmed cost at request time. A change voids this.
+  unitCost        Decimal @map("unit_cost") @db.Decimal(14, 2)
+  /// What the seller wants to charge.
+  requestedPrice  Decimal @map("requested_price") @db.Decimal(14, 2)
+  /// configuredPrice − requestedPrice. Stored rather than derived so the
+  /// record reads correctly even if the ladder is refactored.
+  discountAmount  Decimal @map("discount_amount") @db.Decimal(14, 2)
+  /// True when requestedPrice is below unitCost — the high-risk subset.
+  belowCost       Boolean @default(false) @map("below_cost")
+  /// Where the unit was. A transfer voids the approval.
+  unitBranchId    Bytes   @map("unit_branch_id") @db.Binary(16)
+
+  requesterId Bytes   @map("requester_id") @db.Binary(16)
+  /// Required when below cost; optional otherwise.
+  reason      String? @db.VarChar(255)
+
+  status DiscountApprovalStatus @default(pending)
+
+  /// ── The decision ─────────────────────────────────────────────────────────
+  /// Always the Owner. Null until decided.
+  approverId    Bytes?    @map("approver_id") @db.Binary(16)
+  decidedAt     DateTime? @map("decided_at")
+  /// The price the Owner actually approved. Immutable once set, and the only
+  /// price the sale may use — never re-read from the request.
+  approvedPrice Decimal?  @map("approved_price") @db.Decimal(14, 2)
+  decisionNote  String?   @map("decision_note") @db.VarChar(255)
+
+  /// Set when a sale consumes it. Single use is enforced by a conditional
+  /// update on `status`, not by reading this first.
+  consumedBySaleId Bytes?    @map("consumed_by_sale_id") @db.Binary(16)
+  consumedAt       DateTime? @map("consumed_at")
+  /// Why it was voided, when it was.
+  voidReason       String?   @map("void_reason") @db.VarChar(64)
+
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  /// Optimistic concurrency for the decision itself.
+  version   Int      @default(0)
+
+  /// Retry safety, the same pair every other mutation in this project uses.
+  clientUuid        Bytes?  @map("client_uuid") @db.Binary(16)
+  clientRequestHash String? @map("client_request_hash") @db.VarChar(64)
+
+  company   Company @relation(fields: [companyId], references: [id])
+  branch    Branch  @relation(fields: [branchId], references: [id])
+  unit      Unit    @relation(fields: [unitId], references: [id])
+  requester User    @relation("DiscountApprovalRequester", fields: [requesterId], references: [id])
+  approver  User?   @relation("DiscountApprovalApprover", fields: [approverId], references: [id])
+
+  @@unique([companyId, clientUuid], name: "discount_approval_client_uuid")
+  /// The Owner's queue: pending work in this company, oldest first.
+  @@index([companyId, status, createdAt])
+  /// Voiding by unit, when stock moves or sells.
+  @@index([unitId, status])
+  @@map("discount_approvals")
+}
+
+/// The lifecycle of one approval. Every terminal state is distinct because
+/// they mean different things to the person who asked.
+enum DiscountApprovalStatus {
+  /// Waiting for the Owner.
+  pending
+  /// The Owner said yes. Not yet used.
+  approved
+  /// The Owner said no. Terminal.
+  rejected
+  /// Nobody decided in time. Terminal.
+  expired
+  /// The world moved — price changed, cost changed, unit sold or transferred.
+  voided
+  /// Spent on a sale. Terminal, and the only success state.
+  consumed
 }

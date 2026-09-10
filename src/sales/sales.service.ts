@@ -23,6 +23,7 @@ import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
 import { evaluateEligibility, NO_RETURNS, resolveWindowForSale, snapshotPolicy } from './return-policy';
 import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
+import { DiscountApprovalsService } from '../discount-approvals/discount-approvals.service';
 
 /** Every value the filters accept, kept next to the enums they mirror. */
 const PAY_STATUSES = ['paid', 'partial', 'credit'] as const satisfies readonly SalePayStatus[];
@@ -35,6 +36,13 @@ interface PreparedLine {
   price: number;
   discount: number;
   cost: number;
+  /**
+   * What the price ladder says this sells for — the FLOOR (A2).
+   *
+   * Null when the ladder reached `unpriced`: the shop has never said what this
+   * costs, so there is no floor to be below and nothing to approve.
+   */
+  configuredPrice: number | null;
 }
 
 @Injectable()
@@ -48,6 +56,7 @@ export class SalesService {
     private readonly invoiceNumbers: InvoiceNumberService,
     private readonly events: SpineEventBus,
     private readonly cls: ClsService<AppClsStore>,
+    private readonly approvals: DiscountApprovalsService,
   ) {}
 
   async createSale(dto: CreateSaleDto) {
@@ -127,7 +136,16 @@ export class SalesService {
               branchId,
             );
             const price = this.policy.resolvePrice(l.price, resolved.price);
-            prepared.push({ unitId: unit.id, productId: unit.productId, quantity: 1, price, discount, cost: Number(unit.cost) });
+            prepared.push({
+              unitId: unit.id,
+              productId: unit.productId,
+              quantity: 1,
+              price,
+              discount,
+              cost: Number(unit.cost),
+              // The ladder's answer — the FLOOR this line is measured against.
+              configuredPrice: resolved.price,
+            });
           } else {
             const productId = uuidToBin(l.productId as string);
             const quantity = l.quantity ?? 1;
@@ -173,7 +191,14 @@ export class SalesService {
               branchId,
             );
             const price = this.policy.resolvePrice(l.price, resolved.price);
-            prepared.push({ productId, quantity, price, discount, cost: Number(stock.cost) });
+            prepared.push({
+              productId,
+              quantity,
+              price,
+              discount,
+              cost: Number(stock.cost),
+              configuredPrice: resolved.price,
+            });
           }
         }
 
@@ -186,7 +211,48 @@ export class SalesService {
         const totalCost = this.policy.round(prepared.reduce((s, p) => s + p.cost * p.quantity, 0));
         const margin = this.policy.round(total - totalCost);
 
-        this.policy.assertBelowCostAllowed(margin, hasOverride, dto.overrideReason);
+        /*
+         * The sale's identity is minted before the floor check, because
+         * consuming an approval records WHICH sale spent it. Nothing is written
+         * yet — this is a uuid, not a row.
+         */
+        const saleId = newUuidV7Bin();
+
+        /**
+         * The floor is checked PER LINE, not on the sale's total margin.
+         *
+         * An aggregate check lets a healthy line pay for a ruinous one: sell an
+         * accessory at a good margin and a phone far below its price, and the
+         * total still looks positive. The configured price is a decision about
+         * one product, so it has to be enforced about one product.
+         */
+        for (const line of prepared) {
+          /*
+           * An approval is spent HERE, inside the sale's transaction, by a
+           * conditional update. Two concurrent sales racing for one approval
+           * both attempt it and MySQL serialises them on the row — exactly one
+           * wins. Checking first and writing after would let both through.
+           */
+          const approval =
+            line.unitId && line.configuredPrice !== null && line.price < line.configuredPrice
+              ? await this.approvals.consume(tx as unknown as Prisma.TransactionClient, {
+                  unitId: line.unitId,
+                  requestedPrice: line.price,
+                  currentConfiguredPrice: line.configuredPrice,
+                  currentPriceVersion: null,
+                  currentCost: line.cost,
+                  currentBranchId: branchId,
+                  saleId,
+                })
+              : null;
+          this.policy.assertPriceAllowed({
+            price: line.price,
+            configuredPrice: line.configuredPrice,
+            cost: line.cost,
+            approval,
+            reason: dto.overrideReason,
+          });
+        }
         const { amountPaid, balanceDue, payStatus } = this.policy.reconcilePayments(dto.payments, total);
         this.policy.assertCreditHasCustomer(payStatus, dto.customerId);
 
@@ -224,7 +290,6 @@ export class SalesService {
         });
         const policySnapshot = snapshotPolicy(soldAt, resolvedPolicy.windowHours);
 
-        const saleId = newUuidV7Bin();
         await tx.sale.create({
           data: {
             id: saleId,

@@ -62,7 +62,15 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'financial.correction.approve', label: 'Approve a correction to a confirmed payment' },
   { key: 'cost.view',           label: 'View cost & profit' },
   { key: 'discount.apply',      label: 'Apply discounts (within limit)' },
-  { key: 'discount.override',   label: 'Override discount limits' },
+  /**
+   * A2: **approval authority**, held by the Owner alone.
+   *
+   * It no longer lets its holder sell below the floor directly. It is the right
+   * to APPROVE somebody else's request — or one's own, through the same audited
+   * workflow, which is what makes an Owner's own below-floor sale as traceable
+   * as anybody else's.
+   */
+  { key: 'discount.override',   label: 'Approve selling below the set price' },
   { key: 'unit.add',            label: 'Add inventory units' },
   { key: 'unit.transfer',       label: 'Transfer stock between branches' },
   { key: 'import.run',          label: 'Run Excel/CSV inventory import' },
@@ -347,8 +355,15 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
 
   administrator: ADMIN_KEYS,
   branch_manager: [
+    /*
+     * A2: `discount.override` was REMOVED here. It is now approval authority
+     * and belongs to the Owner alone — a manager may request an exception and
+     * may not grant one. `branch_manager` is a retired role kept so an older
+     * session's permission set still maps, but leaving the key here would have
+     * meant a legacy assignment could still approve its own discounts.
+     */
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
-    'discount.override', 'unit.add', 'unit.transfer', 'import.run',
+    'unit.add', 'unit.transfer', 'import.run',
     'purchase.manage', 'supplier.manage', 'expense.manage',
     'closing.perform', 'report.view',
   ],

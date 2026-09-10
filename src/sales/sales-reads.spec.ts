@@ -65,6 +65,8 @@ function makeService(opts: {
     {} as never,
     {} as never,
     {} as never,
+    // A2: the approvals service. These read tests never sell below the floor.
+    { consume: async () => null } as never,
   );
   return { service, recorded };
 }

@@ -29,16 +29,83 @@ describe('SalesPolicyService', () => {
     });
   });
 
-  describe('assertBelowCostAllowed', () => {
-    it('allows non-negative margin', () => {
-      expect(() => policy.assertBelowCostAllowed(10, false, undefined)).not.toThrow();
+  describe('assertPriceAllowed — the floor is the configured price', () => {
+    const base = { configuredPrice: 17000, cost: 10000, approval: null, reason: undefined };
+
+    it('allows a price at or above the set price', () => {
+      expect(() => policy.assertPriceAllowed({ ...base, price: 17000 })).not.toThrow();
+      expect(() => policy.assertPriceAllowed({ ...base, price: 20000 })).not.toThrow();
     });
-    it('blocks below cost without override', () => {
-      expect(() => policy.assertBelowCostAllowed(-1, false, 'x')).toThrow(ForbiddenException);
+
+    it('refuses BELOW the set price even when the sale is still profitable', () => {
+      /*
+       * The correction that defines A2. 15 000 against a 10 000 cost earns
+       * money — and it is still below what the shop decided this sells for, so
+       * it is the Owner's call, not the seller's.
+       */
+      expect(() => policy.assertPriceAllowed({ ...base, price: 15000 })).toThrow(ForbiddenException);
     });
-    it('requires a reason with override', () => {
-      expect(() => policy.assertBelowCostAllowed(-1, true, undefined)).toThrow(BadRequestException);
-      expect(() => policy.assertBelowCostAllowed(-1, true, 'clearance')).not.toThrow();
+
+    it('refuses below cost, which is the high-risk subset of the same rule', () => {
+      expect(() => policy.assertPriceAllowed({ ...base, price: 9000 })).toThrow(ForbiddenException);
+    });
+
+    it('has no PRICE floor when the product has no configured price', () => {
+      // The ladder reached `unpriced`. There is nothing to be below, and
+      // inventing a floor from cost is the substitution this rule removes.
+      expect(() =>
+        policy.assertPriceAllowed({ ...base, configuredPrice: null, price: 10500 }),
+      ).not.toThrow();
+    });
+
+    it('but the COST threshold still applies without a configured price', () => {
+      /*
+       * The two thresholds are independent. An unpriced product has no
+       * configured floor to except — and selling it at a loss is still a loss,
+       * so it still needs the Owner.
+       */
+      expect(() =>
+        policy.assertPriceAllowed({ ...base, configuredPrice: null, price: 1 }),
+      ).toThrow(ForbiddenException);
+    });
+
+    it('accepts a matching approval', () => {
+      expect(() =>
+        policy.assertPriceAllowed({
+          ...base,
+          price: 15000,
+          approval: { approvedPrice: 15000, belowCost: false },
+        }),
+      ).not.toThrow();
+    });
+
+    it('refuses an approval granted for a DIFFERENT price', () => {
+      // An approval for 15 000 must not authorise 1 500.
+      expect(() =>
+        policy.assertPriceAllowed({
+          ...base,
+          price: 1500,
+          approval: { approvedPrice: 15000, belowCost: false },
+        }),
+      ).toThrow(ConflictException);
+    });
+
+    it('still requires a reason below cost, even with an approval', () => {
+      expect(() =>
+        policy.assertPriceAllowed({
+          ...base,
+          price: 9000,
+          approval: { approvedPrice: 9000, belowCost: true },
+        }),
+      ).toThrow(BadRequestException);
+      expect(() =>
+        policy.assertPriceAllowed({
+          ...base,
+          price: 9000,
+          approval: { approvedPrice: 9000, belowCost: true },
+          reason: 'water damaged',
+        }),
+      ).not.toThrow();
     });
   });
 
