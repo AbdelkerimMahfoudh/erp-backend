@@ -243,6 +243,26 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     expect(revokedInSql(revoke, 'store_manager')).toEqual(['discount.override']);
   });
 
+  it('0067 takes discount.override from the retired branch_manager, and nothing else', () => {
+    /*
+     * A2 removed the key from the branch_manager matrix in code and no
+     * migration followed, so seeded installations kept it — and a live request
+     * from a Branch Manager approved a discount. This pins the repair to
+     * exactly that pair: the matrix must no longer grant it, the migration must
+     * revoke precisely it, and it must not reach the Owner, who legitimately
+     * holds the key, or any other role.
+     */
+    const repair = sqlOf('0067_revoke_branch_manager_discount_override');
+    expect(revokedInSql(repair, 'branch_manager')).toEqual(['discount.override']);
+    expect(ROLE_PERMISSIONS.branch_manager).not.toContain('discount.override');
+    expect(ROLE_PERMISSIONS.owner).toContain('discount.override');
+    for (const role of ['owner', 'store_manager', 'store_employee', 'administrator'] as const) {
+      expect(revokedInSql(repair, role)).toEqual([]);
+    }
+    // A revocation, never a grant.
+    expect(repair).not.toMatch(/INSERT INTO/);
+  });
+
   it('the backfill never touches owner or administrator', () => {
     // Owner must be unchanged, and administrator is an internal SaaS role that
     // has no business in a store-role migration.

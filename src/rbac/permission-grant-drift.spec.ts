@@ -1,30 +1,42 @@
 import { PrismaClient } from '@prisma/client';
 import { verifyCatalogue } from '../../scripts/verify-permission-catalogue';
-import { ALL_PERMISSION_KEYS, ROLE_LABELS, ROLE_PERMISSIONS } from './role-permissions';
+import { ALL_PERMISSION_KEYS, PERMISSIONS, ROLE_LABELS, ROLE_PERMISSIONS, type RoleKey } from './role-permissions';
 
 /**
  * A perfect catalogue with wrong grants.
  *
- * The CP6 live run found `discount.override` still mapped to the retired
+ * The CP6 live run found `discount.override` still granted to the retired
  * `branch_manager` role in the database. A2 removed it from the code when
  * approval became Owner-only; the `role_permissions` row stayed, and
- * `AccessService` resolves authority from that table and nothing else — so the
- * retired role could still approve a discount at a shop that still assigned it.
+ * `AccessService` resolves authority from that table and nothing else — so a
+ * Branch Manager approved a discount over real HTTP.
  *
  * The deploy gate reported **61/61, catalogue complete**, because it only ever
  * asked whether the KEYS exist. Every key existing says nothing about who holds
- * them. These tests pin the difference.
+ * them. These tests pin the difference, and pin that roles are matched by their
+ * key so a renamed role cannot hide a drifted grant.
  */
 
+interface FakeRole {
+  key: string;
+  name: string;
+  keys: readonly string[];
+}
+
 /** Just enough of a Prisma client for the two reads the verifier makes. */
-function fakePrisma(roles: { name: string; keys: string[] }[]): PrismaClient {
+function fakePrisma(roles: FakeRole[]): PrismaClient {
   return {
     permission: {
-      findMany: async () => ALL_PERMISSION_KEYS.map((key) => ({ key, label: labelFor(key) })),
+      findMany: async () =>
+        ALL_PERMISSION_KEYS.map((key) => ({
+          key,
+          label: PERMISSIONS.find((p) => p.key === key)?.label ?? key,
+        })),
     },
     role: {
       findMany: async () =>
         roles.map((r) => ({
+          key: r.key,
           name: r.name,
           rolePermissions: r.keys.map((key) => ({ permission: { key } })),
         })),
@@ -32,14 +44,8 @@ function fakePrisma(roles: { name: string; keys: string[] }[]): PrismaClient {
   } as unknown as PrismaClient;
 }
 
-// Labels are display text and drift harmlessly; the verifier already says so.
-function labelFor(key: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { PERMISSIONS } = require('./role-permissions') as { PERMISSIONS: { key: string; label: string }[] };
-  return PERMISSIONS.find((p) => p.key === key)?.label ?? key;
-}
-
-const correctRole = (roleKey: keyof typeof ROLE_PERMISSIONS) => ({
+const correctRole = (roleKey: RoleKey): FakeRole => ({
+  key: roleKey,
   name: ROLE_LABELS[roleKey],
   keys: ROLE_PERMISSIONS[roleKey],
 });
@@ -60,12 +66,32 @@ describe('grants, not just keys', () => {
     const report = await verifyCatalogue(
       fakePrisma([
         correctRole('owner'),
-        { name: ROLE_LABELS.branch_manager, keys: [...ROLE_PERMISSIONS.branch_manager, 'discount.override'] },
+        { ...correctRole('branch_manager'), keys: [...ROLE_PERMISSIONS.branch_manager, 'discount.override'] },
       ]),
     );
     expect(report.ok).toBe(false);
     const drift = report.grants.find((g) => g.roleKey === 'branch_manager');
     expect(drift?.extra).toEqual(['discount.override']);
+  });
+
+  it('matches a role by its key, so renaming it cannot hide a drifted grant', async () => {
+    /*
+     * The first version matched on the display name. A shop that renamed
+     * "Branch Manager" would have had its drifted grant skipped and the gate
+     * would have reported green. The key is the enum both sides share.
+     */
+    const report = await verifyCatalogue(
+      fakePrisma([
+        {
+          key: 'branch_manager',
+          name: 'Assistant Manager (renamed by the shop)',
+          keys: [...ROLE_PERMISSIONS.branch_manager, 'discount.override'],
+        },
+      ]),
+    );
+    expect(report.ok).toBe(false);
+    expect(report.grants[0]?.role).toBe('Assistant Manager (renamed by the shop)');
+    expect(report.grants[0]?.extra).toEqual(['discount.override']);
   });
 
   it('reports a narrowed role without failing, because a shop may mean it', async () => {
@@ -75,18 +101,15 @@ describe('grants, not just keys', () => {
      * overruling that — completing somebody's deliberately narrowed role would
      * be a worse bug than the one it is looking for, and a silent one.
      */
-    const report = await verifyCatalogue(
-      fakePrisma([{ name: ROLE_LABELS.store_manager, keys: ROLE_PERMISSIONS.store_manager.slice(1) }]),
-    );
+    const narrowed = correctRole('store_manager');
+    const report = await verifyCatalogue(fakePrisma([{ ...narrowed, keys: narrowed.keys.slice(1) }]));
     expect(report.ok).toBe(true);
     expect(report.grants[0]?.missing.length).toBeGreaterThan(0);
     expect(report.grants[0]?.extra).toEqual([]);
   });
 
-  it('leaves a role the codebase does not know alone', async () => {
-    // A tenant may legitimately have invented one, and judging it would be
-    // inventing policy from a name.
-    const report = await verifyCatalogue(fakePrisma([{ name: 'Night Cashier', keys: ['sale.create'] }]));
+  it('leaves a role key the codebase does not define alone', async () => {
+    const report = await verifyCatalogue(fakePrisma([{ key: 'night_cashier', name: 'Night Cashier', keys: ['sale.create'] }]));
     expect(report.grants).toEqual([]);
     expect(report.ok).toBe(true);
   });

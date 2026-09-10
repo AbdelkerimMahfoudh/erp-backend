@@ -22,7 +22,7 @@
 // ===========================================================================
 
 import { PrismaClient } from '@prisma/client';
-import { ALL_PERMISSION_KEYS, PERMISSIONS, ROLE_LABELS, ROLE_PERMISSIONS, type RoleKey } from '../src/rbac/role-permissions';
+import { ALL_PERMISSION_KEYS, PERMISSIONS, ROLE_PERMISSIONS, type RoleKey } from '../src/rbac/role-permissions';
 
 /**
  * A role holding a permission the codebase does not grant it.
@@ -108,27 +108,27 @@ export async function verifyCatalogue(prisma: PrismaClient): Promise<Report> {
 /**
  * What each role is actually granted, against what the codebase grants it.
  *
- * Compared by role NAME, because that is the only thing the two sides share:
- * the database stores a display name and the codebase keys by `RoleKey`.
- * A role the codebase does not know is left alone and not reported — a tenant
- * may legitimately have invented one, and judging it would be inventing policy.
+ * Matched by the role's KEY, never its display name. The first version matched
+ * on the label, so a shop that renamed "Branch Manager" would have had its
+ * drifted grant skipped and this gate would have reported green — exactly the
+ * false reassurance it exists to prevent. `roles.key` is the `RoleKey` enum, the
+ * same identifier `ROLE_PERMISSIONS` is keyed by.
+ *
+ * A key the codebase does not define is left alone rather than judged.
  */
 async function verifyGrants(prisma: PrismaClient): Promise<GrantDrift[]> {
   const roles = await prisma.role.findMany({
     select: {
+      key: true,
       name: true,
       rolePermissions: { select: { permission: { select: { key: true } } } },
     },
   });
 
-  const byLabel = new Map<string, RoleKey>(
-    (Object.entries(ROLE_LABELS) as [RoleKey, string][]).map(([key, label]) => [label, key]),
-  );
-
   const drift: GrantDrift[] = [];
   for (const role of roles) {
-    const roleKey = byLabel.get(role.name);
-    if (!roleKey) continue;
+    const roleKey = role.key as RoleKey;
+    if (!Object.prototype.hasOwnProperty.call(ROLE_PERMISSIONS, roleKey)) continue;
 
     const held = new Set(role.rolePermissions.map((rp) => rp.permission.key));
     const granted = new Set(ROLE_PERMISSIONS[roleKey]);

@@ -82,13 +82,116 @@ describe(`migration ${CATALOGUE_MIGRATION}`, () => {
     expect(all).toContain(CATALOGUE_MIGRATION);
 
     const later = all.slice(all.indexOf(CATALOGUE_MIGRATION) + 1);
-    const touching = later.filter((d) => {
-      const body = readFileSync(join(MIGRATIONS, d, 'migration.sql'), 'utf8')
-        .replace(/^\s*--.*$/gm, '');
-      return /`permissions`/.test(body);
-    });
+    const touching = later.filter((d) =>
+      writesToCatalogue(readFileSync(join(MIGRATIONS, d, 'migration.sql'), 'utf8')),
+    );
     expect(touching).toEqual([]);
+
+    /*
+     * Not vacuous: 0067 names the `permissions` table — it has to, to find the
+     * grant by key — and it must be judged a READ, not waved through unseen.
+     */
+    const repair = '0067_revoke_branch_manager_discount_override';
+    expect(later).toContain(repair);
+    const repairSql = readFileSync(join(MIGRATIONS, repair, 'migration.sql'), 'utf8').replace(/^\s*--.*$/gm, '');
+    expect(repairSql).toMatch(/`permissions`/);
+    expect(writesToCatalogue(repairSql)).toBe(false);
   });
+
+  /**
+   * Does this SQL CHANGE the `permissions` table?
+   *
+   * A write is identified by its TARGET, not by the table's name appearing
+   * anywhere. The first version failed any later migration that so much as
+   * mentioned `permissions` — which is every grant or revocation, because
+   * permission ids are generated per installation (0059 uses `UUID()` at apply
+   * time, and a seeded database carries the seed's own ids), so the only
+   * correct way for a migration to name a permission is by key, through a
+   * JOIN. 0067 revokes one stale grant exactly that way, in 0018's shape, and
+   * was refused for reading the catalogue it has to read.
+   *
+   * The guarantee this test exists for is unchanged: every statement that can
+   * alter the table is still caught — including a DELETE or UPDATE that
+   * reaches catalogue rows through a join alias, which a target-only pattern
+   * would miss. The cases below pin that.
+   */
+  function writesToCatalogue(sql: string): boolean {
+    const body = sql.replace(/^\s*--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const T = '`permissions`';
+    const direct = [
+      new RegExp('INSERT\\s+(?:IGNORE\\s+)?INTO\\s+' + T, 'i'),
+      new RegExp('REPLACE\\s+(?:INTO\\s+)?' + T, 'i'),
+      new RegExp('UPDATE\\s+(?:IGNORE\\s+)?' + T, 'i'),
+      new RegExp('DELETE\\s+(?:IGNORE\\s+)?FROM\\s+' + T, 'i'),
+      new RegExp('(?:ALTER|DROP)\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?' + T, 'i'),
+      new RegExp('TRUNCATE\\s+(?:TABLE\\s+)?' + T, 'i'),
+      new RegExp('RENAME\\s+TABLE\\s+' + T, 'i'),
+    ];
+    if (direct.some((r) => r.test(body))) return true;
+
+    // Multi-table statements: find the alias the catalogue is joined under,
+    // then ask whether the statement deletes that alias or sets its columns.
+    for (const statement of body.split(';')) {
+      const joined = new RegExp(T + '(?:\\s+(?:AS\\s+)?(\\w+))?', 'i').exec(statement);
+      if (!joined) continue;
+      const alias = joined[1] && !/^(ON|JOIN|WHERE|SET|INNER|LEFT|RIGHT|USING)$/i.test(joined[1]) ? joined[1] : 'permissions';
+
+      const del = /^\s*DELETE\s+(?:IGNORE\s+)?([\w`\s,.]+?)\s+FROM\s/i.exec(statement);
+      if (del) {
+        const targets = del[1].split(',').map((t) => t.replace(/[`\s]/g, '').replace(/\.\*$/, ''));
+        if (targets.includes(alias) || targets.includes('permissions')) return true;
+      }
+
+      if (/^\s*UPDATE\s/i.test(statement)) {
+        const set = statement.slice(statement.search(/\bSET\b/i));
+        if (new RegExp('\\b`?' + alias + '`?\\.`?\\w+`?\\s*=', 'i').test(set)) return true;
+      }
+    }
+    return false;
+  }
+
+  describe('the catalogue-write detector', () => {
+    it.each([
+      ['an INSERT', 'INSERT INTO `permissions` (`id`, `key`, `label`) VALUES (0x01, \'x.y\', \'X\');'],
+      ['an INSERT IGNORE', 'INSERT IGNORE INTO `permissions` (`key`) VALUES (\'x.y\');'],
+      ['a REPLACE', 'REPLACE INTO `permissions` (`key`) VALUES (\'x.y\');'],
+      ['an UPDATE', 'UPDATE `permissions` SET `label` = \'renamed\' WHERE `key` = \'x.y\';'],
+      ['a DELETE', 'DELETE FROM `permissions` WHERE `key` = \'x.y\';'],
+      ['a DELETE of catalogue rows through a join alias', 'DELETE p FROM `role_permissions` rp JOIN `permissions` p ON p.`id` = rp.`permission_id` WHERE rp.`company_id` = 0x01;'],
+      ['an UPDATE setting a catalogue column through a join alias', 'UPDATE `role_permissions` rp JOIN `permissions` p ON p.`id` = rp.`permission_id` SET p.`label` = \'x\' WHERE rp.`company_id` = 0x01;'],
+      ['an ALTER', 'ALTER TABLE `permissions` ADD COLUMN `x` INT;'],
+      ['a DROP', 'DROP TABLE IF EXISTS `permissions`;'],
+      ['a TRUNCATE', 'TRUNCATE TABLE `permissions`;'],
+      ['a RENAME', 'RENAME TABLE `permissions` TO `permissions_old`;'],
+    ])('still catches %s', (_label, sql) => {
+      expect(writesToCatalogue(sql)).toBe(true);
+    });
+
+    it('does not mistake a revocation that reads the catalogue by key for a write', () => {
+      expect(writesToCatalogue(sqlOfMigration('0018_store_role_revoke'))).toBe(false);
+      expect(
+        writesToCatalogue(
+          'DELETE rp FROM `role_permissions` rp JOIN `roles` r ON r.`id` = rp.`role_id` JOIN `permissions` p ON p.`id` = rp.`permission_id` WHERE r.`key` = \'branch_manager\' AND p.`key` = \'discount.override\';',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not mistake a grant that reads the catalogue by key for a write', () => {
+      expect(
+        writesToCatalogue(
+          'INSERT INTO `role_permissions` (`company_id`, `role_id`, `permission_id`) SELECT r.`company_id`, r.`id`, p.`id` FROM `roles` r JOIN `permissions` p ON p.`key` = \'x.y\' WHERE r.`key` = \'owner\';',
+        ),
+      ).toBe(false);
+    });
+
+    it('ignores the table named only in a comment', () => {
+      expect(writesToCatalogue('-- DELETE FROM `permissions` would be wrong here\nSELECT 1;')).toBe(false);
+    });
+  });
+
+  function sqlOfMigration(name: string): string {
+    return readFileSync(join(MIGRATIONS, name, 'migration.sql'), 'utf8');
+  }
 
   it('publishes exactly the canonical key set', () => {
     const { ok, missing, extra } = checkCommittedMigration();
