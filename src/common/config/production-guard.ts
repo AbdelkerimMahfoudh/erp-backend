@@ -1,3 +1,5 @@
+import { isIngressMode, isLoopbackAddress } from './ingress';
+
 /**
  * What production may not start with.
  *
@@ -16,7 +18,10 @@
  *   behind the edge, or the administration ENDPOINTS stay reachable beside the
  *   proxy that enforces the `/admin` boundary — "the guard would then be a
  *   password alone, which is exactly the single layer the deployment is
- *   supposed to avoid while administrator MFA does not exist".
+ *   supposed to avoid while administrator MFA does not exist". That is a
+ *   statement about REACHABILITY, not about a bind address — see below.
+ * - `ingress.ts` says how the API port is kept private, and why that is
+ *   DECLARED rather than detected. Both deployment shapes are supported.
  * - `MessagingModule` already refuses `development-log` in production. This
  *   adds nothing there; it is listed so the whole set is in one place.
  *
@@ -28,6 +33,7 @@
 
 export interface ProductionGuardEnv {
   NODE_ENV?: string;
+  API_INGRESS?: string;
   COOKIE_SECURE?: string;
   SWAGGER_ENABLED?: string;
   API_BIND?: string;
@@ -77,13 +83,30 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
     );
   }
 
-  // Bound to every interface, the administration ENDPOINTS answer beside the
-  // proxy that is supposed to gate them — and administrator MFA does not exist.
-  if (!env.API_BIND || env.API_BIND.trim() === '0.0.0.0') {
+  /*
+   * How the API port is kept private — declared, not guessed.
+   *
+   * An earlier version of this guard rejected 0.0.0.0 outright. That was
+   * wrong: it encoded ONE of the two correct implementations as if it were the
+   * invariant, and it would have refused to start this project's own staging
+   * stack, whose compose file says in as many words not to bind loopback
+   * inside a container. See `ingress.ts` for the invariant that actually
+   * holds. Both modes are equally supported and neither is recommended here.
+   */
+  if (!isIngressMode(env.API_INGRESS)) {
     problems.push(
-      'API_BIND is not set to a loopback address. A deployed API must bind 127.0.0.1 ' +
-        'and sit behind the edge, or /api/* is reachable without the proxy that ' +
-        'enforces the /admin boundary. Set API_BIND=127.0.0.1.',
+      'API_INGRESS is not set. Production must declare how the API port is kept ' +
+        'private: "loopback" (the API binds 127.0.0.1 on a host it shares with the ' +
+        'edge) or "network" (the API is on a private network or container and the ' +
+        'edge is the only thing that can reach it). Both are supported.',
+    );
+  } else if (env.API_INGRESS === 'loopback' && !isLoopbackAddress(env.API_BIND)) {
+    problems.push(
+      `API_INGRESS=loopback but API_BIND is ${env.API_BIND ?? 'unset (defaults to 0.0.0.0)'}. ` +
+        'On a shared host the bind address IS the isolation, so /api/* would be ' +
+        'reachable without the proxy that enforces the /admin boundary. ' +
+        'Set API_BIND=127.0.0.1, or declare API_INGRESS=network if the network ' +
+        'already isolates the port.',
     );
   }
 
@@ -114,12 +137,19 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
     );
   }
 
-  if (env.APP_DATABASE_URL && /localhost|127\.0\.0\.1/.test(env.APP_DATABASE_URL)) {
-    problems.push(
-      'APP_DATABASE_URL points at localhost in production. ' +
-        'If the database really is local, say so explicitly with a hostname.',
-    );
-  }
+  /*
+   * A localhost database URL is NOT checked, deliberately.
+   *
+   * It was, briefly, on the theory that it looked like a copied development
+   * `.env`. That is an assumption about architecture, not an invariant: an
+   * application and its MySQL on one VPS connect over loopback, and that is a
+   * perfectly ordinary single-host deployment. Refusing it would have been the
+   * same mistake as the blanket bind rejection above — encoding one deployment
+   * shape as if it were a security property.
+   *
+   * What actually catches a copied `.env` is the placeholder check above, which
+   * tests the VALUE rather than the topology.
+   */
 
   return problems;
 }

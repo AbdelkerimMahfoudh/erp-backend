@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
@@ -8,6 +9,7 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { AppConfigService } from './common/config/app-config.service';
 import { assertProductionConfig } from './common/config/production-guard';
+import { isIngressMode, trustProxySetting } from './common/config/ingress';
 
 async function bootstrap(): Promise<void> {
   /*
@@ -20,8 +22,26 @@ async function bootstrap(): Promise<void> {
    */
   assertProductionConfig();
 
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
   const config = app.get(AppConfigService);
+
+  /**
+   * Who the client is, when there is a proxy in front.
+   *
+   * Express defaults `req.ip` to the socket peer. Behind the edge that peer is
+   * the EDGE, so without this every request looks like it came from the same
+   * address — and `req.ip` is what the rate limiter keys on and what the login
+   * audit row records. `AUTH_THROTTLE_LIMIT` would be a budget shared by every
+   * user on the platform rather than a per-client one: one noisy client locks
+   * everybody out, and a distributed brute force is invisible.
+   *
+   * Trusting forwarded headers is not free, which is why it follows the
+   * declared ingress rather than being switched on generally. If the API were
+   * directly reachable, anyone could send `X-Forwarded-For` and choose their
+   * own rate-limit bucket and their own audit trail.
+   */
+  const ingress = process.env.API_INGRESS;
+  app.set('trust proxy', trustProxySetting(isIngressMode(ingress) ? ingress : undefined));
 
   // Route Nest logs through pino.
   app.useLogger(app.get(Logger));

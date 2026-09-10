@@ -12,6 +12,7 @@ import { assertProductionConfig, productionConfigProblems } from './production-g
 /** A production environment with nothing wrong with it. */
 const SAFE = {
   NODE_ENV: 'production',
+  API_INGRESS: 'loopback',
   COOKIE_SECURE: 'true',
   SWAGGER_ENABLED: 'false',
   API_BIND: '127.0.0.1',
@@ -74,19 +75,6 @@ describe('the settings that fail open', () => {
     expect(problems[0]).toContain('SWAGGER_ENABLED');
   });
 
-  it('refuses an API bound to every interface', () => {
-    /*
-     * `main.ts` already says why: bound to 0.0.0.0 the administration
-     * ENDPOINTS answer beside the proxy that enforces the /admin boundary, and
-     * administrator MFA does not exist — so the guard would be a password alone.
-     */
-    for (const bind of ['0.0.0.0', undefined]) {
-      const problems = productionConfigProblems({ ...SAFE, API_BIND: bind });
-      expect(problems).toHaveLength(1);
-      expect(problems[0]).toContain('127.0.0.1');
-    }
-  });
-
   it.each([
     'http://localhost:8081',
     'http://127.0.0.1:3000',
@@ -119,13 +107,17 @@ describe('the settings that fail open', () => {
     },
   );
 
-  it('flags a localhost database URL', () => {
-    const problems = productionConfigProblems({
-      ...SAFE,
-      APP_DATABASE_URL: 'mysql://app:pw@localhost:3306/erp',
-    });
-    expect(problems).toHaveLength(1);
-    expect(problems[0]).toContain('localhost');
+  it('does NOT flag a localhost database URL', () => {
+    /*
+     * Deliberately allowed. An application and its MySQL on one VPS connect
+     * over loopback, and that is an ordinary single-host deployment — refusing
+     * it would repeat the blanket-bind mistake, encoding one architecture as a
+     * security property. A copied .env is caught by the placeholder secret
+     * check, which tests the value rather than the topology.
+     */
+    expect(
+      productionConfigProblems({ ...SAFE, APP_DATABASE_URL: 'mysql://app:pw@localhost:3306/erp' }),
+    ).toEqual([]);
   });
 
   it('reports every problem at once, not the first', () => {
@@ -183,5 +175,120 @@ describe('the auth rate limit is a real control', () => {
     // variable behaves differently from a present one.
     expect(controller).toMatch(/\|\| 10;/);
     expect(schema).toMatch(/AUTH_THROTTLE_LIMIT:.*default\(10\)/);
+  });
+});
+
+describe('how the API port is kept private', () => {
+  /*
+   * The rule this replaced was wrong, and wrong in a way that would have been
+   * discovered by a failed deployment rather than by a test.
+   *
+   * `docs/39` §3 states the invariant: "the API binds loopback only
+   * (API_BIND=127.0.0.1) and is reachable solely through the edge; under Docker
+   * the same is achieved with `expose` rather than `ports`." The invariant is
+   * REACHABILITY. Two implementations satisfy it, and they need opposite bind
+   * addresses — so a blanket rejection of 0.0.0.0 encodes one of them as if it
+   * were the rule, and refuses the other.
+   */
+
+  describe('a container or private network — the staging stack', () => {
+    const CONTAINER = { ...SAFE, API_INGRESS: 'network', API_BIND: undefined };
+
+    it('starts with the default bind, which is what a container needs', () => {
+      // `deploy/docker-compose.staging.yml`: "Do NOT set API_BIND=127.0.0.1
+      // here... Inside a container it would bind the container's own loopback
+      // and the edge could never reach it."
+      expect(productionConfigProblems(CONTAINER)).toEqual([]);
+    });
+
+    it.each(['0.0.0.0', '::', undefined])('accepts API_BIND=%p', (bind) => {
+      expect(productionConfigProblems({ ...CONTAINER, API_BIND: bind })).toEqual([]);
+    });
+
+    it('would have been refused by the previous rule', () => {
+      // The regression this test exists for: the project's own staging stack
+      // could not have started.
+      expect(productionConfigProblems({ ...CONTAINER, API_BIND: '0.0.0.0' })).toEqual([]);
+    });
+  });
+
+  describe('directly on a host shared with the edge', () => {
+    it('accepts a loopback bind', () => {
+      expect(productionConfigProblems({ ...SAFE, API_INGRESS: 'loopback' })).toEqual([]);
+    });
+
+    it.each(['127.0.0.1', 'localhost', '::1', '::ffff:127.0.0.1'])(
+      'recognises %p as loopback',
+      (bind) => {
+        expect(productionConfigProblems({ ...SAFE, API_INGRESS: 'loopback', API_BIND: bind })).toEqual([]);
+      },
+    );
+
+    it.each(['0.0.0.0', '192.168.1.10', undefined])('refuses a reachable bind of %p', (bind) => {
+      // Here the bind address IS the isolation. Nothing else is protecting it.
+      const problems = productionConfigProblems({ ...SAFE, API_INGRESS: 'loopback', API_BIND: bind });
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toContain('/admin boundary');
+    });
+  });
+
+  describe('the declaration itself', () => {
+    it('is required in production, because it cannot be detected', () => {
+      /*
+       * `/.dockerenv` is a convention, not a guarantee; a container can run
+       * with --network host; a bare-metal process can sit behind a firewall
+       * that isolates it just as well. Guessing is silent in both directions.
+       */
+      const problems = productionConfigProblems({ ...SAFE, API_INGRESS: undefined });
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toContain('API_INGRESS');
+    });
+
+    it.each(['docker', 'proxy', 'TRUE', ''])('refuses the unknown value %p', (mode) => {
+      expect(productionConfigProblems({ ...SAFE, API_INGRESS: mode })).toHaveLength(1);
+    });
+
+    it('recommends neither mode', () => {
+      // The owner chooses the architecture. This file must not choose it for
+      // them by making one option sound like the safe one.
+      const source = readFileSync('src/common/config/ingress.ts', 'utf8');
+      expect(source).toMatch(/does not choose an architecture|equally supported/i);
+    });
+
+    it('is not required outside production', () => {
+      expect(productionConfigProblems({ NODE_ENV: 'development' })).toEqual([]);
+    });
+  });
+});
+
+describe('who the client is behind a proxy', () => {
+  /*
+   * `req.ip` is what the rate limiter keys on and what the login audit row
+   * records. Express defaults it to the socket peer, which behind the edge is
+   * the EDGE — so without trust configured, AUTH_THROTTLE_LIMIT is a budget
+   * shared by every user on the platform rather than a per-client one.
+   */
+  const { trustProxySetting } = require('./ingress');
+
+  it('trusts exactly one hop on a private network', () => {
+    // One: the edge appended the client address and rewrote anything claimed
+    // beyond it. Trusting more would let a client choose its own bucket.
+    expect(trustProxySetting('network')).toBe(1);
+  });
+
+  it('trusts only loopback peers on a shared host', () => {
+    expect(trustProxySetting('loopback')).toBe('loopback');
+  });
+
+  it('trusts nothing when no ingress is declared', () => {
+    // Development. `req.ip` is the peer, which on a laptop is the truth — and
+    // trusting headers on a directly reachable API lets anyone forge them.
+    expect(trustProxySetting(undefined)).toBe(false);
+  });
+
+  it('is wired from the declared ingress, not switched on generally', () => {
+    const main = readFileSync('src/main.ts', 'utf8');
+    expect(main).toMatch(/trust proxy'?\s*,\s*trustProxySetting\(/);
+    expect(main).not.toMatch(/'trust proxy',\s*true/);
   });
 });
