@@ -13,8 +13,23 @@ import { AuthService } from './auth.service';
 import { ChooseAccountDto, LoginDto } from './dto/login.dto';
 import { LogoutDto, RefreshDto } from './dto/token.dto';
 
-// Stricter rate limit on auth endpoints (brute-force defense).
-const AUTH_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
+/**
+ * Stricter rate limit on auth endpoints (brute-force defense).
+ *
+ * Read from the environment, because `AUTH_THROTTLE_LIMIT` was validated by
+ * Joi, exposed on `AppConfigService` and consumed by nothing — an operator
+ * tightening it after a credential-stuffing attempt would have changed
+ * nothing, and no test or log would have said so. Dead configuration is worse
+ * than none: it looks like a control.
+ *
+ * `process.env` directly rather than the config service, which the project
+ * otherwise requires: a decorator is evaluated when this module is loaded, and
+ * nothing is injected yet. The Joi schema still validates the value, and the
+ * fallback matches the schema's own default so a missing variable behaves
+ * exactly as before.
+ */
+const AUTH_THROTTLE_LIMIT = Number(process.env.AUTH_THROTTLE_LIMIT) || 10;
+const AUTH_THROTTLE = { default: { limit: AUTH_THROTTLE_LIMIT, ttl: 60_000 } };
 
 @ApiTags('auth')
 @Controller({ path: 'auth', version: '1' })

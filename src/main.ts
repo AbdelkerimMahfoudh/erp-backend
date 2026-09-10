@@ -7,8 +7,19 @@ import helmet from 'helmet';
 
 import { AppModule } from './app.module';
 import { AppConfigService } from './common/config/app-config.service';
+import { assertProductionConfig } from './common/config/production-guard';
 
 async function bootstrap(): Promise<void> {
+  /*
+   * Before anything is built or bound.
+   *
+   * Every rule this enforces was already written down and none of them was
+   * enforced: a fail-open default starts happily and is quietly less safe than
+   * the documentation says. A refusal to boot is seen in seconds; a session
+   * cookie in clear text is not seen at all.
+   */
+  assertProductionConfig();
+
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
   const config = app.get(AppConfigService);
 
