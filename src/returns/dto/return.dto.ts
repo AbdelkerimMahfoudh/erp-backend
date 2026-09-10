@@ -13,6 +13,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 /**
  * The return workflow's request shapes.
@@ -141,6 +142,7 @@ export class AdjustmentDto {
   @ApiProperty({ minimum: 0 })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   unitAmount: number;
 
   @ApiProperty()
@@ -248,6 +250,7 @@ export class ReportRefundDto {
   @ApiProperty({ minimum: 0 })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   reportedAmount: number;
 
   @ApiProperty({ enum: ['cash', 'account'] })

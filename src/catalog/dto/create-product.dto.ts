@@ -11,6 +11,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 export class CreateProductDto {
   @ApiProperty({ maxLength: 80 })
@@ -57,12 +58,14 @@ export class CreateProductDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   defaultCost?: number;
 
   @ApiPropertyOptional({ minimum: 0 })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   defaultPrice?: number;
 
   @ApiPropertyOptional({ minimum: 0, default: 0 })

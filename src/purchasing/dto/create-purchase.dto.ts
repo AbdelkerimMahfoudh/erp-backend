@@ -15,6 +15,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 /** A learning-map key echoed back from a prior POST /scan (teach-on-confirm). */
 export class RecognitionKeyDto {
@@ -42,6 +43,7 @@ export class ReceiveItemDto {
   @ApiProperty({ minimum: 0.01, description: 'Per-unit (imei/serial) or per-item (quantity) purchase cost' })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   unitCost: number;
 
   @ApiPropertyOptional({ type: [String], description: 'Serialized products: one IMEI/serial per physical unit' })
@@ -61,6 +63,7 @@ export class ReceiveItemDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   price?: number;
 
   @ApiPropertyOptional({ type: RecognitionKeyDto, description: 'Echoed from POST /scan to teach recognition on confirm' })
@@ -95,6 +98,7 @@ export class CreatePurchaseDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   paidAmount?: number;
 
   @ApiPropertyOptional({ format: 'date' })

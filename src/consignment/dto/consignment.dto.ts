@@ -13,6 +13,7 @@ import {
   MinLength,
   Min,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 export class CreateConsignmentDto {
   @ApiProperty({ format: 'uuid', description: 'Who the phones are going to' })
@@ -34,6 +35,7 @@ export class CreateConsignmentDto {
   @ApiProperty({ minimum: 0.01, description: 'What you are asking, in total' })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   proposedAmount: number;
 
   @ApiPropertyOptional({ maxLength: 255, description: 'Condition as sent' })
@@ -73,6 +75,7 @@ export class DecideConsignmentDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   amount?: number;
 
   /** Mandatory for a dispute: "rejected" with no reason is not a conversation. */
@@ -127,6 +130,7 @@ export class ConsignmentPaymentDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   amount?: number;
 
   @ApiPropertyOptional({ enum: ['cash', 'account'] })
@@ -172,6 +176,7 @@ export class ForgiveDto {
   @ApiProperty({ minimum: 0.01 })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   amount: number;
 
   /**

@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsDateString, IsNumber, IsOptional, Min } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 export class CreateClosingDto {
   /**
@@ -15,6 +16,7 @@ export class CreateClosingDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   countedCash?: number;
 
   @ApiPropertyOptional({ format: 'date', description: 'Day to close; defaults to today (UTC)' })

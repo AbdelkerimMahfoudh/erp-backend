@@ -16,6 +16,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
 
@@ -116,6 +117,7 @@ export class SettlementAllocationDto {
   @ApiProperty({ minimum: 0.01 })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   amount!: number;
 }
 
@@ -127,6 +129,7 @@ export class ReportSettlementDto {
   @ApiProperty({ minimum: 0.01, description: 'Total handed over. Must equal the allocations.' })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   amount!: number;
 
   @ApiProperty({ enum: ['cash', 'account'] })

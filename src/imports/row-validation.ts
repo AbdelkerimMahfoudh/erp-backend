@@ -1,4 +1,12 @@
 import type { ImportField, ImportKind } from './column-mapping';
+import { isMoney, MONEY_MAX_STRING } from '../common/money/money';
+
+/**
+ * A row whose amount cannot fit the column is reported HERE, as a bad row with
+ * a reason the shop can act on — not left to overflow at insert time, where it
+ * would fail the whole import with a database error nobody can read.
+ */
+const TOO_LARGE = `The amount is too large (the most this can hold is ${MONEY_MAX_STRING})`;
 
 /**
  * Deciding what happens to each row (Milestone G).
@@ -182,6 +190,7 @@ export function validateRow(input: ValidateInput): RowVerdict {
   const cost = parseNumber(cells.cost ?? null);
   if (cost == null) fail('No cost');
   else if (cost < 0) fail('The cost cannot be negative');
+  else if (!isMoney(cost)) fail(TOO_LARGE);
   else {
     parsed.cost = cost;
     if (cost === 0) {
@@ -198,6 +207,7 @@ export function validateRow(input: ValidateInput): RowVerdict {
   const price = parseNumber(cells.price ?? null);
   if (price != null) {
     if (price < 0) fail('The price cannot be negative');
+    else if (!isMoney(price)) fail(TOO_LARGE);
     else {
       parsed.price = price;
       if (cost != null && cost > 0 && price > 0 && price < cost) {

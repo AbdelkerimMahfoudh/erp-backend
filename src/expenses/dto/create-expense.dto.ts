@@ -12,6 +12,7 @@ import {
   Matches,
   Min,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 /**
  * Reporting an expense. **Reporting moves no money** — only an Owner's
@@ -29,6 +30,7 @@ export class CreateExpenseDto {
   @ApiProperty()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   amount!: number;
 
   @ApiPropertyOptional({

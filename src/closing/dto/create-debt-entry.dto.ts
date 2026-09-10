@@ -10,6 +10,7 @@ import {
   MinLength,
   Min,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 /**
  * A repayment, a payroll deduction, or a write-off (E-CP2).
@@ -32,6 +33,7 @@ export class CreateDebtEntryDto {
   @ApiProperty({ minimum: 0.01 })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   amount: number;
 
   /** Mandatory for every kind. A ledger row nobody can explain is worse than none. */

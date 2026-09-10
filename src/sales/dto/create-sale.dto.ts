@@ -16,6 +16,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 /**
  * A sale line is EITHER a serialized unit (scan its `identifier` — IMEI or
@@ -44,12 +45,14 @@ export class SaleLineDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   price?: number;
 
   @ApiPropertyOptional({ minimum: 0 })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   discount?: number;
 }
 
@@ -61,6 +64,7 @@ export class PaymentInputDto {
   @ApiProperty({ minimum: 0.01 })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   amount: number;
 
   /**
@@ -104,6 +108,7 @@ export class CreateSaleDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   saleDiscount?: number;
 
   @ApiPropertyOptional({ maxLength: 255, description: 'Required for below-cost / over-limit overrides' })

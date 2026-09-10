@@ -10,6 +10,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 /**
  * One channel's count, entered by whoever is holding the drawer (E-CP1).
@@ -36,6 +37,7 @@ export class RecordCountDto {
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   counted?: number;
 
   /**

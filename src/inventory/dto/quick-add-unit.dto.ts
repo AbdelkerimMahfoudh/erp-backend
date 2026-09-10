@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsInt, IsNumber, IsOptional, IsString, IsUUID, Matches, MaxLength, Min } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 /**
  * Quick "Add Stock" for one product. The product's tracking type decides which
@@ -32,12 +33,14 @@ export class QuickAddUnitDto {
   @ApiProperty({ minimum: 0.01, description: 'Per-unit / per-item purchase cost' })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   cost: number;
 
   @ApiPropertyOptional({ minimum: 0, description: 'Selling price for quantity stock (else product default)' })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
+  @IsMoney({ min: 0 })
   price?: number;
 
   /**

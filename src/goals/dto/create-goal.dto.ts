@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsDateString, IsIn, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 export class CreateGoalDto {
   @ApiProperty({ enum: ['company', 'branch', 'user'] })
@@ -41,6 +42,7 @@ export class CreateGoalDto {
   @ApiProperty({ minimum: 0.01, description: 'A target of zero is met before anybody starts' })
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
+  @IsMoney({ min: 0.01 })
   targetAmount: number;
 
   @ApiPropertyOptional({ maxLength: 255 })
