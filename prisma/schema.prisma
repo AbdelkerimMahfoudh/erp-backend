@@ -361,6 +361,7 @@ model Company {
   billingPeriods                 BillingPeriod[]
 
   @@map("companies")
+  anomalyDismissals AnomalyDismissal[]
 }
 
 model Branch {
@@ -547,6 +548,7 @@ model User {
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
   @@unique([companyId, email], map: "ux_users_company_email") // 0055: email is a login identifier; same per-company rule as phone
   @@map("users")
+  anomalyDismissals AnomalyDismissal[] @relation("AnomalyDismissedBy")
 }
 
 model Role {
@@ -4181,4 +4183,40 @@ enum DiscountApprovalStatus {
   voided
   /// Spent on a sale. Terminal, and the only success state.
   consumed
+}
+
+/// Somebody has seen this anomaly and does not want to be told again for a
+/// week (A3).
+///
+/// The anomalies themselves are never stored — all six rules are computed on
+/// read from rollups and ledgers that already exist, because a stored anomaly
+/// is a second copy of a figure the shop already has, and a stale one within
+/// the hour. What is stored is the one thing that cannot be recomputed: that a
+/// person looked and said "I know".
+///
+/// Company-scoped, not per user. An anomaly is about the business, and making
+/// each person dismiss the same shortfall separately turns a prompt into
+/// paperwork.
+model AnomalyDismissal {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+
+  /// The anomaly's stable identity: its code, plus whatever it is about —
+  /// `anomaly.low_stock:<product hex>`. A rule about the whole shop carries
+  /// the code alone.
+  anomalyKey String @map("anomaly_key") @db.VarChar(160)
+
+  dismissedById Bytes    @map("dismissed_by_id") @db.Binary(16)
+  dismissedAt   DateTime @default(now()) @map("dismissed_at")
+  /// Seven days on. Stored rather than derived, so changing the window later
+  /// cannot silently re-suppress or un-suppress what somebody already
+  /// dismissed under the old one.
+  suppressedUntil DateTime @map("suppressed_until")
+
+  company     Company @relation(fields: [companyId], references: [id])
+  dismissedBy User    @relation("AnomalyDismissedBy", fields: [dismissedById], references: [id])
+
+  @@index([companyId, anomalyKey, suppressedUntil])
+  @@index([dismissedAt])
+  @@map("anomaly_dismissals")
 }

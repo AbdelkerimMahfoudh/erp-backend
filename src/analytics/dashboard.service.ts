@@ -129,8 +129,14 @@ export class DashboardService {
       .slice(0, limit ?? Number.MAX_SAFE_INTEGER);
   }
 
-  /** Products at/below the low-stock threshold (units + quantity stock). */
-  private async lowStock() {
+  /**
+   * Products at/below the low-stock threshold (units + quantity stock).
+   *
+   * Public since A3: the anomaly rules need the shop's own threshold, and a
+   * second list built from a second threshold is two answers to "what counts
+   * as low?".
+   */
+  async lowStock() {
     const branchId = this.tenant.branchId();
     const threshold = await this.numberSetting('low_stock_threshold', 3);
 
@@ -183,12 +189,24 @@ export class DashboardService {
   }
 
   /** Sales/revenue/margin per employee over a window (live over sales). */
-  async employeePerformance(days: number) {
+  /**
+   * Revenue and margin per seller over a window.
+   *
+   * `endingDaysAgo` shifts the window back without changing anything else, so
+   * "the last thirty days" and "the thirty before that" come from ONE
+   * definition of a seller's margin. Computing the earlier window separately is
+   * exactly how two figures that must be comparable stop being comparable.
+   */
+  async employeePerformance(days: number, endingDaysAgo = 0) {
     const branchId = this.tenant.branchId();
-    const from = this.windowStart(days);
+    const from = this.windowStart(days + endingDaysAgo);
+    const until = endingDaysAgo > 0 ? this.windowStart(endingDaysAgo) : null;
     const grouped = await this.db.sale.groupBy({
       by: ['userId'],
-      where: { soldAt: { gte: from }, ...(branchId ? { branchId } : {}) },
+      where: {
+        soldAt: until ? { gte: from, lt: until } : { gte: from },
+        ...(branchId ? { branchId } : {}),
+      },
       _sum: { total: true, margin: true },
       _count: true,
     });
@@ -208,6 +226,11 @@ export class DashboardService {
   }
 
   // --- helpers --------------------------------------------------------------
+
+  /** The shop's own `dead_stock_days`. Exposed so an anomaly can say how long. */
+  async deadStockDays(): Promise<number> {
+    return this.numberSetting('dead_stock_days', 60);
+  }
 
   private windowStart(days: number): Date {
     const start = new Date(Date.now() - (days - 1) * 86_400_000);
