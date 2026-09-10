@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { BadRequestException, ForbiddenException, PayloadTooLargeException } from '@nestjs/common';
 import { parseCsv } from '../imports/csv';
 import { ReportsService, MAX_EXPORT_ROWS } from './reports.service';
@@ -491,5 +492,29 @@ describe('every kind produces a readable file', () => {
     const { csv, rowCount } = await service.export({ kind: 'profit-by-product', locale: 'en' });
     expect(rowCount).toBe(0);
     expect(table(csv)).toHaveLength(1);
+  });
+});
+
+describe('the response a browser actually sees', () => {
+  /*
+   * Found by a real browser download, not by any test here.
+   *
+   * A browser hides every response header except a short safelist unless the
+   * server opts in. `Content-Disposition` is not on that list, so the endpoint
+   * answered 200 with the right bytes and the web client read `null` for the
+   * filename — every export would have saved as `report.csv`, losing the
+   * report, period and branch that the filename is the only place to carry.
+   *
+   * Read from source because the alternative is booting the whole application
+   * to inspect one CORS option. The value is what matters and it is asserted.
+   */
+  const main = readFileSync('src/main.ts', 'utf8');
+
+  it('exposes the filename header to browsers', () => {
+    expect(main).toMatch(/exposedHeaders:\s*\[[^\]]*'Content-Disposition'/);
+  });
+
+  it('exposes the row count too', () => {
+    expect(main).toMatch(/exposedHeaders:\s*\[[^\]]*'X-Report-Rows'/);
   });
 });

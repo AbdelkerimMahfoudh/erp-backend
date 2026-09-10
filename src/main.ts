@@ -33,6 +33,20 @@ async function bootstrap(): Promise<void> {
   app.enableCors({
     origin: config.corsOrigins.length > 0 ? config.corsOrigins : false,
     credentials: true,
+    /**
+     * A browser hides every response header except a short safelist unless the
+     * server says otherwise — and `Content-Disposition` is not on it.
+     *
+     * Found by a real browser download, not by a test: the report endpoint
+     * answered 200 with the right bytes, and the web client read `null` for the
+     * filename and fell back to `report.csv`. Every export would have saved
+     * under the same name, losing the report, period and branch that the
+     * filename is the only place to carry.
+     *
+     * Native fetch is unaffected — this is a browser rule, so only the web
+     * build ever saw it.
+     */
+    exposedHeaders: ['Content-Disposition', 'X-Report-Rows'],
   });
 
   // Versioned API: /api/v1/...  (health is version-neutral: /api/health)
