@@ -104,11 +104,24 @@ export class SalesPolicyService {
     if (!belowFloor && !belowCost) return;
 
     if (!approval) {
-      throw new ForbiddenException(
-        belowCost
+      /*
+       * A CODE, not only a sentence.
+       *
+       * The phone has to tell "ask the Owner" apart from "you may not do this
+       * at all", and it cannot do that by matching English prose — least of all
+       * in a shop running the app in Arabic. `belowCost` chooses which copy the
+       * client shows, and only a reader with `cost.view` is shown the loss
+       * framing; everyone else is told a stronger approval is needed, which is
+       * true and reveals nothing.
+       */
+      throw new ForbiddenException({
+        code: 'approval_required',
+        belowCost,
+        configuredPrice,
+        message: belowCost
           ? 'Selling below cost needs an Owner approval for this exact unit and price'
           : 'Selling below the set price needs an Owner approval for this exact unit and price',
-      );
+      });
     }
 
     /*
@@ -117,9 +130,10 @@ export class SalesPolicyService {
      * 1 500, which is the whole reuse problem in miniature.
      */
     if (Math.abs(approval.approvedPrice - price) > EPSILON) {
-      throw new ConflictException(
-        'This approval was granted for a different price. Ask again for the price you want.',
-      );
+      throw new ConflictException({
+        code: 'approval_price_changed',
+        message: 'This approval was granted for a different price. Ask again for the price you want.',
+      });
     }
 
     if (belowCost && (!reason || reason.trim().length === 0)) {

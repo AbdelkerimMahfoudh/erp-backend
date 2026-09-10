@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { DiscountApprovalStatus } from '@prisma/client';
 import { APPROVAL_TTL_MINUTES } from './discount-approvals.service';
 import { ROLE_PERMISSIONS } from '../rbac/role-permissions';
+import { FINANCIAL_FIELDS } from '../common/interceptors/financial-fields';
 
 /**
  * The approval lifecycle, and the invariants that keep it from becoming a
@@ -256,13 +257,80 @@ describe('what a client is shown', () => {
 });
 
 describe('notifications', () => {
-  it('are deduplicated per approval and per event', () => {
-    // A retried decision cannot produce a second message.
-    expect(SERVICE).toMatch(/dedupeKey: `discount_approval:\$\{[^}]+\}:requested`/);
-    expect(SERVICE).toMatch(/dedupeKey: `discount_approval:\$\{[^}]+\}:decided`/);
+  it('are deduplicated per approval, per event, per person', () => {
+    /*
+     * The key names the approval and the event, and the database's unique index
+     * is `(companyId, targetUserId, dedupeKey)` — so a retried submission or a
+     * retried decision cannot produce a second message for anybody.
+     */
+    expect(SERVICE).toContain("dedupeKey = `discount_approval:${params.approvalId.toString('hex')}:${params.event}`");
+    expect(SERVICE).toContain("e.code === 'P2002'");
   });
 
   it('reach approvers by permission, not by a hardcoded role name', () => {
-    expect(SERVICE).toMatch(/permission: 'discount\.override'/);
+    expect(SERVICE).toContain("permission: { key: 'discount.override' }");
+  });
+
+  it('are addressed to a person and land on the request itself', () => {
+    /*
+     * The defect this replaced: the service called `NotificationsService.emit`
+     * with `{ kind, userId, entityType, entityId }` behind an `as never`, while
+     * `emit` takes `{ type, title, targetUserId, actionLink }`. Every field the
+     * delivery needed arrived undefined — no type, no recipient, no link — and
+     * the cast is what hid it. A notification nobody is addressed by, that opens
+     * nothing, is not a notification.
+     */
+    expect(SERVICE).toContain('targetUserId: userId');
+    expect(SERVICE).toContain('type: `discount_approval.${params.event}`');
+    expect(SERVICE).toContain("actionLink = `/approvals/${binToUuid(params.approvalId)}`");
+  });
+
+  it('carry prices and a flag, never a cost figure', () => {
+    // A notification is read outside the request that authorised it, by whoever
+    // picks the phone up. Selling prices are the shop's own decisions; the cost
+    // is not, and `belowCost` discloses no amount.
+    const start = SERVICE.indexOf('private async notify(');
+    const notify = SERVICE.slice(start, SERVICE.indexOf('return sent;', start));
+    expect(notify).not.toMatch(/unitCost/);
+    expect(notify).not.toMatch(/margin/);
+  });
+});
+
+describe('reading a request', () => {
+  it('scopes a requester to their own, on the server', () => {
+    /*
+     * Anyone with `sale.create` may ask, so anyone with `sale.create` reaches
+     * the endpoint. Without this scope they would read every colleague's
+     * request and the price each was asking for. A client-side filter is a
+     * display preference; this is a boundary.
+     */
+    expect(SERVICE).toContain("const mineOnly = !this.may('discount.override');");
+    expect(SERVICE).toContain('...(mineOnly ? { requesterId: this.tenant.userId() ?? Buffer.alloc(16) } : {}),');
+  });
+
+  it('refuses a deep link into another person’s request', () => {
+    // A notification's link is a convenience, never an authorisation.
+    const get = SERVICE.slice(SERVICE.indexOf('async get(id: string)'));
+    expect(get).toContain("if (!this.may('discount.override') && !row.requesterId.equals(");
+    expect(get).toContain('ForbiddenException');
+  });
+
+  it('gives the Owner the cost through the gate that already governs it', () => {
+    /*
+     * The approver has to judge a loss, and `docs/46` says they hold
+     * `cost.view` already. Naming the field `unitCost` means
+     * `CostGatingInterceptor` strips it for everyone else automatically — the
+     * same mechanism as the rest of the app, not a second rule to remember.
+     */
+    expect(SERVICE).toContain('unitCost: Number(row.unitCost),');
+    expect(FINANCIAL_FIELDS.has('unitCost')).toBe(true);
+  });
+
+  it('names the thing being decided about, in one round trip', () => {
+    // An Owner is deciding about a physical phone, in a shop, for a person. Ids
+    // would put four more fetches and a spinner in front of that decision.
+    expect(SERVICE).toContain('const DETAIL = {');
+    expect(SERVICE).toContain('requesterName: row.requester?.name ?? null,');
+    expect(SERVICE).toContain('branchName: row.branch?.name ?? null,');
   });
 });

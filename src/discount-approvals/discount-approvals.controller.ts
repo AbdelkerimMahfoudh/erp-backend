@@ -30,9 +30,16 @@ export class DiscountApprovalsController {
 
   @Get()
   @RequirePermissions('sale.create')
-  @ApiOperation({ summary: 'Requests in this company, newest first' })
+  @ApiOperation({ summary: 'Your requests; every request in the company for an approver' })
   list(@Query('status') status?: DiscountApprovalStatus) {
     return this.approvals.list(status);
+  }
+
+  @Get(':id')
+  @RequirePermissions('sale.create')
+  @ApiOperation({ summary: 'One request — what a notification opens' })
+  get(@Param('id') id: string) {
+    return this.approvals.get(id);
   }
 
   @Post(':id/decide')

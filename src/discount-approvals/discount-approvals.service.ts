@@ -12,7 +12,6 @@ import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
-import { NotificationsService } from '../notifications/notifications.service';
 import { PricingService } from '../pricing/pricing.service';
 import { AppClsStore } from '../common/context/request-context';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
@@ -75,7 +74,6 @@ export class DiscountApprovalsService {
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
-    private readonly notifications: NotificationsService,
     private readonly pricing: PricingService,
     private readonly cls: ClsService<AppClsStore>,
   ) {}
@@ -210,7 +208,20 @@ export class DiscountApprovalsService {
       },
     });
 
-    await this.notifyApprovers(created.id, belowCost);
+    await this.notify({
+      recipients: await this.approvers(),
+      approvalId: created.id,
+      branchId,
+      event: 'requested',
+      title: 'A price needs your approval',
+      body: null,
+      payload: {
+        configuredPrice: Number(created.configuredPrice),
+        requestedPrice: Number(created.requestedPrice),
+        discountAmount: Number(created.discountAmount),
+        belowCost,
+      },
+    });
     return this.present(created);
   }
 
@@ -292,18 +303,18 @@ export class DiscountApprovalsService {
       },
     });
 
-    await this.notifications.emit({
-      companyId: this.tenant.companyId(),
-      userId: current.requesterId,
-      kind: input.approve ? 'discount_approved' : 'discount_rejected',
-      title: input.approve ? 'Price approved' : 'Price not approved',
+    await this.notify({
+      recipients: [current.requesterId],
+      approvalId,
+      branchId: current.branchId,
+      event: input.approve ? 'approved' : 'rejected',
+      title: input.approve ? 'Your price was approved' : 'Your price was not approved',
       body: null,
-      entityType: 'discount_approval',
-      entityId: approvalId,
-      // One notification per decision. The key is the approval itself, so a
-      // retried decision cannot produce a second message.
-      dedupeKey: `discount_approval:${binToUuid(approvalId)}:decided`,
-    } as never);
+      payload: {
+        approvedPrice: input.approve ? Number(current.requestedPrice) : null,
+        note: input.note?.trim() || null,
+      },
+    });
 
     return this.present(updated);
   }
@@ -333,15 +344,46 @@ export class DiscountApprovalsService {
     return this.present(updated);
   }
 
-  /** The Owner's queue, and a requester's own history. */
+  /**
+   * The Owner's queue, and a requester's own history — never each other's.
+   *
+   * Anyone with `sale.create` may ask, so anyone with `sale.create` can reach
+   * this endpoint; without the scope below they would read every colleague's
+   * requests and the prices those were asking for. An approver sees everything
+   * because deciding is their job. Least privilege, decided on the server: a
+   * client filter is a display preference, not a boundary.
+   */
   async list(status?: DiscountApprovalStatus) {
+    const mineOnly = !this.may('discount.override');
     const rows = await this.db.discountApproval.findMany({
-      where: status ? { status } : {},
+      where: {
+        ...(status ? { status } : {}),
+        ...(mineOnly ? { requesterId: this.tenant.userId() ?? Buffer.alloc(16) } : {}),
+      },
       orderBy: { createdAt: 'desc' },
       take: 100,
+      include: DETAIL,
     });
     const settled = await Promise.all(rows.map((r) => this.settleIfStale(r)));
-    return { rows: settled.map((r) => this.present(r)) };
+    return { rows: settled.map((r) => this.present(r)), scope: mineOnly ? 'mine' : 'company' };
+  }
+
+  /**
+   * One request, for the screen a notification opens.
+   *
+   * Same scope rule as the list: a requester may read their own, an approver
+   * may read any. A deep link is not an authorisation.
+   */
+  async get(id: string) {
+    const row = await this.db.discountApproval.findFirst({
+      where: { id: uuidToBin(id) },
+      include: DETAIL,
+    });
+    if (!row) throw new NotFoundException('No such request');
+    if (!this.may('discount.override') && !row.requesterId.equals(this.tenant.userId() ?? Buffer.alloc(16))) {
+      throw new ForbiddenException('That request is not yours');
+    }
+    return this.present(await this.settleIfStale(row));
   }
 
   /**
@@ -466,22 +508,91 @@ export class DiscountApprovalsService {
     });
   }
 
-  private async notifyApprovers(approvalId: Buffer, belowCost: boolean): Promise<void> {
-    /*
-     * One notification per request, keyed on the request. A retried submission
-     * that replays an existing row does not reach here, and a redelivery cannot
-     * produce a second message.
-     */
-    await this.notifications.emit({
-      companyId: this.tenant.companyId(),
-      permission: 'discount.override',
-      kind: belowCost ? 'discount_request_below_cost' : 'discount_request',
-      title: 'A price needs your approval',
-      body: null,
-      entityType: 'discount_approval',
-      entityId: approvalId,
-      dedupeKey: `discount_approval:${binToUuid(approvalId)}:requested`,
-    } as never);
+  /**
+   * Tell whoever can actually answer.
+   *
+   * `discount.override` is Owner-only and **not delegatable**, so a role lookup
+   * is the complete set of people who can decide this. If it ever becomes
+   * delegatable, per-branch grants have to be unioned in here or a delegated
+   * approver would silently never be told.
+   */
+  private async approvers(): Promise<Buffer[]> {
+    const assignments = await this.db.userBranch.findMany({
+      where: {
+        user: { isActive: true, deletedAt: null },
+        role: { rolePermissions: { some: { permission: { key: 'discount.override' } } } },
+      },
+      select: { userId: true },
+      distinct: ['userId'],
+    });
+    return assignments.map((a) => a.userId);
+  }
+
+  /**
+   * One row per person per event, landing on **this** request.
+   *
+   * ## Why this is written here and not through `NotificationsService.emit`
+   *
+   * It used to be, and it did not work. `emit` takes
+   * `{ type, title, targetUserId, actionLink }`; the call passed
+   * `{ kind, userId, entityType, entityId, dedupeKey }` behind an `as never`,
+   * so every field the delivery needed arrived undefined — no type, no
+   * recipient, and **no link**. The cast is what hid it. Nothing about the
+   * notification was right except the title.
+   *
+   * The shape below is the one transfers and returns already use: a typed row
+   * with `actionLink` pointing at the request itself, a `dedupeKey` the
+   * database enforces, and a `payload` the app renders in the reader's own
+   * language.
+   *
+   * **No cost and no margin travels.** A notification is read outside the
+   * request that authorised it, by whoever picks the phone up. Prices are the
+   * shop's own selling decisions and are safe; `belowCost` is a flag the client
+   * turns into loss wording only for a reader who may see cost.
+   */
+  private async notify(params: {
+    recipients: readonly Buffer[];
+    approvalId: Buffer;
+    branchId: Buffer;
+    event: 'requested' | 'approved' | 'rejected';
+    title: string;
+    body: string | null;
+    payload: Record<string, unknown>;
+  }): Promise<number> {
+    const companyId = this.tenant.companyId();
+    const actionLink = `/approvals/${binToUuid(params.approvalId)}`;
+    const dedupeKey = `discount_approval:${params.approvalId.toString('hex')}:${params.event}`;
+
+    let sent = 0;
+    for (const userId of params.recipients) {
+      try {
+        await this.db.notification.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            branchId: params.branchId,
+            targetUserId: userId,
+            type: `discount_approval.${params.event}`,
+            title: params.title,
+            body: params.body,
+            actionLink,
+            dedupeKey,
+            payload: { event: params.event, ...params.payload } as Prisma.InputJsonValue,
+          },
+        });
+        sent += 1;
+      } catch (e) {
+        /*
+         * The unique index refused a duplicate: this person has already been
+         * told about this exact event. That is success. A retried submission
+         * must not produce a second message, and it certainly must not undo the
+         * decision that had already been taken.
+         */
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') continue;
+        throw e;
+      }
+    }
+    return sent;
   }
 
   /**
@@ -493,24 +604,7 @@ export class DiscountApprovalsService {
    * discount, and `belowCost` as a flag. The cost itself is available on the
    * unit, through the gate that already governs it.
    */
-  private present(row: {
-    id: Buffer;
-    status: DiscountApprovalStatus;
-    configuredPrice: Prisma.Decimal;
-    requestedPrice: Prisma.Decimal;
-    discountAmount: Prisma.Decimal;
-    approvedPrice: Prisma.Decimal | null;
-    belowCost: boolean;
-    reason: string | null;
-    decisionNote: string | null;
-    expiresAt: Date;
-    createdAt: Date;
-    version: number;
-    voidReason: string | null;
-    unitId: Buffer;
-    requesterId: Buffer;
-    approverId: Buffer | null;
-  }) {
+  private present(row: PresentableApproval) {
     return {
       id: binToUuid(row.id),
       status: row.status,
@@ -528,8 +622,68 @@ export class DiscountApprovalsService {
       expiresAt: row.expiresAt.toISOString(),
       createdAt: row.createdAt.toISOString(),
       version: row.version,
+      /*
+       * The cost, named so the gate already governing it strips it.
+       *
+       * `unitCost` is in `FINANCIAL_FIELDS`, so `CostGatingInterceptor` removes
+       * it for every caller without `cost.view` — the same mechanism that hides
+       * cost everywhere else in the app, rather than a second rule that has to
+       * be remembered. An Owner deciding whether to sell at a loss needs the
+       * figure and already holds the permission; a requester who does not hold
+       * it never receives it, and their screen says a stronger approval is
+       * needed without saying why.
+       */
+      unitCost: Number(row.unitCost),
+      /** What the request is about, in the words the shop uses. */
+      product: row.unit?.product
+        ? { name: row.unit.product.name, variant: row.variant ?? row.unit.product.variant ?? null }
+        : null,
+      identifier: row.unit?.imeiPrimary ?? row.unit?.serialNo ?? null,
+      branchName: row.branch?.name ?? null,
+      requesterName: row.requester?.name ?? null,
+      approverName: row.approver?.name ?? null,
     };
   }
+}
+
+/**
+ * What a review screen needs in one round trip.
+ *
+ * The Owner is deciding about a physical thing: which phone, whose request,
+ * which shop. Returning ids and making the phone fetch four more documents to
+ * name them would put a spinner between a person and a decision they are being
+ * asked to make quickly.
+ */
+const DETAIL = {
+  unit: { select: { imeiPrimary: true, serialNo: true, product: { select: { name: true, variant: true } } } },
+  branch: { select: { name: true } },
+  requester: { select: { name: true } },
+  approver: { select: { name: true } },
+} as const;
+
+interface PresentableApproval {
+  id: Buffer;
+  status: DiscountApprovalStatus;
+  configuredPrice: Prisma.Decimal;
+  requestedPrice: Prisma.Decimal;
+  discountAmount: Prisma.Decimal;
+  approvedPrice: Prisma.Decimal | null;
+  unitCost: Prisma.Decimal;
+  belowCost: boolean;
+  variant: string | null;
+  reason: string | null;
+  decisionNote: string | null;
+  expiresAt: Date;
+  createdAt: Date;
+  version: number;
+  voidReason: string | null;
+  unitId: Buffer;
+  requesterId: Buffer;
+  approverId: Buffer | null;
+  unit?: { imeiPrimary: string | null; serialNo: string | null; product?: { name: string; variant: string | null } | null } | null;
+  branch?: { name: string } | null;
+  requester?: { name: string } | null;
+  approver?: { name: string } | null;
 }
 
 function reasonMessage(reason: VoidReason): string {
