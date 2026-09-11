@@ -255,6 +255,27 @@ describe('the detail screen is told what it may do, and why not', () => {
     expect(JSON.stringify(detail)).not.toMatch(/cost|price|margin/i);
   });
 
+  it('a transfer cancelled after approval was never shipped, and says so', async () => {
+    /*
+     * The column defaults to now(), so the row always carries a sent_at. Before
+     * this, cancelling an APPROVED transfer left that default in the response
+     * and the app listed a shipping event — "Sent by somebody", nobody named —
+     * for goods that never left the shop.
+     */
+    asEmployee();
+    const t = await request();
+    asManager();
+    await h.service.approve(t.id, { expectedVersion: t.version });
+    const approved = await h.service.getById(t.id);
+    await h.service.cancel(t.id, { expectedVersion: approved.version, reason: 'Quantity wrong' });
+
+    const detail = await h.service.getById(t.id);
+    expect(detail.status).toBe('cancelled');
+    expect(detail.timestamps.sentAt).toBeNull();
+    expect(detail.people.sentBy).toBeNull();
+    expect(detail.timestamps.decidedAt).toBeInstanceOf(Date);
+  });
+
   it('offers a manager approve, reject and cancel on a pending request', async () => {
     asEmployee();
     const t = await request();

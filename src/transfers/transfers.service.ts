@@ -22,7 +22,7 @@ import { assertTransferTransition } from './transfer-state-machine';
 import { TransferStatus } from '@prisma/client';
 import { computeDiscrepancy, DiscrepancyReport } from './discrepancy.util';
 import { unitIdentifier } from '../inventory/unit-identifier.util';
-import { computeActions, requestedAtOf } from './transfer-view';
+import { computeActions, requestedAtOf, shippedAt } from './transfer-view';
 import {
   CreateTransferDto,
   ListTransfersDto,
@@ -1184,7 +1184,7 @@ export class TransfersService {
         requestedBy: t.requestedBy?.name ?? null,
         requestedAt: requestedAtOf(t.id),
         approvedAt: t.approvedAt,
-        sentAt: t.status === 'pending_approval' || t.status === 'approved' ? null : t.sentAt,
+        sentAt: shippedAt(t),
         receivedAt: t.receivedAt,
         decidedAt: t.decidedAt,
         decisionReason: t.decisionReason,
@@ -1334,9 +1334,9 @@ export class TransfersService {
       timestamps: {
         requestedAt: requestedAtOf(transfer.id),
         approvedAt: transfer.approvedAt,
-        // `sentAt` carries DEFAULT now() from the original schema, so it is only
-        // a shipping time once the transfer has actually shipped.
-        sentAt: transfer.status === 'pending_approval' || transfer.status === 'approved' ? null : transfer.sentAt,
+        // Only a shipping time once the transfer has actually shipped; the
+        // column's DEFAULT now() means every row carries one regardless.
+        sentAt: shippedAt(transfer),
         receivedAt: transfer.receivedAt,
         decidedAt: transfer.decidedAt,
       },

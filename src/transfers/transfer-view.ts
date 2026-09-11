@@ -12,6 +12,28 @@ import { TERMINAL_STATUSES } from './transfer-state-machine';
  * must be performed from.
  */
 
+/**
+ * When a transfer was shipped — or null, because it never was.
+ *
+ * `stock_transfers.sent_at` carries `DEFAULT now()` from the original schema, so
+ * every row has a value whether or not anything was ever sent. Blanking it by
+ * status alone was not enough: a transfer cancelled AFTER approval is neither
+ * `pending_approval` nor `approved`, so it kept the default and the app listed
+ * "Sent by somebody" for goods that never left the shop.
+ *
+ * `sentById` is written only by shipping, so it is the honest signal. The
+ * status check stays for rows shipped before that column was populated.
+ */
+export function shippedAt(transfer: {
+  status: string;
+  sentAt: Date | null;
+  sentById: Buffer | null;
+}): Date | null {
+  const shipped =
+    transfer.sentById !== null || transfer.status === 'in_transit' || transfer.status === 'received';
+  return shipped ? transfer.sentAt : null;
+}
+
 export type ActionReason = 'status' | 'permission' | 'branch' | 'ownership' | null;
 
 export interface TransferAction {
