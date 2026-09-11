@@ -33,9 +33,24 @@ export interface ScanResult {
    * a question — it stays `null`.
    */
   inventory: ScanInventoryMatch | null;
-  /** Short guidance when not recognized (client shows create/confirm prompt). */
+  /**
+   * Short guidance when not recognized, in English. Kept for older clients;
+   * a client showing text to staff must translate `hintCode` instead.
+   */
   hint?: string;
+  /** Stable, translatable reason for `hint`. */
+  hintCode?: ScanHintCode;
+  /** Values the translated hint needs, e.g. the two contested product names. */
+  hintParams?: Record<string, string>;
 }
+
+export type ScanHintCode =
+  | 'unrecognized_code'
+  | 'new_barcode'
+  | 'recognized_device'
+  | 'unknown_imei'
+  | 'serial_manual'
+  | 'contested_mapping';
 
 /**
  * What the server knows about this identifier already existing.

@@ -11,6 +11,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   MaxLength,
   Min,
   ValidateNested,
@@ -30,9 +31,28 @@ export class RecognitionKeyDto {
 }
 
 /**
+ * One physical serialized unit, with the second IMEI of a dual-SIM phone.
+ *
+ * `identifiers[]` stays the short form for single-identifier units. A unit
+ * listed here is the same unit as one listed there — the two are merged, and
+ * a primary appearing in both is a duplicate in the delivery.
+ */
+export class ReceiveUnitDto {
+  @ApiProperty({ description: 'IMEI 1 (imei products) or serial number', maxLength: 64 })
+  @IsString()
+  @MaxLength(64)
+  identifier: string;
+
+  @ApiPropertyOptional({ description: 'IMEI 2 of the SAME phone. IMEI products only; optional.', example: '490154203237518' })
+  @IsOptional()
+  @Matches(/^\d{15}$/, { message: 'imeiSecondary must be 15 digits' })
+  imeiSecondary?: string;
+}
+
+/**
  * One receiving line — PRODUCT-FIRST. The product's tracking type decides the
  * workflow; the client never labels a line "phone" or "accessory":
- *   imei/serial → `identifiers[]` (one unit per identifier)
+ *   imei/serial → `identifiers[]` and/or `units[]` (one unit per entry)
  *   quantity    → `quantity` (bulk, no identifiers)
  */
 export class ReceiveItemDto {
@@ -52,6 +72,14 @@ export class ReceiveItemDto {
   @ArrayMaxSize(500)
   @IsString({ each: true })
   identifiers?: string[];
+
+  @ApiPropertyOptional({ type: [ReceiveUnitDto], description: 'Serialized products: units carrying an optional IMEI 2' })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @ValidateNested({ each: true })
+  @Type(() => ReceiveUnitDto)
+  units?: ReceiveUnitDto[];
 
   @ApiPropertyOptional({ minimum: 1, description: 'Quantity-tracked products: bulk count' })
   @IsOptional()

@@ -66,7 +66,7 @@ export class ScannerService {
     };
 
     if (kind === 'unknown') {
-      return { ...base, hint: 'Unrecognized code — create a new product template.' };
+      return { ...base, hint: 'Unrecognized code — create a new product template.', hintCode: 'unrecognized_code' };
     }
 
     // 1. Learned mapping (the fast path once the store has taught the scanner).
@@ -86,7 +86,7 @@ export class ScannerService {
       const suggestion = await this.catalog.findOrSuggest({ barcode: normalized });
       return suggestion
         ? { ...base, recognized: true, confidence: CONFIDENCE_EXACT_BARCODE, suggestion }
-        : { ...base, hint: 'New barcode — confirm the product to teach it.' };
+        : { ...base, hint: 'New barcode — confirm the product to teach it.', hintCode: 'new_barcode' };
     }
 
     if (kind === 'imei') {
@@ -95,16 +95,13 @@ export class ScannerService {
         const suggestion = await this.catalog.findOrSuggest({ productId: rec.suggestion.productId });
         if (suggestion) return { ...base, recognized: true, confidence: CONFIDENCE_TAC_CATALOG, suggestion };
       }
-      return {
-        ...base,
-        hint: rec.known
-          ? 'Recognized device — confirm the product to teach it.'
-          : 'Unknown IMEI — create a new product template.',
-      };
+      return rec.known
+        ? { ...base, hint: 'Recognized device — confirm the product to teach it.', hintCode: 'recognized_device' }
+        : { ...base, hint: 'Unknown IMEI — create a new product template.', hintCode: 'unknown_imei' };
     }
 
     // serial: prefix learning is reserved; fall back to manual confirmation.
-    return { ...base, hint: 'Serial scan — confirm the product manually (serial learning coming soon).' };
+    return { ...base, hint: 'Serial scan — confirm the product manually (serial learning coming soon).', hintCode: 'serial_manual' };
   }
 
   /**
@@ -168,6 +165,11 @@ export class ScannerService {
       hint:
         `This code is linked to two different products — "${suggestion.brand} ${suggestion.model}" ` +
         `and "${corroborating.brand} ${corroborating.model}". Confirm the right one.`,
+      hintCode: 'contested_mapping',
+      hintParams: {
+        first: ` ${suggestion.model}`,
+        second: ` ${corroborating.model}`,
+      },
     };
   }
 

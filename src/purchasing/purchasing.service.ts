@@ -36,27 +36,49 @@ function fingerprint(dto: CreatePurchaseDto): string {
     referenceNo: dto.referenceNo ?? null,
     paidAmount: dto.paidAmount ?? 0,
     items: (dto.items ?? [])
-      .map((i) => ({
-        productId: i.productId,
-        unitCost: i.unitCost,
-        quantity: i.quantity ?? null,
-        price: i.price ?? null,
-        identifiers: [...(i.identifiers ?? [])].sort(),
-      }))
+      .map((i) => {
+        const entries = unitEntries(i);
+        const secondaries = entries
+          .filter((e) => e.imeiSecondary)
+          .map((e) => `${e.identifier}|${e.imeiSecondary}`)
+          .sort();
+        return {
+          productId: i.productId,
+          unitCost: i.unitCost,
+          quantity: i.quantity ?? null,
+          price: i.price ?? null,
+          identifiers: entries.map((e) => e.identifier).sort(),
+          // Only present when a second IMEI was sent, so a request without one
+          // hashes exactly as it did before `units[]` existed — a replay of a
+          // delivery received earlier still matches its stored fingerprint.
+          ...(secondaries.length ? { secondaries } : {}),
+        };
+      })
       .sort((a, b) => (a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0)),
   };
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
+/** Every unit on a line, whichever form the client used. */
+function unitEntries(item: ReceiveItemDto): { identifier: string; imeiSecondary?: string }[] {
+  return [
+    ...(item.identifiers ?? []).map((identifier) => ({ identifier })),
+    ...(item.units ?? []).map((u) => ({ identifier: u.identifier, imeiSecondary: u.imeiSecondary })),
+  ];
+}
+
 interface RejectedLine {
   identifier: string;
   reason: string;
+  /** The IMEI 2 sent with a refused unit, so the client can keep the pair together. */
+  secondary?: string;
 }
 
 interface PreparedUnit {
   productId: Buffer;
   identifier: string;
   imeiPrimary: string | null;
+  imeiSecondary: string | null;
   serialNo: string | null;
   cost: number;
 }
@@ -139,22 +161,40 @@ export class PurchasingService {
       const strategy = this.strategies.get(product.trackingType);
 
       if (strategy.perUnit) {
-        const ids = item.identifiers ?? [];
-        if (ids.length === 0) {
+        const entries = unitEntries(item);
+        if (entries.length === 0) {
           rejected.push({ identifier: item.productId, reason: `${strategy.identifierLabel} required` });
           continue;
         }
-        for (const raw of ids) {
+        const imei = this.strategies.get('imei');
+        for (const entry of entries) {
+          const raw = entry.identifier;
           const check = strategy.validateIdentifier(raw);
           const normalized = strategy.normalize(raw);
-          if (!check.ok) rejected.push({ identifier: raw, reason: check.reason ?? 'invalid identifier' });
-          else if (seen.has(normalized)) rejected.push({ identifier: normalized, reason: 'duplicate in batch' });
+          /*
+           * IMEI 2 is optional and belongs to the SAME phone. It is checked here
+           * with the same rules as IMEI 1 — Luhn, never equal to IMEI 1, never
+           * on a product that has no IMEIs — so a bad second number refuses this
+           * one unit rather than the delivery, and never reaches the triggers.
+           */
+          const secondary = entry.imeiSecondary ? imei.normalize(entry.imeiSecondary) : null;
+          const refuse = (reason: string) =>
+            rejected.push({ identifier: check.ok ? normalized : raw, reason, ...(secondary ? { secondary } : {}) });
+
+          if (!check.ok) refuse(check.reason ?? 'invalid identifier');
+          else if (secondary && product.trackingType !== 'imei') refuse('secondary IMEI on a product without IMEIs');
+          else if (secondary && !imei.validateIdentifier(secondary).ok) refuse('invalid secondary IMEI');
+          else if (secondary && secondary === normalized) refuse('secondary IMEI equals primary');
+          // Either number already used in this delivery — as anybody's IMEI 1 or IMEI 2.
+          else if (seen.has(normalized) || (secondary && seen.has(secondary))) refuse('duplicate in batch');
           else {
             seen.add(normalized);
+            if (secondary) seen.add(secondary);
             preparedUnits.push({
               productId: product.id,
               identifier: normalized,
               ...this.identifierColumns(product, normalized),
+              imeiSecondary: secondary,
               cost: item.unitCost,
             });
           }
@@ -178,17 +218,31 @@ export class PurchasingService {
     }
 
     // 2. Same-company duplicate pre-check (global unique index is the backstop).
-    const existing = await this.inventory.findExistingIdentifiers(preparedUnits.map((u) => u.identifier));
+    // Both IMEIs are looked up, across all three identifier columns.
+    const existing = await this.inventory.findExistingIdentifiers(
+      preparedUnits.flatMap((u) => (u.imeiSecondary ? [u.identifier, u.imeiSecondary] : [u.identifier])),
+    );
     const committableUnits = preparedUnits.filter((u) => {
-      if (existing.has(u.identifier)) {
-        rejected.push({ identifier: u.identifier, reason: 'already registered' });
+      if (existing.has(u.identifier) || (u.imeiSecondary && existing.has(u.imeiSecondary))) {
+        rejected.push({
+          identifier: u.identifier,
+          reason: 'already registered',
+          ...(u.imeiSecondary ? { secondary: u.imeiSecondary } : {}),
+        });
         return false;
       }
       return true;
     });
 
     if (committableUnits.length === 0 && preparedStock.length === 0) {
-      return { purchaseId: null, unitsCreated: 0, stockLines: 0, total: 0, rejected };
+      return {
+        purchaseId: null,
+        unitsCreated: 0,
+        stockLines: 0,
+        total: 0,
+        rejected,
+        accepted: { identifiers: [] as string[], stockProductIds: [] as string[] },
+      };
     }
 
     // 3. Totals.
@@ -249,6 +303,7 @@ export class PurchasingService {
             productId: u.productId,
             branchId,
             imeiPrimary: u.imeiPrimary,
+            imeiSecondary: u.imeiSecondary,
             serialNo: u.serialNo,
             cost: u.cost,
             supplierId: supplier.id,
@@ -366,6 +421,16 @@ export class PurchasingService {
       stockLines: preparedStock.length,
       total,
       rejected,
+      /*
+       * What this purchase actually received, by name. A partly refused
+       * delivery keeps its refused lines on the phone for correction; this is
+       * how the client knows which lines to drop, so correcting and finishing
+       * again can never send an accepted line a second time.
+       */
+      accepted: {
+        identifiers: committableUnits.map((u) => u.identifier),
+        stockProductIds: [...new Set(preparedStock.map((l) => binToUuid(l.productId)))],
+      },
     };
   }
 
@@ -382,7 +447,10 @@ export class PurchasingService {
   private async findReplay(dto: CreatePurchaseDto, companyId: Buffer) {
     const prior = await this.db.purchase.findFirst({
       where: { companyId, clientUuid: uuidToBin(dto.clientUuid) },
-      include: { items: true, units: { select: { id: true } } },
+      include: {
+        items: true,
+        units: { select: { id: true, productId: true, imeiPrimary: true, serialNo: true } },
+      },
     });
     if (!prior) return null;
 
@@ -393,12 +461,25 @@ export class PurchasingService {
     }
 
     const stockLines = prior.items.length - prior.units.length;
+    // Rebuilt from what was stored, not from the request: after a lost response
+    // the client needs to learn which of its lines the FIRST attempt received.
+    const unitProducts = new Set(prior.units.map((u) => u.productId.toString('hex')));
     return {
       purchaseId: binToUuid(prior.id),
       unitsCreated: prior.units.length,
       stockLines: stockLines > 0 ? stockLines : 0,
       total: Number(prior.total),
       rejected: [] as unknown[],
+      accepted: {
+        identifiers: prior.units.map((u) => u.imeiPrimary ?? u.serialNo ?? '').filter(Boolean),
+        stockProductIds: [
+          ...new Set(
+            prior.items
+              .filter((i) => !unitProducts.has(i.productId.toString('hex')))
+              .map((i) => binToUuid(i.productId)),
+          ),
+        ],
+      },
       replayed: true,
     };
   }
