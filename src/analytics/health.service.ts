@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { LOW_STOCK_DEFAULT, LOW_STOCK_SETTING } from '../inventory/low-stock';
 import { Prisma } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -39,7 +40,7 @@ export class HealthService {
     const now = new Date();
     const todayDate = new Date(`${dayKey(now)}T00:00:00.000Z`);
     const deadDays = await this.numberSetting('dead_stock_days', 60);
-    const lowThreshold = await this.numberSetting('low_stock_threshold', 3);
+    const lowThreshold = await this.numberSetting(LOW_STOCK_SETTING, LOW_STOCK_DEFAULT);
 
     // Shared inventory snapshots — fetched once, feed three components.
     const [valuations, velocity, activeProducts] = await Promise.all([

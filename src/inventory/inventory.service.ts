@@ -24,6 +24,8 @@ import {
 import { unitIdentifier } from './unit-identifier.util';
 import { receiveQuantityAtCost } from './stock-cost';
 import { assertAssignedToBranch } from '../rbac/active-branch';
+import { buildStockSummary, type StockSummaryRow } from './stock-summary';
+import { LOW_STOCK_DEFAULT, LOW_STOCK_SETTING } from './low-stock';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
 import { fingerprintReceipt } from './receipt-fingerprint';
 
@@ -812,6 +814,87 @@ export class InventoryService {
     return [...rows.values()].sort(
       (a, b) => a.brand.localeCompare(b.brand) || a.model.localeCompare(b.model),
     );
+  }
+
+  /**
+   * The Stock screen: one row per exact variant, with what it sells for and
+   * whether it is running low.
+   *
+   * Branch-scoped and assignment-checked like `countByModel`. A price is a
+   * decision made in one branch, so without an active branch there is no honest
+   * price to show — this requires one rather than guessing.
+   *
+   * Every figure is read fresh and passed through `buildStockSummary`, which
+   * resolves each unit through the sale's own price ladder and never carries
+   * cost. See that file for what the row deliberately omits.
+   */
+  async summarizeStock(): Promise<StockSummaryRow[]> {
+    const branchId = this.tenant.requireBranchId();
+    await assertAssignedToBranch(this.db, this.tenant.requireUserId(), branchId);
+    const companyId = this.tenant.companyId();
+
+    const [units, stockItems, setting] = await Promise.all([
+      // `in_stock` and nothing else: sold, reserved, faulty, in-transit and
+      // consigned units are not stock anyone can sell today.
+      this.db.unit.findMany({
+        where: { status: 'in_stock', branchId },
+        select: { id: true, productId: true, branchId: true },
+      }),
+      this.db.stockItem.findMany({
+        where: { branchId },
+        select: { productId: true, quantity: true, reservedQuantity: true, price: true, version: true },
+      }),
+      this.db.setting.findFirst({ where: { key: LOW_STOCK_SETTING, branchId: null } }),
+    ]);
+
+    const productIds = [
+      ...new Map(
+        [...units.map((u) => u.productId), ...stockItems.map((s) => s.productId)].map((id) => [
+          id.toString('hex'),
+          id,
+        ]),
+      ).values(),
+    ];
+    if (productIds.length === 0) return [];
+
+    const [products, overrides, branchVariants] = await Promise.all([
+      this.db.product.findMany({
+        where: { id: { in: productIds } },
+        select: {
+          id: true,
+          brand: true,
+          model: true,
+          variant: true,
+          barcode: true,
+          trackingType: true,
+          specifications: true,
+          defaultPrice: true,
+        },
+      }),
+      units.length
+        ? this.db.unitPriceOverride.findMany({
+            where: { companyId, unitId: { in: units.map((u) => u.id) } },
+            select: { unitId: true, price: true, version: true, branchId: true },
+          })
+        : Promise.resolve([]),
+      this.db.branchVariantPrice.findMany({
+        where: { companyId, branchId, productId: { in: productIds } },
+        select: { productId: true, price: true, version: true },
+      }),
+    ]);
+
+    return buildStockSummary({
+      activeBranchId: branchId,
+      threshold: typeof setting?.value === 'number' ? setting.value : LOW_STOCK_DEFAULT,
+      products: products.map((p) => ({
+        ...p,
+        defaultPrice: p.defaultPrice === null ? null : Number(p.defaultPrice),
+      })),
+      units,
+      overrides: overrides.map((o) => ({ ...o, price: Number(o.price) })),
+      branchVariants: branchVariants.map((v) => ({ ...v, price: Number(v.price) })),
+      stockItems: stockItems.map((s) => ({ ...s, price: s.price === null ? null : Number(s.price) })),
+    });
   }
 
   async listStock(filter: InventoryFilter): Promise<InventoryPage> {

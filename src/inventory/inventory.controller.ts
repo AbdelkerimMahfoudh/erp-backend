@@ -44,6 +44,23 @@ export class InventoryController {
     return this.inventory.countByModel();
   }
 
+  @Get('inventory/summary')
+  @ApiOperation({
+    summary: 'The Stock screen: one row per exact variant at the active branch',
+    description:
+      'Serialized variants with at least one `in_stock` unit, and every quantity ' +
+      'stock line the branch holds. Each row carries `available` (sellable now — ' +
+      'reserved quantity excluded), `lowStock` from the shop’s ' +
+      '`low_stock_threshold` (the same rule as the dashboard), and `price`: the ' +
+      'min/max of prices resolved through the sale’s own ladder, with priced and ' +
+      'unpriced counts, or null when nothing is priced. **No cost or margin, in any ' +
+      'shape.** Requires an active branch. Not paginated: it is one row per ' +
+      'variant, not per unit — unit lists stay on `GET /inventory`.',
+  })
+  summary() {
+    return this.inventory.summarizeStock();
+  }
+
   @Get('units/:identifier')
   @ApiOperation({ summary: 'Unit detail by identifier (IMEI or serial), with audit-derived timeline' })
   byIdentifier(@Param('identifier') identifier: string) {

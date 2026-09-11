@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { isLowStock, LOW_STOCK_DEFAULT, LOW_STOCK_SETTING } from '../inventory/low-stock';
 import { Prisma } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -138,7 +139,8 @@ export class DashboardService {
    */
   async lowStock() {
     const branchId = this.tenant.branchId();
-    const threshold = await this.numberSetting('low_stock_threshold', 3);
+    // The same setting and the same comparison the Stock screen uses (`low-stock.ts`).
+    const threshold = await this.numberSetting(LOW_STOCK_SETTING, LOW_STOCK_DEFAULT);
 
     const [unitGroups, stocks] = await Promise.all([
       this.db.unit.groupBy({
@@ -153,7 +155,7 @@ export class DashboardService {
     ]);
 
     const low: { productId: Buffer; inStock: number }[] = [
-      ...unitGroups.filter((g) => g._count <= threshold).map((g) => ({ productId: g.productId, inStock: g._count })),
+      ...unitGroups.filter((g) => isLowStock(g._count, threshold)).map((g) => ({ productId: g.productId, inStock: g._count })),
       ...stocks.map((s) => ({ productId: s.productId, inStock: s.quantity })),
     ];
     const labels = await this.productLabels(low.map((l) => l.productId));
