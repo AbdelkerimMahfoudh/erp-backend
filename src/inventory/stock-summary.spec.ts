@@ -164,6 +164,19 @@ describe('available and low', () => {
     );
     expect(rows[0]).toMatchObject({ available: 2, lowStock: false });
   });
+
+  it('sends on-hand and reserved, so the screen can explain the difference', () => {
+    const rows = buildStockSummary(
+      inputs({ stockItems: [{ productId: CABLE, quantity: 5, reservedQuantity: 3, price: 350, version: 1 }] }),
+    );
+    expect(rows[0]).toMatchObject({ available: 2, onHand: 5, reserved: 3 });
+    expect(rows[0].available).toBe(rows[0].onHand - rows[0].reserved);
+  });
+
+  it('has nothing reserved on a serialized row, and on-hand equal to available', () => {
+    const rows = buildStockSummary(inputs({ units: [unit(1, TV), unit(2, TV)] }));
+    expect(rows[0]).toMatchObject({ available: 2, onHand: 2, reserved: 0 });
+  });
 });
 
 describe('what the row never carries', () => {
@@ -183,7 +196,7 @@ describe('what the row never carries', () => {
   it('carries no unit ids or identifiers — those stay on the unit list', () => {
     const rows = buildStockSummary(inputs({ units: [unit(1, IPHONE_BLACK)] }));
     expect(Object.keys(rows[0]).sort()).toEqual(
-      ['available', 'barcode', 'brand', 'category', 'lowStock', 'lowStockThreshold', 'model', 'price', 'productId', 'specifications', 'trackingType', 'variant'].sort(),
+      ['available', 'barcode', 'brand', 'category', 'lowStock', 'lowStockThreshold', 'model', 'onHand', 'price', 'productId', 'reserved', 'specifications', 'trackingType', 'variant'].sort(),
     );
   });
 });

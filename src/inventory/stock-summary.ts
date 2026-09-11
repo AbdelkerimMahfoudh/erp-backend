@@ -74,6 +74,15 @@ export interface StockSummaryRow {
    * promised to an open transfer — reserved goods are not free to sell.
    */
   available: number;
+  /**
+   * Physically held. Equal to `available` for serialized goods; for quantity
+   * stock it includes what is reserved. The low-stock rule compares THIS figure,
+   * so a row can be low-looking-but-not-low by exactly `reserved` — which is why
+   * both are sent, and the screen can say so instead of appearing to disagree.
+   */
+  onHand: number;
+  /** Promised to an open transfer. Always 0 for serialized goods. */
+  reserved: number;
   lowStock: boolean;
   lowStockThreshold: number;
   /**
@@ -132,6 +141,8 @@ export function buildStockSummary(input: SummaryInputs): StockSummaryRow[] {
     rows.push({
       ...identity(product),
       available: units.length,
+      onHand: units.length,
+      reserved: 0,
       lowStock: isLowStock(units.length, input.threshold),
       lowStockThreshold: input.threshold,
       price:
@@ -162,6 +173,8 @@ export function buildStockSummary(input: SummaryInputs): StockSummaryRow[] {
     rows.push({
       ...identity(product),
       available,
+      onHand: s.quantity,
+      reserved: s.reservedQuantity,
       lowStock: isLowStock(s.quantity, input.threshold),
       lowStockThreshold: input.threshold,
       price:
