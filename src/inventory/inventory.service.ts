@@ -25,6 +25,7 @@ import { unitIdentifier } from './unit-identifier.util';
 import { receiveQuantityAtCost } from './stock-cost';
 import { assertAssignedToBranch } from '../rbac/active-branch';
 import { buildStockSummary, type StockSummaryRow } from './stock-summary';
+import { referencedIds, shapeUnitTimeline } from './unit-timeline';
 import { LOW_STOCK_DEFAULT, LOW_STOCK_SETTING } from './low-stock';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
 import { fingerprintReceipt } from './receipt-fingerprint';
@@ -687,7 +688,14 @@ export class InventoryService {
           { serialNo: identifier },
         ],
       },
-      include: { product: true, branch: { select: { id: true, name: true } } },
+      include: {
+        product: true,
+        branch: { select: { id: true, name: true } },
+        // Where it came from, for the item summary. Names and a reference only —
+        // a purchase's totals are cost, and cost stays behind `cost.view`.
+        supplier: { select: { name: true } },
+        purchase: { select: { referenceNo: true, date: true } },
+      },
     });
     if (!unit) throw new NotFoundException('Unit not found');
     return unit;
@@ -700,21 +708,41 @@ export class InventoryService {
     return { ...unit, timeline };
   }
 
+  /**
+   * The unit's history as language-free facts — see `unit-timeline.ts`.
+   *
+   * The NEWEST 200 entries. This used to take the oldest 200 in ascending
+   * order, so a busy phone's recent history was the part cut off.
+   */
   private async timeline(unitId: Buffer) {
     const events = await this.db.auditLog.findMany({
       where: { entityId: unitId, entityType: { in: ['Unit', 'Return'] } },
-      orderBy: { at: 'asc' },
+      orderBy: [{ at: 'desc' }, { id: 'desc' }],
       take: 200,
     });
-    return events.map((e) => ({
-      at: e.at,
-      entity: e.entityType,
-      action: e.action,
-      before: e.before,
-      after: e.after,
-      reason: e.reason,
-      by: e.userId ? binToUuid(e.userId) : null,
-    }));
+
+    const { userIds, branchIds } = referencedIds(events);
+    const [users, branches] = await Promise.all([
+      userIds.length
+        ? this.db.user.findMany({
+            where: { id: { in: userIds } },
+            select: { id: true, name: true, userBranches: { select: { branchId: true, role: { select: { key: true } } } } },
+          })
+        : [],
+      branchIds.length
+        ? this.db.branch.findMany({ where: { id: { in: branchIds } }, select: { id: true, name: true } })
+        : [],
+    ]);
+
+    return shapeUnitTimeline(events, {
+      users: new Map(
+        users.map((u) => [
+          u.id.toString('hex'),
+          { name: u.name, roles: new Map(u.userBranches.map((ub) => [ub.branchId.toString('hex'), ub.role.key as string])) },
+        ]),
+      ),
+      branches: new Map(branches.map((br) => [br.id.toString('hex'), br.name])),
+    });
   }
 
   /**

@@ -183,6 +183,19 @@ export class TransfersService {
               problems: [{ identifier, reason: 'claimed by someone else' }],
             });
           }
+          /*
+           * The reservation is part of the phone's history. Without this entry the
+           * timeline jumped from "In stock" straight to "sent" or "back in stock",
+           * with nothing saying a transfer ever claimed it.
+           */
+          await this.audit.recordTx(tx, {
+            entityType: 'Unit',
+            entityId: unit.id,
+            action: 'status_change',
+            before: { status: 'in_stock' },
+            after: { status: 'reserved', transferId: binToUuid(id), toBranch: binToUuid(toBranchId) },
+            branchId: fromBranchId,
+          });
         }
 
         /**
@@ -517,7 +530,7 @@ export class TransfersService {
           entityId: i.unitId,
           action: 'status_change',
           before: { status: 'reserved' },
-          after: { status: 'in_stock' },
+          after: { status: 'in_stock', transferId: binToUuid(transferId) },
           reason: action,
           branchId: fromBranchId,
         });
@@ -699,7 +712,11 @@ export class TransfersService {
           entityId: i.unitId!,
           action: 'status_change',
           before: { status: 'reserved' },
-          after: { status: 'in_transit' },
+          after: {
+            status: 'in_transit',
+            transferId: binToUuid(transfer.id),
+            toBranch: binToUuid(transfer.toBranchId),
+          },
           branchId: fromBranchId,
         });
       }
@@ -881,7 +898,12 @@ export class TransfersService {
             entityId: i.unitId!,
             action: 'status_change',
             before: { status: 'in_transit' },
-            after: { status: 'in_stock', branch: binToUuid(toBranchId) },
+            after: {
+              status: 'in_stock',
+              branch: binToUuid(toBranchId),
+              transferId: binToUuid(transfer.id),
+              fromBranch: binToUuid(transfer.fromBranchId),
+            },
             branchId: toBranchId,
           });
         }
