@@ -140,6 +140,13 @@ export class SuppliersService {
     const paidBy = new Map(paid.map((p) => [p.supplier_id.toString('hex'), num(p.paid)]));
 
     for (const t of totals) {
+      /*
+       * A purchase with no supplier (`0070`) is not a payable: it was settled in
+       * full at the counter and owes nobody. The `supplierId: { in: ids }`
+       * filter above already excludes those rows — this keeps the type honest
+       * rather than asserting the filter will never change.
+       */
+      if (!t.supplierId) continue;
       const key = t.supplierId.toString('hex');
       out.set(key, round2(num(t._sum.total) - (paidBy.get(key) ?? 0)));
     }

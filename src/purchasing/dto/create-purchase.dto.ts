@@ -112,9 +112,20 @@ export class CreatePurchaseDto {
   @IsUUID()
   clientUuid!: string;
 
-  @ApiProperty({ format: 'uuid' })
+  /**
+   * OPTIONAL (`0070`). Who the goods were bought from, when there is somebody
+   * to name.
+   *
+   * Omit it for the everyday case: a handset bought from a walk-in seller and
+   * paid for on the spot. Omitting it is **not** a statement that payment
+   * happened — `paidAmount` must still say so, and must cover the whole total,
+   * or the purchase is refused. An unpaid balance always needs a named payee,
+   * because a debt has to be owed to somebody.
+   */
+  @ApiPropertyOptional({ format: 'uuid', description: 'Omit for a walk-in seller; then paidAmount must equal the total' })
+  @IsOptional()
   @IsUUID()
-  supplierId: string;
+  supplierId?: string;
 
   @ApiPropertyOptional({ maxLength: 40 })
   @IsOptional()

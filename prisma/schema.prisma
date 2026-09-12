@@ -1079,7 +1079,17 @@ model Purchase {
   id                Bytes          @id @db.Binary(16)
   companyId         Bytes          @map("company_id") @db.Binary(16)
   branchId          Bytes          @map("branch_id") @db.Binary(16)
-  supplierId        Bytes          @map("supplier_id") @db.Binary(16)
+  /// NULLABLE (`0070`). The everyday case this shop actually has is buying a
+  /// handset from whoever walked in with it and paying on the spot: there is no
+  /// trading partner to record, and inventing an "Unknown supplier" row would
+  /// put a fictional counterparty into the payables ledger.
+  ///
+  /// NULL is permitted ONLY on a purchase settled in full — the service refuses
+  /// an outstanding balance with nobody named, because a debt has to be owed to
+  /// somebody. It is never a substitute for "we did not ask": omitting the
+  /// supplier does not imply payment, and full payment must be stated
+  /// explicitly.
+  supplierId        Bytes?         @map("supplier_id") @db.Binary(16)
   userId            Bytes?         @map("user_id") @db.Binary(16)
   referenceNo       String?        @map("reference_no") @db.VarChar(40)
   /// Client-generated request identity for safe retries (see 0013).
@@ -1099,7 +1109,7 @@ model Purchase {
 
   company     Company                        @relation(fields: [companyId], references: [id])
   branch      Branch                         @relation(fields: [branchId], references: [id])
-  supplier    Supplier                       @relation(fields: [supplierId], references: [id])
+  supplier    Supplier?                      @relation(fields: [supplierId], references: [id])
   user        User?                          @relation(fields: [userId], references: [id])
   items       PurchaseItem[]
   units       Unit[]
@@ -1135,7 +1145,12 @@ model PurchaseItem {
 model SupplierPayment {
   id          Bytes         @id @db.Binary(16)
   companyId   Bytes         @map("company_id") @db.Binary(16)
-  supplierId  Bytes         @map("supplier_id") @db.Binary(16)
+  /// NULLABLE (`0070`), for the same reason `Purchase.supplierId` is: money
+  /// genuinely changed hands for a phone bought from a walk-in seller, and that
+  /// payment record must survive even though there is no trading partner to
+  /// attribute it to. The row is kept rather than skipped — dropping it would
+  /// lose the fact that the shop paid.
+  supplierId  Bytes?        @map("supplier_id") @db.Binary(16)
   purchaseId  Bytes?        @map("purchase_id") @db.Binary(16)
   amount      Decimal       @db.Decimal(14, 2)
   method      PaymentMethod
@@ -1143,7 +1158,7 @@ model SupplierPayment {
   createdById Bytes?        @map("created_by") @db.Binary(16)
 
   company   Company   @relation(fields: [companyId], references: [id])
-  supplier  Supplier  @relation(fields: [supplierId], references: [id])
+  supplier  Supplier? @relation(fields: [supplierId], references: [id])
   purchase  Purchase? @relation(fields: [purchaseId], references: [id])
   createdBy User?     @relation(fields: [createdById], references: [id])
 

@@ -20,6 +20,10 @@ import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
 import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+// The payable module already owns money rounding, and this file must agree with
+// it exactly — a purchase the service thinks is settled and the ledger thinks is
+// a penny short would be an unpayable debt nobody could clear.
+import { round2 } from '../suppliers/payable';
 import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
 
 /**
@@ -32,7 +36,15 @@ import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
  */
 function fingerprint(dto: CreatePurchaseDto): string {
   const canonical = {
-    supplierId: dto.supplierId,
+    /*
+     * `?? null`, never left undefined: `JSON.stringify` drops an undefined
+     * property entirely, so a walk-in purchase would hash a shorter object and
+     * a later replay that happened to send `supplierId: null` would look like a
+     * different delivery. An explicit null hashes stably. A named supplier
+     * hashes exactly as it always did, so replays of existing purchases still
+     * match their stored fingerprint.
+     */
+    supplierId: dto.supplierId ?? null,
     referenceNo: dto.referenceNo ?? null,
     paidAmount: dto.paidAmount ?? 0,
     items: (dto.items ?? [])
@@ -137,8 +149,20 @@ export class PurchasingService {
     const replay = await this.findReplay(dto, companyId);
     if (replay) return replay;
 
-    const supplier = await this.db.supplier.findUnique({ where: { id: uuidToBin(dto.supplierId) } });
-    if (!supplier) throw new NotFoundException('Supplier not found');
+    /**
+     * A named supplier must exist. NO supplier is legitimate — and is the
+     * commonest case in this shop, buying a handset from whoever walked in with
+     * it (`0070`).
+     *
+     * There is deliberately no fallback to an "Unknown supplier" row: that
+     * would put a fictional counterparty into the payables ledger, and every
+     * walk-in purchase in the shop's history would pile up against it as though
+     * one person were owed the lot.
+     */
+    const supplier = dto.supplierId
+      ? await this.db.supplier.findUnique({ where: { id: uuidToBin(dto.supplierId) } })
+      : null;
+    if (dto.supplierId && !supplier) throw new NotFoundException('Supplier not found');
 
     // Load every referenced product once (must belong to this company).
     const productIds = [...new Set(items.map((i) => i.productId))];
@@ -251,6 +275,34 @@ export class PurchasingService {
     const total = Number((unitsCost + stockCost).toFixed(2));
     const amountPaid = dto.paidAmount ?? 0;
     if (amountPaid > total) throw new BadRequestException('Paid amount exceeds total');
+
+    /**
+     * No payee named ⇒ nothing may be left owing.
+     *
+     * A debt has to be owed to somebody: an outstanding balance against nobody
+     * is a figure no report can chase, no settlement can clear and no person can
+     * be asked about. So the purchase is refused, and the refusal says which of
+     * the two things to do — name who it was bought from, or record the whole
+     * amount as paid.
+     *
+     * Note what is NOT done here: `paidAmount` is not defaulted to the total
+     * just because no supplier was given. Omitting a seller says nothing about
+     * whether money changed hands, and quietly marking an unpaid purchase as
+     * settled would invent a payment that never happened. The client has to
+     * state it.
+     */
+    if (!supplier && round2(amountPaid) !== round2(total)) {
+      throw new BadRequestException({
+        code: 'supplier_required_for_balance',
+        message:
+          'Name who this was bought from, or record the full amount as paid. ' +
+          'An unpaid balance has to be owed to somebody.',
+        total: round2(total),
+        paidAmount: round2(amountPaid),
+        outstanding: round2(total - amountPaid),
+      });
+    }
+
     const status = amountPaid >= total ? 'paid' : amountPaid > 0 ? 'partial' : 'unpaid';
 
     // 4. Commit — one atomic transaction (the Receiving Session "Finish").
@@ -280,7 +332,7 @@ export class PurchasingService {
             id: pid,
             companyId,
             branchId,
-            supplierId: supplier.id,
+            supplierId: supplier?.id ?? null,
             userId: this.tenant.userId() ?? null,
             referenceNo: dto.referenceNo ?? null,
             clientUuid: uuidToBin(dto.clientUuid),
@@ -306,7 +358,9 @@ export class PurchasingService {
             imeiSecondary: u.imeiSecondary,
             serialNo: u.serialNo,
             cost: u.cost,
-            supplierId: supplier.id,
+            // Already nullable on the unit: a phone bought from a walk-in seller
+            // has a cost and a purchase, and simply no trading partner.
+            supplierId: supplier?.id ?? null,
             purchaseId: pid,
           });
         }
@@ -336,12 +390,24 @@ export class PurchasingService {
         }
 
         const payable = Number((total - amountPaid).toFixed(2));
-        if (payable !== 0) {
+        /*
+         * Only a named supplier can carry a balance, and by the rule above a
+         * purchase with no supplier has none. The `supplier` guard is belt and
+         * braces: if the validation above were ever weakened, this would leave
+         * the ledger untouched rather than throw at the database.
+         */
+        if (payable !== 0 && supplier) {
           await tx.supplier.update({ where: { id: supplier.id }, data: { balance: { increment: payable } } });
         }
         if (amountPaid > 0) {
+          /*
+           * The payment record is written whether or not there is a supplier.
+           * Money genuinely left the till for a walk-in purchase, and skipping
+           * the row would lose that fact entirely — the purchase would show as
+           * paid with nothing recording the payment.
+           */
           await tx.supplierPayment.create({
-            data: { id: newUuidV7Bin(), companyId, supplierId: supplier.id, purchaseId: pid, amount: amountPaid, method: 'cash' },
+            data: { id: newUuidV7Bin(), companyId, supplierId: supplier?.id ?? null, purchaseId: pid, amount: amountPaid, method: 'cash' },
           });
         }
 
@@ -366,7 +432,7 @@ export class PurchasingService {
           codeType: plan.codeType,
           code: plan.code,
           productId: plan.productId,
-          supplierId: supplier.id,
+          supplierId: supplier?.id ?? null,
           source: 'receiving',
         })));
 
