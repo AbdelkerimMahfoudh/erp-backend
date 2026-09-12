@@ -72,6 +72,23 @@ export function catalogueKeys(): string[] {
   return PERMISSIONS.map((p) => p.key).sort();
 }
 
+/**
+ * Canonical keys that arrived AFTER 0059, each published by its own migration.
+ *
+ * 0059 is an immutable historical snapshot — see the header: editing it would
+ * leave every database that already applied it silently different from the file
+ * describing it. So a permission added later is published by a new additive
+ * migration, and this list is what tells the drift check the difference between
+ * "0059 is out of step with the canonical source" (a bug) and "the canonical
+ * source has grown since, exactly as designed" (not a bug).
+ *
+ * Adding an entry here is part of writing such a migration, and the entry must
+ * name the migration that publishes the key.
+ */
+export const PUBLISHED_AFTER_CATALOGUE: ReadonlyMap<string, string> = new Map([
+  ['customer.manage', '0068_customer_manage_permission'],
+]);
+
 function committedSql(): string {
   return readFileSync(
     join(__dirname, '..', 'prisma', 'migrations', CATALOGUE_MIGRATION, 'migration.sql'),
@@ -90,7 +107,11 @@ export function checkCommittedMigration(): { ok: boolean; missing: string[]; ext
   const inSql = new Set([...sql.matchAll(/'((?:[a-z_]+\.)+[a-z_]+)'/g)].map((m) => m[1]));
   const canonical = new Set(catalogueKeys());
 
-  const missing = [...canonical].filter((k) => !inSql.has(k)).sort();
+  // A key a LATER migration publishes is not missing from this one; it did not
+  // exist when this snapshot was taken.
+  const missing = [...canonical]
+    .filter((k) => !inSql.has(k) && !PUBLISHED_AFTER_CATALOGUE.has(k))
+    .sort();
   const extra = [...inSql].filter((k) => !canonical.has(k)).sort();
   return { ok: missing.length === 0 && extra.length === 0, missing, extra };
 }

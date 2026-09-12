@@ -39,6 +39,7 @@ import { SuppliersModule } from './suppliers/suppliers.module';
 import { CorrectionsModule } from './corrections/corrections.module';
 import { PurchasingModule } from './purchasing/purchasing.module';
 import { PricingModule } from './pricing/pricing.module';
+import { CustomersModule } from './customers/customers.module';
 import { SalesModule } from './sales/sales.module';
 import { TransfersModule } from './transfers/transfers.module';
 import { ReturnsModule } from './returns/returns.module';
@@ -158,6 +159,7 @@ import { LoansModule } from './loans/loans.module';
     CorrectionsModule,
     PurchasingModule,
     PricingModule,
+    CustomersModule,
     SalesModule,
     TransfersModule,
     ReturnsModule,

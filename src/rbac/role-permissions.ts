@@ -168,6 +168,18 @@ export const PERMISSIONS: { key: string; label: string }[] = [
   { key: 'transfer.receive',    label: 'Receive a transfer at the destination' },
   { key: 'transfer.cancel',     label: 'Cancel any transfer before shipment' },
   { key: 'transfer.cancel_own', label: 'Withdraw your own pending request' },
+  /**
+   * 4a — adding a customer from the till.
+   *
+   * FINDING a customer is not gated on this: it is part of selling, guarded by
+   * `sale.create`, because a credit sale REQUIRES a customer and gating the
+   * lookup would gate the sale. This key is only the authority to CREATE one,
+   * so a shop that wants its customer list curated can withhold it and still
+   * sell. Branch-scoped like `catalog.manage` — deliberately not added to
+   * `COMPANY_PERMISSIONS` — so the action is attributed to the branch it
+   * happened in and no authority is unioned across branches.
+   */
+  { key: 'customer.manage',     label: 'Add a customer' },
 ];
 
 export const ALL_PERMISSION_KEYS = PERMISSIONS.map((p) => p.key);
@@ -272,6 +284,10 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     // here, and it carries no pricing authority — `price.edit` stays delegated
     // per branch by an Owner.
     'catalog.manage',
+    // 4a: a manager may add a customer at the counter. An employee may find and
+    // attribute a sale to one, and may not create one — the same shape as the
+    // catalog split above.
+    'customer.manage',
   ],
 
   /**

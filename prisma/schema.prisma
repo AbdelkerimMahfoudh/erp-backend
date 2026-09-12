@@ -1315,6 +1315,16 @@ model Payment {
   receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
   /// Frozen at the moment of payment, like every other account reference here.
   accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+  /// The PROVIDER as it stood at payment time — `bankily`, `sedad`, `bim_bank`,
+  /// or the configured name when the provider is `other` (4a).
+  ///
+  /// The label alone was not enough. A shop that renames "Bankily – Main
+  /// Counter" to "Counter 1" keeps the frozen label, but a receipt reprinted a
+  /// year later could no longer say which service the money came through, and
+  /// an account switched from one provider to another would make every past
+  /// payment look like it used the new one. Both are answered by freezing the
+  /// provider beside the label.
+  accountProviderSnapshot String? @map("account_provider_snapshot") @db.VarChar(60)
 
   company          Company           @relation(fields: [companyId], references: [id])
   sale             Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)

@@ -8,6 +8,7 @@ import {
 } from './role-permissions';
 import {
   CATALOGUE_MIGRATION,
+  PUBLISHED_AFTER_CATALOGUE,
   catalogueKeys,
   checkCommittedMigration,
 } from '../../scripts/generate-catalogue-migration';
@@ -28,14 +29,19 @@ import {
 const MIGRATIONS = join(__dirname, '..', '..', 'prisma', 'migrations');
 
 describe('the canonical catalogue', () => {
-  it('holds exactly 61 keys, all unique', () => {
-    expect(PERMISSIONS).toHaveLength(61);
-    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(61);
+  it('holds exactly 62 keys, all unique', () => {
+    // 61 → 62 in 4a: `customer.manage`, the authority to ADD a customer.
+    // Finding one stays under `sale.create`, because a credit sale requires a
+    // customer and gating the lookup would gate the sale.
+    expect(PERMISSIONS).toHaveLength(62);
+    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(62);
   });
 
-  it('gives Owner 61, Manager 43 and Employee 20', () => {
-    expect(ROLE_PERMISSIONS.owner).toHaveLength(61);
-    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(43);
+  it('gives Owner 62, Manager 44 and Employee 20', () => {
+    expect(ROLE_PERMISSIONS.owner).toHaveLength(62);
+    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(44);
+    // The Employee is deliberately unchanged: they attribute a sale to an
+    // existing customer, and do not create one.
     expect(ROLE_PERMISSIONS.store_employee).toHaveLength(20);
   });
 
@@ -85,7 +91,25 @@ describe(`migration ${CATALOGUE_MIGRATION}`, () => {
     const touching = later.filter((d) =>
       writesToCatalogue(readFileSync(join(MIGRATIONS, d, 'migration.sql'), 'utf8')),
     );
-    expect(touching).toEqual([]);
+    /*
+     * A later migration may ADD the one key its own feature introduces — that
+     * is how every permission before 0059 arrived, and refusing it would mean
+     * no feature could ever ship a permission again. What must never happen is
+     * a second migration republishing the WHOLE catalogue (pinned separately
+     * below), or one that updates or deletes catalogue rows.
+     *
+     * Each entry here is a single additive insert, guarded by NOT EXISTS on the
+     * key. Adding to this list is part of writing such a migration.
+     */
+    const additive = ['0068_customer_manage_permission'];
+    expect(touching).toEqual(additive);
+
+    for (const name of additive) {
+      const body = readFileSync(join(MIGRATIONS, name, 'migration.sql'), 'utf8').replace(/^\s*--.*$/gm, '');
+      expect(body).not.toMatch(/\bUPDATE\s+`?permissions`?/i);
+      expect(body).not.toMatch(/\bDELETE\s+FROM/i);
+      expect(body).toMatch(/WHERE NOT EXISTS/i);
+    }
 
     /*
      * Not vacuous: 0067 names the `permissions` table — it has to, to find the
@@ -200,9 +224,22 @@ describe(`migration ${CATALOGUE_MIGRATION}`, () => {
   });
 
   it('is derived from the canonical source, not hand-maintained', () => {
-    // Every canonical key appears; the generator is what produced them.
-    for (const key of catalogueKeys()) expect(sql).toContain(`'${key}'`);
+    /*
+     * Every canonical key of ITS OWN TIME appears; the generator produced them.
+     * Keys added since are published by their own additive migration — 0059 is
+     * an immutable snapshot and is never rewritten to include them.
+     */
+    for (const key of catalogueKeys()) {
+      if (PUBLISHED_AFTER_CATALOGUE.has(key)) continue;
+      expect(sql).toContain(`'${key}'`);
+    }
     expect(sql).toContain('scripts/generate-catalogue-migration.ts');
+
+    // Not vacuous: each later key really is published somewhere.
+    for (const [key, migration] of PUBLISHED_AFTER_CATALOGUE) {
+      const body = readFileSync(join(MIGRATIONS, migration, 'migration.sql'), 'utf8');
+      expect(body).toContain(`'${key}'`);
+    }
   });
 
   it('uses conditional insert semantics, never IGNORE or REPLACE', () => {

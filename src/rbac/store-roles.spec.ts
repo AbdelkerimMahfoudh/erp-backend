@@ -68,7 +68,8 @@ describe('store-facing roles', () => {
     // The Owner holds every permission by construction, so this number moving
     // is the signal that a phase added authority — it should never move by
     // accident, and it moving LATE means a phase shipped a drift.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(61);
+    // 61 → 62 in 4a — `customer.manage`.
+    expect(ROLE_PERMISSIONS.owner.length).toBe(62);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);

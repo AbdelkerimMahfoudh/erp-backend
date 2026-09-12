@@ -465,11 +465,42 @@ export class SalesService {
            */
           const accountBin =
             pay.method === 'cash' || !pay.receivingAccountId ? null : uuidToBin(pay.receivingAccountId);
+
+          /**
+           * A non-cash payment must name the account it landed in (4a).
+           *
+           * It used to be optional, and money with no account was recorded as
+           * "unattributed" — a real category, but one nothing could reconcile.
+           * The till now knows which accounts exist, so the honest answer is
+           * always available and the gap no longer has a reason to exist. Cash
+           * is the opposite case: the drawer belongs to no account, and
+           * `ck_payments_cash_no_account` refuses one.
+           */
+          if (pay.method !== 'cash' && !accountBin) {
+            throw new BadRequestException('Choose the account this money was received into');
+          }
+
           const account = accountBin
-            ? await tx.receivingAccount.findFirst({ where: { id: accountBin }, select: { label: true } })
+            ? await tx.receivingAccount.findFirst({
+                where: { id: accountBin },
+                select: { label: true, provider: true, providerName: true, isActive: true },
+              })
             : null;
           if (accountBin && !account) {
+            // The tenant client scopes this lookup, so another company's
+            // account is simply not found — it can never be referenced here.
             throw new BadRequestException('That receiving account does not exist');
+          }
+          /**
+           * A deactivated account may not take new money.
+           *
+           * Deactivation is how a shop closes a channel; accepting a sale into
+           * one would create a balance nobody is reconciling, in an account the
+           * Owner believes is shut. Past payments keep pointing at it, which is
+           * why the row is deactivated rather than deleted.
+           */
+          if (account && !account.isActive) {
+            throw new BadRequestException('That receiving account is no longer active');
           }
           await tx.payment.create({
             data: {
@@ -480,6 +511,13 @@ export class SalesService {
               amount: pay.amount,
               receivingAccountId: accountBin,
               accountLabelSnapshot: account?.label ?? null,
+              // Frozen beside the label: a rename or a provider change later
+              // must not rewrite what this receipt said at the counter.
+              accountProviderSnapshot: account
+                ? account.provider === 'other'
+                  ? (account.providerName ?? 'other')
+                  : account.provider
+                : null,
             },
           });
         }
