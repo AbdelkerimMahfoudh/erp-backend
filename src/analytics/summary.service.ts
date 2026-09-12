@@ -28,6 +28,24 @@ export interface PeriodSummary {
   };
   /** Expenses broken out, because a salary is not a taxi fare. */
   expenseDetail: { total: number; fixed: number; salaries: number; count: number };
+  /**
+   * Money CUSTOMERS actually handed over in the period, across every channel.
+   *
+   * A fourth question, and not answerable from any figure that existed before.
+   * `cash.salesReceived` is net REVENUE used as a stand-in — it is what was
+   * billed, not what was collected — so a credit sale inflated it and a deposit
+   * against an older sale was missing from it entirely. This counts `payments`
+   * rows, which is the only record of money arriving.
+   *
+   * Deliberately NOT netted against refunds. A refund is money going back out
+   * and already has its own line (`cash.refundsPaid`); subtracting it here
+   * would answer "collected" with a number that is neither what came in nor
+   * what the shop kept, and a reader could not tell which.
+   *
+   * Never profit and never an available balance: collecting an old debt moves
+   * no profit at all, and cash in hand is this less everything that went out.
+   */
+  collected: { total: number; cash: number; account: number; count: number };
   /** What is owed, in both directions, as of now rather than for the period. */
   balances: {
     loansReceivable: number;
@@ -111,6 +129,7 @@ export class SummaryService {
 
     const balances = await this.balances();
     const discrepancies = await this.openDiscrepancies();
+    const collected = await this.collectedInPeriod(fromISO, toISO);
     const prev = precedingPeriod(fromISO, toISO);
 
     return {
@@ -130,6 +149,7 @@ export class SummaryService {
         salaries: current.expensesSalary,
         count: current.expensesCount,
       },
+      collected,
       balances,
       discrepancies,
       comparison: {
@@ -194,6 +214,62 @@ export class SummaryService {
       refundsPaid: sum((r) => r.refundsPaidTotal),
       correctionsCash: sum((r) => r.correctionsCash),
       days: rows.length,
+    };
+  }
+
+  /**
+   * Money customers actually handed over in the window.
+   *
+   * Counted from `payments`, which is the only record of money ARRIVING. The
+   * rollup could not answer this: it stores revenue, and revenue is what was
+   * billed — a credit sale raises it without a coin moving, and a customer
+   * settling an older balance moves a coin without raising it.
+   *
+   * Split by channel because a shop reconciles them separately: cash is the
+   * drawer, everything else landed in a named account. The split is `method`,
+   * not `receiving_account_id` — an older non-cash payment can have no account
+   * (they were "unattributed" before `0045`) and would otherwise vanish from
+   * the total it belongs in.
+   *
+   * Branch scoping is EXPLICIT, exactly as `rollupTotals` does it: the tenant
+   * client scopes by company alone, so without this a two-shop owner would read
+   * one shop's screen and see both shops' money.
+   *
+   * Keyed on the SALE's `sold_at` rather than `paid_at`. Every payment this
+   * model records is taken as part of its sale, so the two agree — and using
+   * the sale's own timestamp is what keeps this figure in the same window as
+   * the revenue beside it, instead of drifting a day apart at a midnight
+   * boundary. If part-payment against an older sale is ever added, this must
+   * move to `paid_at`, and the two figures must stop being compared directly.
+   */
+  private async collectedInPeriod(fromISO: string, toISO: string) {
+    const branchId = this.tenant.branchId() ?? null;
+    const start = new Date(`${fromISO}T00:00:00.000Z`);
+    // Exclusive upper bound: `to` is an INCLUSIVE day, so the window runs to
+    // the end of it. Comparing against midnight would silently drop the last
+    // day's takings — the day a shopkeeper is most likely to be looking at.
+    const end = new Date(new Date(`${toISO}T00:00:00.000Z`).getTime() + 86_400_000);
+
+    const rows = await this.db.payment.groupBy({
+      by: ['method'],
+      where: {
+        sale: {
+          soldAt: { gte: start, lt: end },
+          ...(branchId ? { branchId } : {}),
+        },
+      },
+      _sum: { amount: true },
+      _count: true,
+    });
+
+    const sumOf = (pick: (method: string) => boolean): number =>
+      round2(rows.filter((r) => pick(r.method)).reduce((acc, r) => acc + num(r._sum.amount), 0));
+
+    return {
+      total: sumOf(() => true),
+      cash: sumOf((m) => m === 'cash'),
+      account: sumOf((m) => m !== 'cash'),
+      count: rows.reduce((acc, r) => acc + r._count, 0),
     };
   }
 
