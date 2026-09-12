@@ -785,13 +785,19 @@ describe('the category decides how its products are received', () => {
     expect(products[0].trackingType).toBe('quantity');
   });
 
-  it('refuses serial as a newly chosen mode on an uncategorised product', async () => {
+  /**
+   * A television scanned by its serial has to be able to become a product. The
+   * category rule above is what stops counted stock being individually tracked;
+   * an uncategorised product has no category to contradict, so the mode is the
+   * client's to state.
+   */
+  it('accepts serial as a newly chosen mode on an uncategorised product', async () => {
     const { service, products } = makeService();
 
-    await expect(service.create(baseDto({ trackingType: 'serial' as never }))).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
-    expect(products).toHaveLength(0);
+    await service.create(baseDto({ trackingType: 'serial' as never }));
+
+    expect(products).toHaveLength(1);
+    expect(products[0].trackingType).toBe('serial');
   });
 
   /**

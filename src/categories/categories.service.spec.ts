@@ -67,12 +67,11 @@ describe('creating a category', () => {
     }
   });
 
-  it('refuses serial, which is no longer a selectable workflow', async () => {
+  it('accepts serial, so a shop can file televisions and laptops by serial number', async () => {
     const { service, categories } = makeService();
-    await expect(service.create(createDto({ defaultTrackingType: TrackingType.serial }))).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
-    expect(categories).toHaveLength(0);
+    await service.create(createDto({ defaultTrackingType: TrackingType.serial }));
+    expect(categories).toHaveLength(1);
+    expect(categories[0].defaultTrackingType).toBe('serial');
   });
 
   it('records the mode it was created with, so the choice is auditable', async () => {
@@ -117,13 +116,21 @@ describe('changing a category tracking mode', () => {
     ).rejects.toMatchObject({ response: { code: 'category_tracking_change_blocked' } });
   });
 
-  it('refuses moving to serial even on an empty category', async () => {
+  /**
+   * Serial is selectable again, so an EMPTY category may be re-filed to it.
+   * A category with products in it still cannot change mode — that is the
+   * `category_tracking_change_blocked` case above, and it is what protects
+   * existing stock from being reinterpreted.
+   */
+  it('allows moving to serial on an empty category', async () => {
     const cat = category();
-    const { service } = makeService({ categories: [cat], productsPerCategory: 0 });
+    const { service, categories } = makeService({ categories: [cat], productsPerCategory: 0 });
 
-    await expect(
-      service.update(cat.id.toString('hex'), { defaultTrackingType: TrackingType.serial } as UpdateCategoryDto),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    await service.update(cat.id.toString('hex'), {
+      defaultTrackingType: TrackingType.serial,
+    } as UpdateCategoryDto);
+
+    expect(categories[0].defaultTrackingType).toBe('serial');
   });
 
   /**

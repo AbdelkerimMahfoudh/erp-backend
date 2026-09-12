@@ -14,19 +14,28 @@ import { TrackingType } from '@prisma/client';
  * and "Téléphone", "هاتف" and "Phone" are all the same workflow. Reading intent
  * out of a label would make the workflow depend on the shop's spelling.
  *
- * ## Why `serial` is not offered
+ * ## Why `serial` is offered again
  *
- * The tracking engine supports three modes and the strategy registry still
- * implements all three. But `serial` is deliberately **not selectable** right
- * now: the approved decision is that only `Phone` is individually tracked, and
- * offering a third mode in the picker would invite exactly the misconfiguration
- * this module exists to prevent — a box of cables registered one at a time.
+ * It was withdrawn from the picker once, to stop a box of cables being
+ * registered one at a time. That guard cost more than it saved: the shop sells
+ * televisions, laptops and power stations that carry a serial and no IMEI, the
+ * scanner classifies those serials correctly, and Receive already handles them
+ * — but no new serial-tracked product could be created, so a scanned serial had
+ * nowhere to go and the form proposed IMEI instead. Proposing IMEI for a
+ * serial is the worse misconfiguration: it asks for a number the device does
+ * not have.
  *
- * It is not *removed*, because removing it would strand data. A category or
- * product already stored as `serial` keeps working, keeps its units, and may be
- * saved again unchanged. What is refused is *newly choosing* it.
+ * The protection that actually matters is elsewhere and is unchanged: a
+ * category still DECIDES the mode (`resolveTrackingType` refuses a client that
+ * contradicts it), so cables in an Accessories category cannot become
+ * individually tracked whatever a form suggests. The mode is only the client's
+ * to state for an uncategorised product.
  */
-export const SELECTABLE_TRACKING_TYPES: readonly TrackingType[] = [TrackingType.imei, TrackingType.quantity];
+export const SELECTABLE_TRACKING_TYPES: readonly TrackingType[] = [
+  TrackingType.imei,
+  TrackingType.serial,
+  TrackingType.quantity,
+];
 
 /** True when this product is received one physical item at a time. */
 export function isSerialized(mode: TrackingType): boolean {
@@ -42,10 +51,10 @@ export function isSerialized(mode: TrackingType): boolean {
  * because the value predates this rule.
  */
 export function assertSelectableTrackingType(next: TrackingType, previous?: TrackingType | null): void {
-  if (next === previous) return; // unchanged, including a historical `serial`
+  if (next === previous) return; // unchanged, including any historical mode
   if (!SELECTABLE_TRACKING_TYPES.includes(next)) {
     throw new BadRequestException(
-      `Tracking mode '${next}' can no longer be chosen. Phones are tracked individually by IMEI; everything else is counted by quantity.`,
+      `Tracking mode '${next}' cannot be chosen. Devices are tracked one at a time by IMEI or serial number; everything else is counted by quantity.`,
     );
   }
 }
