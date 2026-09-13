@@ -3188,6 +3188,11 @@ enum StoreConnectionStatus {
   /// Stops NEW requests. Never deletes history, never erases a liability — a
   /// shop cannot escape what it owes by blocking the creditor.
   blocked
+  /// The requester withdrew the request before it was answered (`0071`).
+  cancelled
+  /// Either store ended an accepted connection (`0071`). New dealings stop;
+  /// everything already owed or held stays settleable.
+  removed
 }
 
 /// The trust relationship between two companies.

@@ -18,6 +18,63 @@ import {
   toPublicPreview,
   type PublicStorePreview,
 } from './discovery';
+import {
+  mayCancel,
+  mayRemove,
+  newDealingRefusal,
+  resolveConnectionRequest,
+  type ConnectionStatusLike,
+  type CounterpartyKindLike,
+} from './dealing-authorization';
+import { sideOf } from './consignment-scope';
+import { outstanding as consignmentOutstanding, type LedgerKind as ConsignmentLedgerKind } from './consignment-money';
+import {
+  directionFor,
+  remaining as loanRemaining,
+  type Direction,
+  type LedgerKind as LoanLedgerKind,
+} from '../loans/loan-rules';
+
+const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
+
+interface SharedPhone {
+  consignmentId: string;
+  brand: string | null;
+  model: string | null;
+  variant: string | null;
+  identifier: string;
+  custody: 'held' | 'in_transit';
+}
+
+const CLOSED_CONSIGNMENT = new Set(['settled', 'returned_accepted', 'forgiven_settled', 'cancelled']);
+const CLOSED_LOAN = new Set(['settled', 'forgiven_settled', 'cancelled']);
+
+/**
+ * Whose move a loan is waiting for, from this store's side.
+ *
+ * Offers: the store that did NOT make the offer answers. Money: the debtor pays,
+ * and only the creditor confirms a reported payment.
+ */
+export function loanWaitingOn(
+  status: string,
+  direction: Direction,
+  proposedByMe: boolean,
+): 'us' | 'them' | 'both' | 'none' {
+  switch (status) {
+    case 'proposed':
+    case 'counter_proposed':
+      return proposedByMe ? 'them' : 'us';
+    case 'disputed':
+      return 'both';
+    case 'accepted':
+    case 'partially_paid':
+      return direction === 'they_owe_us' ? 'them' : 'us';
+    case 'payment_awaiting_confirmation':
+      return direction === 'they_owe_us' ? 'us' : 'them';
+    default:
+      return 'none';
+  }
+}
 
 /**
  * Finding and trusting another shop (H-CP2).
@@ -146,6 +203,8 @@ export class ConnectionsService {
           direction: iAmRequester ? ('outgoing' as const) : ('incoming' as const),
           /** Only I can act on a request somebody sent ME. */
           canDecide: !iAmRequester && c.status === 'pending',
+          canCancel: mayCancel(c.status as ConnectionStatusLike, iAmRequester),
+          canRemove: mayRemove(c.status as ConnectionStatusLike),
           blockedByMe: c.blockedByCompanyId?.equals(me) ?? false,
           blockReason: c.blockReason,
           note: c.note,
@@ -157,13 +216,61 @@ export class ConnectionsService {
     };
   }
 
-  /** Ask another shop to connect. */
+  /**
+   * Look a store up by its exact code, to confirm who a request would go to.
+   *
+   * Exactly the public preview search already gives — name, city, logo — plus
+   * this store's OWN relationship with it, which the caller already knows. The
+   * same privacy rules as search: not discoverable, inactive or blocked either
+   * way are all "no such store".
+   */
+  async lookup(rawCode: string) {
+    const me = this.tenant.companyId();
+    const code = (rawCode ?? '').trim().toUpperCase();
+    if (code.length !== 10) {
+      throw new BadRequestException({ code: 'store_code_invalid', message: 'A store code is 10 characters' });
+    }
+    await this.refuseOwnCode(me, code);
+
+    const company = await this.prisma.company.findFirst({
+      where: { publicStoreId: code, isDiscoverable: true, isActive: true },
+      select: { id: true, publicStoreId: true, name: true, city: true, logoRef: true },
+    });
+    if (!company) throw new NotFoundException('No such store');
+
+    const existing = await this.pairRow(me, company.id);
+    if (existing?.status === 'blocked') throw new NotFoundException('No such store');
+
+    return {
+      store: toPublicPreview(company),
+      relationship: existing
+        ? {
+            id: binToUuid(existing.id),
+            status: existing.status,
+            direction: existing.requesterCompanyId.equals(me) ? ('outgoing' as const) : ('incoming' as const),
+          }
+        : null,
+    };
+  }
+
+  /**
+   * Ask another shop to connect.
+   *
+   * Every way two shops can already be related is resolved by
+   * `resolveConnectionRequest`, and every outcome is safe to repeat: a retry of
+   * my own request writes nothing, and two requests crossing in flight both
+   * resolve against the single row the unique pair key allows — one creates it,
+   * the other finds it. Nothing here ever accepts on the other store's behalf.
+   */
   async request(publicStoreId: string, note?: string) {
     const me = this.tenant.companyId();
     const userId = this.tenant.userId() ?? null;
+    const code = publicStoreId.trim().toUpperCase();
+
+    await this.refuseOwnCode(me, code);
 
     const them = await this.prisma.company.findFirst({
-      where: { publicStoreId: publicStoreId.trim().toUpperCase(), isDiscoverable: true, isActive: true },
+      where: { publicStoreId: code, isDiscoverable: true, isActive: true },
       select: { id: true },
     });
     /**
@@ -173,45 +280,238 @@ export class ConnectionsService {
      */
     if (!them || them.id.equals(me)) throw new NotFoundException('No such store');
 
-    const existing = await this.prisma.storeConnection.findFirst({
-      where: {
-        OR: [
-          { requesterCompanyId: me, addresseeCompanyId: them.id },
-          { requesterCompanyId: them.id, addresseeCompanyId: me },
-        ],
-      },
-    });
-    if (existing?.status === 'blocked') {
-      // Deliberately the same answer as "no such store".
-      throw new NotFoundException('No such store');
-    }
-    if (existing) {
-      throw new ConflictException(
-        existing.status === 'accepted'
-          ? 'You are already connected to that store'
-          : 'There is already a request between you and that store',
+    // Twice at most: once normally, once more if a concurrent write moved the row.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const existing = await this.pairRow(me, them.id);
+      const outcome = resolveConnectionRequest(
+        existing
+          ? { status: existing.status as ConnectionStatusLike, requesterIsMe: existing.requesterCompanyId.equals(me) }
+          : null,
       );
+
+      if (outcome.kind === 'refuse') {
+        const body = { code: outcome.code, message: outcome.message };
+        throw outcome.status === 404 ? new NotFoundException('No such store') : new ConflictException(body);
+      }
+
+      if (outcome.kind === 'already_requested') return this.list();
+
+      if (outcome.kind === 'reopen' && existing) {
+        const won = await this.prisma.storeConnection.updateMany({
+          where: { id: existing.id, version: existing.version, status: existing.status },
+          data: {
+            // Re-oriented: the store asking NOW is the requester, and the other
+            // store is the one that must accept again.
+            requesterCompanyId: me,
+            addresseeCompanyId: them.id,
+            status: 'pending',
+            requestedById: userId,
+            decidedById: null,
+            decidedAt: null,
+            note: note?.trim() || null,
+            version: { increment: 1 },
+          },
+        });
+        if (won.count === 0) continue;
+        await this.audit.record({
+          entityType: 'StoreConnection',
+          entityId: existing.id,
+          action: 'status_change',
+          before: { status: existing.status },
+          after: { to: code, status: 'pending', reopened: true },
+        });
+        return this.list();
+      }
+
+      const id = newUuidV7Bin();
+      try {
+        await this.prisma.storeConnection.create({
+          data: {
+            id,
+            requesterCompanyId: me,
+            addresseeCompanyId: them.id,
+            status: 'pending',
+            requestedById: userId,
+            note: note?.trim() || null,
+          },
+        });
+      } catch (e) {
+        // The other store's request (or my own retry) created the pair first.
+        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') continue;
+        throw e;
+      }
+      await this.audit.record({
+        entityType: 'StoreConnection',
+        entityId: id,
+        action: 'create',
+        after: { to: code, status: 'pending' },
+      });
+      return this.list();
     }
-
-    const id = newUuidV7Bin();
-    await this.prisma.storeConnection.create({
-      data: {
-        id,
-        requesterCompanyId: me,
-        addresseeCompanyId: them.id,
-        status: 'pending',
-        requestedById: userId,
-        note: note?.trim() || null,
-      },
+    throw new ConflictException({
+      code: 'refresh_required',
+      message: 'That relationship changed while the request was being sent. Refresh and try again.',
     });
+  }
 
-    await this.audit.record({
-      entityType: 'StoreConnection',
-      entityId: id,
-      action: 'create',
-      after: { to: publicStoreId, status: 'pending' },
-    });
+  /** Withdraw a request I sent, before it is answered. */
+  async cancel(id: string, expectedVersion?: number) {
+    const me = this.tenant.companyId();
+    const conn = await this.mine(id);
+    if (!mayCancel(conn.status as ConnectionStatusLike, conn.requesterCompanyId.equals(me))) {
+      throw new ConflictException({
+        code: 'connection_not_cancellable',
+        message: 'Only a request you sent, and that is still waiting, can be withdrawn',
+      });
+    }
+    await this.transition(conn, 'cancelled', expectedVersion);
     return this.list();
+  }
+
+  /**
+   * End an accepted connection, from either side.
+   *
+   * New dealings stop at once — `assertMayStartDealing` re-reads the status
+   * inside every commit. Nothing already agreed, sent, owed or held is touched:
+   * both stores can still return consigned phones, report and confirm payments,
+   * resolve disputes and read their shared history.
+   */
+  async remove(id: string, expectedVersion?: number) {
+    const conn = await this.mine(id);
+    if (!mayRemove(conn.status as ConnectionStatusLike)) {
+      throw new ConflictException({
+        code: 'connection_not_removable',
+        message: 'Only an accepted connection can be removed',
+      });
+    }
+    await this.transition(conn, 'removed', expectedVersion);
+    return this.list();
+  }
+
+  /**
+   * One connected store, from this store's point of view.
+   *
+   * Only what both stores already share: consignments and loans between the
+   * two companies, their ledgers, and the snapshotted identity of consigned
+   * phones. Never the other store's inventory, purchase costs, margins,
+   * customers or dealings with anybody else — none of it is queried.
+   */
+  async summary(id: string) {
+    const me = this.tenant.companyId();
+    const conn = await this.mine(id);
+    const iAmRequester = conn.requesterCompanyId.equals(me);
+    const themId = iAmRequester ? conn.addresseeCompanyId : conn.requesterCompanyId;
+
+    const [company, consignments, loans] = await Promise.all([
+      this.prisma.company.findUnique({
+        where: { id: themId },
+        select: { publicStoreId: true, name: true, city: true, logoRef: true, publicPhone: true },
+      }),
+      this.prisma.consignment.findMany({
+        where: {
+          OR: [
+            { sourceCompanyId: me, destinationCompanyId: themId },
+            { sourceCompanyId: themId, destinationCompanyId: me },
+          ],
+        },
+        include: {
+          lines: { select: { id: true, status: true, brand: true, model: true, variant: true, identifier: true } },
+          ledger: { select: { kind: true, amount: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      this.prisma.loan.findMany({
+        where: {
+          OR: [
+            { companyId: me, counterpartyCompanyId: themId },
+            { companyId: themId, counterpartyCompanyId: me },
+          ],
+        },
+        include: { ledger: { select: { kind: true, amount: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+    ]);
+    if (!company) throw new NotFoundException('No such connection');
+
+    const meHex = binToUuid(me);
+    let theyOweUs = 0;
+    let weOweThem = 0;
+    const ourItemsWithThem: SharedPhone[] = [];
+    const theirItemsWithUs: SharedPhone[] = [];
+
+    const consignmentRows = consignments.map((c) => {
+      const side = sideOf(c, me);
+      const owed = consignmentOutstanding(c.ledger.map((l) => ({ kind: l.kind as ConsignmentLedgerKind, amount: Number(l.amount) })));
+      // The consignor is always the creditor: the holder owes for what it sold.
+      if (owed > 0) side === 'source' ? (theyOweUs += owed) : (weOweThem += owed);
+
+      const inTransit = c.status === 'custody_awaiting_confirmation' || c.status === 'return_in_transit';
+      for (const line of c.lines) {
+        const held = line.status === 'in_custody' || (inTransit && line.status === 'proposed');
+        if (!held) continue;
+        const phone: SharedPhone = {
+          consignmentId: binToUuid(c.id),
+          brand: line.brand,
+          model: line.model,
+          variant: line.variant,
+          identifier: line.identifier,
+          custody: inTransit ? 'in_transit' : 'held',
+        };
+        (side === 'source' ? ourItemsWithThem : theirItemsWithUs).push(phone);
+      }
+
+      return {
+        type: 'consignment' as const,
+        id: binToUuid(c.id),
+        status: c.status,
+        closed: CLOSED_CONSIGNMENT.has(c.status),
+        side,
+        phones: c.lines.length,
+        agreedAmount: c.agreedAmount == null ? null : Number(c.agreedAmount),
+        proposedAmount: c.proposedAmount == null ? null : Number(c.proposedAmount),
+        outstanding: owed,
+        createdAt: c.createdAt,
+      };
+    });
+
+    const loanRows = loans.map((l) => {
+      const direction = directionFor({ companyId: binToUuid(l.companyId), direction: l.direction as Direction }, meHex);
+      const left = loanRemaining(l.ledger.map((e) => ({ kind: e.kind as LoanLedgerKind, amount: Number(e.amount) })));
+      if (left > 0) direction === 'they_owe_us' ? (theyOweUs += left) : (weOweThem += left);
+      return {
+        type: 'loan' as const,
+        id: binToUuid(l.id),
+        status: l.status,
+        closed: CLOSED_LOAN.has(l.status),
+        direction,
+        waitingOn: loanWaitingOn(l.status, direction, l.proposedByCompanyId.equals(me)),
+        principal: l.principal == null ? null : Number(l.principal),
+        proposedAmount: Number(l.proposedAmount),
+        remaining: left,
+        createdAt: l.createdAt,
+      };
+    });
+
+    const status = conn.status as ConnectionStatusLike;
+    return {
+      id: binToUuid(conn.id),
+      status,
+      direction: iAmRequester ? ('outgoing' as const) : ('incoming' as const),
+      version: conn.version,
+      store: toConnectedDetail(company, status === 'accepted'),
+      /** Whether a NEW dealing may start now. Existing ones are always settleable. */
+      canStartDealing: status === 'accepted',
+      canRemove: mayRemove(status),
+      canCancel: mayCancel(status, iAmRequester),
+      canDecide: !iAmRequester && status === 'pending',
+      // Money and custody are separate facts and are never netted against each other.
+      money: { theyOweUs: round2(theyOweUs), weOweThem: round2(weOweThem) },
+      custody: { ourItemsWithThem, theirItemsWithUs },
+      pending: [...consignmentRows, ...loanRows].filter((r) => !r.closed),
+      history: [...consignmentRows, ...loanRows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()),
+    };
   }
 
   /**
@@ -323,6 +623,7 @@ export class ConnectionsService {
     const me = this.tenant.companyId();
     const rows = await this.prisma.counterparty.findMany({
       where: { companyId: me, isActive: true },
+      include: { connection: { select: { id: true, status: true } } },
       orderBy: { name: 'asc' },
       take: 200,
     });
@@ -335,6 +636,17 @@ export class ConnectionsService {
         city: c.city,
         note: c.note,
         connectedStoreId: c.connectedCompanyId ? binToUuid(c.connectedCompanyId) : null,
+        connectionId: c.connection ? binToUuid(c.connection.id) : null,
+        /**
+         * Whether a NEW dealing may start with them. The same pure rule the
+         * server enforces at commit, so a picker can say why a name is greyed
+         * out — but it is only a hint; the commit re-checks.
+         */
+        canStartDealing:
+          newDealingRefusal({
+            kind: c.kind as CounterpartyKindLike,
+            connectionStatus: (c.connection?.status as ConnectionStatusLike | undefined) ?? null,
+          }) === null,
       })),
     };
   }
@@ -355,6 +667,18 @@ export class ConnectionsService {
   }) {
     const me = this.tenant.companyId();
     if (!input.name?.trim()) throw new BadRequestException('A counterparty needs a name');
+    /**
+     * A shop recorded by hand could only ever be used to start dealings with no
+     * accepted connection — which the Partners rule forbids. Refused here with
+     * the reason, rather than created and then refused at every use. Existing
+     * manual stores keep their records and can still be settled.
+     */
+    if (input.kind === 'manual_store') {
+      throw new BadRequestException({
+        code: 'connection_required',
+        message: 'Stores are added through Partners, by connecting to them. A person can still be recorded by hand.',
+      });
+    }
 
     const id = newUuidV7Bin();
     await this.prisma.counterparty.create({
@@ -379,6 +703,56 @@ export class ConnectionsService {
   }
 
   // --- helpers --------------------------------------------------------------
+
+  /** A store's own code is known to it, so saying so leaks nothing. */
+  private async refuseOwnCode(me: Buffer, code: string) {
+    const own = await this.prisma.company.findUnique({ where: { id: me }, select: { publicStoreId: true } });
+    if (own?.publicStoreId?.toUpperCase() === code) {
+      throw new BadRequestException({ code: 'connection_self', message: 'That is your own store code' });
+    }
+  }
+
+  /** The single relationship row a pair of stores may have, whichever way round. */
+  private pairRow(me: Buffer, them: Buffer) {
+    return this.prisma.storeConnection.findFirst({
+      where: {
+        OR: [
+          { requesterCompanyId: me, addresseeCompanyId: them },
+          { requesterCompanyId: them, addresseeCompanyId: me },
+        ],
+      },
+    });
+  }
+
+  /** Compare-and-swap a status change, recorded by whoever made it. */
+  private async transition(
+    conn: { id: Buffer; status: string; version: number },
+    to: 'cancelled' | 'removed',
+    expectedVersion?: number,
+  ) {
+    if (expectedVersion != null && expectedVersion !== conn.version) {
+      throw new ConflictException({ code: 'refresh_required', message: 'This connection changed. Refresh and try again.' });
+    }
+    const won = await this.prisma.storeConnection.updateMany({
+      where: { id: conn.id, version: conn.version, status: conn.status as never },
+      data: {
+        status: to,
+        decidedById: this.tenant.userId() ?? null,
+        decidedAt: new Date(),
+        version: { increment: 1 },
+      },
+    });
+    if (won.count === 0) {
+      throw new ConflictException({ code: 'refresh_required', message: 'This connection changed. Refresh and try again.' });
+    }
+    await this.audit.record({
+      entityType: 'StoreConnection',
+      entityId: conn.id,
+      action: 'status_change',
+      before: { status: conn.status },
+      after: { status: to },
+    });
+  }
 
   /**
    * A connection I am part of, or a 404.

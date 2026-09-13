@@ -4,6 +4,7 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { ConnectionsService } from './connections.service';
 import {
   BlockConnectionDto,
+  ConnectionVersionDto,
   CreateCounterpartyDto,
   DecideConnectionDto,
   RequestConnectionDto,
@@ -38,6 +39,19 @@ export class ConnectionsController {
    * see who the shop is connected to in order to operate consignments. MANAGING
    * trust stays Owner-only on the routes below.
    */
+  /**
+   * One store by its exact code, so the person can see who a request would go
+   * to before sending it. The same public preview as search, and the same
+   * "no such store" for anything search would hide.
+   */
+  @Get('stores/lookup')
+  @RequirePermissions('connection.manage')
+  @ApiQuery({ name: 'code', description: 'The exact 10-character Store Account ID' })
+  @ApiOperation({ summary: 'Confirm the store behind a code before requesting a connection' })
+  lookup(@Query('code') code: string) {
+    return this.connections.lookup(code ?? '');
+  }
+
   @Get('connections')
   @RequirePermissions('consignment.view')
   @ApiOperation({ summary: 'Stores this shop is connected to, or has requests with' })
@@ -69,6 +83,37 @@ export class ConnectionsController {
   @ApiOperation({ summary: 'Block or unblock a store' })
   block(@Param('id') id: string, @Body() dto: BlockConnectionDto) {
     return this.connections.setBlocked(id, dto.blocked, dto.reason);
+  }
+
+  /** Withdraw a request this store sent, while it is still waiting. */
+  @Post('connections/:id/cancel')
+  @RequirePermissions('connection.manage')
+  @ApiOperation({ summary: 'Withdraw a connection request you sent' })
+  cancel(@Param('id') id: string, @Body() dto: ConnectionVersionDto) {
+    return this.connections.cancel(id, dto.expectedVersion);
+  }
+
+  /**
+   * End an accepted connection. Stops NEW dealings only: existing consignments
+   * and loans stay returnable, payable and readable by both stores.
+   */
+  @Post('connections/:id/remove')
+  @RequirePermissions('connection.manage')
+  @ApiOperation({ summary: 'End a connection; existing obligations stay settleable' })
+  remove(@Param('id') id: string, @Body() dto: ConnectionVersionDto) {
+    return this.connections.remove(id, dto.expectedVersion);
+  }
+
+  /**
+   * Everything two connected stores share: identity, status, who owes whom,
+   * whose phones each holds, and what is waiting on whom. Readable with
+   * `consignment.view`, like the list.
+   */
+  @Get('connections/:id/summary')
+  @RequirePermissions('consignment.view')
+  @ApiOperation({ summary: 'A connected store: balances, custody, pending actions and shared history' })
+  summary(@Param('id') id: string) {
+    return this.connections.summary(id);
   }
 
   @Get('counterparties')

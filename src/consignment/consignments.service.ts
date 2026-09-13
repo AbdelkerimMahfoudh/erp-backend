@@ -10,6 +10,12 @@ import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import {
+  assertMayStartDealing,
+  newDealingRefusal,
+  type ConnectionStatusLike,
+  type CounterpartyKindLike,
+} from './dealing-authorization';
+import {
   assertDestination,
   assertSource,
   sideOf,
@@ -104,18 +110,19 @@ export class ConsignmentsService {
     if (!counterparty) throw new NotFoundException('No such counterparty');
 
     /**
-     * A blocked relationship stops NEW business. It deliberately does not touch
-     * anything already outstanding — blocking is not a way to escape a debt.
+     * A new consignment needs an ACCEPTED connection (Partners rule). Checked
+     * early here so a refusal is fast, and again below inside the commit, where
+     * it actually counts — see `assertMayStartDealing`.
      */
-    if (counterparty.connection?.status === 'blocked') {
-      throw new ConflictException('That store is blocked');
-    }
-    if (counterparty.kind === 'connected_store' && counterparty.connection?.status !== 'accepted') {
-      throw new ConflictException('You are not connected to that store yet');
-    }
+    const early = newDealingRefusal({
+      kind: counterparty.kind as CounterpartyKindLike,
+      connectionStatus: (counterparty.connection?.status as ConnectionStatusLike | undefined) ?? null,
+    });
+    if (early) throw new ConflictException({ code: early.code, message: early.message });
 
     const consignmentId = newUuidV7Bin();
     const created = await this.prisma.$transaction(async (tx) => {
+      await assertMayStartDealing(tx, counterparty.id);
       /**
        * The parent row is written FIRST, because `fk_cline_consignment` requires
        * it — the live run failed here with "Related record constraint failed"
@@ -344,6 +351,15 @@ export class ConsignmentsService {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      /**
+       * Accepting or counter-offering commits a store to NEW business, so it
+       * needs the connection accepted at the moment of commit. Rejecting,
+       * disputing and cancelling reduce commitments and stay open whatever the
+       * connection's state.
+       */
+      if (dto.action === 'accept' || dto.action === 'counter') {
+        await assertMayStartDealing(tx, c.counterpartyId);
+      }
       const won = await tx.consignment.updateMany({
         where: { id: c.id, version: c.version, status: c.status },
         data: {
@@ -448,6 +464,13 @@ export class ConsignmentsService {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      /**
+       * Handing phones over is a NEW stock handover. Confirming receipt of
+       * phones that were already sent is finishing an existing obligation, and
+       * stays open after a connection ends — nobody should be left holding a
+       * shipment they are not allowed to acknowledge.
+       */
+      if (action === 'send_custody') await assertMayStartDealing(tx, c.counterpartyId);
       const won = await tx.consignment.updateMany({
         where: { id: c.id, version: c.version, status: c.status },
         data: {

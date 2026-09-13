@@ -13,6 +13,12 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import {
+  assertMayStartDealing,
+  newDealingRefusal,
+  type ConnectionStatusLike,
+  type CounterpartyKindLike,
+} from '../consignment/dealing-authorization';
+import {
   assertDecision,
   assertForgivenessAllowed,
   assertPaymentAllowed,
@@ -77,13 +83,23 @@ export class LoansService {
     });
     if (!counterparty) throw new NotFoundException('No such counterparty');
 
-    // Blocking stops NEW business. It deliberately touches nothing outstanding.
-    if (counterparty.connection?.status === 'blocked') {
-      throw new ConflictException('That store is blocked');
-    }
+    /**
+     * A new debt with another STORE needs a connection that store has accepted
+     * (Partners rule). Before this, only `blocked` was refused, so a pending
+     * request — or a shop typed in by hand — could already start a loan. Lending
+     * to a person or an employee is not an inter-store dealing and is unaffected.
+     * Checked early for a fast answer, and again inside the commit.
+     */
+    const early = newDealingRefusal({
+      kind: counterparty.kind as CounterpartyKindLike,
+      connectionStatus: (counterparty.connection?.status as ConnectionStatusLike | undefined) ?? null,
+    });
+    if (early) throw new ConflictException({ code: early.code, message: early.message });
 
     const id = newUuidV7Bin();
-    await this.prisma.loan.create({
+    await this.prisma.$transaction(async (tx) => {
+    await assertMayStartDealing(tx, counterparty.id);
+    await tx.loan.create({
       data: {
         id,
         companyId: me,
@@ -104,6 +120,7 @@ export class LoansService {
         proposedById: userId,
         clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
       },
+    });
     });
 
     await this.audit.record({
@@ -236,6 +253,14 @@ export class LoansService {
     const agreed = num(loan.counterAmount ?? loan.proposedAmount);
 
     await this.prisma.$transaction(async (tx) => {
+      /**
+       * Accepting a debt, or countering with a new amount, is a new commitment
+       * and needs the connection accepted at commit. Rejecting, disputing and
+       * cancelling stay open after a connection ends.
+       */
+      if (dto.action === 'accept' || dto.action === 'counter') {
+        await assertMayStartDealing(tx, loan.counterpartyId);
+      }
       const won = await tx.loan.updateMany({
         where: { id: loan.id, version: loan.version, status: loan.status },
         data: {

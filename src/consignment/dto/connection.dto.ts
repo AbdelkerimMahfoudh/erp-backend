@@ -38,6 +38,14 @@ export class DecideConnectionDto {
   expectedVersion?: number;
 }
 
+/** Cancel and remove carry only the version the screen was showing. */
+export class ConnectionVersionDto {
+  @ApiPropertyOptional({ description: 'Version the connection was read at' })
+  @IsOptional()
+  @IsInt()
+  expectedVersion?: number;
+}
+
 export class BlockConnectionDto {
   @ApiProperty({ description: 'true blocks, false lifts a block you placed' })
   @IsBoolean()
