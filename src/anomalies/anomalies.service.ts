@@ -15,7 +15,6 @@ import {
   belowCostAnomalies,
   cashShortfallAnomalies,
   deadStockAnomalies,
-  lowStockAnomalies,
   NOTIFYING_CODES,
   orderAnomalies,
   overdueDebtAnomalies,
@@ -89,7 +88,6 @@ export class AnomaliesService {
     const suppressed = await this.suppressedKeys(now);
 
     const groups = await Promise.all([
-      this.lowStock(),
       this.deadStock(),
       this.may('loan.view') ? this.overdueDebt(now) : Promise.resolve([]),
       this.isOwner() ? this.sellerMargin() : Promise.resolve([]),
@@ -170,30 +168,7 @@ export class AnomaliesService {
     return new Set(rows.map((r) => r.anomalyKey));
   }
 
-  // ── The six ──────────────────────────────────────────────────────────────
-
-  private async lowStock(): Promise<Anomaly[]> {
-    const branchId = this.tenant.branchId();
-    // The dashboard's own low-stock list, so the threshold is the shop's and
-    // there is only one answer to "what counts as low?".
-    const low = await this.dashboard.lowStock();
-    if (low.length === 0) return [];
-
-    const velocity = await this.db.productVelocity.findMany({
-      where: branchId ? { branchId } : {},
-      select: { productId: true, sold30d: true },
-    });
-    const soldByUuid = new Map(velocity.map((v) => [binToUuid(v.productId), v.sold30d]));
-
-    return lowStockAnomalies(
-      low.map((row) => ({
-        productId: row.productId,
-        label: row.label ?? row.productId,
-        inStock: row.inStock,
-        soldInWindow: soldByUuid.get(row.productId) ?? 0,
-      })),
-    );
-  }
+  // ── The rules ──────────────────────────────────────────────────────────────
 
   private async deadStock(): Promise<Anomaly[]> {
     const [rows, days] = await Promise.all([

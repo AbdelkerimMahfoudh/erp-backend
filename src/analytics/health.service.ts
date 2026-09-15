@@ -1,5 +1,4 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { LOW_STOCK_DEFAULT, LOW_STOCK_SETTING } from '../inventory/low-stock';
 import { Prisma } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -14,7 +13,6 @@ const NEUTRAL = 0.5;
 const DEFAULT_WEIGHTS: Record<string, number> = {
   profit_trend: 0.25,
   cash_flow: 0.15,
-  stock_coverage: 0.2,
   overdue_debts: 0.15,
   dead_stock: 0.1,
   velocity: 0.15,
@@ -40,7 +38,6 @@ export class HealthService {
     const now = new Date();
     const todayDate = new Date(`${dayKey(now)}T00:00:00.000Z`);
     const deadDays = await this.numberSetting('dead_stock_days', 60);
-    const lowThreshold = await this.numberSetting(LOW_STOCK_SETTING, LOW_STOCK_DEFAULT);
 
     // Shared inventory snapshots — fetched once, feed three components.
     const [valuations, velocity, activeProducts] = await Promise.all([
@@ -53,7 +50,6 @@ export class HealthService {
     const components: ComponentScore[] = [
       await this.profitTrend(branchWhere, todayDate),
       await this.cashFlow(branchWhere, todayDate),
-      this.stockCoverage(valuations, activeProducts, lowThreshold),
       await this.overdueDebts(branchWhere, todayDate),
       this.deadStock(valuations, lastSoldByHex, deadDays, now),
       this.velocityScore(valuations, velocity),
@@ -86,13 +82,6 @@ export class HealthService {
     const total = num(agg._sum.total);
     if (total <= 0) return { key: 'cash_flow', score: NEUTRAL, insufficientData: true };
     return { key: 'cash_flow', score: clamp01(num(agg._sum.amountPaid) / total) };
-  }
-
-  /** Share of active products stocked above the low-stock threshold. */
-  private stockCoverage(valuations: { unitsCount: number; quantity: number }[], activeProducts: number, threshold: number): ComponentScore {
-    if (activeProducts === 0) return { key: 'stock_coverage', score: NEUTRAL, insufficientData: true };
-    const covered = valuations.filter((v) => v.unitsCount + v.quantity > threshold).length;
-    return { key: 'stock_coverage', score: clamp01(covered / activeProducts) };
   }
 
   /** 1 − overdue receivables / total receivables (no debt = healthy). */

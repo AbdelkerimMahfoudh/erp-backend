@@ -1,7 +1,6 @@
 import type { Prisma, TrackingType } from '@prisma/client';
 import { resolveQuantity, resolveSerialized } from '../pricing/price-resolution';
 import { binToUuid } from '../common/utils/uuid.util';
-import { isLowStock } from './low-stock';
 
 /**
  * The shelf, one row per exact product variant, for the Stock screen.
@@ -22,7 +21,6 @@ import { isLowStock } from './low-stock';
  *   ladder the sale uses (`resolveSerialized` / `resolveQuantity`). When units of
  *   one variant resolve to different prices — a unit override on one phone — the
  *   row carries the RANGE, never one of them presented as "the" price.
- * - **No second definition of low.** `isLowStock` is shared with the dashboard.
  * - **No stored count.** Everything is derived from the rows passed in, which the
  *   service reads fresh on every request.
  *
@@ -44,7 +42,6 @@ export interface SummaryProduct {
 
 export interface SummaryInputs {
   activeBranchId: Buffer;
-  threshold: number;
   products: SummaryProduct[];
   /** `in_stock` units at the active branch. Nothing else is sellable today. */
   units: { id: Buffer; productId: Buffer; branchId: Buffer }[];
@@ -76,15 +73,12 @@ export interface StockSummaryRow {
   available: number;
   /**
    * Physically held. Equal to `available` for serialized goods; for quantity
-   * stock it includes what is reserved. The low-stock rule compares THIS figure,
-   * so a row can be low-looking-but-not-low by exactly `reserved` — which is why
-   * both are sent, and the screen can say so instead of appearing to disagree.
+   * stock it includes what is reserved — both are sent, so the screen can say
+   * how much of what is held is already promised.
    */
   onHand: number;
   /** Promised to an open transfer. Always 0 for serialized goods. */
   reserved: number;
-  lowStock: boolean;
-  lowStockThreshold: number;
   /**
    * Null when NOTHING in this row has a selling price. Otherwise the range of
    * resolved prices, with how many units are priced and how many are not — so a
@@ -143,8 +137,6 @@ export function buildStockSummary(input: SummaryInputs): StockSummaryRow[] {
       available: units.length,
       onHand: units.length,
       reserved: 0,
-      lowStock: isLowStock(units.length, input.threshold),
-      lowStockThreshold: input.threshold,
       price:
         prices.length === 0
           ? null
@@ -175,8 +167,6 @@ export function buildStockSummary(input: SummaryInputs): StockSummaryRow[] {
       available,
       onHand: s.quantity,
       reserved: s.reservedQuantity,
-      lowStock: isLowStock(s.quantity, input.threshold),
-      lowStockThreshold: input.threshold,
       price:
         resolved.price === null
           ? null

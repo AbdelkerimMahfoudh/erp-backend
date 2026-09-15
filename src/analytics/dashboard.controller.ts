@@ -11,7 +11,7 @@ export class DashboardController {
 
   @Get('home')
   @RequirePermissions('report.view')
-  @ApiOperation({ summary: 'Owner snapshot: today/month totals, inventory value, low-stock count' })
+  @ApiOperation({ summary: 'Owner snapshot: today/month totals and inventory value' })
   home() {
     return this.dashboard.home();
   }

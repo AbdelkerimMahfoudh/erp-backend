@@ -1,11 +1,11 @@
 import { Warning, WarningCode, WarningSeverity, messageKeyFor } from '../common/warnings/warning.types';
 
 /**
- * The six deterministic anomaly rules (A3), as pure functions.
+ * The deterministic anomaly rules (A3), as pure functions. Low stock was removed
+ * with low-stock management in the first-release scope.
  *
- * ## The six, by name
+ * ## By name
  *
- * 1. `anomaly.low_stock` — stock about to run out, with how many days are left
  * 2. `anomaly.dead_stock` — stock that has not sold for the shop's own window
  * 3. `anomaly.overdue_debt` — customers past their due date
  * 4. `anomaly.seller_margin_drop` — one seller's margin halved *(Owner only)*
@@ -37,9 +37,6 @@ import { Warning, WarningCode, WarningSeverity, messageKeyFor } from '../common/
  */
 
 /** Five sales in the window before a rate of sale means anything. */
-export const LOW_STOCK_MIN_SALES = 5;
-/** How far ahead the low-stock rule looks. */
-export const LOW_STOCK_DAYS_LEFT = 7;
 /** Twenty sales in each window before two margins are comparable. */
 export const MARGIN_MIN_SALES = 20;
 /** Collapse means halved. Not a tuned constant — a plain, sayable threshold. */
@@ -83,37 +80,6 @@ function anomaly(
 }
 
 // ── 1. Low stock, with days left ───────────────────────────────────────────
-
-export interface LowStockInput {
-  productId: string;
-  label: string;
-  inStock: number;
-  /** Units sold in the window. The velocity row's own count. */
-  soldInWindow: number;
-}
-
-/**
- * Running out, and roughly when.
- *
- * "Three left" is a number; "three left, about two days" is a decision. The
- * rate is units sold in the window divided by the window — the same figure the
- * dashboard's velocity row already holds — and below five sales there is no
- * rate worth quoting, so nothing is said.
- */
-export function lowStockAnomalies(rows: readonly LowStockInput[]): Anomaly[] {
-  const out: Anomaly[] = [];
-  for (const row of rows) {
-    if (row.soldInWindow < LOW_STOCK_MIN_SALES) continue;
-    if (row.inStock <= 0) continue;
-    const perDay = row.soldInWindow / ANOMALY_WINDOW_DAYS;
-    const daysLeft = Math.floor(row.inStock / perDay);
-    if (daysLeft > LOW_STOCK_DAYS_LEFT) continue;
-    out.push(
-      anomaly('anomaly.low_stock', 'info', { product: row.label, inStock: row.inStock, days: daysLeft }, row.productId),
-    );
-  }
-  return out;
-}
 
 // ── 2. Dead stock ──────────────────────────────────────────────────────────
 

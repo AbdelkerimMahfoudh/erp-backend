@@ -1,10 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { buildStockSummary, type SummaryInputs } from './stock-summary';
-import { isLowStock, LOW_STOCK_DEFAULT, LOW_STOCK_SETTING } from './low-stock';
 
 /**
  * The Stock screen's rows: one per exact variant, what it sells for, how many
- * can be sold today, and whether that is low.
+ * can be sold today.
  *
  * Every assertion here is about a way this could quietly lie — one phone's
  * override shown as every phone's price, colours folded together, reserved
@@ -24,7 +23,6 @@ const TV = b(103);
 function inputs(over: Partial<SummaryInputs> = {}): SummaryInputs {
   return {
     activeBranchId: BRANCH,
-    threshold: 3,
     products: [
       { id: IPHONE_BLACK, brand: 'Apple', model: 'iPhone 17', variant: '256 GB · Black', barcode: null, trackingType: 'imei', specifications: null, defaultPrice: 40000 },
       { id: IPHONE_BLUE, brand: 'Apple', model: 'iPhone 17', variant: '256 GB · Blue', barcode: null, trackingType: 'imei', specifications: null, defaultPrice: 40000 },
@@ -54,7 +52,7 @@ describe('one row per exact variant', () => {
 
   it('lists a serialized product only when a unit is on the shelf', () => {
     // The service passes in_stock units only; a variant with none has no row,
-    // exactly as the dashboard's low-stock list never lists it.
+
     expect(buildStockSummary(inputs())).toEqual([]);
   });
 
@@ -132,7 +130,7 @@ describe('selling price, through the sale\'s own ladder', () => {
   });
 });
 
-describe('available and low', () => {
+describe('available', () => {
   it('does not count reserved goods as sellable', () => {
     const rows = buildStockSummary(
       inputs({ stockItems: [{ productId: CABLE, quantity: 10, reservedQuantity: 4, price: 350, version: 1 }] }),
@@ -140,29 +138,11 @@ describe('available and low', () => {
     expect(rows[0].available).toBe(6);
   });
 
-  it('keeps an empty stock line visible, available zero and low', () => {
+  it('keeps an empty stock line visible, with nothing available', () => {
     const rows = buildStockSummary(
       inputs({ stockItems: [{ productId: CABLE, quantity: 0, reservedQuantity: 0, price: 350, version: 1 }] }),
     );
-    expect(rows[0]).toMatchObject({ available: 0, lowStock: true });
-  });
-
-  it('is low AT the threshold, not only below it', () => {
-    const at = buildStockSummary(inputs({ units: [unit(1, IPHONE_BLACK), unit(2, IPHONE_BLACK), unit(3, IPHONE_BLACK)] }));
-    const above = buildStockSummary(
-      inputs({ units: [1, 2, 3, 4].map((n) => unit(n, IPHONE_BLACK)) }),
-    );
-    expect(at[0].lowStock).toBe(true);
-    expect(above[0].lowStock).toBe(false);
-  });
-
-  it('compares quantity stock on the PHYSICAL figure, as the dashboard does', () => {
-    // 5 physical, 3 reserved: 2 available, but the dashboard's rule has always
-    // been physical quantity, and two screens must not disagree about "low".
-    const rows = buildStockSummary(
-      inputs({ stockItems: [{ productId: CABLE, quantity: 5, reservedQuantity: 3, price: 350, version: 1 }] }),
-    );
-    expect(rows[0]).toMatchObject({ available: 2, lowStock: false });
+    expect(rows[0]).toMatchObject({ available: 0 });
   });
 
   it('sends on-hand and reserved, so the screen can explain the difference', () => {
@@ -196,22 +176,20 @@ describe('what the row never carries', () => {
   it('carries no unit ids or identifiers — those stay on the unit list', () => {
     const rows = buildStockSummary(inputs({ units: [unit(1, IPHONE_BLACK)] }));
     expect(Object.keys(rows[0]).sort()).toEqual(
-      ['available', 'barcode', 'brand', 'category', 'lowStock', 'lowStockThreshold', 'model', 'onHand', 'price', 'productId', 'reserved', 'specifications', 'trackingType', 'variant'].sort(),
+      ['available', 'barcode', 'brand', 'category', 'model', 'onHand', 'price', 'productId', 'reserved', 'specifications', 'trackingType', 'variant'].sort(),
     );
   });
 });
 
-describe('one definition of low', () => {
-  it('is the shop setting, inclusive', () => {
-    expect(LOW_STOCK_SETTING).toBe('low_stock_threshold');
-    expect(LOW_STOCK_DEFAULT).toBe(3);
-    expect(isLowStock(3, 3)).toBe(true);
-    expect(isLowStock(4, 3)).toBe(false);
+describe('low stock is not a first-release concept', () => {
+  it('the row carries no low-stock flag or threshold', () => {
+    const rows = buildStockSummary(inputs({ units: [unit(1, IPHONE_BLACK)] }));
+    expect(rows[0]).not.toHaveProperty('lowStock');
+    expect(rows[0]).not.toHaveProperty('lowStockThreshold');
   });
 
-  it('is the one the dashboard uses', () => {
+  it('the dashboard no longer computes a low-stock list', () => {
     const dashboard = readFileSync('src/analytics/dashboard.service.ts', 'utf8');
-    expect(dashboard).toMatch(/LOW_STOCK_SETTING/);
-    expect(dashboard).toMatch(/isLowStock\(/);
+    expect(dashboard).not.toMatch(/lowStock|LOW_STOCK|isLowStock/);
   });
 });

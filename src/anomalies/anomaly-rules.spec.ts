@@ -5,8 +5,6 @@ import {
   BELOW_COST_MIN_COUNT,
   cashShortfallAnomalies,
   deadStockAnomalies,
-  lowStockAnomalies,
-  LOW_STOCK_MIN_SALES,
   MARGIN_MIN_SALES,
   NOTIFYING_CODES,
   orderAnomalies,
@@ -19,13 +17,13 @@ import {
 import { FINANCIAL_FIELDS } from '../common/interceptors/financial-fields';
 
 /**
- * The six rules, by name:
+ * The five rules, by name — low stock was removed with low-stock management
+ * in the first-release scope:
  *
- * 1. `anomaly.low_stock` · 2. `anomaly.dead_stock` · 3. `anomaly.overdue_debt`
- * 4. `anomaly.seller_margin_drop` · 5. `anomaly.cash_shortfall`
- * 6. `anomaly.below_cost_cluster`
+ * `anomaly.dead_stock` · `anomaly.overdue_debt` · `anomaly.seller_margin_drop`
+ * · `anomaly.cash_shortfall` · `anomaly.below_cost_cluster`
  *
- * There is no seventh, no score and no model. What is pinned here is each
+ * There is no sixth, no score and no model. What is pinned here is each
  * rule's threshold, its minimum sample and its behaviour with no history — the
  * three places a "needs your attention" panel turns into noise.
  */
@@ -33,10 +31,9 @@ import { FINANCIAL_FIELDS } from '../common/interceptors/financial-fields';
 const SERVICE = readFileSync('src/anomalies/anomalies.service.ts', 'utf8');
 const RULES = readFileSync('src/anomalies/anomaly-rules.ts', 'utf8');
 
-describe('the six rules, and only six', () => {
+describe('the five rules, and only five', () => {
   it('are exactly the approved codes', () => {
     const codes = [
-      ...lowStockAnomalies([{ productId: 'p', label: 'P', inStock: 2, soldInWindow: 30 }]),
       ...deadStockAnomalies([{ productId: 'p', label: 'P', inStock: 1, days: 60 }]),
       ...overdueDebtAnomalies({ count: 1, amount: 100 }),
       ...sellerMarginAnomalies([
@@ -53,7 +50,6 @@ describe('the six rules, and only six', () => {
 
     expect(new Set(codes)).toEqual(
       new Set([
-        'anomaly.low_stock',
         'anomaly.dead_stock',
         'anomaly.overdue_debt',
         'anomaly.seller_margin_drop',
@@ -78,43 +74,9 @@ describe('the six rules, and only six', () => {
      * value is the failure mode this feature has to avoid.
      */
     expect(SERVICE).toMatch(/this\.dashboard\.deadStock\(\)/);
-    expect(SERVICE).toMatch(/this\.dashboard\.lowStock\(\)/);
+    // First release: no low-stock anomaly, and no low-stock list to read.
+    expect(SERVICE).not.toMatch(/lowStock/);
     expect(SERVICE).toMatch(/this\.dashboard\.employeePerformance\(/);
-  });
-});
-
-describe('1 — low stock, with days left', () => {
-  const row = (over: Partial<Parameters<typeof lowStockAnomalies>[0][number]> = {}) => ({
-    productId: 'p1',
-    label: 'Charger',
-    inStock: 3,
-    soldInWindow: 30,
-    ...over,
-  });
-
-  it('says how many days are left, not just how many are on the shelf', () => {
-    // 30 sold in 30 days is one a day; three left is three days.
-    const [a] = lowStockAnomalies([row()]);
-    expect(a.params).toEqual({ product: 'Charger', inStock: 3, days: 3 });
-  });
-
-  it('says nothing below the minimum sample', () => {
-    // Four sales is not a rate of sale, and a rate is the whole point.
-    expect(lowStockAnomalies([row({ soldInWindow: LOW_STOCK_MIN_SALES - 1 })])).toEqual([]);
-  });
-
-  it('says nothing about stock that is not running out', () => {
-    // 300 left at one a day is not a warning, it is an overstock.
-    expect(lowStockAnomalies([row({ inStock: 300 })])).toEqual([]);
-  });
-
-  it('says nothing when there is none left — that is not "running out"', () => {
-    expect(lowStockAnomalies([row({ inStock: 0 })])).toEqual([]);
-  });
-
-  it('keys on the product, so dismissing one does not silence the rest', () => {
-    const [a] = lowStockAnomalies([row()]);
-    expect(a.key).toBe('anomaly.low_stock:p1');
   });
 });
 
@@ -221,11 +183,11 @@ describe('6 — below-cost cluster', () => {
 });
 
 describe('dismissal, ordering and notification', () => {
-  const a = (key: string, code: Anomaly['code'] = 'anomaly.low_stock'): Anomaly => ({
+  const a = (key: string, code: Anomaly['code'] = 'anomaly.dead_stock'): Anomaly => ({
     key,
     code,
     severity: 'info',
-    messageKey: 'warning.anomaly.lowStock',
+    messageKey: 'warning.anomaly.deadStock',
     params: {},
     field: null,
     submitted: null,
@@ -233,8 +195,8 @@ describe('dismissal, ordering and notification', () => {
   });
 
   it('suppresses exactly the dismissed key', () => {
-    const kept = withoutDismissed([a('anomaly.low_stock:p1'), a('anomaly.low_stock:p2')], new Set(['anomaly.low_stock:p1']));
-    expect(kept.map((x) => x.key)).toEqual(['anomaly.low_stock:p2']);
+    const kept = withoutDismissed([a('anomaly.dead_stock:p1'), a('anomaly.dead_stock:p2')], new Set(['anomaly.dead_stock:p1']));
+    expect(kept.map((x) => x.key)).toEqual(['anomaly.dead_stock:p2']);
   });
 
   it('puts what must be acted on above what is merely noted', () => {

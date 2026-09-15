@@ -26,7 +26,6 @@ import { receiveQuantityAtCost } from './stock-cost';
 import { assertAssignedToBranch } from '../rbac/active-branch';
 import { buildStockSummary, type StockSummaryRow } from './stock-summary';
 import { referencedIds, shapeUnitTimeline } from './unit-timeline';
-import { LOW_STOCK_DEFAULT, LOW_STOCK_SETTING } from './low-stock';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
 import { fingerprintReceipt } from './receipt-fingerprint';
 
@@ -691,9 +690,9 @@ export class InventoryService {
       include: {
         product: true,
         branch: { select: { id: true, name: true } },
-        // Where it came from, for the item summary. Names and a reference only —
-        // a purchase's totals are cost, and cost stays behind `cost.view`.
-        supplier: { select: { name: true } },
+        // The purchase reference and date only. First release: no supplier name
+        // is sent: ordinary purchases are anonymous, and historical supplier
+        // links stay in the database, dormant.
         purchase: { select: { referenceNo: true, date: true } },
       },
     });
@@ -861,7 +860,7 @@ export class InventoryService {
     await assertAssignedToBranch(this.db, this.tenant.requireUserId(), branchId);
     const companyId = this.tenant.companyId();
 
-    const [units, stockItems, setting] = await Promise.all([
+    const [units, stockItems] = await Promise.all([
       // `in_stock` and nothing else: sold, reserved, faulty, in-transit and
       // consigned units are not stock anyone can sell today.
       this.db.unit.findMany({
@@ -872,7 +871,6 @@ export class InventoryService {
         where: { branchId },
         select: { productId: true, quantity: true, reservedQuantity: true, price: true, version: true },
       }),
-      this.db.setting.findFirst({ where: { key: LOW_STOCK_SETTING, branchId: null } }),
     ]);
 
     const productIds = [
@@ -913,7 +911,6 @@ export class InventoryService {
 
     return buildStockSummary({
       activeBranchId: branchId,
-      threshold: typeof setting?.value === 'number' ? setting.value : LOW_STOCK_DEFAULT,
       products: products.map((p) => ({
         ...p,
         defaultPrice: p.defaultPrice === null ? null : Number(p.defaultPrice),

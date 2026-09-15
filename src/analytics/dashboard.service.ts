@@ -1,5 +1,4 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { isLowStock, LOW_STOCK_DEFAULT, LOW_STOCK_SETTING } from '../inventory/low-stock';
 import { Prisma } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -13,7 +12,7 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 
 /**
  * Owner-dashboard aggregates. Reads the rollups built in 2D.1–2D.2 (plus a
- * couple of live reads for low-stock and employee performance). Every figure is
+ * live read for employee performance). Every figure is
  * tracking-type independent. Branch-scoped when X-Branch-Id is set, else
  * company-wide; branch comparison is always company-wide.
  */
@@ -32,7 +31,7 @@ export class DashboardService {
     const todayDate = new Date(`${dayKey(now)}T00:00:00.000Z`);
     const monthStart = new Date(`${dayKey(now).slice(0, 8)}01T00:00:00.000Z`);
 
-    const [today, month, inventory, lowStockCount] = await Promise.all([
+    const [today, month, inventory] = await Promise.all([
       this.db.dailyRollup.aggregate({
         where: { day: todayDate, ...(branchId ? { branchId } : {}) },
         _sum: { revenue: true, grossProfit: true, netProfit: true, salesCount: true, qtySold: true },
@@ -42,7 +41,6 @@ export class DashboardService {
         _sum: { revenue: true, grossProfit: true, netProfit: true },
       }),
       this.analytics.inventoryValue(),
-      this.lowStock().then((l) => l.length),
     ]);
 
     return {
@@ -63,17 +61,15 @@ export class DashboardService {
         expectedProfit: inventory.totals.expectedProfit,
         productCount: inventory.totals.productCount,
       },
-      lowStockCount,
     };
   }
 
   /** Full dashboard: snapshot + rankings + dead stock + comparisons. */
   async dashboard() {
-    const [home, performance, deadStock, lowStock, branchComparison, employeePerformance] = await Promise.all([
+    const [home, performance, deadStock, branchComparison, employeePerformance] = await Promise.all([
       this.home(),
       this.analytics.productPerformance(30),
       this.deadStock(10),
-      this.lowStock(),
       this.branchComparison(30),
       this.employeePerformance(30),
     ]);
@@ -85,7 +81,6 @@ export class DashboardService {
       mostProfitable: products.slice(0, 5), // productPerformance is profit-desc
       worstPerforming: [...products].sort((a, b) => a.grossProfit - b.grossProfit).slice(0, 5),
       deadStock,
-      lowStock,
       branchComparison,
       employeePerformance,
     };
@@ -128,43 +123,6 @@ export class DashboardService {
       }))
       .sort((a, b) => b.inventoryValue - a.inventoryValue)
       .slice(0, limit ?? Number.MAX_SAFE_INTEGER);
-  }
-
-  /**
-   * Products at/below the low-stock threshold (units + quantity stock).
-   *
-   * Public since A3: the anomaly rules need the shop's own threshold, and a
-   * second list built from a second threshold is two answers to "what counts
-   * as low?".
-   */
-  async lowStock() {
-    const branchId = this.tenant.branchId();
-    // The same setting and the same comparison the Stock screen uses (`low-stock.ts`).
-    const threshold = await this.numberSetting(LOW_STOCK_SETTING, LOW_STOCK_DEFAULT);
-
-    const [unitGroups, stocks] = await Promise.all([
-      this.db.unit.groupBy({
-        by: ['productId'],
-        where: { status: 'in_stock', ...(branchId ? { branchId } : {}) },
-        _count: true,
-      }),
-      this.db.stockItem.findMany({
-        where: { quantity: { lte: threshold }, ...(branchId ? { branchId } : {}) },
-        select: { productId: true, quantity: true },
-      }),
-    ]);
-
-    const low: { productId: Buffer; inStock: number }[] = [
-      ...unitGroups.filter((g) => isLowStock(g._count, threshold)).map((g) => ({ productId: g.productId, inStock: g._count })),
-      ...stocks.map((s) => ({ productId: s.productId, inStock: s.quantity })),
-    ];
-    const labels = await this.productLabels(low.map((l) => l.productId));
-    return low.map((l) => ({
-      productId: binToUuid(l.productId),
-      label: labels.get(l.productId.toString('hex')) ?? null,
-      inStock: l.inStock,
-      threshold,
-    }));
   }
 
   /** Revenue/profit per branch over a window (always company-wide). */

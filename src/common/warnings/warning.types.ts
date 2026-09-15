@@ -43,7 +43,6 @@ export type WarningCode =
   | 'magnitude.expense_amount'
   | 'magnitude.debt_payment'
   // A3 — deterministic anomalies
-  | 'anomaly.low_stock'
   | 'anomaly.dead_stock'
   | 'anomaly.overdue_debt'
   | 'anomaly.seller_margin_drop'
