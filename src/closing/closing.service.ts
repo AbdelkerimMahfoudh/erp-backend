@@ -194,7 +194,7 @@ export class ClosingService {
      * drifts afterwards — the property `reconciliation.spec.ts` already pins
      * for cash.
      */
-    const finalChannels = await this.expectedChannels(companyId, branchId, day, dayDate);
+    const finalChannels = await this.expectedChannels(companyId, branchId, day, day);
     const countsByChannel = new Map(
       (already?.channelCounts ?? []).map((c) => [
         `${c.channel}:${c.receivingAccountId ? binToUuid(c.receivingAccountId) : 'NONE'}`,
@@ -438,6 +438,37 @@ export class ClosingService {
    * written, so an Employee looking at what is outstanding cannot accidentally
    * commit anything.
    */
+  /**
+   * Recorded money movement per channel over an inclusive day range.
+   *
+   * The same movements and the same channel rules the daily closing uses, for a
+   * period instead of one day — so Money and the closing can never disagree
+   * about what moved through the drawer or an account. It is RECORDED movement:
+   * nothing here says an external provider saw the money.
+   */
+  async periodMovements(from: string, to: string) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const day = /^\d{4}-\d{2}-\d{2}$/;
+    if (!day.test(from) || !day.test(to) || from > to) {
+      throw new BadRequestException('from and to must be YYYY-MM-DD, with from on or before to');
+    }
+    const channels = await this.expectedChannels(companyId, branchId, from, to);
+    return {
+      from,
+      to,
+      channels: channels.map((ch) => ({
+        channel: ch.channel,
+        accountId: ch.accountId,
+        label: ch.labelSnapshot,
+        isUnattributed: ch.isUnattributed,
+        moneyIn: round2(ch.salesIn + ch.correctionsIn),
+        moneyOut: round2(ch.refundsOut + ch.supplierOut + ch.expensesOut),
+        net: ch.expected,
+      })),
+    };
+  }
+
   async openView(date?: string) {
     const companyId = this.tenant.companyId();
     const branchId = this.tenant.requireBranchId();
@@ -449,7 +480,7 @@ export class ClosingService {
       include: { channelCounts: true },
     });
 
-    const channels = await this.expectedChannels(companyId, branchId, day, dayDate);
+    const channels = await this.expectedChannels(companyId, branchId, day, day);
     const recorded = new Map(
       (closing?.channelCounts ?? []).map((c) => [
         `${c.channel}:${c.receivingAccountId ? binToUuid(c.receivingAccountId) : 'NONE'}`,
@@ -533,7 +564,7 @@ export class ClosingService {
       throw new ConflictException(`Day ${day} is already closed for this branch`);
     }
 
-    const channels = await this.expectedChannels(companyId, branchId, day, dayDate);
+    const channels = await this.expectedChannels(companyId, branchId, day, day);
     const target = channels.find(
       (c) => c.channel === dto.channel && (c.accountId ?? null) === (dto.accountId ?? null),
     );
@@ -662,11 +693,11 @@ export class ClosingService {
   private async expectedChannels(
     companyId: Buffer,
     branchId: Buffer,
-    day: string,
-    dayDate: Date,
+    fromDay: string,
+    toDay: string,
   ): Promise<ChannelRow[]> {
     const [movements, accounts] = await Promise.all([
-      this.channelMovements(companyId, branchId, day, dayDate),
+      this.channelMovements(companyId, branchId, fromDay, toDay),
       this.db.receivingAccount.findMany({
         select: { id: true, label: true, isActive: true, sortOrder: true },
         orderBy: { sortOrder: 'asc' },
@@ -728,11 +759,14 @@ export class ClosingService {
   private async channelMovements(
     companyId: Buffer,
     branchId: Buffer,
-    day: string,
-    dayDate: Date,
+    fromDay: string,
+    toDay: string,
   ): Promise<MovementRow[]> {
-    const start = dayDate;
-    const end = new Date(dayDate.getTime() + 86_400_000);
+    // Inclusive day range. The closing asks for one day (fromDay === toDay);
+    // Money asks for a period. DATE columns compare BETWEEN the two days, and
+    // timestamp columns use the half-open window those days cover.
+    const start = new Date(`${fromDay}T00:00:00.000Z`);
+    const end = new Date(new Date(`${toDay}T00:00:00.000Z`).getTime() + 86_400_000);
 
     const rows = await this.db.$queryRaw<
       { channel: string; account_id: Buffer | null; component: string; amount: unknown }[]
@@ -760,7 +794,7 @@ export class ClosingService {
              'refundsOut', SUM(reported_amount)
       FROM refund_payouts
       WHERE company_id = ${companyId} AND branch_id = ${branchId}
-        AND status = 'confirmed' AND confirmation_date = ${day}
+        AND status = 'confirmed' AND confirmation_date BETWEEN ${fromDay} AND ${toDay}
       GROUP BY method, receiving_account_id
 
       UNION ALL
@@ -771,7 +805,7 @@ export class ClosingService {
              'supplierOut', SUM(amount)
       FROM supplier_settlements
       WHERE company_id = ${companyId} AND branch_id = ${branchId}
-        AND status = 'confirmed' AND confirmation_date = ${day}
+        AND status = 'confirmed' AND confirmation_date BETWEEN ${fromDay} AND ${toDay}
       GROUP BY method, receiving_account_id
 
       UNION ALL
@@ -797,7 +831,7 @@ export class ClosingService {
              'expensesOut', SUM(amount)
       FROM expenses
       WHERE company_id = ${companyId} AND branch_id = ${branchId} AND status = 'confirmed'
-        AND IF(expense_class = 'fixed', due_date, confirmation_date) = ${day}
+        AND IF(expense_class = 'fixed', due_date, confirmation_date) BETWEEN ${fromDay} AND ${toDay}
       GROUP BY method, receiving_account_id
 
       UNION ALL
@@ -817,7 +851,7 @@ export class ClosingService {
       LEFT JOIN refund_payouts rp ON rp.id = fc.target_refund_payout_id
       LEFT JOIN supplier_settlements ss ON ss.id = fc.target_supplier_settlement_id
       WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
-        AND fc.status = 'approved' AND fc.correction_date = ${day}
+        AND fc.status = 'approved' AND fc.correction_date BETWEEN ${fromDay} AND ${toDay}
       GROUP BY fc.method, COALESCE(rp.receiving_account_id, ss.receiving_account_id)
     `);
 

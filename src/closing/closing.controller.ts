@@ -24,6 +24,15 @@ export class ClosingController {
    * enter the count is the one who needs to see what is outstanding. It writes
    * nothing, so looking cannot commit anything.
    */
+  @Get('closings/movements')
+  @RequirePermissions('report.view')
+  @ApiQuery({ name: 'from', required: true, description: 'First day, YYYY-MM-DD (inclusive)' })
+  @ApiQuery({ name: 'to', required: true, description: 'Last day, YYYY-MM-DD (inclusive)' })
+  @ApiOperation({ summary: 'Recorded money in and out per channel (cash and each account) for a period' })
+  periodMovements(@Query('from') from: string, @Query('to') to: string) {
+    return this.closing.periodMovements(from, to);
+  }
+
   @Get('closings/open/view')
   @RequirePermissions('closing.count')
   @ApiQuery({ name: 'date', required: false, description: 'Day to view; defaults to today (UTC)' })
