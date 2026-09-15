@@ -188,7 +188,8 @@ export const ALL_PERMISSION_KEYS = PERMISSIONS.map((p) => p.key);
 // editing — are NOT granted to the Administrator by default; it is a
 // technical/setup role (D11), not a commercial one.
 const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
-  (k) => k !== 'cost.view' && k !== 'discount.override' && k !== 'price.edit',
+  // `import.run` is the Owner's alone (0073, first-release scope).
+  (k) => k !== 'cost.view' && k !== 'discount.override' && k !== 'price.edit' && k !== 'import.run',
 );
 
 /**
@@ -242,7 +243,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      * action in the application.
      */
     'financial.correction.request',
-    'unit.add', 'import.run',
+    // `import.run` removed (0073): importing opening inventory is the Owner's alone.
+    'unit.add',
     // E: a manager may count as well as sign off. `debt.manage` is NOT here —
     // holding a named person responsible for a shortage is the Owner's call.
     // F: a manager sets the targets their branch is working toward.
@@ -379,12 +381,12 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      * meant a legacy assignment could still approve its own discounts.
      */
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
-    'unit.add', 'unit.transfer', 'import.run',
+    'unit.add', 'unit.transfer',
     'purchase.manage', 'supplier.manage', 'expense.manage',
     'closing.perform', 'report.view',
   ],
   sales_employee: ['sale.create', 'sale.return', 'discount.apply', 'unit.add'],
-  warehouse_employee: ['unit.add', 'unit.transfer', 'import.run'],
+  warehouse_employee: ['unit.add', 'unit.transfer'],
 };
 
 /** Only these three are shown in store-facing onboarding. */

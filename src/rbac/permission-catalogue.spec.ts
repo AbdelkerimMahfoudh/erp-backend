@@ -39,7 +39,7 @@ describe('the canonical catalogue', () => {
 
   it('gives Owner 62, Manager 44 and Employee 20', () => {
     expect(ROLE_PERMISSIONS.owner).toHaveLength(62);
-    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(44);
+    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(43);
     // The Employee is deliberately unchanged: they attribute a sale to an
     // existing customer, and do not create one.
     expect(ROLE_PERMISSIONS.store_employee).toHaveLength(20);

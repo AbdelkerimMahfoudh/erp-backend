@@ -172,7 +172,12 @@ describe('role matrix — SQL and TypeScript must agree', () => {
    * both store roles, so without subtracting these the SQL would look like it
    * still grants a permission a deployed system no longer has.
    */
-  const revocations = [revoke, sqlOf('0031_transfer_permissions_and_lifecycle')];
+  const revocations = [
+    revoke,
+    sqlOf('0031_transfer_permissions_and_lifecycle'),
+    // First release: inventory import is Owner-only.
+    sqlOf('0073_import_owner_only'),
+  ];
 
   for (const role of ['store_manager', 'store_employee'] as const) {
     it(`${role}: migrations grant exactly what the seed grants`, () => {
