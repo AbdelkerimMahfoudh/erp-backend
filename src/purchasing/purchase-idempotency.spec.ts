@@ -9,7 +9,7 @@ import { uuidToBin, binToUuid } from '../common/utils/uuid.util';
  * Receiving must survive a retry.
  *
  * A timeout on `POST /purchases` used to create a SECOND purchase: duplicate
- * stock, a duplicate supplier payable, and a second teach-on-confirm pass that
+ * stock, a duplicate payment, and a second teach-on-confirm pass that
  * inflated recognition `confirmations` for one logical action. Offline replay
  * would have made that routine rather than rare.
  *
@@ -20,14 +20,13 @@ import { uuidToBin, binToUuid } from '../common/utils/uuid.util';
 const COMPANY = uuidToBin('018f0000-0000-7000-8000-00000000c001');
 const OTHER_COMPANY = uuidToBin('018f0000-0000-7000-8000-00000000c002');
 const BRANCH = uuidToBin('018f0000-0000-7000-8000-0000000000b1');
-const SUPPLIER = uuidToBin('018f0000-0000-7000-8000-00000000f001');
 const PRODUCT = '018f0000-0000-7000-8000-00000000a001';
 const KEY = '018f0000-0000-7000-8000-00000000e001';
 
 function dtoFor(over: Record<string, unknown> = {}) {
   return {
     clientUuid: KEY,
-    supplierId: binToUuid(SUPPLIER),
+    paymentMethod: 'cash',
     items: [{ productId: PRODUCT, unitCost: 800, identifiers: ['356888000000001'] }],
     ...over,
   } as never;
@@ -70,7 +69,7 @@ function makeService(companyId: Buffer = COMPANY) {
         return data;
       }),
     },
-    supplier: { findUnique: jest.fn(async () => ({ id: SUPPLIER })) },
+    receivingAccount: { findFirst: jest.fn(async () => null) },
     product: {
       findMany: jest.fn(async () => [
         { id: uuidToBin(PRODUCT), trackingType: 'imei', defaultPrice: 1000, companyId },
@@ -86,7 +85,6 @@ function makeService(companyId: Buffer = COMPANY) {
         unit: { create: jest.fn(async () => ({ id: uuidToBin(PRODUCT) })) },
         stockItem: { upsert: jest.fn(async () => ({})) },
         auditLog: { create: jest.fn(async () => ({})) },
-        supplier: { update: jest.fn(async () => ({})) },
       }),
     ),
   };
@@ -221,7 +219,7 @@ describe('purchase idempotency', () => {
     // Mobile is the only consumer, so the key is REQUIRED rather than opt-in:
     // an unkeyed receive is exactly the retry that duplicates a delivery.
     const dto = plainToInstance(CreatePurchaseDto, {
-      supplierId: binToUuid(SUPPLIER),
+      paymentMethod: 'cash',
       items: [{ productId: PRODUCT, unitCost: 800, identifiers: ['356888000000001'] }],
     });
     const errors = await validate(dto, { whitelist: true });
@@ -231,7 +229,7 @@ describe('purchase idempotency', () => {
   it('accepts a request that supplies the key', async () => {
     const dto = plainToInstance(CreatePurchaseDto, {
       clientUuid: KEY,
-      supplierId: binToUuid(SUPPLIER),
+      paymentMethod: 'cash',
       items: [{ productId: PRODUCT, unitCost: 800, identifiers: ['356888000000001'] }],
     });
     const errors = await validate(dto, { whitelist: true });

@@ -1154,17 +1154,24 @@ model SupplierPayment {
   purchaseId  Bytes?        @map("purchase_id") @db.Binary(16)
   amount      Decimal       @db.Decimal(14, 2)
   method      PaymentMethod
+  /// The active account a non-cash purchase was paid from (`0072`). NULL for
+  /// cash, and for rows written before the column existed.
+  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  /// Frozen at payment time, so renaming the account cannot retitle history.
+  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
   paidAt      DateTime      @default(now()) @map("paid_at") @db.DateTime(6)
   createdById Bytes?        @map("created_by") @db.Binary(16)
 
-  company   Company   @relation(fields: [companyId], references: [id])
-  supplier  Supplier? @relation(fields: [supplierId], references: [id])
-  purchase  Purchase? @relation(fields: [purchaseId], references: [id])
-  createdBy User?     @relation(fields: [createdById], references: [id])
+  company          Company           @relation(fields: [companyId], references: [id])
+  supplier         Supplier?         @relation(fields: [supplierId], references: [id])
+  purchase         Purchase?         @relation(fields: [purchaseId], references: [id])
+  createdBy        User?             @relation(fields: [createdById], references: [id])
+  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id], map: "fk_supplier_payments_account")
 
   @@index([companyId, supplierId])
   @@index([purchaseId])
   @@index([createdById])
+  @@index([companyId, receivingAccountId], map: "ix_supplier_payments_account")
   @@map("supplier_payments")
 }
 
@@ -2135,6 +2142,7 @@ model CompanySettings {
 /// Cash is not represented: it is always available and needs no configuration.
 model ReceivingAccount {
   expenses          Expense[]
+  purchasePayments  SupplierPayment[]
   consignmentLedger ConsignmentLedgerEntry[]
   loanLedger        LoanLedgerEntry[]
   payments          Payment[]

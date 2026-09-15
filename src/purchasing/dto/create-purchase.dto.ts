@@ -4,8 +4,8 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
-  IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -112,38 +112,35 @@ export class CreatePurchaseDto {
   @IsUUID()
   clientUuid!: string;
 
-  /**
-   * OPTIONAL (`0070`). Who the goods were bought from, when there is somebody
-   * to name.
+  /*
+   * First release: no supplier, no amount paid, no due date.
    *
-   * Omit it for the everyday case: a handset bought from a walk-in seller and
-   * paid for on the spot. Omitting it is **not** a statement that payment
-   * happened — `paidAmount` must still say so, and must cover the whole total,
-   * or the purchase is refused. An unpaid balance always needs a named payee,
-   * because a debt has to be owed to somebody.
+   * An ordinary purchase is anonymous and settled in full when it is received.
+   * The server sets the amount paid to the purchase total; the client only says
+   * HOW it was paid. `supplierId`, `paidAmount` and `dueDate` are no longer
+   * properties of this contract, so the global `forbidNonWhitelisted` pipe
+   * refuses any request that still sends them — a partial or unpaid ordinary
+   * purchase cannot be expressed at all. Buying on credit from another store
+   * belongs to Partners (loans and consignments), not here.
    */
-  @ApiPropertyOptional({ format: 'uuid', description: 'Omit for a walk-in seller; then paidAmount must equal the total' })
+
+  /** Where the money for this purchase came from. */
+  @ApiProperty({ enum: ['cash', 'card', 'mobile', 'bank', 'other'] })
+  @IsIn(['cash', 'card', 'mobile', 'bank', 'other'])
+  paymentMethod!: 'cash' | 'card' | 'mobile' | 'bank' | 'other';
+
+  /** Required for every non-cash method, refused for cash. Must be active. */
+  @ApiPropertyOptional({ format: 'uuid' })
   @IsOptional()
   @IsUUID()
-  supplierId?: string;
+  receivingAccountId?: string;
 
+  /** A transaction reference or private note, when there is one. */
   @ApiPropertyOptional({ maxLength: 40 })
   @IsOptional()
   @IsString()
   @MaxLength(40)
   referenceNo?: string;
-
-  @ApiPropertyOptional({ minimum: 0 })
-  @IsOptional()
-  @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0)
-  @IsMoney({ min: 0 })
-  paidAmount?: number;
-
-  @ApiPropertyOptional({ format: 'date' })
-  @IsOptional()
-  @IsDateString()
-  dueDate?: string;
 
   @ApiProperty({ type: [ReceiveItemDto], description: 'Staged receiving items (client Receiving Session → one atomic commit)' })
   @IsArray()

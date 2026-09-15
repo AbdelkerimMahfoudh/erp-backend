@@ -15,7 +15,6 @@ import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
 
 const COMPANY = uuidToBin('018f0000-0000-7000-8000-00000000c001');
 const BRANCH = uuidToBin('018f0000-0000-7000-8000-0000000000b1');
-const SUPPLIER = uuidToBin('018f0000-0000-7000-8000-00000000f001');
 const PHONE = '018f0000-0000-7000-8000-00000000a001';
 const TV = '018f0000-0000-7000-8000-00000000a002';
 const CABLE = '018f0000-0000-7000-8000-00000000a003';
@@ -46,7 +45,7 @@ function makeService(registered: string[] = []) {
 
   const db: any = {
     purchase: { findFirst: jest.fn(async () => null) },
-    supplier: { findUnique: jest.fn(async () => ({ id: SUPPLIER })) },
+    receivingAccount: { findFirst: jest.fn(async () => null) },
     product: {
       findMany: jest.fn(async () => [
         { id: uuidToBin(PHONE), trackingType: 'imei', defaultPrice: 1000, companyId: COMPANY },
@@ -59,7 +58,6 @@ function makeService(registered: string[] = []) {
         purchase: { create: jest.fn(async ({ data }: any) => data) },
         purchaseItem: { create: jest.fn(async () => ({})) },
         supplierPayment: { create: jest.fn(async () => ({})) },
-        supplier: { update: jest.fn(async () => ({})) },
         stockItem: { upsert: jest.fn(async () => ({})) },
         $executeRaw: jest.fn(async () => {
           stockReceipts += 1;
@@ -95,7 +93,7 @@ function makeService(registered: string[] = []) {
 }
 
 const dto = (items: unknown[], clientUuid = '018f0000-0000-7000-8000-00000000e001') =>
-  ({ clientUuid, supplierId: binToUuid(SUPPLIER), items }) as never;
+  ({ clientUuid, paymentMethod: 'cash', items }) as never;
 
 describe('receiving a phone with an optional IMEI 2', () => {
   it('stores IMEI 2 on the same unit as IMEI 1', async () => {

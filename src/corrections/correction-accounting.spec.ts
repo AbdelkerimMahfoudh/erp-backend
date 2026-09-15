@@ -19,7 +19,6 @@ const migration = readFileSync(
   join(SRC, '..', '..', 'prisma', 'migrations', '0040_financial_correction', 'migration.sql'),
   'utf8',
 );
-const suppliers = readFileSync(join(SRC, '..', 'suppliers', 'suppliers.service.ts'), 'utf8');
 const returns = readFileSync(join(SRC, '..', 'returns', 'returns.service.ts'), 'utf8');
 const rollup = readFileSync(join(SRC, '..', 'analytics', 'rollup.service.ts'), 'utf8');
 const closing = readFileSync(join(SRC, '..', 'closing', 'closing.service.ts'), 'utf8');
@@ -138,10 +137,8 @@ describe('the liability comes back exactly once', () => {
    * makes "exactly once" impossible to get wrong.
    */
   it('every live-liability query excludes a corrected payment', () => {
-    // Supplier list balance, per-purchase outstanding, and the paid-status
-    // recompute at confirmation.
-    expect((suppliers.match(/settlementNotCorrected\(/g) ?? []).length).toBe(3);
-    // The refund liability.
+    // Supplier liabilities left the launch app with the Suppliers module (first
+    // release); the refund liability is the one still live.
     expect(returns).toMatch(/payoutNotCorrected\('p'\)/);
   });
 
@@ -149,7 +146,6 @@ describe('the liability comes back exactly once', () => {
     expect(sql).toMatch(/export function settlementNotCorrected/);
     expect(sql).toMatch(/export function payoutNotCorrected/);
     // No hand-rolled copies anywhere else.
-    expect(suppliers).not.toMatch(/NOT EXISTS[\s\S]{0,80}financial_corrections/);
     expect(returns).not.toMatch(/NOT EXISTS[\s\S]{0,80}financial_corrections/);
   });
 

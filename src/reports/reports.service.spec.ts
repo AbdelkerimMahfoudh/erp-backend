@@ -32,13 +32,10 @@ interface Seed {
   branches?: Record<string, unknown>[];
   dead?: Record<string, unknown>[];
   loans?: Record<string, unknown>[];
-  suppliers?: { rows: Record<string, unknown>[]; nextCursor: string | null }[];
 }
 
 function harness(permissions: ReadonlySet<string>, seed: Seed = {}, branchId: Buffer | null = BRANCH) {
   const audited: Record<string, unknown>[] = [];
-  const supplierPages = seed.suppliers ?? [{ rows: [], nextCursor: null }];
-  let pageIndex = 0;
 
   const analytics: any = {
     productPerformance: jest.fn(async (days: number) => ({
@@ -62,16 +59,13 @@ function harness(permissions: ReadonlySet<string>, seed: Seed = {}, branchId: Bu
       return { rows: seed.loans ?? [] };
     }),
   };
-  const suppliers: any = {
-    list: jest.fn(async () => supplierPages[pageIndex++] ?? { rows: [], nextCursor: null }),
-  };
   const tenant: any = { branchId: () => branchId, companyId: () => Buffer.alloc(16, 1) };
   const audit: any = { record: jest.fn(async (p: Record<string, unknown>) => void audited.push(p)) };
   const cls: any = { get: (k: string) => (k === 'permissions' ? permissions : undefined) };
   const db: any = { branch: { findFirst: jest.fn(async () => ({ name: 'Main Store' })) } };
 
-  const service = new ReportsService(analytics, dashboard, loans, suppliers, tenant, audit, cls, db);
-  return { service, audited, analytics, dashboard, loans, suppliers, db };
+  const service = new ReportsService(analytics, dashboard, loans, tenant, audit, cls, db);
+  return { service, audited, analytics, dashboard, loans, db };
 }
 
 /**
@@ -280,19 +274,6 @@ describe('completeness', () => {
     expect(table(csv)).toHaveLength(26); // header + 25
   });
 
-  it('pages through every supplier rather than exporting the first page', async () => {
-    const { service, suppliers } = harness(OWNER, {
-      suppliers: [
-        { rows: [{ name: 'A', outstanding: 100 }], nextCursor: 'c1' },
-        { rows: [{ name: 'B', outstanding: 200 }], nextCursor: 'c2' },
-        { rows: [{ name: 'C', outstanding: 300 }], nextCursor: null },
-      ],
-    });
-    const { rowCount } = await service.export({ kind: 'debtors-creditors', locale: 'en' });
-    expect(suppliers.list).toHaveBeenCalledTimes(3);
-    expect(rowCount).toBe(3);
-  });
-
   it('refuses an oversized export instead of truncating it', async () => {
     const dead = Array.from({ length: MAX_EXPORT_ROWS + 1 }, () => ({ label: 'x', inStock: 1 }));
     const { service } = harness(OWNER, { dead });
@@ -322,7 +303,6 @@ describe('debtors and creditors', () => {
       { direction: 'we_owe_them', otherParty: 'Fatima', statusText: 'Confirmed', remaining: 1500, createdAt: new Date('2026-06-11T00:00:00Z') },
       { direction: 'they_owe_us', otherParty: 'Settled', statusText: 'Confirmed', remaining: 0, createdAt: new Date() },
     ],
-    suppliers: [{ rows: [{ name: 'Wholesaler', outstanding: 9000 }], nextCursor: null }],
   };
 
   it('keeps the two directions distinguishable on every row', async () => {
@@ -332,13 +312,12 @@ describe('debtors and creditors', () => {
     const byName = Object.fromEntries(rows.map((r) => [r[2], r]));
     expect(byName['Ahmed'][0]).toBe('owed_to_us');
     expect(byName['Fatima'][0]).toBe('owed_by_us');
-    expect(byName['Wholesaler'][0]).toBe('owed_by_us');
   });
 
   it('says which ledger each row came from', async () => {
     const { service } = harness(OWNER, seed);
     const rows = table((await service.export({ kind: 'debtors-creditors', locale: 'en' })).csv).slice(1);
-    expect(rows.map((r) => r[1]).sort()).toEqual(['loan', 'loan', 'supplier']);
+    expect(rows.map((r) => r[1]).sort()).toEqual(['loan', 'loan']);
   });
 
   it('omits a settled debt rather than writing a zero row', async () => {
@@ -347,19 +326,6 @@ describe('debtors and creditors', () => {
     expect(rows.map((r) => r[2])).not.toContain('Settled');
   });
 
-  it('writes no supplier row at all when the caller may not see the balance', async () => {
-    /*
-     * `SuppliersService` omits `outstanding` entirely for such a caller. Not
-     * written is the only honest option: "we owe nothing" and "you may not know
-     * what we owe" cannot share a cell.
-     */
-    const { service } = harness(MANAGER, {
-      loans: seed.loans,
-      suppliers: [{ rows: [{ name: 'Wholesaler' }], nextCursor: null }],
-    });
-    const rows = table((await service.export({ kind: 'debtors-creditors', locale: 'en' })).csv).slice(1);
-    expect(rows.map((r) => r[2])).not.toContain('Wholesaler');
-  });
 });
 
 describe('branch scope', () => {
@@ -456,10 +422,10 @@ describe('an export changes nothing', () => {
   it('touches no service that writes', async () => {
     // Every collaborator is a read. If an export ever needs a write, that is a
     // design change and this test is where the argument has to be had.
-    const { service, analytics, dashboard, loans, suppliers, db } = harness(OWNER, { products: [] });
+    const { service, analytics, dashboard, loans, db } = harness(OWNER, { products: [] });
     await service.export({ kind: 'profit-by-product', locale: 'en' });
 
-    for (const collaborator of [analytics, dashboard, loans, suppliers, db.branch]) {
+    for (const collaborator of [analytics, dashboard, loans, db.branch]) {
       for (const [name, fn] of Object.entries(collaborator)) {
         if (typeof fn === 'function' && (fn as jest.Mock).mock) {
           expect(name).toMatch(/^(find|list|get|count|.*Performance|.*Comparison|deadStock)/);
@@ -477,7 +443,6 @@ describe('every kind produces a readable file', () => {
       branches: [{ name: 'Main', revenue: 100, grossProfit: 20, netProfit: 10 }],
       dead: [{ label: 'Old', trackingType: 'imei', inStock: 1, inventoryValue: 5, lastSoldAt: null }],
       loans: [{ direction: 'they_owe_us', otherParty: 'X', statusText: 'Confirmed', remaining: 1, createdAt: new Date() }],
-      suppliers: [{ rows: [{ name: 'S', outstanding: 2 }], nextCursor: null }],
     });
     const { csv, rowCount } = await service.export({ kind, locale: 'en' });
     expect(rowCount).toBeGreaterThan(0);

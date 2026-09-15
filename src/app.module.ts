@@ -35,7 +35,6 @@ import { SettingsModule } from './settings/settings.module';
 import { MessagingModule } from './messaging/messaging.module';
 import { ScannerModule } from './scanner/scanner.module';
 import { InventoryModule } from './inventory/inventory.module';
-import { SuppliersModule } from './suppliers/suppliers.module';
 import { CorrectionsModule } from './corrections/corrections.module';
 import { PurchasingModule } from './purchasing/purchasing.module';
 import { PricingModule } from './pricing/pricing.module';
@@ -155,7 +154,6 @@ import { LoansModule } from './loans/loans.module';
     CategoriesModule,
     ScannerModule,
     InventoryModule,
-    SuppliersModule,
     CorrectionsModule,
     PurchasingModule,
     PricingModule,

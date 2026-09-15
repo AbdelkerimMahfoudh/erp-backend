@@ -207,7 +207,7 @@ export const REPORTS: Record<ReportKind, ReportDefinition> = {
    *
    * `direction` is `owed_to_us` or `owed_by_us`, from THIS company's point of
    * view, exactly as `LoansService` resolves it. `source` says whether the row
-   * came from a loan or a supplier balance, so a total can be taken per source
+   * came from, so a total can be taken per source
    * without joining two accounting ideas that are not the same idea.
    *
    * Gated beyond `report.view`: a balance names a counterparty and what they

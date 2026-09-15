@@ -12,7 +12,6 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RollupService } from '../analytics/rollup.service';
-import { SuppliersService } from '../suppliers/suppliers.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { CreateClosingDto } from './dto/create-closing.dto';
@@ -46,7 +45,6 @@ export class ClosingService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly rollups: RollupService,
-    private readonly suppliers: SuppliersService,
   ) {}
 
   async close(dto: CreateClosingDto) {
@@ -108,16 +106,19 @@ export class ClosingService {
     const refundedCash = round2(num(rollup?.refundsPaidCash ?? 0));
 
     /**
-     * Supplier payments CONFIRMED today also left the till, and had no
-     * figure here before J1 — so a day where the shop paid a supplier
-     * reported a shortage that was not a shortage. Only the cash part is
-     * subtracted: an account transfer never touched the drawer.
+     * Money paid for stock today left the till: historical supplier
+     * settlements confirmed today, AND — first release — every ordinary
+     * purchase paid in full at receipt today.
      *
-     * This is a balance-sheet movement, not an expense and not COGS. It
-     * appears nowhere in the profit figures below, deliberately — inventory
-     * cost reaches profit through COGS when the goods sell.
+     * The second half was missing entirely. A phone bought for cash wrote a
+     * payment row that nothing in closing read, so the drawer showed a surplus
+     * that was not a surplus. Only the cash part is subtracted here; an account
+     * payment never touched the drawer and appears in its account's channel.
+     *
+     * A balance-sheet movement, not an expense and not COGS — the cost reaches
+     * profit through COGS when the phone sells.
      */
-    const supplierPaid = await this.suppliers.paidOn(branchId, dayDate);
+    const supplierPaid = await this.stockPaidOn(branchId, dayDate);
 
     /**
      * Money that came BACK today because a confirmed payment was corrected
@@ -696,6 +697,34 @@ export class ClosingService {
    * `rollup.service.ts` records, and `correction-sql.ts` names the queries this
    * applies to.
    */
+  /**
+   * Everything paid for stock at a branch on one day, split total / cash.
+   *
+   * Two sources, never overlapping: confirmed supplier settlements (historical,
+   * keyed on their confirmation day) and purchase payments made at receipt
+   * (keyed on when they were paid, scoped to the purchase's branch).
+   */
+  private async stockPaidOn(branchId: Buffer, dayDate: Date) {
+    const companyId = this.tenant.companyId();
+    const end = new Date(dayDate.getTime() + 86_400_000);
+    const rows = await this.db.$queryRaw<{ is_cash: number; total: Prisma.Decimal }[]>(Prisma.sql`
+      SELECT (method = 'cash') AS is_cash, COALESCE(SUM(amount), 0) AS total
+        FROM supplier_settlements
+       WHERE company_id = ${companyId} AND branch_id = ${branchId}
+         AND status = 'confirmed' AND confirmation_date = ${dayDate}
+       GROUP BY (method = 'cash')
+      UNION ALL
+      SELECT (sp.method = 'cash') AS is_cash, COALESCE(SUM(sp.amount), 0) AS total
+        FROM supplier_payments sp
+        JOIN purchases p ON p.id = sp.purchase_id
+       WHERE sp.company_id = ${companyId} AND p.branch_id = ${branchId}
+         AND sp.paid_at >= ${dayDate} AND sp.paid_at < ${end}
+       GROUP BY (sp.method = 'cash')`);
+    const total = round2(rows.reduce((a, r) => a + num(r.total), 0));
+    const cash = round2(rows.filter((r) => Number(r.is_cash) === 1).reduce((a, r) => a + num(r.total), 0));
+    return { total, cash };
+  }
+
   private async channelMovements(
     companyId: Buffer,
     branchId: Buffer,
@@ -744,6 +773,19 @@ export class ClosingService {
       WHERE company_id = ${companyId} AND branch_id = ${branchId}
         AND status = 'confirmed' AND confirmation_date = ${day}
       GROUP BY method, receiving_account_id
+
+      UNION ALL
+      -- Purchases paid in full at receipt today (first release). The same
+      -- "paid for stock" component: cash left the drawer, anything else left
+      -- the account the purchase named.
+      SELECT IF(sp.method = 'cash', 'cash', 'account'),
+             IF(sp.method = 'cash', NULL, sp.receiving_account_id),
+             'supplierOut', SUM(sp.amount)
+      FROM supplier_payments sp
+      JOIN purchases p ON p.id = sp.purchase_id
+      WHERE sp.company_id = ${companyId} AND p.branch_id = ${branchId}
+        AND sp.paid_at >= ${start} AND sp.paid_at < ${end}
+      GROUP BY IF(sp.method = 'cash', 'cash', 'account'), IF(sp.method = 'cash', NULL, sp.receiving_account_id)
 
       UNION ALL
       -- Expenses CONFIRMED today (D). A variable expense belongs to its

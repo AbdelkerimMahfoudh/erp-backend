@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { Inject, Injectable } from '@nestjs/common';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -119,10 +120,17 @@ export class SummaryService {
       column. Where the source cannot answer precisely the figure is omitted
       rather than estimated — see `unavailable` below.
     */
+    /*
+      Paid for stock: purchases paid in full at receipt (first release) plus any
+      historical supplier settlement confirmed in the window. This used to read
+      `correctionsCash` — money coming BACK from corrections — so the outflow
+      was wrong in both source and sign.
+    */
+    const stockPaid = await this.stockPaidInPeriod(fromISO, toISO);
     const cash = cashMovement({
       salesReceived: current.revenue,
       refundsPaid: current.refundsPaid,
-      supplierPaymentsConfirmed: current.correctionsCash,
+      supplierPaymentsConfirmed: stockPaid,
       expensesCash: current.expensesCash,
       otherOutflows: 0,
     });
@@ -140,7 +148,7 @@ export class SummaryService {
         ...cash,
         salesReceived: current.revenue,
         refundsPaid: current.refundsPaid,
-        supplierPaymentsConfirmed: current.correctionsCash,
+        supplierPaymentsConfirmed: stockPaid,
         expensesCash: current.expensesCash,
       },
       expenseDetail: {
@@ -164,7 +172,6 @@ export class SummaryService {
       */
       unavailable: [
         'refund_liability',
-        'supplier_liability',
         'commissions_and_fees',
         'per_channel_expected_movement',
         'unattributed_legacy_payments',
@@ -271,6 +278,36 @@ export class SummaryService {
       account: sumOf((m) => m !== 'cash'),
       count: rows.reduce((acc, r) => acc + r._count, 0),
     };
+  }
+
+  /**
+   * Everything paid for stock in the window, all channels, branch-scoped.
+   *
+   * Purchases paid in full at receipt (first release), keyed on when they were
+   * paid and scoped by the purchase's branch, plus any historical supplier
+   * settlement confirmed in the window.
+   */
+  private async stockPaidInPeriod(fromISO: string, toISO: string): Promise<number> {
+    const branchId = this.tenant.branchId() ?? null;
+    const companyId = this.tenant.companyId();
+    const start = new Date(`${fromISO}T00:00:00.000Z`);
+    const end = new Date(new Date(`${toISO}T00:00:00.000Z`).getTime() + 86_400_000);
+    const purchaseBranch = branchId ? Prisma.sql`AND p.branch_id = ${branchId}` : Prisma.empty;
+    const settlementBranch = branchId ? Prisma.sql`AND branch_id = ${branchId}` : Prisma.empty;
+    const rows = await this.db.$queryRaw<{ total: unknown }[]>(Prisma.sql`
+      SELECT COALESCE(SUM(sp.amount), 0) AS total
+        FROM supplier_payments sp
+        JOIN purchases p ON p.id = sp.purchase_id
+       WHERE sp.company_id = ${companyId}
+         AND sp.paid_at >= ${start} AND sp.paid_at < ${end}
+         ${purchaseBranch}
+      UNION ALL
+      SELECT COALESCE(SUM(amount), 0)
+        FROM supplier_settlements
+       WHERE company_id = ${companyId} AND status = 'confirmed'
+         AND confirmation_date >= ${start} AND confirmation_date < ${end}
+         ${settlementBranch}`);
+    return round2(rows.reduce((a, r) => a + num(r.total), 0));
   }
 
   /**

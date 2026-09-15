@@ -4,7 +4,6 @@ import {
   ConflictException,
   Inject,
   Injectable,
-  NotFoundException,
 } from '@nestjs/common';
 import { CodeType, Prisma, Product } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -20,16 +19,14 @@ import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
 import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
-// The payable module already owns money rounding, and this file must agree with
-// it exactly — a purchase the service thinks is settled and the ledger thinks is
-// a penny short would be an unpayable debt nobody could clear.
-import { round2 } from '../suppliers/payable';
 import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
+
+const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
 /**
  * Stable fingerprint of what the client asked for.
  *
- * Only the fields that define the DELIVERY are hashed — supplier, reference and
+ * Only the fields that define the DELIVERY are hashed — payment, reference and
  * the item lines. Identifier order is normalised so a client that re-sends the
  * same scans in a different order is still recognised as the same request
  * rather than being rejected as a conflict.
@@ -37,16 +34,18 @@ import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
 function fingerprint(dto: CreatePurchaseDto): string {
   const canonical = {
     /*
-     * `?? null`, never left undefined: `JSON.stringify` drops an undefined
-     * property entirely, so a walk-in purchase would hash a shorter object and
-     * a later replay that happened to send `supplierId: null` would look like a
-     * different delivery. An explicit null hashes stably. A named supplier
-     * hashes exactly as it always did, so replays of existing purchases still
-     * match their stored fingerprint.
+     * How it was paid is part of what was asked for: the same scans replayed
+     * with a different method or account are a different purchase, not a
+     * retry. `?? null` because `JSON.stringify` drops undefined properties.
+     *
+     * The first-release contract changed this canonical shape (no supplier, no
+     * paid amount), so a request id issued BEFORE the change and replayed after
+     * it will read as a conflict rather than a replay. That can only affect a
+     * retry left pending across the deploy, and a conflict is the safe answer.
      */
-    supplierId: dto.supplierId ?? null,
+    paymentMethod: dto.paymentMethod,
+    receivingAccountId: dto.receivingAccountId?.toLowerCase() ?? null,
     referenceNo: dto.referenceNo ?? null,
-    paidAmount: dto.paidAmount ?? 0,
     items: (dto.items ?? [])
       .map((i) => {
         const entries = unitEntries(i);
@@ -150,19 +149,40 @@ export class PurchasingService {
     if (replay) return replay;
 
     /**
-     * A named supplier must exist. NO supplier is legitimate — and is the
-     * commonest case in this shop, buying a handset from whoever walked in with
-     * it (`0070`).
+     * First release: an ordinary purchase is anonymous. Nobody is asked who sold
+     * the phone, no supplier is looked up or created, and there is deliberately
+     * no "Unknown supplier" row — that would put a fictional counterparty into a
+     * payables ledger that no longer exists in the launch app.
      *
-     * There is deliberately no fallback to an "Unknown supplier" row: that
-     * would put a fictional counterparty into the payables ledger, and every
-     * walk-in purchase in the shop's history would pile up against it as though
-     * one person were owed the lot.
+     * The payment method is validated BEFORE anything is written, so a refused
+     * account never leaves half a purchase behind.
      */
-    const supplier = dto.supplierId
-      ? await this.db.supplier.findUnique({ where: { id: uuidToBin(dto.supplierId) } })
+    if (dto.paymentMethod === 'cash' && dto.receivingAccountId) {
+      throw new BadRequestException({
+        code: 'cash_has_no_account',
+        message: 'Cash is paid from the drawer, not from an account',
+      });
+    }
+    if (dto.paymentMethod !== 'cash' && !dto.receivingAccountId) {
+      throw new BadRequestException({
+        code: 'account_required',
+        message: 'Choose the account this purchase was paid from',
+      });
+    }
+    const account = dto.receivingAccountId
+      ? await this.db.receivingAccount.findFirst({
+          where: { id: uuidToBin(dto.receivingAccountId) },
+          select: { id: true, label: true, isActive: true },
+        })
       : null;
-    if (dto.supplierId && !supplier) throw new NotFoundException('Supplier not found');
+    // The tenant client scopes the lookup, so another company's account is
+    // simply not found.
+    if (dto.receivingAccountId && !account) {
+      throw new BadRequestException({ code: 'account_not_found', message: 'That payment account does not exist' });
+    }
+    if (account && !account.isActive) {
+      throw new BadRequestException({ code: 'account_inactive', message: 'That payment account is no longer active' });
+    }
 
     // Load every referenced product once (must belong to this company).
     const productIds = [...new Set(items.map((i) => i.productId))];
@@ -273,37 +293,16 @@ export class PurchasingService {
     const unitsCost = committableUnits.reduce((s, u) => s + u.cost, 0);
     const stockCost = preparedStock.reduce((s, l) => s + l.cost * l.quantity, 0);
     const total = Number((unitsCost + stockCost).toFixed(2));
-    const amountPaid = dto.paidAmount ?? 0;
-    if (amountPaid > total) throw new BadRequestException('Paid amount exceeds total');
-
     /**
-     * No payee named ⇒ nothing may be left owing.
+     * Paid in full, by the server.
      *
-     * A debt has to be owed to somebody: an outstanding balance against nobody
-     * is a figure no report can chase, no settlement can clear and no person can
-     * be asked about. So the purchase is refused, and the refusal says which of
-     * the two things to do — name who it was bought from, or record the whole
-     * amount as paid.
-     *
-     * Note what is NOT done here: `paidAmount` is not defaulted to the total
-     * just because no supplier was given. Omitting a seller says nothing about
-     * whether money changed hands, and quietly marking an unpaid purchase as
-     * settled would invent a payment that never happened. The client has to
-     * state it.
+     * The amount paid is not an input: the client cannot send one, so it can
+     * neither under-pay nor leave an ordinary purchase unpaid, and an omitted
+     * field can never quietly become a zero. Cost and payment are the same
+     * number, recorded in the same transaction as the stock.
      */
-    if (!supplier && round2(amountPaid) !== round2(total)) {
-      throw new BadRequestException({
-        code: 'supplier_required_for_balance',
-        message:
-          'Name who this was bought from, or record the full amount as paid. ' +
-          'An unpaid balance has to be owed to somebody.',
-        total: round2(total),
-        paidAmount: round2(amountPaid),
-        outstanding: round2(total - amountPaid),
-      });
-    }
-
-    const status = amountPaid >= total ? 'paid' : amountPaid > 0 ? 'partial' : 'unpaid';
+    const amountPaid = round2(total);
+    const status = 'paid' as const;
 
     // 4. Commit — one atomic transaction (the Receiving Session "Finish").
     /**
@@ -332,7 +331,7 @@ export class PurchasingService {
             id: pid,
             companyId,
             branchId,
-            supplierId: supplier?.id ?? null,
+            supplierId: null,
             userId: this.tenant.userId() ?? null,
             referenceNo: dto.referenceNo ?? null,
             clientUuid: uuidToBin(dto.clientUuid),
@@ -343,7 +342,7 @@ export class PurchasingService {
             total,
             amountPaid,
             status,
-            dueDate: dto.dueDate ? new Date(dto.dueDate) : null,
+            dueDate: null,
           },
         });
 
@@ -358,9 +357,7 @@ export class PurchasingService {
             imeiSecondary: u.imeiSecondary,
             serialNo: u.serialNo,
             cost: u.cost,
-            // Already nullable on the unit: a phone bought from a walk-in seller
-            // has a cost and a purchase, and simply no trading partner.
-            supplierId: supplier?.id ?? null,
+            supplierId: null,
             purchaseId: pid,
           });
         }
@@ -376,7 +373,7 @@ export class PurchasingService {
            * moved and `cost` stayed at whatever the FIRST ever receipt paid, so
            * buying the same cable again at a higher price never changed the
            * recorded cost. The purchase line above keeps the ACTUAL price paid,
-           * which is what the supplier is owed; only the branch's running
+           * which is what was paid for it; only the branch's running
            * average moves.
            */
           await receiveQuantityAtCost(tx, {
@@ -389,27 +386,25 @@ export class PurchasingService {
           });
         }
 
-        const payable = Number((total - amountPaid).toFixed(2));
         /*
-         * Only a named supplier can carry a balance, and by the rule above a
-         * purchase with no supplier has none. The `supplier` guard is belt and
-         * braces: if the validation above were ever weakened, this would leave
-         * the ledger untouched rather than throw at the database.
+         * The full payment, in the same transaction as the purchase and the
+         * units: all three exist, or none do. No balance is created anywhere —
+         * nothing is owed. Closing and the period summary read this row as money
+         * leaving the drawer (cash) or the named account.
          */
-        if (payable !== 0 && supplier) {
-          await tx.supplier.update({ where: { id: supplier.id }, data: { balance: { increment: payable } } });
-        }
-        if (amountPaid > 0) {
-          /*
-           * The payment record is written whether or not there is a supplier.
-           * Money genuinely left the till for a walk-in purchase, and skipping
-           * the row would lose that fact entirely — the purchase would show as
-           * paid with nothing recording the payment.
-           */
-          await tx.supplierPayment.create({
-            data: { id: newUuidV7Bin(), companyId, supplierId: supplier?.id ?? null, purchaseId: pid, amount: amountPaid, method: 'cash' },
-          });
-        }
+        await tx.supplierPayment.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            supplierId: null,
+            purchaseId: pid,
+            amount: amountPaid,
+            method: dto.paymentMethod,
+            receivingAccountId: account?.id ?? null,
+            accountLabelSnapshot: account?.label ?? null,
+            createdById: this.tenant.userId() ?? null,
+          },
+        });
 
         await this.audit.recordTx(tx, {
           entityType: 'Purchase',
@@ -432,7 +427,7 @@ export class PurchasingService {
           codeType: plan.codeType,
           code: plan.code,
           productId: plan.productId,
-          supplierId: supplier?.id ?? null,
+          supplierId: null,
           source: 'receiving',
         })));
 

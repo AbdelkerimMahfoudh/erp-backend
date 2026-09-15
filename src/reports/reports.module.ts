@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AnalyticsModule } from '../analytics/analytics.module';
 import { LoansModule } from '../loans/loans.module';
-import { SuppliersModule } from '../suppliers/suppliers.module';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
 
@@ -13,7 +12,7 @@ import { ReportsService } from './reports.service';
  * bytes.
  */
 @Module({
-  imports: [AnalyticsModule, LoansModule, SuppliersModule],
+  imports: [AnalyticsModule, LoansModule],
   controllers: [ReportsController],
   providers: [ReportsService],
 })

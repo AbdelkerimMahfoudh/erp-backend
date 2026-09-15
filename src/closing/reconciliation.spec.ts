@@ -35,7 +35,8 @@ import { join } from 'node:path';
 const SRC = __dirname;
 const closing = readFileSync(join(SRC, 'closing.service.ts'), 'utf8');
 const rollup = readFileSync(join(SRC, '..', 'analytics', 'rollup.service.ts'), 'utf8');
-const suppliers = readFileSync(join(SRC, '..', 'suppliers', 'suppliers.service.ts'), 'utf8');
+/** Paid for stock now lives in closing itself (first release: Suppliers module removed). */
+const stockPaid = closing.slice(closing.indexOf('private async stockPaidOn('), closing.indexOf('private async channelMovements('));
 
 /**
  * The expected-cash expression, comments stripped.
@@ -55,7 +56,7 @@ const equation = closing
 const TERMS = [
   { name: 'cash._sum.amount', sign: '+', why: 'cash taken in from sales' },
   { name: 'refundedCash', sign: '-', why: 'refunds handed back in cash (I3)' },
-  { name: 'supplierPaid.cash', sign: '-', why: 'supplier payments in cash (J1)' },
+  { name: 'supplierPaid.cash', sign: '-', why: 'paid for stock in cash: settlements (J1) and purchases paid at receipt' },
   { name: 'expensesCash', sign: '-', why: 'expenses paid in cash (D)' },
   { name: 'correctedCash', sign: '+', why: 'corrections returned in cash (B)' },
 ] as const;
@@ -112,9 +113,15 @@ describe('only CONFIRMED movements reach the equation', () => {
     expect(block).toMatch(/status = 'confirmed'/);
   });
 
-  it('supplier payments: confirmed settlements only', () => {
-    const paidOn = suppliers.slice(suppliers.indexOf('async paidOn('), suppliers.indexOf('async paidOn(') + 600);
-    expect(paidOn).toMatch(/status = 'confirmed'/);
+  it('paid for stock: confirmed settlements, and purchases paid at receipt', () => {
+    expect(stockPaid).toMatch(/FROM supplier_settlements[\s\S]*status = 'confirmed'/);
+    // A purchase is paid in full the moment it is received, so its payment row
+    // is already a completed movement — keyed on when it was paid, at the
+    // purchase's own branch.
+    expect(stockPaid).toContain('FROM supplier_payments sp');
+    expect(stockPaid).toContain('JOIN purchases p ON p.id = sp.purchase_id');
+    expect(stockPaid).toContain('p.branch_id = ${branchId}');
+    expect(stockPaid).toContain('sp.paid_at >= ${dayDate} AND sp.paid_at < ${end}');
   });
 
   it('expenses: confirmed only', () => {
@@ -140,7 +147,8 @@ describe('only CASH reaches the till figure', () => {
   it('each component separates its cash part', () => {
     expect(rollup).toMatch(/method = 'cash' THEN reported_amount END\), 0\)\s+AS paid_cash/);
     expect(rollup).toMatch(/method = 'cash' THEN amount END\), 0\)\s+AS paid_cash|method = 'cash' THEN amount END\), 0\)\s+AS expenses_cash/);
-    expect(suppliers).toMatch(/GROUP BY method/);
+    expect(stockPaid).toContain("GROUP BY (method = 'cash')");
+    expect(stockPaid).toContain("GROUP BY (sp.method = 'cash')");
   });
 
   it('the equation reads the cash figures, never the totals', () => {

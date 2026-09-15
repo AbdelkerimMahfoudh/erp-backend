@@ -2,7 +2,6 @@ import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { InventoryService } from './inventory.service';
-import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
 import { InventoryQueryDto } from './dto/inventory-query.dto';
 
 @ApiTags('inventory')
@@ -50,8 +49,7 @@ export class InventoryController {
     description:
       'Serialized variants with at least one `in_stock` unit, and every quantity ' +
       'stock line the branch holds. Each row carries `available` (sellable now — ' +
-      'reserved quantity excluded), `lowStock` from the shop’s ' +
-      '`low_stock_threshold` (the same rule as the dashboard), and `price`: the ' +
+      'reserved quantity excluded), and `price`: the ' +
       'min/max of prices resolved through the sale’s own ladder, with priced and ' +
       'unpriced counts, or null when nothing is priced. **No cost or margin, in any ' +
       'shape.** Requires an active branch. Not paginated: it is one row per ' +
@@ -67,12 +65,13 @@ export class InventoryController {
     return this.inventory.findByIdentifierWithTimeline(identifier);
   }
 
-  @Post('units')
-  @RequirePermissions('unit.add')
-  @ApiOperation({ summary: 'Quick add a single unit to stock (no supplier)' })
-  quickAdd(@Body() dto: QuickAddUnitDto) {
-    return this.inventory.quickAdd(dto);
-  }
+  /*
+   * `POST /units` (quick add) is no longer exposed. It created sellable stock
+   * with no purchase and no payment, which the first release forbids for
+   * ordinary receiving: every received phone is a purchase paid in full
+   * (`POST /purchases`). Opening inventory is brought in by the Owner-only
+   * import. The service method remains, dormant, with its own spec.
+   */
 
   @Post('units/:id/faulty')
   @RequirePermissions('unit.add')

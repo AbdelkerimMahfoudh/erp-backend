@@ -8,7 +8,6 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { DashboardService } from '../analytics/dashboard.service';
 import { LoansService } from '../loans/loans.service';
-import { SuppliersService } from '../suppliers/suppliers.service';
 import { writeCsv } from './csv-writer';
 import { count, isoDate, money, text } from './report-values';
 import {
@@ -59,7 +58,6 @@ export class ReportsService {
     private readonly analytics: AnalyticsService,
     private readonly dashboard: DashboardService,
     private readonly loans: LoansService,
-    private readonly suppliers: SuppliersService,
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
     private readonly cls: ClsService<AppClsStore>,
@@ -194,15 +192,7 @@ export class ReportsService {
   /**
    * Both directions of what is owed, as of now.
    *
-   * Two sources, because the shop has two kinds of counterparty and they are
-   * not the same idea: a loan is an agreed debt with a status and a ledger, and
-   * a supplier balance is what has been received and not yet settled. They are
-   * kept apart by the `source` column rather than added together, for the
-   * reason `SummaryService.balances` gives — a single "total owed" that spans
-   * both would be a number nobody could reconcile against either ledger.
-   *
-   * Suppliers are paged through to the end. Exporting the first page would be
-   * exporting what the phone happened to have loaded.
+   * Loans only, in the first release — see the note below.
    */
   private async debtorsAndCreditors(): Promise<Record<string, unknown>[]> {
     const rows: Record<string, unknown>[] = [];
@@ -221,32 +211,11 @@ export class ReportsService {
     }
 
     /*
-     * `SuppliersService.list` omits `outstanding` entirely for a caller who
-     * cannot see the shop's money — it is the same field-permission policy
-     * this export defers to everywhere else. A row with no balance is not
-     * written as zero; it is not written at all, because "we owe this supplier
-     * nothing" and "you may not know what we owe this supplier" are different
-     * statements and a spreadsheet cannot hold both in one cell.
+     * First release: no supplier balances. Suppliers and purchase credit are
+     * postponed, every ordinary purchase is paid in full, so loans are the only
+     * debts this report can hold. Historical supplier rows stay in the
+     * database, dormant, and are deliberately not exported as live debts.
      */
-    let cursor: string | undefined;
-    for (;;) {
-      const page = await this.suppliers.list({ limit: 50, status: 'all', cursor });
-      for (const supplier of page.rows) {
-        const outstanding = (supplier as { outstanding?: number }).outstanding;
-        if (outstanding === undefined || outstanding === 0) continue;
-        rows.push({
-          direction: outstanding > 0 ? 'owed_by_us' : 'owed_to_us',
-          source: 'supplier',
-          counterparty: supplier.name,
-          status: null,
-          since: null,
-          outstanding: Math.abs(outstanding),
-        });
-      }
-      cursor = page.nextCursor ?? undefined;
-      if (!cursor) break;
-    }
-
     return rows.sort((a, b) => Number(b.outstanding) - Number(a.outstanding));
   }
 
