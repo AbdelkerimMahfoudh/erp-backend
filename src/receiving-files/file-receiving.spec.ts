@@ -347,3 +347,39 @@ withDemo('the 100-phone demo workbook', () => {
     expect(summarise(entries).selectedCost).toBe(1_242_000);
   });
 });
+
+/**
+ * The endpoint has to be in the build that is actually running.
+ *
+ * The first real-device attempt failed with "That file could not be read"
+ * because the API process serving the shop was older than the feature and
+ * answered 404 — the module existed in Git and in no running process. These
+ * checks cannot start a server, but they do keep the route wired into the app
+ * and its parsers declared, so a build that omits either fails here first.
+ */
+describe('the parse endpoint stays wired into the application', () => {
+  it('AppModule imports the receiving-files module', () => {
+    const app = readFileSync(__dirname + '/../app.module.ts', 'utf8');
+    expect(app).toContain('ReceivingFilesModule');
+    expect(app).toMatch(/imports:\s*\[[\s\S]*ReceivingFilesModule/);
+  });
+
+  it('the module declares the controller that owns the route', () => {
+    const module = readFileSync(__dirname + '/receiving-files.module.ts', 'utf8');
+    expect(module).toContain('ReceivingFilesController');
+    expect(module).toContain('ReceivingFilesService');
+  });
+
+  it('the route is still POST purchases/file/parse on version 1', () => {
+    const controller = readFileSync(__dirname + '/receiving-files.controller.ts', 'utf8');
+    expect(controller).toContain("path: 'purchases/file'");
+    expect(controller).toContain("version: '1'");
+    expect(controller).toContain("@Post('parse')");
+  });
+
+  it('both parsers are declared as dependencies, not merely installed', () => {
+    const pkg = JSON.parse(readFileSync(__dirname + '/../../package.json', 'utf8'));
+    expect(pkg.dependencies['pdfjs-dist']).toBeTruthy();
+    expect(pkg.dependencies['jszip']).toBeTruthy();
+  });
+});
