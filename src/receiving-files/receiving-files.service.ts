@@ -12,7 +12,7 @@ import {
   type SourceRef,
 } from './file-entries';
 import { matchProduct, type CatalogueProduct } from './product-match';
-import { readPdf } from './pdf-reader';
+import { mergeByGap, readPdf, type PdfCell } from './pdf-reader';
 import { readWorkbook, type SheetCell } from './xlsx-reader';
 
 /**
@@ -145,22 +145,35 @@ export class ReceivingFilesService {
      * to a required field is the heading; any later row that repeats it is a
      * header again, not a phone.
      */
-    const headerRow = pdf.rows.find((r) => missingRequired(guessColumns(r.cells)).length === 0);
+    const headerRow = pdf.rows
+      .map((r) => ({ page: r.page, cells: mergeByGap(r.cells) }))
+      .find((r) => missingRequired(guessColumns(r.cells.map((c) => c.text))).length === 0);
     if (!headerRow) {
       throw new BadRequestException({
         code: 'pdf_no_table',
         message: 'No column headings were found in that PDF — check it is the stock list, not a letter',
       });
     }
-    const headings = headerRow.cells;
+    const headings = headerRow.cells.map((c) => c.text);
+    /*
+     * Where each column starts on the page.
+     *
+     * A printed row has no fixed number of cells: a phone with no second IMEI
+     * simply prints nothing there, and reading cells in order would slide its
+     * price into the IMEI 2 column. So every cell is placed in the column whose
+     * heading it sits under — which is also what keeps a value on the row it
+     * was printed on rather than near.
+     */
+    const columnX = headerRow.cells.map((c) => c.x);
     const columns = this.columnsFor(headings, options.mapping);
     const headerKey = headings.map((h) => h.trim().toLowerCase()).join('|');
     const headingCurrency = currencyInHeading(headings[columns.find((c) => c.field === 'cost')?.index ?? -1] ?? '');
 
     const entries: FileEntry[] = [];
     for (const [i, row] of pdf.rows.entries()) {
-      if (row.cells.map((c) => c.trim().toLowerCase()).join('|') === headerKey) continue;
-      if (row.cells.every((c) => !c.trim())) continue;
+      const merged = mergeByGap(row.cells);
+      if (merged.map((c) => c.text.trim().toLowerCase()).join('|') === headerKey) continue;
+      if (row.cells.every((c) => !c.text.trim())) continue;
       if (entries.length >= MAX_PHONES_PER_FILE) {
         throw new BadRequestException({
           code: 'file_too_large',
@@ -168,11 +181,15 @@ export class ReceivingFilesService {
         });
       }
       const source: SourceRef = { sheet: null, row: null, page: row.page };
-      const cells: SheetCell[] = row.cells.map((text) => ({ text }));
-      const entry = buildEntry({ cells, columns, source, headingCurrency }, `p${row.page}-${i}`);
-      // A printed line that carries no identifier at all is page furniture —
-      // a title, a total, a footer — not a phone somebody failed to fill in.
-      if (!entry.extracted.imei1 && !entry.extracted.serial && !entry.extracted.model) continue;
+      const entry = buildEntry({ cells: alignToColumns(row.cells, columnX), columns, source, headingCurrency }, `p${row.page}-${i}`);
+      /*
+       * Page furniture — a title, a page number, a total — is not a phone
+       * somebody forgot to fill in. A printed line counts as a phone only when
+       * it carries an identifier, or both a model and a price.
+       */
+      const identified = Boolean(entry.extracted.imei1 ?? entry.extracted.serial);
+      const described = Boolean(entry.extracted.model && entry.extracted.cost !== null);
+      if (!identified && !described) continue;
       entries.push(entry);
     }
 
@@ -196,6 +213,7 @@ export class ReceivingFilesService {
   }
 
   // ── shared ────────────────────────────────────────────────────────────────
+
 
   /** The guess, with the app's corrections applied on top. */
   private columnsFor(headings: string[], mapping?: Record<string, number>): ColumnGuess[] {
@@ -274,4 +292,56 @@ export class ReceivingFilesService {
       trackingType: r.trackingType as CatalogueProduct['trackingType'],
     }));
   }
+}
+
+/**
+ * Put each printed cell in the column whose heading it sits under.
+ *
+ * Nearest heading by starting position, with a guard: a cell further from every
+ * heading than half the widest column gap is left out rather than forced into a
+ * column it does not belong to.
+ */
+export function alignToColumns(cells: readonly PdfCell[], columnX: readonly number[]): { text: string }[] {
+  const out: { text: string }[] = columnX.map(() => ({ text: '' }));
+  const gaps = columnX.slice(1).map((x, i) => x - columnX[i]);
+  const tolerance = (gaps.length ? Math.max(...gaps) : 60) * 0.75;
+
+  const place = (text: string, x: number) => {
+    let best = -1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const [i, cx] of columnX.entries()) {
+      const d = Math.abs(x - cx);
+      if (d < bestDistance) {
+        bestDistance = d;
+        best = i;
+      }
+    }
+    if (best < 0 || bestDistance > tolerance) return;
+    out[best] = { text: out[best].text ? out[best].text + ' ' + text : text };
+  };
+
+  for (const cell of cells) {
+    /*
+     * One printed item can cover two columns.
+     *
+     * When the gap between them is narrow, pdfjs hands back a single text item
+     * — "351234000001016 12500" — and reading it as one value puts the price
+     * inside the IMEI. So an item that reaches past the next column heading is
+     * split on its spaces, and each piece placed by where it actually sits,
+     * estimated from the item's own measured width.
+     */
+    const pieces = cell.text.split(/\s+/).filter(Boolean);
+    const spansAnother = columnX.some((cx) => cx > cell.x + 1 && cx < cell.x + cell.width);
+    if (pieces.length > 1 && spansAnother && cell.width > 0) {
+      const characters = pieces.reduce((a, piece) => a + piece.length, 0) + (pieces.length - 1);
+      let consumed = 0;
+      for (const piece of pieces) {
+        place(piece, cell.x + (consumed / characters) * cell.width);
+        consumed += piece.length + 1;
+      }
+      continue;
+    }
+    place(cell.text, cell.x);
+  }
+  return out;
 }

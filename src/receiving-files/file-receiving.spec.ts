@@ -234,7 +234,10 @@ describe('PDF rows', () => {
 
   it('groups items on one baseline into a row, left to right', () => {
     const rows = rowsFromItems([item('990001000000018', 200, 700), item('iPhone 12', 60, 700), item('12500', 400, 700)], 1);
-    expect(rows).toEqual([{ page: 1, cells: ['iPhone 12', '990001000000018', '12500'] }]);
+    expect(rows[0].page).toBe(1);
+    expect(rows[0].cells.map((c) => c.text)).toEqual(['iPhone 12', '990001000000018', '12500']);
+    // Each cell keeps where it was printed: columns are decided by position.
+    expect(rows[0].cells.map((c) => c.x)).toEqual([60, 200, 400]);
   });
 
   it('keeps a price on its own phone rather than the one above', () => {
@@ -242,9 +245,9 @@ describe('PDF rows', () => {
       [item('990001000000018', 200, 700), item('12500', 400, 700), item('990001000000026', 200, 680), item('9500', 400, 680)],
       2,
     );
-    expect(rows).toEqual([
-      { page: 2, cells: ['990001000000018', '12500'] },
-      { page: 2, cells: ['990001000000026', '9500'] },
+    expect(rows.map((r) => r.cells.map((c) => c.text))).toEqual([
+      ['990001000000018', '12500'],
+      ['990001000000026', '9500'],
     ]);
   });
 

@@ -16,11 +16,26 @@ import { BadRequestException } from '@nestjs/common';
  * was processed.
  */
 
+export interface PdfCell {
+  text: string;
+  /** Where the text starts on the page. Columns are decided by this, not by order. */
+  x: number;
+  /** How wide it is, so two neighbours can be told apart. */
+  width: number;
+}
+
 export interface PdfRow {
   /** 1-based page. */
   page: number;
-  /** Cells left to right, as printed. */
-  cells: string[];
+  /**
+   * The text printed on this baseline, left to right, still in the pieces the
+   * PDF itself uses.
+   *
+   * Deliberately NOT merged into columns here: how wide a gap separates two
+   * columns is only knowable once the heading row is found, and merging first
+   * is how a fifteen-digit IMEI and the price beside it become one value.
+   */
+  cells: PdfCell[];
 }
 
 export interface PdfContent {
@@ -56,22 +71,38 @@ export function rowsFromItems(items: Item[], page: number): PdfRow[] {
     else lines.push([item]);
   }
 
-  return lines.map((line) => {
-    const ordered = [...line].sort((a, b) => a.x - b.x);
-    const cells: string[] = [];
-    let current = '';
-    let cursor: number | null = null;
-    for (const item of ordered) {
-      if (cursor !== null && item.x - cursor > COLUMN_GAP) {
-        cells.push(current.trim());
-        current = '';
-      }
-      current += (current && !current.endsWith(' ') ? ' ' : '') + item.str.trim();
-      cursor = item.x + item.width;
+  return lines.map((line) => ({
+    page,
+    cells: [...line]
+      .sort((a, b) => a.x - b.x)
+      .map((item) => ({ text: item.str.trim(), x: item.x, width: item.width })),
+  }));
+}
+
+/**
+ * Merge a row's pieces into cells by the gaps between them.
+ *
+ * Used to read the HEADING row, where there are no columns to align to yet.
+ * Data rows are aligned to those headings instead, which is what keeps a price
+ * out of the IMEI column when the two are printed close together.
+ */
+export function mergeByGap(cells: readonly PdfCell[]): PdfCell[] {
+  const out: PdfCell[] = [];
+  let text = '';
+  let startedAt: number | null = null;
+  let cursor: number | null = null;
+  for (const cell of cells) {
+    if (cursor !== null && cell.x - cursor > COLUMN_GAP) {
+      out.push({ text: text.trim(), x: startedAt ?? cell.x, width: cursor - (startedAt ?? cursor) });
+      text = '';
+      startedAt = null;
     }
-    if (current.trim()) cells.push(current.trim());
-    return { page, cells };
-  });
+    if (startedAt === null) startedAt = cell.x;
+    text += (text ? ' ' : '') + cell.text;
+    cursor = cell.x + cell.width;
+  }
+  if (text.trim()) out.push({ text: text.trim(), x: startedAt ?? 0, width: (cursor ?? 0) - (startedAt ?? 0) });
+  return out;
 }
 
 export async function readPdf(buffer: Buffer): Promise<PdfContent> {
