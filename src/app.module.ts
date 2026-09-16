@@ -37,6 +37,7 @@ import { ScannerModule } from './scanner/scanner.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { CorrectionsModule } from './corrections/corrections.module';
 import { PurchasingModule } from './purchasing/purchasing.module';
+import { ReceivingFilesModule } from './receiving-files/receiving-files.module';
 import { PricingModule } from './pricing/pricing.module';
 import { CustomersModule } from './customers/customers.module';
 import { SalesModule } from './sales/sales.module';
@@ -156,6 +157,7 @@ import { LoansModule } from './loans/loans.module';
     InventoryModule,
     CorrectionsModule,
     PurchasingModule,
+    ReceivingFilesModule,
     PricingModule,
     CustomersModule,
     SalesModule,
