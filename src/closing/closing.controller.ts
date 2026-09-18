@@ -33,6 +33,20 @@ export class ClosingController {
     return this.closing.periodMovements(from, to);
   }
 
+  /**
+   * The Money screen in one read (0074): cash in the drawer now, what moved
+   * through each account today, the period's sales, collected and outstanding,
+   * and today's expenses. `report.view`, like the figures it replaces.
+   */
+  @Get('closings/overview')
+  @RequirePermissions('report.view')
+  @ApiQuery({ name: 'from', required: true, description: 'First day, YYYY-MM-DD (inclusive)' })
+  @ApiQuery({ name: 'to', required: true, description: 'Last day, YYYY-MM-DD (inclusive)' })
+  @ApiOperation({ summary: 'Money overview: drawer now, accounts today, period sales, collected and outstanding' })
+  overview(@Query('from') from: string, @Query('to') to: string) {
+    return this.closing.overview(from, to);
+  }
+
   @Get('closings/open/view')
   @RequirePermissions('closing.count')
   @ApiQuery({ name: 'date', required: false, description: 'Day to view; defaults to today (UTC)' })

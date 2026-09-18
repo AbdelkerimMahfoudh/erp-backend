@@ -473,6 +473,124 @@ export class ClosingService {
     };
   }
 
+  /**
+   * The Money screen in one read (0074).
+   *
+   * Four questions, kept apart because they are different facts:
+   *
+   * - **Cash in the drawer now** — today's expected drawer, from the SAME
+   *   channel computation the daily closing counts against. Not sales, not
+   *   collected: what the drawer should hold after every cash movement today.
+   *   The closing reconciles each day on its own (no opening float is carried),
+   *   so this is a real balance of the drawer as the closing understands it.
+   * - **Accounts today** — what was recorded into and out of each account
+   *   today. Deliberately NOT called a balance: the app never learns what an
+   *   account held before, nor what the owner moved out of it privately, so no
+   *   balance — and no "total available" — can be stated honestly.
+   * - **The period's sales** — how many phones, their full selling value, and
+   *   how much of it is still owed, counted from the sales themselves on the
+   *   sale's own day. A later collection never raises any of these.
+   * - **Collected in the period** — money actually received, dated by when it
+   *   arrived. It can exceed sales on a day old balances are paid.
+   */
+  async overview(from: string, to: string) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const day = /^\d{4}-\d{2}-\d{2}$/;
+    if (!day.test(from) || !day.test(to) || from > to) {
+      throw new BadRequestException('from and to must be YYYY-MM-DD, with from on or before to');
+    }
+    const today = dayKey(new Date());
+    const start = new Date(`${from}T00:00:00.000Z`);
+    const end = new Date(new Date(`${to}T00:00:00.000Z`).getTime() + 86_400_000);
+    const todayDate = new Date(`${today}T00:00:00.000Z`);
+
+    const [todayChannels, periodChannels, sales, phones, owedAll, expenses] = await Promise.all([
+      this.expectedChannels(companyId, branchId, today, today),
+      this.expectedChannels(companyId, branchId, from, to),
+      this.db.sale.aggregate({
+        where: { branchId, isReversed: false, soldAt: { gte: start, lt: end } },
+        _sum: { total: true, balanceDue: true },
+        _count: true,
+      }),
+      // A phone is an IMEI-tracked unit. A charger sold beside it is a sale,
+      // counted in the value, but it is not a phone.
+      this.db.saleItem.count({
+        where: {
+          voided: false,
+          unit: { product: { trackingType: 'imei' } },
+          sale: { branchId, isReversed: false, soldAt: { gte: start, lt: end } },
+        },
+      }),
+      this.db.sale.aggregate({
+        where: { branchId, isReversed: false, balanceDue: { gt: 0 } },
+        _sum: { balanceDue: true },
+        _count: true,
+      }),
+      // Only money actually paid today: a confirmed expense moves money on its
+      // confirmation day. A reported one moves nothing and is not shown here.
+      this.db.expense.findMany({
+        where: { branchId, status: 'confirmed', confirmationDate: todayDate },
+        select: {
+          id: true,
+          category: true,
+          amount: true,
+          method: true,
+          accountLabelSnapshot: true,
+          reference: true,
+          receiptKey: true,
+          confirmedAt: true,
+        },
+        orderBy: { confirmedAt: 'desc' },
+      }),
+    ]);
+
+    const cash = todayChannels.find((c) => c.channel === 'cash');
+    const collected = periodChannels.reduce((n, c) => n + c.salesIn, 0);
+    const refunds = periodChannels.reduce((n, c) => n + c.refundsOut, 0);
+
+    return {
+      from,
+      to,
+      today,
+      cashNow: round2(cash?.expected ?? 0),
+      accountsToday: todayChannels
+        .filter((c) => c.channel !== 'cash')
+        .map((c) => ({
+          accountId: c.accountId,
+          label: c.labelSnapshot,
+          isUnattributed: c.isUnattributed,
+          moneyIn: round2(c.salesIn + c.correctionsIn),
+          moneyOut: round2(c.refundsOut + c.supplierOut + c.expensesOut),
+          net: c.expected,
+        })),
+      period: {
+        phonesSold: phones,
+        salesCount: sales._count,
+        salesValue: round2(num(sales._sum.total)),
+        collected: round2(collected),
+        /** Still owed today on the sales made in this period. */
+        outstanding: round2(num(sales._sum.balanceDue)),
+        refunds: round2(refunds),
+      },
+      /** Everything owed at this branch right now, whatever day it was sold. */
+      outstandingAll: { amount: round2(num(owedAll._sum.balanceDue)), sales: owedAll._count },
+      expensesToday: {
+        total: round2(expenses.reduce((n, e) => n + num(e.amount), 0)),
+        rows: expenses.map((e) => ({
+          id: binToUuid(e.id),
+          description: e.category,
+          amount: num(e.amount),
+          method: e.method,
+          accountLabel: e.accountLabelSnapshot,
+          reference: e.reference,
+          hasReceipt: e.receiptKey !== null,
+          paidAt: e.confirmedAt,
+        })),
+      },
+    };
+  }
+
   async openView(date?: string) {
     const companyId = this.tenant.companyId();
     const branchId = this.tenant.requireBranchId();
