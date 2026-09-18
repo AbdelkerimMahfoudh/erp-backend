@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger'
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { SalesService } from './sales.service';
 import { SalePaymentsService } from './sale-payments.service';
+import { SaleSelectionService } from './sale-selection.service';
 import { RecordSalePaymentDto } from './dto/record-payment.dto';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
@@ -14,6 +15,7 @@ export class SalesController {
   constructor(
     private readonly sales: SalesService,
     private readonly payments: SalePaymentsService,
+    private readonly selection: SaleSelectionService,
   ) {}
 
   /**
@@ -60,6 +62,21 @@ export class SalesController {
   @ApiOperation({ summary: 'Sales per day for a period, with value and outstanding' })
   byDay(@Query('from') from: string, @Query('to') to: string) {
     return this.sales.byDay(from, to);
+  }
+
+  /**
+   * The phone about to be sold, by scanned or typed IMEI, or a serial.
+   *
+   * `sale.create`: this is the first step of selling. It only reads — never
+   * creates a Product or Unit — and answers whether the phone can be sold here,
+   * at the price the sale will charge, with no cost, history or other branch's
+   * name. Two path segments, so it cannot collide with `:id`.
+   */
+  @Get('selection/:identifier')
+  @RequirePermissions('sale.create')
+  @ApiOperation({ summary: 'Find the existing phone to sell, with its availability and selling price' })
+  selectPhone(@Param('identifier') identifier: string) {
+    return this.selection.select(identifier);
   }
 
   @Get(':id')
