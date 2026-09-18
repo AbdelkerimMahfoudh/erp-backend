@@ -1,4 +1,6 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ClsService } from 'nestjs-cls';
+import { AppClsStore } from '../common/context/request-context';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
@@ -7,6 +9,8 @@ import { PricingService } from '../pricing/pricing.service';
 import {
   assertLookupIdentifier,
   availabilityOf,
+  branchDisclosure,
+  NOT_AVAILABLE_HERE,
   maskIdentifier,
   normalizeIdentifier,
   variantParts,
@@ -22,7 +26,7 @@ import {
  *
  * Deliberately narrow. It reads; it never creates a Product, a Unit or stock.
  * It returns no margin, no history, no staff names, no full identifier and no
- * other branch's name — only what the person at the counter needs to decide
+ * other branch's existence or name unless the caller holds `branch.manage` — only what the person at the counter needs to decide
  * whether to hand this phone over. Cost reaches only a caller with `cost.view`.
  */
 @Injectable()
@@ -31,7 +35,12 @@ export class SaleSelectionService {
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
     private readonly tenant: TenantContext,
     private readonly pricing: PricingService,
+    private readonly cls: ClsService<AppClsStore>,
   ) {}
+
+  private may(permission: string): boolean {
+    return this.cls.get('permissions')?.has(permission) ?? false;
+  }
 
   async select(raw: string) {
     const branchId = this.tenant.requireBranchId();
@@ -46,6 +55,7 @@ export class SaleSelectionService {
         id: true,
         status: true,
         branchId: true,
+        branch: { select: { name: true } },
         cost: true,
         dateIn: true,
         imeiPrimary: true,
@@ -54,7 +64,16 @@ export class SaleSelectionService {
         product: { select: { brand: true, model: true, variant: true, specifications: true, trackingType: true } },
       },
     });
-    if (!unit) throw new NotFoundException({ code: 'not_found', message: 'No phone in this shop has that number' });
+    const canViewBranches = this.may('branch.manage');
+    // Without branch.manage, "nowhere" and "another branch" are one answer, so
+    // the difference cannot reveal another branch's stock.
+    if (!unit) {
+      throw new NotFoundException(
+        canViewBranches ? { code: 'not_found', message: 'No phone in this shop has that number' } : NOT_AVAILABLE_HERE,
+      );
+    }
+    const disclosure = branchDisclosure(unit.branchId, branchId, canViewBranches);
+    if (disclosure === 'hidden') throw new NotFoundException(NOT_AVAILABLE_HERE);
 
     const availability = availabilityOf(unit.status, unit.branchId, branchId);
     const matchedBy =
@@ -83,6 +102,8 @@ export class SaleSelectionService {
         trackingType: unit.product.trackingType,
       },
       price,
+      /** Only for a caller with branch.manage, and only when the phone is elsewhere. */
+      otherBranch: disclosure === 'shown' ? { name: unit.branch.name } : null,
       /**
        * For the seller's private summary only. `cost` is removed by the global
        * financial-fields interceptor for any caller without `cost.view`, so a

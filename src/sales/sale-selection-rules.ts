@@ -101,3 +101,24 @@ export function maskIdentifier(identifier: string | null): string | null {
   if (!identifier) return null;
   return `•••• ${identifier.slice(-4)}`;
 }
+
+/** The one answer a caller without `branch.manage` gets for a phone that is not here. */
+export const NOT_AVAILABLE_HERE = {
+  code: 'not_available_here',
+  message: 'This phone is not available in this branch.',
+} as const;
+
+/**
+ * Whether the caller may learn anything about a phone outside the active
+ * branch. Without `branch.manage` a phone elsewhere — sold, in stock or
+ * otherwise — is answered exactly like a number that exists nowhere, so the
+ * lookup cannot be used to probe other branches' stock.
+ */
+export function branchDisclosure(
+  unitBranchId: Buffer,
+  activeBranchId: Buffer,
+  canViewBranches: boolean,
+): 'here' | 'shown' | 'hidden' {
+  if (unitBranchId.equals(activeBranchId)) return 'here';
+  return canViewBranches ? 'shown' : 'hidden';
+}

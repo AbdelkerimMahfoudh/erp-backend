@@ -110,6 +110,7 @@ describe('finding a phone to sell only reads', () => {
   it('returns no margin, history, staff or full identifier; cost is left to the gating interceptor', () => {
     const returned = service.slice(service.indexOf('return {'));
     expect(returned).not.toMatch(/margin|timeline|user|imeiPrimary:|imeiSecondary:|serialNo:|branchId:/);
+    expect(returned).toContain("otherBranch: disclosure === 'shown'");
     // `cost` is only in the response because the global interceptor strips it
     // for every caller without cost.view.
     const fields = readFileSync(join(__dirname, '..', 'common', 'interceptors', 'financial-fields.ts'), 'utf8');
