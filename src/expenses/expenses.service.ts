@@ -20,6 +20,8 @@ import {
   needsReasonWarning,
 } from './expense-rules';
 import { CreateExpenseDto, DecideExpenseDto, ListExpensesDto } from './dto/create-expense.dto';
+import { STORAGE_PROVIDER, type StorageProvider } from '../storage/storage.types';
+import { assertReceipt, detectReceiptType, receiptKey } from './receipt-rules';
 
 const num = (d: Prisma.Decimal | number | null | undefined): number => (d == null ? 0 : Number(d));
 
@@ -55,6 +57,7 @@ export class ExpensesService {
     private readonly audit: AuditService,
     private readonly cls: ClsService<AppClsStore>,
     @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
+    @Inject(STORAGE_PROVIDER) private readonly storage: StorageProvider,
   ) {}
 
   private has(permission: string): boolean {
@@ -336,6 +339,56 @@ export class ExpensesService {
       reportedBy: { select: { name: true } },
       confirmedBy: { select: { name: true } },
     } as const;
+  }
+
+  /**
+   * Attach a receipt photo to an expense at this branch (0074).
+   *
+   * Optional evidence only: it changes no amount, no status and no day, so it
+   * may be added to a reported or a confirmed expense alike. A second photo
+   * replaces the first.
+   */
+  async attachReceipt(idStr: string, bytes: Buffer | undefined) {
+    const expense = await this.loadHere(idStr);
+    const type = assertReceipt(bytes);
+    const key = receiptKey(binToUuid(expense.companyId), binToUuid(expense.id), type.ext);
+    if (expense.receiptKey && expense.receiptKey !== key) await this.storage.delete(expense.receiptKey).catch(() => undefined);
+    await this.storage.put(key, bytes as Buffer, type.contentType);
+    await this.db.expense.update({ where: { id: expense.id }, data: { receiptKey: key } });
+    await this.audit.record({
+      entityType: 'Expense',
+      entityId: expense.id,
+      action: 'update',
+      reason: 'receipt_attached',
+      branchId: expense.branchId ?? undefined,
+    });
+    return { hasReceipt: true };
+  }
+
+  /** The receipt photo, for whoever may read the expense at this branch. */
+  async readReceipt(idStr: string): Promise<{ bytes: Buffer; contentType: string }> {
+    const expense = await this.loadHere(idStr);
+    if (!expense.receiptKey) throw new NotFoundException('No receipt for this expense');
+    const bytes = await this.storage.get(expense.receiptKey);
+    return { bytes, contentType: detectReceiptType(bytes)?.contentType ?? 'application/octet-stream' };
+  }
+
+  /**
+   * An expense of THIS branch that the caller may see. Another branch's, and —
+   * for somebody who only reports expenses — another person's, answer exactly
+   * like a missing one, the same rule `detail()` applies.
+   */
+  private async loadHere(idStr: string) {
+    const expense = await this.load(idStr);
+    const branchId = this.tenant.requireBranchId();
+    if (!expense.branchId || !expense.branchId.equals(branchId)) throw new NotFoundException('Expense not found');
+    if (!this.seesAll()) {
+      const userId = this.tenant.userId();
+      if (!expense.reportedById || !userId || !expense.reportedById.equals(userId)) {
+        throw new NotFoundException('Expense not found');
+      }
+    }
+    return expense;
   }
 
   /** A malformed id is a 404, not a 500 — shipped as a real defect twice. */

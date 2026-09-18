@@ -1,7 +1,10 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Param, Post, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { ExpensesService } from './expenses.service';
+import { MAX_RECEIPT_BYTES } from './receipt-rules';
 import { CreateExpenseDto, DecideExpenseDto, ListExpensesDto } from './dto/create-expense.dto';
 
 /**
@@ -53,6 +56,38 @@ export class ExpensesController {
   @ApiOperation({ summary: 'One expense' })
   detail(@Param('id') id: string) {
     return this.expenses.detail(id);
+  }
+
+  /**
+   * Attach a photo of the receipt (0074). Optional evidence: it changes no
+   * amount, status or day. The image type is read from the file's own bytes.
+   */
+  @Post(':id/receipt')
+  @RequirePermissions('expense.submit')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_RECEIPT_BYTES } }))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Attach a receipt photo to an expense' })
+  attachReceipt(@Param('id') id: string, @UploadedFile() file: { buffer: Buffer } | undefined) {
+    return this.expenses.attachReceipt(id, file?.buffer);
+  }
+
+  /**
+   * The receipt photo, as the raw image.
+   *
+   * Written straight to the response, the way the report export does it. A
+   * returned `StreamableFile` passed through the global response interceptors
+   * and reached the client as a JSON description of a stream, labelled as a
+   * JPEG — found by the live lifecycle check, not by the suite.
+   */
+  @Get(':id/receipt')
+  @RequirePermissions('expense.submit')
+  @ApiOperation({ summary: 'The receipt photo, for whoever may read the expense' })
+  async receipt(@Param('id') id: string, @Res() res: Response): Promise<void> {
+    const { bytes, contentType } = await this.expenses.readReceipt(id);
+    res.setHeader('Content-Type', contentType);
+    // Private evidence: never kept by a shared cache.
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(bytes);
   }
 
   @Post(':id/confirm')
