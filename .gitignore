@@ -58,3 +58,6 @@ desktop.ini
 
 # Local staging launcher, carries generated secrets.
 staging-server.cjs
+
+# Local-disk storage (receipts, photos). User data: never committed.
+/uploads/
