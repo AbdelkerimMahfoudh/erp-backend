@@ -176,6 +176,16 @@ enum PaymentMethod {
   other
 }
 
+/// Money taken WITH the sale, or received LATER against its balance (0074).
+///
+/// A collection is a movement of money on the day it arrives. It is never a
+/// second sale: revenue and profit come from `sale_items` on the sale's own
+/// day, and a collection writes to neither.
+enum SalePaymentKind {
+  at_sale
+  collection
+}
+
 enum TransferStatus {
   /// An employee has asked; stock is already reserved but nobody has agreed yet.
   pending_approval
@@ -359,9 +369,9 @@ model Company {
   subscriptionEvents             SubscriptionEvent[]
   subscriptionPayments           SubscriptionPayment[]
   billingPeriods                 BillingPeriod[]
+  anomalyDismissals              AnomalyDismissal[]
 
   @@map("companies")
-  anomalyDismissals AnomalyDismissal[]
 }
 
 model Branch {
@@ -461,6 +471,7 @@ model User {
   connectionsDecidedBy     StoreConnection[]        @relation("ConnectionDecidedBy")
   counterpartyRecords      Counterparty[]           @relation("CounterpartyUser")
   counterpartiesCreated    Counterparty[]           @relation("CounterpartyCreatedBy")
+  paymentsRecorded         Payment[]                @relation("PaymentRecordedBy")
   consignmentLedgerEntries ConsignmentLedgerEntry[]
 
   /// Loan roles. Named, because who proposed and who decided must stay
@@ -543,12 +554,12 @@ model User {
   verificationIntents   VerificationIntent[]
   settlementsReported   SupplierSettlement[]   @relation("SettlementReportedBy")
   settlementsConfirmed  SupplierSettlement[]   @relation("SettlementConfirmedBy")
+  anomalyDismissals     AnomalyDismissal[]     @relation("AnomalyDismissedBy")
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
   @@unique([companyId, email], map: "ux_users_company_email") // 0055: email is a login identifier; same per-company rule as phone
   @@map("users")
-  anomalyDismissals AnomalyDismissal[] @relation("AnomalyDismissedBy")
 }
 
 model Role {
@@ -1143,24 +1154,24 @@ model PurchaseItem {
 }
 
 model SupplierPayment {
-  id          Bytes         @id @db.Binary(16)
-  companyId   Bytes         @map("company_id") @db.Binary(16)
+  id                   Bytes         @id @db.Binary(16)
+  companyId            Bytes         @map("company_id") @db.Binary(16)
   /// NULLABLE (`0070`), for the same reason `Purchase.supplierId` is: money
   /// genuinely changed hands for a phone bought from a walk-in seller, and that
   /// payment record must survive even though there is no trading partner to
   /// attribute it to. The row is kept rather than skipped — dropping it would
   /// lose the fact that the shop paid.
-  supplierId  Bytes?        @map("supplier_id") @db.Binary(16)
-  purchaseId  Bytes?        @map("purchase_id") @db.Binary(16)
-  amount      Decimal       @db.Decimal(14, 2)
-  method      PaymentMethod
+  supplierId           Bytes?        @map("supplier_id") @db.Binary(16)
+  purchaseId           Bytes?        @map("purchase_id") @db.Binary(16)
+  amount               Decimal       @db.Decimal(14, 2)
+  method               PaymentMethod
   /// The active account a non-cash purchase was paid from (`0072`). NULL for
   /// cash, and for rows written before the column existed.
-  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  receivingAccountId   Bytes?        @map("receiving_account_id") @db.Binary(16)
   /// Frozen at payment time, so renaming the account cannot retitle history.
-  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
-  paidAt      DateTime      @default(now()) @map("paid_at") @db.DateTime(6)
-  createdById Bytes?        @map("created_by") @db.Binary(16)
+  accountLabelSnapshot String?       @map("account_label_snapshot") @db.VarChar(80)
+  paidAt               DateTime      @default(now()) @map("paid_at") @db.DateTime(6)
+  createdById          Bytes?        @map("created_by") @db.Binary(16)
 
   company          Company           @relation(fields: [companyId], references: [id])
   supplier         Supplier?         @relation(fields: [supplierId], references: [id])
@@ -1227,24 +1238,27 @@ model RecognitionOutbox {
 }
 
 model Sale {
-  id         Bytes         @id @db.Binary(16)
-  companyId  Bytes         @map("company_id") @db.Binary(16)
-  branchId   Bytes         @map("branch_id") @db.Binary(16)
-  userId     Bytes         @map("user_id") @db.Binary(16)
-  customerId Bytes?        @map("customer_id") @db.Binary(16)
-  invoiceNo  String        @map("invoice_no") @db.VarChar(24)
-  soldAt     DateTime      @default(now()) @map("sold_at") @db.DateTime(6)
-  subtotal   Decimal       @db.Decimal(14, 2)
-  discount   Decimal       @default(0) @db.Decimal(14, 2)
-  taxTotal   Decimal       @default(0) @map("tax_total") @db.Decimal(14, 2)
-  total      Decimal       @db.Decimal(14, 2)
-  totalCost  Decimal       @map("total_cost") @db.Decimal(14, 2)
-  margin     Decimal       @db.Decimal(14, 2)
-  amountPaid Decimal       @default(0) @map("amount_paid") @db.Decimal(14, 2)
-  balanceDue Decimal       @default(0) @map("balance_due") @db.Decimal(14, 2)
-  payStatus  SalePayStatus @default(paid) @map("pay_status")
-  dueDate    DateTime?     @map("due_date") @db.Date
-  isReversed Boolean       @default(false) @map("is_reversed")
+  id             Bytes         @id @db.Binary(16)
+  companyId      Bytes         @map("company_id") @db.Binary(16)
+  branchId       Bytes         @map("branch_id") @db.Binary(16)
+  userId         Bytes         @map("user_id") @db.Binary(16)
+  customerId     Bytes?        @map("customer_id") @db.Binary(16)
+  /// A partner store — connected or manual — that owes the balance (0074).
+  /// Never set together with `customerId`: one balance, one debtor.
+  counterpartyId Bytes?        @map("counterparty_id") @db.Binary(16)
+  invoiceNo      String        @map("invoice_no") @db.VarChar(24)
+  soldAt         DateTime      @default(now()) @map("sold_at") @db.DateTime(6)
+  subtotal       Decimal       @db.Decimal(14, 2)
+  discount       Decimal       @default(0) @db.Decimal(14, 2)
+  taxTotal       Decimal       @default(0) @map("tax_total") @db.Decimal(14, 2)
+  total          Decimal       @db.Decimal(14, 2)
+  totalCost      Decimal       @map("total_cost") @db.Decimal(14, 2)
+  margin         Decimal       @db.Decimal(14, 2)
+  amountPaid     Decimal       @default(0) @map("amount_paid") @db.Decimal(14, 2)
+  balanceDue     Decimal       @default(0) @map("balance_due") @db.Decimal(14, 2)
+  payStatus      SalePayStatus @default(paid) @map("pay_status")
+  dueDate        DateTime?     @map("due_date") @db.Date
+  isReversed     Boolean       @default(false) @map("is_reversed")
 
   /// The return policy THIS sale was sold under, snapshotted at completion
   /// (I1). `0` means no returns. Deliberately not read from
@@ -1269,6 +1283,7 @@ model Sale {
   branch                   Branch           @relation(fields: [branchId], references: [id])
   user                     User             @relation(fields: [userId], references: [id])
   customer                 Customer?        @relation(fields: [customerId], references: [id])
+  counterparty             Counterparty?    @relation(fields: [counterpartyId], references: [id], onDelete: Restrict, map: "fk_sales_counterparty")
   returnPolicyOverriddenBy User?            @relation("SaleReturnPolicyOverride", fields: [returnPolicyOverriddenById], references: [id])
   items                    SaleItem[]
   payments                 Payment[]
@@ -1282,6 +1297,8 @@ model Sale {
   @@index([companyId, branchId, soldAt])
   @@index([companyId, userId, soldAt])
   @@index([customerId])
+  @@index([counterpartyId], map: "ix_sales_counterparty")
+  @@index([companyId, branchId, balanceDue], map: "ix_sales_balance")
   @@map("sales")
 }
 
@@ -1315,12 +1332,24 @@ model SaleItem {
 }
 
 model Payment {
-  id        Bytes         @id @db.Binary(16)
-  companyId Bytes         @map("company_id") @db.Binary(16)
-  saleId    Bytes         @map("sale_id") @db.Binary(16)
-  method    PaymentMethod
-  amount    Decimal       @db.Decimal(14, 2)
-  paidAt    DateTime      @default(now()) @map("paid_at") @db.DateTime(6)
+  id                Bytes           @id @db.Binary(16)
+  companyId         Bytes           @map("company_id") @db.Binary(16)
+  saleId            Bytes           @map("sale_id") @db.Binary(16)
+  kind              SalePaymentKind @default(at_sale)
+  method            PaymentMethod
+  amount            Decimal         @db.Decimal(14, 2)
+  /// When the money ARRIVED. Reconciliation, closing and "collected" are all
+  /// dated by this, never by the sale — a balance paid a week later belongs to
+  /// the week it was paid.
+  paidAt            DateTime        @default(now()) @map("paid_at") @db.DateTime(6)
+  /// Who confirmed the money arrived (0074). Backfilled from the seller for
+  /// every payment taken before, which is who took it.
+  recordedById      Bytes?          @map("recorded_by_id") @db.Binary(16)
+  /// Idempotency for a later collection, bound to its payload by the hash.
+  clientUuid        Bytes?          @map("client_uuid") @db.Binary(16)
+  clientRequestHash String?         @map("client_request_hash") @db.Char(64)
+  reference         String?         @db.VarChar(80)
+  note              String?         @db.VarChar(255)
 
   /// Which account the money landed in (0045). Money going OUT was already
   /// attributed — `refund_payouts`, `supplier_settlements` and `expenses` all
@@ -1334,9 +1363,9 @@ model Payment {
   /// inventing a financial record.
   ///
   /// Always NULL for cash, enforced by `ck_payments_cash_no_account`.
-  receivingAccountId   Bytes?  @map("receiving_account_id") @db.Binary(16)
+  receivingAccountId      Bytes?  @map("receiving_account_id") @db.Binary(16)
   /// Frozen at the moment of payment, like every other account reference here.
-  accountLabelSnapshot String? @map("account_label_snapshot") @db.VarChar(80)
+  accountLabelSnapshot    String? @map("account_label_snapshot") @db.VarChar(80)
   /// The PROVIDER as it stood at payment time — `bankily`, `sedad`, `bim_bank`,
   /// or the configured name when the provider is `other` (4a).
   ///
@@ -1351,10 +1380,14 @@ model Payment {
   company          Company           @relation(fields: [companyId], references: [id])
   sale             Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)
   receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
+  recordedBy       User?             @relation("PaymentRecordedBy", fields: [recordedById], references: [id], onDelete: Restrict, map: "fk_payments_recorded_by")
 
+  @@unique([companyId, clientUuid], map: "ux_payments_client_uuid")
   @@index([saleId])
   @@index([companyId])
   @@index([companyId, receivingAccountId], map: "ix_payments_account")
+  @@index([companyId, paidAt], map: "ix_payments_paid_at")
+  @@index([recordedById], map: "ix_payments_recorded_by")
   @@map("payments")
 }
 
@@ -1548,6 +1581,8 @@ model Expense {
   /// already happened, and deactivation cannot strand a confirmation.
   accountLabelSnapshot String?       @map("account_label_snapshot") @db.VarChar(80)
   reference            String?       @db.VarChar(120)
+  /// Where an optional receipt photo is stored (0074). Never the photo itself.
+  receiptKey           String?       @map("receipt_key") @db.VarChar(255)
   /// An explicit state, never invented placeholder copy: "Miscellaneous" in a
   /// ledger is indistinguishable from a real category a year later.
   reasonOmitted        Boolean       @default(false) @map("reason_omitted")
@@ -3298,6 +3333,7 @@ model Counterparty {
 
   consignments Consignment[]
   loans        Loan[]
+  sales        Sale[]
 
   @@index([companyId, kind, isActive])
   @@index([connectionId])
@@ -4244,8 +4280,8 @@ model AnomalyDismissal {
   /// the code alone.
   anomalyKey String @map("anomaly_key") @db.VarChar(160)
 
-  dismissedById Bytes    @map("dismissed_by_id") @db.Binary(16)
-  dismissedAt   DateTime @default(now()) @map("dismissed_at")
+  dismissedById   Bytes    @map("dismissed_by_id") @db.Binary(16)
+  dismissedAt     DateTime @default(now()) @map("dismissed_at")
   /// Seven days on. Stored rather than derived, so changing the window later
   /// cannot silently re-suppress or un-suppress what somebody already
   /// dismissed under the old one.
