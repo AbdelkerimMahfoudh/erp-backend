@@ -43,7 +43,16 @@ describe('money collected', () => {
     // money, with nothing on screen to say so.
     const method = COLLECTED_METHOD;
     expect(method).toContain('this.tenant.branchId()');
-    expect(method).toContain('branchId ? { branchId }');
+    expect(method).toContain('branchId ? { sale: { branchId } }');
+  });
+
+  it('is dated by when the money arrived, not by the sale (0074)', () => {
+    // A balance collected on the 19th for a sale on the 18th is money collected
+    // on the 19th. Dating it by the sale would put it on a day that may already
+    // be closed, and leave the day it actually arrived short.
+    const method = COLLECTED_METHOD;
+    expect(method).toContain('paidAt: { gte: start, lt: end }');
+    expect(method).not.toContain('soldAt');
   });
 
   it('includes the whole of the last day of an inclusive window', () => {

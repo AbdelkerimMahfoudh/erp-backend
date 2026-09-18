@@ -31,9 +31,16 @@ describe('period movements', () => {
   });
 
   it('timestamp-keyed components use the half-open window of the range', () => {
-    expect(movements).toMatch(/sold_at >= \$\{start\} AND s\.sold_at < \$\{end\}/);
+    expect(movements).toMatch(/p\.paid_at >= \$\{start\} AND p\.paid_at < \$\{end\}/);
     expect(movements).toMatch(/paid_at >= \$\{start\} AND sp\.paid_at < \$\{end\}/);
     expect(movements).toMatch(/getTime\(\) \+ 86_400_000/);
+  });
+
+  it('sale money is dated by when it arrived, never by the sale (0074)', () => {
+    // A later collection must land on the day it was received. Dating it by
+    // the sale would count it on a day that may already be signed off.
+    expect(movements).not.toMatch(/s\.sold_at >= \$\{start\}/);
+    expect((movements.match(/p\.paid_at >= \$\{start\} AND p\.paid_at < \$\{end\}/g) ?? []).length).toBe(2);
   });
 
   it('the closing still asks for exactly one day', () => {

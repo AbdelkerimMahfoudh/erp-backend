@@ -242,12 +242,13 @@ export class SummaryService {
    * client scopes by company alone, so without this a two-shop owner would read
    * one shop's screen and see both shops' money.
    *
-   * Keyed on the SALE's `sold_at` rather than `paid_at`. Every payment this
-   * model records is taken as part of its sale, so the two agree — and using
-   * the sale's own timestamp is what keeps this figure in the same window as
-   * the revenue beside it, instead of drifting a day apart at a midnight
-   * boundary. If part-payment against an older sale is ever added, this must
-   * move to `paid_at`, and the two figures must stop being compared directly.
+   * Keyed on `paid_at` — the day the money ARRIVED. Until 0074 every payment
+   * was taken with its sale in the same second, so this used the sale's own
+   * timestamp to stay in the revenue's window. Part-payment against an older
+   * sale now exists, and this is the change that comment asked for: a balance
+   * collected on the 19th is money collected on the 19th, while its revenue
+   * stays on the sale's day. The two figures are no longer compared directly —
+   * "collected" can exceed "sales" on a day when old balances are paid.
    */
   private async collectedInPeriod(fromISO: string, toISO: string) {
     const branchId = this.tenant.branchId() ?? null;
@@ -260,10 +261,8 @@ export class SummaryService {
     const rows = await this.db.payment.groupBy({
       by: ['method'],
       where: {
-        sale: {
-          soldAt: { gte: start, lt: end },
-          ...(branchId ? { branchId } : {}),
-        },
+        paidAt: { gte: start, lt: end },
+        ...(branchId ? { sale: { branchId } } : {}),
       },
       _sum: { amount: true },
       _count: true,

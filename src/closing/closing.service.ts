@@ -89,10 +89,14 @@ export class ClosingService {
     const refundsPaidTotal = round2(num(rollup?.refundsPaidTotal ?? 0));
     const refundsPaidCash = round2(num(rollup?.refundsPaidCash ?? 0));
 
-    // Expected cash = cash payments taken on the day at this branch.
+    // Expected cash = cash RECEIVED on the day at this branch, dated by when the
+    // money arrived (`paid_at`) and never by the sale. A balance collected a week
+    // after its sale belongs in the drawer of the day it was handed over (0074).
+    // Every payment before 0074 arrived in the same second as its sale, so no
+    // past day moves.
     const cash = await this.db.payment.aggregate({
       _sum: { amount: true },
-      where: { method: 'cash', sale: { branchId, soldAt: { gte: start, lt: end } } },
+      where: { method: 'cash', paidAt: { gte: start, lt: end }, sale: { branchId } },
     });
     /**
      * Cash refunds CONFIRMED today left the till, so the drawer should hold
@@ -771,19 +775,21 @@ export class ClosingService {
     const rows = await this.db.$queryRaw<
       { channel: string; account_id: Buffer | null; component: string; amount: unknown }[]
     >(Prisma.sql`
-      -- Sales taken in. Cash lands in the drawer; anything else lands in the
-      -- account it named, or in the unattributed bucket if it named none.
+      -- Money received from sales. Cash lands in the drawer; anything else lands
+      -- in the account it named, or in the unattributed bucket if it named none.
+      -- Dated by paid_at, when the money arrived, so a balance collected later
+      -- is counted once, on its own day, and never on the sale's (0074).
       SELECT 'cash' AS channel, NULL AS account_id, 'salesIn' AS component, SUM(p.amount) AS amount
       FROM payments p
       JOIN sales s ON s.id = p.sale_id
       WHERE p.company_id = ${companyId} AND s.branch_id = ${branchId}
-        AND s.sold_at >= ${start} AND s.sold_at < ${end} AND p.method = 'cash'
+        AND p.paid_at >= ${start} AND p.paid_at < ${end} AND p.method = 'cash'
       UNION ALL
       SELECT 'account', p.receiving_account_id, 'salesIn', SUM(p.amount)
       FROM payments p
       JOIN sales s ON s.id = p.sale_id
       WHERE p.company_id = ${companyId} AND s.branch_id = ${branchId}
-        AND s.sold_at >= ${start} AND s.sold_at < ${end} AND p.method <> 'cash'
+        AND p.paid_at >= ${start} AND p.paid_at < ${end} AND p.method <> 'cash'
       GROUP BY p.receiving_account_id
 
       UNION ALL
