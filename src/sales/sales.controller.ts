@@ -1,7 +1,9 @@
 import { Body, Controller, Get, GoneException, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { SalesService } from './sales.service';
+import { SalePaymentsService } from './sale-payments.service';
+import { RecordSalePaymentDto } from './dto/record-payment.dto';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
 
@@ -9,7 +11,10 @@ import { ListSalesDto } from './dto/list-sales.dto';
 @ApiBearerAuth()
 @Controller({ path: 'sales', version: '1' })
 export class SalesController {
-  constructor(private readonly sales: SalesService) {}
+  constructor(
+    private readonly sales: SalesService,
+    private readonly payments: SalePaymentsService,
+  ) {}
 
   /**
    * Both reads are gated on `sale.view` (I1). They previously required NO
@@ -29,6 +34,34 @@ export class SalesController {
     return this.sales.list(query);
   }
 
+  /**
+   * Every balance still owed at this branch, grouped by who owes it (0074).
+   *
+   * `report.view`: the whole branch's receivables are an Owner and Manager
+   * question. An Employee still sees a single sale's balance on its detail.
+   * Declared before `:id`, which would otherwise swallow the path.
+   */
+  @Get('outstanding')
+  @RequirePermissions('report.view')
+  @ApiOperation({ summary: 'Balances still owed at this branch, grouped by customer or partner store' })
+  outstanding() {
+    return this.sales.outstanding();
+  }
+
+  /**
+   * One line per day for a period: how many sales, their value, and what is
+   * still owed on them (0074). A month of sales is read as thirty lines, and a
+   * day's sales are fetched only when that day is opened.
+   */
+  @Get('by-day')
+  @RequirePermissions('sale.view')
+  @ApiQuery({ name: 'from', required: true, description: 'First day, YYYY-MM-DD (inclusive)' })
+  @ApiQuery({ name: 'to', required: true, description: 'Last day, YYYY-MM-DD (inclusive)' })
+  @ApiOperation({ summary: 'Sales per day for a period, with value and outstanding' })
+  byDay(@Query('from') from: string, @Query('to') to: string) {
+    return this.sales.byDay(from, to);
+  }
+
   @Get(':id')
   @RequirePermissions('sale.view')
   @ApiOperation({
@@ -45,6 +78,25 @@ export class SalesController {
   @ApiOperation({ summary: 'Sell (one atomic transaction): units, profit, audit, notification' })
   create(@Body() dto: CreateSaleDto) {
     return this.sales.createSale(dto);
+  }
+
+  /**
+   * Record money received later against a sale's balance (0074).
+   *
+   * `sale.create`, because whoever may take money at the counter may record
+   * money that arrives afterwards. The server still decides everything:
+   * the branch, the balance, the account, the day and the key.
+   */
+  @Post(':id/payments')
+  @RequirePermissions('sale.create')
+  @ApiOperation({
+    summary: 'Record a later payment against a sale balance',
+    description:
+      'Not a second sale: revenue, cost and profit stay on the original sale. Refuses zero, negative and ' +
+      'overpayment, an inactive account, a closed day, and a key reused for a different payment (409).',
+  })
+  recordPayment(@Param('id') id: string, @Body() dto: RecordSalePaymentDto) {
+    return this.payments.record(id, dto);
   }
 
   /**

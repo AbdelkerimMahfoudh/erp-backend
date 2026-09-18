@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { SalePayStatus, Unit } from '@prisma/client';
+import { payStatusOf } from './sale-payment-rules';
 
 const EPSILON = 0.005;
 
@@ -46,8 +47,9 @@ export class SalesPolicyService {
       throw new BadRequestException(`Payments (${amountPaid}) exceed the total (${total})`);
     }
     const balanceDue = this.round(total - amountPaid);
-    const payStatus: SalePayStatus =
-      balanceDue <= EPSILON ? 'paid' : amountPaid <= EPSILON ? 'credit' : 'partial';
+    // One status rule for the whole app: a sale and a later collection must
+    // never disagree about what "partially paid" means.
+    const payStatus: SalePayStatus = payStatusOf(total, amountPaid);
     return { amountPaid, balanceDue, payStatus };
   }
 
@@ -150,13 +152,6 @@ export class SalesPolicyService {
 
     if (belowCost && (!reason || reason.trim().length === 0)) {
       throw new BadRequestException('A reason is required to sell below cost');
-    }
-  }
-
-  /** A credit/partial sale needs a customer to hold the receivable. */
-  assertCreditHasCustomer(payStatus: SalePayStatus, customerId?: string): void {
-    if ((payStatus === 'credit' || payStatus === 'partial') && !customerId) {
-      throw new BadRequestException('A customer is required for a credit/partial sale');
     }
   }
 }

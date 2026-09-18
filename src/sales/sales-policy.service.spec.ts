@@ -128,12 +128,6 @@ describe('SalesPolicyService', () => {
       expect(() => policy.assertSellable(unit('in_stock', branchA), branchB)).toThrow(ConflictException);
     });
   });
-
-  describe('assertCreditHasCustomer', () => {
-    it('requires a customer for credit/partial', () => {
-      expect(() => policy.assertCreditHasCustomer('credit', undefined)).toThrow(BadRequestException);
-      expect(() => policy.assertCreditHasCustomer('paid', undefined)).not.toThrow();
-      expect(() => policy.assertCreditHasCustomer('partial', 'cust-uuid')).not.toThrow();
-    });
-  });
 });
+// A balance needing a debtor is now `assertDebtorForBalance`, which also accepts
+// a partner store; it is covered in sale-payment-rules.spec.ts.

@@ -39,7 +39,7 @@ const serviceCode = stripComments(service);
 
 describe('the route answers 410 and writes nothing', () => {
   it('throws GoneException with a stable machine-readable code', () => {
-    const c = new SalesController({} as never);
+    const c = new SalesController({} as never, {} as never);
     expect(() => c.legacyReturnDisabled()).toThrow(GoneException);
     try {
       c.legacyReturnDisabled();
@@ -58,7 +58,7 @@ describe('the route answers 410 and writes nothing', () => {
    * TypeError instead of a GoneException, and the test above would fail.
    */
   it('does not reach the sales service at all', () => {
-    const c = new SalesController({} as never);
+    const c = new SalesController({} as never, {} as never);
     expect(() => c.legacyReturnDisabled()).toThrow(GoneException);
   });
 

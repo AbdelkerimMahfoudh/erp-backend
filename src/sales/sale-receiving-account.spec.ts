@@ -107,10 +107,15 @@ describe('the money is attributed once, and only once', () => {
 
 describe('the schema keeps the snapshot honest', () => {
   const schema = readFileSync(join(SRC, '..', '..', 'prisma', 'schema.prisma'), 'utf8');
-  const payment = schema.slice(schema.indexOf('model Payment {'), schema.indexOf('model Payment {') + 2000);
+  // The whole model, to its closing brace — a fixed character count broke the
+  // moment the model gained documented columns (0074).
+  const paymentStart = schema.indexOf('model Payment {');
+  const payment = schema.slice(paymentStart, schema.indexOf('\n}', paymentStart));
 
   it('stores the provider snapshot as its own nullable column', () => {
-    expect(payment).toMatch(/accountProviderSnapshot String\? @map\("account_provider_snapshot"\)/);
+    // Whitespace-tolerant: `prisma format` realigns a model's columns whenever
+    // one is added, and alignment is not what this protects.
+    expect(payment).toMatch(/accountProviderSnapshot\s+String\?\s+@map\("account_provider_snapshot"\)/);
   });
 
   it('leaves historical payments NULL rather than guessing a provider', () => {

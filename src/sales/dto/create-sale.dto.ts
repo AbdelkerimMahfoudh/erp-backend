@@ -14,6 +14,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 import { IsMoney } from '../../common/money/is-money.decorator';
@@ -84,6 +85,27 @@ export class PaymentInputDto {
   receivingAccountId?: string;
 }
 
+/**
+ * A customer typed at the counter because they are not on the list yet.
+ *
+ * The name is what the shop will ask for when the balance is chased, so it is
+ * required. The phone is optional: plenty of customers will not give one, and
+ * refusing the sale over it would only push the shop back to the notebook.
+ */
+export class NewCustomerDto {
+  @ApiProperty({ maxLength: 160 })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(160)
+  name: string;
+
+  @ApiPropertyOptional({ maxLength: 40 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  phone?: string;
+}
+
 export class CreateSaleDto {
   @ApiProperty({ type: [SaleLineDto] })
   @IsArray()
@@ -92,17 +114,41 @@ export class CreateSaleDto {
   @Type(() => SaleLineDto)
   lines: SaleLineDto[];
 
-  @ApiProperty({ type: [PaymentInputDto] })
+  /**
+   * The money received NOW. May be empty (0074): a phone handed over with
+   * nothing paid is a real sale, and the whole total is then owed by the
+   * debtor named below. Each entry must still be a positive amount.
+   */
+  @ApiProperty({ type: [PaymentInputDto], description: 'Money received now. Empty when nothing was paid at the counter.' })
   @IsArray()
-  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => PaymentInputDto)
   payments: PaymentInputDto[];
 
+  /** An existing customer. Chosen from the list, so no duplicate is created. */
   @ApiPropertyOptional({ format: 'uuid' })
   @IsOptional()
   @IsUUID()
   customerId?: string;
+
+  /**
+   * A NEW customer who owes the balance (0074): a name, and a phone if the shop
+   * has one. Never combined with `customerId` or `counterpartyId`.
+   */
+  @ApiPropertyOptional({ type: () => NewCustomerDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => NewCustomerDto)
+  customer?: NewCustomerDto;
+
+  /**
+   * A partner store — connected or manual — that owes the balance (0074).
+   * Never combined with a customer: one balance, one debtor.
+   */
+  @ApiPropertyOptional({ format: 'uuid', description: 'Partner store owing the balance' })
+  @IsOptional()
+  @IsUUID()
+  counterpartyId?: string;
 
   @ApiPropertyOptional({ minimum: 0, description: 'Whole-sale discount' })
   @IsOptional()

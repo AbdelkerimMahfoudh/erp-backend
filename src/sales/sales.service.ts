@@ -22,6 +22,9 @@ import { SalesPolicyService } from './sales-policy.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
 import { evaluateEligibility, NO_RETURNS, resolveWindowForSale, snapshotPolicy } from './return-policy';
+import { assertDebtorForBalance, chooseDebtor, type DebtorChoice, STORE_KINDS } from './sale-payment-rules';
+import { assertMayStartDealing } from '../consignment/dealing-authorization';
+import { paymentSelect, toPaymentView } from './sale-payments.service';
 import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
 import { DiscountApprovalsService } from '../discount-approvals/discount-approvals.service';
 import { MagnitudeReads, MagnitudeService, SALE_PRICE_MIN_SAMPLE } from '../common/warnings/magnitude.service';
@@ -305,7 +308,19 @@ export class SalesService {
           });
         }
         const { amountPaid, balanceDue, payStatus } = this.policy.reconcilePayments(dto.payments, total);
-        this.policy.assertCreditHasCustomer(payStatus, dto.customerId);
+        /**
+         * Who owes what was not paid (0074): one customer — chosen, or typed at
+         * the counter — or one partner store, never both. A sale leaving money
+         * owing without a debtor is refused: an unnamed balance is a debt nobody
+         * will ever chase.
+         */
+        const debtorChoice = chooseDebtor({
+          customerId: dto.customerId,
+          customer: dto.customer,
+          counterpartyId: dto.counterpartyId,
+        });
+        assertDebtorForBalance(balanceDue, debtorChoice);
+        const debtor = await this.resolveDebtor(tx as unknown as Prisma.TransactionClient, companyId, debtorChoice);
 
         const invoiceNo = await this.invoiceNumbers.next(
           tx as unknown as Prisma.TransactionClient,
@@ -347,7 +362,8 @@ export class SalesService {
             companyId,
             branchId,
             userId,
-            customerId: dto.customerId ? uuidToBin(dto.customerId) : null,
+            customerId: debtor.customerId,
+            counterpartyId: debtor.counterpartyId,
             invoiceNo,
             soldAt,
             subtotal,
@@ -507,6 +523,11 @@ export class SalesService {
               id: newUuidV7Bin(),
               companyId,
               saleId,
+              // Taken with the sale, by the person selling. A later collection
+              // is `collection` and goes through recordCollection instead.
+              kind: 'at_sale',
+              recordedById: userId,
+              paidAt: soldAt,
               method: pay.method,
               amount: pay.amount,
               receivingAccountId: accountBin,
@@ -522,9 +543,11 @@ export class SalesService {
           });
         }
 
-        if (dto.customerId && balanceDue > 0) {
+        // The customer's running balance is a cache of what their sales still
+        // owe. A store's balance is never cached: it is read from the sales.
+        if (debtor.customerId && balanceDue > 0) {
           await tx.customer.update({
-            where: { id: uuidToBin(dto.customerId) },
+            where: { id: debtor.customerId },
             data: { balance: { increment: balanceDue } },
           });
         }
@@ -675,6 +698,196 @@ export class SalesService {
    * which is not this one. `requireBranchId()` below is the assertion that the
    * guard's guarantee actually held.
    */
+  /**
+   * Turn the chosen debtor into the ids the sale stores (0074).
+   *
+   * - An existing customer must be one of THIS company's. The tenant client
+   *   scopes the lookup, so another shop's customer is simply not found.
+   * - A new customer is created here, inside the sale's transaction, so a
+   *   refused sale leaves no orphan customer behind. Selecting an existing
+   *   customer never reaches this branch, so it can never duplicate one.
+   * - A store must be a store (never a person or an employee), active, and —
+   *   the approved Partners rule — one this shop may start NEW business with:
+   *   a connection the other store has accepted. A manual store stays readable
+   *   and settleable but cannot be given new credit. The connection row is held
+   *   `FOR UPDATE`, so a removal racing this sale either wins or waits.
+   *
+   * No stock, purchase or record of any kind is written into the other store's
+   * company. This is OUR sale with a balance owed by them — not the bilateral
+   * inter-store sale, which remains undecided (docs/21).
+   */
+  private async resolveDebtor(
+    tx: Prisma.TransactionClient,
+    companyId: Buffer,
+    choice: DebtorChoice,
+  ): Promise<{ customerId: Buffer | null; counterpartyId: Buffer | null }> {
+    switch (choice.kind) {
+      case 'none':
+        return { customerId: null, counterpartyId: null };
+
+      case 'customer_existing': {
+        const found = await tx.customer.findFirst({
+          where: { id: uuidToBin(choice.customerId), deletedAt: null },
+          select: { id: true },
+        });
+        if (!found) throw new BadRequestException({ code: 'customer_not_found', message: 'That customer does not exist' });
+        return { customerId: found.id, counterpartyId: null };
+      }
+
+      case 'customer_new': {
+        const id = newUuidV7Bin();
+        await tx.customer.create({ data: { id, companyId, name: choice.name, phone: choice.phone } });
+        return { customerId: id, counterpartyId: null };
+      }
+
+      case 'store': {
+        const id = uuidToBin(choice.counterpartyId);
+        const store = await tx.counterparty.findFirst({
+          where: { id, isActive: true, kind: { in: [...STORE_KINDS] } },
+          select: { id: true },
+        });
+        if (!store) {
+          throw new BadRequestException({ code: 'store_not_found', message: 'That partner store is not available' });
+        }
+        await assertMayStartDealing(tx, id);
+        return { customerId: null, counterpartyId: id };
+      }
+    }
+  }
+
+  /**
+   * Every balance still owed at this branch, grouped by who owes it (0074).
+   *
+   * Read straight from the sales — `balance_due` is the receivable, and there
+   * is no second ledger to disagree with it. A customer and a store are listed
+   * side by side because "who owes us money" is one question.
+   */
+  async outstanding() {
+    const branchId = this.tenant.requireBranchId();
+    const sales = await this.db.sale.findMany({
+      where: { branchId, isReversed: false, balanceDue: { gt: 0 } },
+      select: {
+        id: true,
+        invoiceNo: true,
+        soldAt: true,
+        total: true,
+        amountPaid: true,
+        balanceDue: true,
+        payStatus: true,
+        customer: { select: { id: true, name: true, phone: true } },
+        counterparty: { select: { id: true, name: true, phone: true } },
+        items: {
+          where: { voided: false },
+          take: 1,
+          select: {
+            unit: { select: { product: { select: { brand: true, model: true, variant: true } } } },
+            product: { select: { brand: true, model: true, variant: true } },
+          },
+        },
+      },
+      orderBy: { soldAt: 'asc' },
+      // A branch with more open balances than this has a conversation to have
+      // that no list will settle; the total below still counts them all.
+      take: 500,
+    });
+
+    type Group = {
+      kind: 'customer' | 'store' | 'unknown';
+      id: string | null;
+      name: string | null;
+      phone: string | null;
+      owed: number;
+      oldest: Date;
+      sales: {
+        id: string;
+        invoiceNo: string;
+        soldAt: Date;
+        product: string | null;
+        total: number;
+        received: number;
+        remaining: number;
+        payStatus: string;
+      }[];
+    };
+    const groups = new Map<string, Group>();
+    for (const s of sales) {
+      const debtor = s.customer
+        ? { kind: 'customer' as const, id: binToUuid(s.customer.id), name: s.customer.name, phone: s.customer.phone }
+        : s.counterparty
+          ? { kind: 'store' as const, id: binToUuid(s.counterparty.id), name: s.counterparty.name, phone: s.counterparty.phone }
+          : // Only possible for a balance recorded before 0074 with no debtor.
+            // Listed honestly rather than hidden.
+            { kind: 'unknown' as const, id: null, name: null, phone: null };
+      const key = `${debtor.kind}:${debtor.id ?? ''}`;
+      const group = groups.get(key) ?? { ...debtor, owed: 0, oldest: s.soldAt, sales: [] };
+      group.owed = Math.round((group.owed + Number(s.balanceDue)) * 100) / 100;
+      if (s.soldAt < group.oldest) group.oldest = s.soldAt;
+      const item = s.items[0];
+      group.sales.push({
+        id: binToUuid(s.id),
+        invoiceNo: s.invoiceNo,
+        soldAt: s.soldAt,
+        product: item ? describeProduct(item.unit?.product ?? item.product) : null,
+        total: Number(s.total),
+        received: Number(s.amountPaid),
+        remaining: Number(s.balanceDue),
+        payStatus: s.payStatus,
+      });
+      groups.set(key, group);
+    }
+
+    const debtors = [...groups.values()].sort((a, b) => b.owed - a.owed);
+    return {
+      total: Math.round(debtors.reduce((n, d) => n + d.owed, 0) * 100) / 100,
+      sales: sales.length,
+      debtors,
+    };
+  }
+
+  /**
+   * One line per day: the sales made, their full value, the phones among them,
+   * and what is still owed on them now (0074).
+   *
+   * The day is the SALE's day. What was collected on a day is a different fact,
+   * dated by when money arrived, and lives on the Money overview.
+   */
+  async byDay(from: string, to: string) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const range = parseDateRange(from, to);
+    if (!range || !from || !to) throw new BadRequestException('from and to must be YYYY-MM-DD');
+
+    const rows = await this.db.$queryRaw<
+      { day: string; sales: bigint; value: unknown; owed: unknown; phones: unknown }[]
+    >(Prisma.sql`
+      SELECT DATE_FORMAT(s.sold_at, '%Y-%m-%d') AS day,
+             COUNT(*)                            AS sales,
+             SUM(s.total)                        AS value,
+             SUM(s.balance_due)                  AS owed,
+             SUM((SELECT COUNT(*) FROM sale_items si
+                    JOIN units u ON u.id = si.unit_id
+                    JOIN products p ON p.id = u.product_id
+                   WHERE si.sale_id = s.id AND si.voided = 0 AND p.tracking_type = 'imei')) AS phones
+      FROM sales s
+      WHERE s.company_id = ${companyId} AND s.branch_id = ${branchId}
+        AND s.is_reversed = 0
+        AND s.sold_at >= ${range.gte} AND s.sold_at < ${range.lt}
+      GROUP BY day
+      ORDER BY day DESC`);
+
+    return {
+      from,
+      to,
+      days: rows.map((r) => ({
+        day: r.day,
+        sales: Number(r.sales),
+        phones: Number(r.phones ?? 0),
+        value: Math.round(Number(r.value ?? 0) * 100) / 100,
+        outstanding: Math.round(Number(r.owed ?? 0) * 100) / 100,
+      })),
+    };
+  }
+
   async list(query: ListSalesDto) {
     const branchId = this.tenant.requireBranchId();
     const limit = Math.min(Math.max(query.limit ?? 20, 1), 50);
@@ -694,8 +907,18 @@ export class SalesService {
       include: {
         user: { select: { name: true } },
         customer: { select: { name: true } },
-        payments: { select: { method: true } },
-        items: { select: { unitId: true, quantity: true, voided: true } },
+        counterparty: { select: { name: true } },
+        payments: { select: { method: true, accountLabelSnapshot: true } },
+        items: {
+          select: {
+            unitId: true,
+            quantity: true,
+            voided: true,
+            // What was sold, as a row can say it without a second request.
+            unit: { select: { product: { select: { brand: true, model: true, variant: true, trackingType: true } } } },
+            product: { select: { brand: true, model: true, variant: true, trackingType: true } },
+          },
+        },
         returns: { select: { id: true } },
       },
       /**
@@ -734,8 +957,18 @@ export class SalesService {
           serializedCount: live.filter((i) => i.unitId !== null).length,
           soldBy: s.user?.name ?? null,
           customer: s.customer?.name ?? null,
+          /** Who owes the balance, whichever kind (0074). Null when nothing is owed to anyone named. */
+          debtor: s.customer
+            ? { kind: 'customer' as const, name: s.customer.name }
+            : s.counterparty
+              ? { kind: 'store' as const, name: s.counterparty.name }
+              : null,
+          /** The first item, which is the whole sale in the common one-phone case. */
+          product: live[0] ? describeProduct(live[0].unit?.product ?? live[0].product) : null,
           // De-duplicated: a split payment of cash+cash is one method twice.
           paymentMethods: [...new Set(s.payments.map((p) => p.method))],
+          /** The accounts money landed in, by the label frozen at the time. */
+          accountLabels: [...new Set(s.payments.map((p) => p.accountLabelSnapshot).filter((l): l is string => !!l))],
           returnPolicy: this.policySummary(s, live, now),
         };
       }),
@@ -840,8 +1073,9 @@ export class SalesService {
       include: {
         user: { select: { name: true } },
         customer: { select: { id: true, name: true, phone: true } },
+        counterparty: { select: { id: true, name: true, phone: true, kind: true } },
         branch: { select: { id: true, name: true } },
-        payments: { orderBy: { paidAt: 'asc' } },
+        payments: { orderBy: { paidAt: 'asc' }, select: paymentSelect },
         returns: { select: { id: true } },
         returnPolicyOverriddenBy: { select: { name: true } },
         items: {
@@ -872,6 +1106,16 @@ export class SalesService {
       customer: sale.customer
         ? { id: binToUuid(sale.customer.id), name: sale.customer.name, phone: sale.customer.phone }
         : null,
+      /**
+       * Who owes the balance, as ONE field whichever kind it is (0074). A
+       * screen answering "who do I chase?" should not have to know there are
+       * two tables behind the answer.
+       */
+      debtor: sale.customer
+        ? { kind: 'customer' as const, id: binToUuid(sale.customer.id), name: sale.customer.name, phone: sale.customer.phone }
+        : sale.counterparty
+          ? { kind: 'store' as const, id: binToUuid(sale.counterparty.id), name: sale.counterparty.name, phone: sale.counterparty.phone }
+          : null,
       subtotal: Number(sale.subtotal),
       discount: Number(sale.discount),
       taxTotal: Number(sale.taxTotal),
@@ -901,12 +1145,9 @@ export class SalesService {
         cost: Number(i.cost),
         voided: i.voided,
       })),
-      payments: sale.payments.map((p) => ({
-        id: binToUuid(p.id),
-        method: p.method,
-        amount: Number(p.amount),
-        paidAt: p.paidAt,
-      })),
+      // Every payment, at the sale and after it, with the account label as it
+      // stood when the money arrived and the person who recorded it.
+      payments: sale.payments.map(toPaymentView),
       returnPolicy: {
         ...this.policySummary(sale, live, new Date(), sale.returns.length > 0),
         // Recorded only when a manager or owner actually changed it, so the
