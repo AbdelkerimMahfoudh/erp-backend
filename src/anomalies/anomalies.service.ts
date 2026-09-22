@@ -169,6 +169,39 @@ export class AnomaliesService {
   }
 
   /**
+   * "I did not mean that" — the undo behind the toast.
+   *
+   * A standing dismissal is ended now rather than deleted: the row stays as
+   * the record that somebody hid this and then thought better of it, and the
+   * ninety-day sweep drops it in its own time. Idempotent — with nothing
+   * standing there is nothing to end, and the answer says so.
+   */
+  async undismiss(key: string) {
+    if (!this.may('report.view')) throw new ForbiddenException('Not allowed to dismiss anomalies');
+    if (!this.tenant.userId()) throw new ForbiddenException('Not signed in');
+
+    const now = new Date();
+    const standing = await this.db.anomalyDismissal.findFirst({
+      where: { companyId: this.tenant.companyId(), anomalyKey: key, suppressedUntil: { gt: now } },
+      orderBy: { suppressedUntil: 'desc' },
+      select: { id: true },
+    });
+    if (!standing) return { key, restored: false };
+
+    const ended = await this.db.anomalyDismissal.updateMany({
+      where: { companyId: this.tenant.companyId(), anomalyKey: key, suppressedUntil: { gt: now } },
+      data: { suppressedUntil: now },
+    });
+    await this.audit.record({
+      entityType: 'anomaly_dismissal',
+      entityId: standing.id,
+      action: 'update',
+      after: { event: 'anomaly_undismissed', anomalyKey: key, ended: ended.count },
+    });
+    return { key, restored: true };
+  }
+
+  /**
    * Which keys are silenced right now — and a retention sweep on the way past.
    *
    * No scheduler. Ninety-day-old dismissals are dropped by whoever reads next,

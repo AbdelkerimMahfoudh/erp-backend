@@ -72,7 +72,27 @@ function makeService(opts: { dead?: DeadRow[]; dismissals?: Dismissal[]; permiss
               r.suppressedUntil > where.suppressedUntil.gt,
           )
           .sort((a, b) => b.suppressedUntil.getTime() - a.suppressedUntil.getTime());
-        return hits[0] ? { suppressedUntil: hits[0].suppressedUntil } : null;
+        return hits[0] ? { id: hits[0].id, suppressedUntil: hits[0].suppressedUntil } : null;
+      },
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { companyId: Buffer; anomalyKey: string; suppressedUntil: { gt: Date } };
+        data: { suppressedUntil: Date };
+      }) => {
+        let count = 0;
+        for (const row of dismissals) {
+          if (
+            row.companyId.equals(where.companyId) &&
+            row.anomalyKey === where.anomalyKey &&
+            row.suppressedUntil > where.suppressedUntil.gt
+          ) {
+            row.suppressedUntil = data.suppressedUntil;
+            count += 1;
+          }
+        }
+        return { count };
       },
       create: async ({ data }: { data: Omit<Dismissal, 'id'> & { id: Buffer; dismissedById: Buffer } }) => {
         const row: Dismissal = {
@@ -216,5 +236,39 @@ describe('"I understand"', () => {
   it('is refused without report.view', async () => {
     const { service } = makeService({ permissions: [] });
     await expect(service.dismiss('anomaly.dead_stock:p1')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.undismiss('anomaly.dead_stock:p1')).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('"I did not mean that" — the undo', () => {
+  it('brings the row back, keeps the record, and is audited once', async () => {
+    const { service, created, audits } = makeService({ dead: deadRows(2) });
+    await service.dismiss('anomaly.dead_stock:p2');
+    expect((await service.list()).total).toBe(1);
+
+    await expect(service.undismiss('anomaly.dead_stock:p2')).resolves.toEqual({ key: 'anomaly.dead_stock:p2', restored: true });
+    expect(keys((await service.list()).rows)).toEqual(['anomaly.dead_stock:p2', 'anomaly.dead_stock:p1']);
+    // Ended, not deleted: the dismissal row is still there as history.
+    expect(created).toHaveLength(1);
+    expect(audits.map((a) => (a as { after: { event: string } }).after.event)).toEqual(['anomaly_dismissed', 'anomaly_undismissed']);
+  });
+
+  it('with nothing standing it changes nothing, says so, and audits nothing', async () => {
+    const { service, audits } = makeService({ dead: deadRows(1) });
+    await expect(service.undismiss('anomaly.dead_stock:p1')).resolves.toEqual({ key: 'anomaly.dead_stock:p1', restored: false });
+    await service.dismiss('anomaly.dead_stock:p1');
+    await service.undismiss('anomaly.dead_stock:p1');
+    await expect(service.undismiss('anomaly.dead_stock:p1')).resolves.toMatchObject({ restored: false });
+    expect(audits).toHaveLength(2);
+  });
+
+  it('after an undo, a fresh "I understand" is a new decision, not a replay', async () => {
+    const { service, created } = makeService({ dead: deadRows(1) });
+    await service.dismiss('anomaly.dead_stock:p1');
+    await service.undismiss('anomaly.dead_stock:p1');
+    const again = await service.dismiss('anomaly.dead_stock:p1');
+    expect(again.replayed).toBe(false);
+    expect(created).toHaveLength(2);
+    expect((await service.list()).total).toBe(0);
   });
 });

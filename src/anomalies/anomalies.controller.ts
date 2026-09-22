@@ -36,6 +36,13 @@ export class AnomaliesController {
 
   @Post(':key/dismiss')
   @RequirePermissions('report.view')
+  @Post(':key/undismiss')
+  @RequirePermissions('report.view')
+  @ApiOperation({ summary: 'End a standing dismissal, so the anomaly shows again — the undo' })
+  undismiss(@Param('key') key: string) {
+    return this.anomalies.undismiss(key);
+  }
+
   @ApiOperation({ summary: 'Silence one anomaly for seven days, for the whole company — a repeat answers the same' })
   dismiss(@Param('key') key: string) {
     return this.anomalies.dismiss(key);
