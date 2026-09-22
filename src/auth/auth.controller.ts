@@ -113,6 +113,9 @@ export class AuthController {
       // Lets a RESTORED session namespace its device credential without a
       // re-login (Stage 3.2). Not a secret.
       publicStoreId: found.company.publicStoreId,
+      // The business's name, so the customer's invoice can carry the store
+      // identity rather than only the branch. Not a secret.
+      companyName: found.company.name,
       isActive: found.isActive,
     };
   }
