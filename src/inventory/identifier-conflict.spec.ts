@@ -88,6 +88,7 @@ function harness(seed: { scoped?: SeedUnit[]; system?: SeedUnit[]; branches?: Bu
     { record: jest.fn() } as never,
     new TrackingStrategyRegistry(),
     systemClient,
+    { get: () => undefined } as never,
   );
   return { service, db, systemClient };
 }

@@ -1,11 +1,14 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, Product, Unit, UnitStatus } from '@prisma/client';
+import { ClsService } from 'nestjs-cls';
+import { AppClsStore } from '../common/context/request-context';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -22,11 +25,13 @@ import {
   type InventoryCursor,
 } from './inventory-cursor';
 import { unitIdentifier } from './unit-identifier.util';
+import { isValidImei } from './imei.util';
 import { receiveQuantityAtCost } from './stock-cost';
 import { assertAssignedToBranch } from '../rbac/active-branch';
 import { buildStockSummary, type StockSummaryRow } from './stock-summary';
 import { referencedIds, shapeUnitTimeline } from './unit-timeline';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
+import { CorrectUnitDto } from './dto/correct-unit.dto';
 import { fingerprintReceipt } from './receipt-fingerprint';
 
 /** What a counted-goods receipt reports back: no unit, just the new arrival. */
@@ -293,7 +298,19 @@ export class InventoryService {
      * identifier exists outside this company. It never selects a row.
      */
     private readonly system: PrismaService,
+    /**
+     * Request-scoped permissions, for the one decision the service makes that a
+     * route guard cannot: whether THIS caller may correct a unit's cost. Cost is
+     * gated on the way out by the financial-fields interceptor; correcting it
+     * requires the same `cost.view`, checked here on the way in — you cannot fix
+     * a number you are not allowed to see. Mirrors `SaleSelectionService`.
+     */
+    private readonly cls: ClsService<AppClsStore>,
   ) {}
+
+  private may(permission: string): boolean {
+    return this.cls.get('permissions')?.has(permission) ?? false;
+  }
 
   /** Same-company identifier pre-check (the global unique index is the backstop). */
   async findExistingIdentifiers(identifiers: string[]): Promise<Set<string>> {
@@ -1020,6 +1037,252 @@ export class InventoryService {
       hasMore: nextCursor !== null,
       totals: { units: unitTotal, stock: stockTotal },
     };
+  }
+
+  /**
+   * Which of these identifiers already belong to a DIFFERENT unit in this
+   * company — the friendly pre-check before a correction. Same three columns
+   * `findByIdentifier` searches, minus the unit being corrected, so a unit
+   * keeping its own number does not report itself as a duplicate. The database
+   * triggers (migration 0042) and unique indexes are the race backstop.
+   */
+  private async identifiersTakenByOthers(exceptUnitId: Buffer, identifiers: string[]): Promise<Set<string>> {
+    const wanted = identifiers.map((i) => i.trim()).filter(Boolean);
+    if (wanted.length === 0) return new Set();
+    const found = await this.db.unit.findMany({
+      where: {
+        id: { not: exceptUnitId },
+        OR: [
+          { imeiPrimary: { in: wanted } },
+          { imeiSecondary: { in: wanted } },
+          { serialNo: { in: wanted } },
+        ],
+      },
+      select: { imeiPrimary: true, imeiSecondary: true, serialNo: true },
+    });
+    const set = new Set<string>();
+    for (const u of found) {
+      for (const v of [u.imeiPrimary, u.imeiSecondary, u.serialNo]) {
+        if (v && wanted.includes(v)) set.add(v);
+      }
+    }
+    return set;
+  }
+
+  /**
+   * Correct one in-stock unit.
+   *
+   * A correction fixes a mistake made at intake — a mistyped IMEI, the wrong
+   * product, a cost off by a digit — and nothing else. The rules it keeps:
+   *
+   *  - **In stock only.** A sold, reserved, in-transit, returned or faulty unit
+   *    is not correctable here; those states have their own workflows, and a
+   *    silent edit would contradict a sale, a transfer or a receipt already on
+   *    the books.
+   *  - **The unit's own columns only.** The product is *re-associated*
+   *    (`productId`), which is how its model, variant, storage, colour and
+   *    barcode are fixed — by pointing at the right catalogue entry, not by
+   *    rewriting the shared one. An IMEI has no route to the barcode field.
+   *  - **The tracking type decides the shape.** An imei-tracked unit takes
+   *    IMEIs and refuses a serial; a serial-tracked unit the reverse. The client
+   *    never picks the mode.
+   *  - **Sensitive changes are explained.** Any IMEI, serial or cost change
+   *    needs a reason, and cost may be touched only by a caller who may see it.
+   *  - **Optimistic concurrency.** The write matches on `updatedAt`; if the unit
+   *    moved since the client read it, nothing is written and the caller is told
+   *    to look again. The database triggers and unique indexes remain the final
+   *    backstop for identifier collisions under a race.
+   */
+  async correctUnit(unitIdStr: string, dto: CorrectUnitDto): Promise<Unit> {
+    const id = uuidToBin(unitIdStr);
+    const unit = await this.db.unit.findUnique({ where: { id }, include: { product: true } });
+    if (!unit) throw new NotFoundException('Unit not found');
+    if (unit.status !== 'in_stock') {
+      throw new ConflictException(
+        'Only a unit that is in stock can be corrected. This one has already moved on — use the workflow for its current state.',
+      );
+    }
+
+    const strategy = this.strategies.get(unit.product.trackingType);
+    // Unchecked: a correction may set the `productId` FK scalar directly
+    // (re-association), which the checked update-many input hides behind a
+    // relation writer that updateMany does not accept.
+    const data: Prisma.UnitUncheckedUpdateManyInput = {};
+    const before: Record<string, unknown> = {};
+    const after: Record<string, unknown> = {};
+    let sensitiveChange = false;
+
+    // ── Product re-association ────────────────────────────────────────────────
+    if (dto.productId !== undefined) {
+      const nextProductId = uuidToBin(dto.productId);
+      if (!nextProductId.equals(unit.productId)) {
+        const nextProduct = await this.db.product.findUnique({ where: { id: nextProductId } });
+        if (!nextProduct) throw new NotFoundException('Product not found');
+        if (nextProduct.trackingType !== unit.product.trackingType) {
+          throw new BadRequestException(
+            'That product is tracked a different way. Moving a unit between tracking types is not a correction.',
+          );
+        }
+        data.productId = nextProductId;
+        before.productId = binToUuid(unit.productId);
+        after.productId = dto.productId;
+      }
+    }
+
+    // ── Identifier corrections, shaped by the tracking type ───────────────────
+    const takesImei = strategy.identifierField === 'imeiPrimary';
+    const takesSerial = strategy.identifierField === 'serialNo';
+
+    if (!takesImei && (dto.imeiPrimary !== undefined || dto.imeiSecondary !== undefined)) {
+      throw new BadRequestException('This product is not tracked by IMEI, so it has no IMEI to correct.');
+    }
+    if (!takesSerial && dto.serialNo !== undefined) {
+      throw new BadRequestException('This product is not tracked by serial number, so it has no serial to correct.');
+    }
+
+    let nextPrimary = unit.imeiPrimary;
+
+    if (takesImei && dto.imeiPrimary !== undefined) {
+      const normalized = strategy.normalize(dto.imeiPrimary);
+      const check = strategy.validateIdentifier(normalized);
+      if (!check.ok) throw new BadRequestException(check.reason);
+      if (normalized !== unit.imeiPrimary) {
+        data.imeiPrimary = normalized;
+        before.imeiPrimary = unit.imeiPrimary;
+        after.imeiPrimary = normalized;
+        nextPrimary = normalized;
+        sensitiveChange = true;
+      }
+    }
+
+    if (takesImei && dto.imeiSecondary !== undefined) {
+      if (dto.imeiSecondary === null) {
+        if (unit.imeiSecondary !== null) {
+          data.imeiSecondary = null;
+          before.imeiSecondary = unit.imeiSecondary;
+          after.imeiSecondary = null;
+          sensitiveChange = true;
+        }
+      } else {
+        const secondary = dto.imeiSecondary.trim();
+        if (!/^\d{15}$/.test(secondary)) {
+          throw new BadRequestException('imeiSecondary must be 15 digits');
+        }
+        if (!isValidImei(secondary)) {
+          throw new BadRequestException('That secondary IMEI is not valid — check the digits.');
+        }
+        if (secondary === nextPrimary) {
+          throw new BadRequestException('The two IMEIs of a dual-SIM phone must be different.');
+        }
+        if (secondary !== unit.imeiSecondary) {
+          data.imeiSecondary = secondary;
+          before.imeiSecondary = unit.imeiSecondary;
+          after.imeiSecondary = secondary;
+          sensitiveChange = true;
+        }
+      }
+    }
+
+    if (takesSerial && dto.serialNo !== undefined) {
+      const normalized = strategy.normalize(dto.serialNo);
+      const check = strategy.validateIdentifier(normalized);
+      if (!check.ok) throw new BadRequestException(check.reason);
+      if (normalized !== unit.serialNo) {
+        data.serialNo = normalized;
+        before.serialNo = unit.serialNo;
+        after.serialNo = normalized;
+        sensitiveChange = true;
+      }
+    }
+
+    // ── Cost ──────────────────────────────────────────────────────────────────
+    if (dto.cost !== undefined) {
+      if (!this.may('cost.view')) {
+        throw new ForbiddenException('Correcting the cost needs permission to see cost.');
+      }
+      const current = Number(unit.cost);
+      if (dto.cost !== current) {
+        data.cost = dto.cost;
+        before.cost = current;
+        after.cost = dto.cost;
+        sensitiveChange = true;
+      }
+    }
+
+    if (Object.keys(data).length === 0) {
+      throw new BadRequestException('Nothing to correct — no field was changed.');
+    }
+
+    // A sensitive correction must say why.
+    if (sensitiveChange && !(dto.reason && dto.reason.trim())) {
+      throw new BadRequestException('A reason is required to correct an IMEI, a serial number or the cost.');
+    }
+
+    // Friendly, self-excluding uniqueness pre-check before the database's own.
+    const newIdentifiers = [data.imeiPrimary, data.imeiSecondary, data.serialNo].filter(
+      (v): v is string => typeof v === 'string',
+    );
+    const taken = await this.identifiersTakenByOthers(id, newIdentifiers);
+    if (taken.size > 0) {
+      throw new ConflictException(`Identifier already registered: ${[...taken].join(', ')}`);
+    }
+
+    const expected = new Date(dto.expectedUpdatedAt);
+
+    try {
+      return await this.db.$transaction(async (tx) => {
+        // Compare-and-swap on updatedAt AND status: the unit must still be the
+        // one the client read, and still in stock. Zero rows means it moved.
+        const result = await tx.unit.updateMany({
+          where: { id, updatedAt: expected, status: 'in_stock' },
+          data,
+        });
+        if (result.count === 0) {
+          throw new ConflictException({
+            code: 'stale_unit',
+            message: 'This item changed since you opened it. Its latest details were reloaded — check them and try again.',
+          });
+        }
+        await this.audit.recordTx(tx, {
+          entityType: 'Unit',
+          entityId: id,
+          action: 'update',
+          before: before as Prisma.InputJsonValue,
+          after: after as Prisma.InputJsonValue,
+          reason: dto.reason?.trim() || undefined,
+          branchId: unit.branchId,
+        });
+        const fresh = await tx.unit.findUnique({
+          where: { id },
+          include: {
+            product: true,
+            branch: { select: { id: true, name: true } },
+            purchase: { select: { referenceNo: true, date: true } },
+          },
+        });
+        // Cannot be null: the row was just updated inside this transaction.
+        return fresh as Unit;
+      });
+    } catch (e) {
+      if (e instanceof ConflictException) throw e;
+      throw this.mapIdentifierClash(e);
+    }
+  }
+
+  /**
+   * Map a database identifier collision to a 409. Covers both the unique-index
+   * duplicate (P2002) and the cross-column trigger (migration 0042), which
+   * surfaces its `SIGNAL` as a raw query error whose message names the clash.
+   */
+  private mapIdentifierClash(e: unknown): Error {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      return new ConflictException('Identifier already registered');
+    }
+    const message = e instanceof Error ? e.message : '';
+    if (/already identifies another unit|same IMEI as both/i.test(message)) {
+      return new ConflictException('Identifier already registered');
+    }
+    return e as Error;
   }
 
   async markFaulty(unitId: string): Promise<Unit> {

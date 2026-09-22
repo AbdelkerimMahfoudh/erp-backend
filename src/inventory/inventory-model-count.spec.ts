@@ -85,7 +85,7 @@ function makeService(units: ReturnType<typeof unit>[], assigned = true) {
     },
   };
   const tenant = { branchId: () => BRANCH, requireUserId: () => USER };
-  const service = new InventoryService(db as never, tenant as never, {} as never, {} as never, {} as never);
+  const service = new InventoryService(db as never, tenant as never, {} as never, {} as never, {} as never, { get: () => undefined } as never);
   return { service, db };
 }
 

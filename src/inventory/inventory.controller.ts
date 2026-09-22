@@ -1,8 +1,9 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { InventoryService } from './inventory.service';
 import { InventoryQueryDto } from './dto/inventory-query.dto';
+import { CorrectUnitDto } from './dto/correct-unit.dto';
 
 @ApiTags('inventory')
 @ApiBearerAuth()
@@ -78,5 +79,31 @@ export class InventoryController {
   @ApiOperation({ summary: 'Mark a unit faulty' })
   markFaulty(@Param('id') id: string) {
     return this.inventory.markFaulty(id);
+  }
+
+  /*
+   * Correct an in-stock unit. Guarded by `unit.add` — the same authority that
+   * receives stock and marks it faulty; correcting an intake mistake is the
+   * same person's job as making the intake. Correcting the cost additionally
+   * needs `cost.view`, enforced in the service. `updatedAt` is the optimistic
+   * lock, so a stale correction is refused rather than overwriting a concurrent
+   * change; sensitive changes carry a reason into the audit trail.
+   */
+  @Patch('units/:id')
+  @RequirePermissions('unit.add')
+  @ApiOperation({
+    summary: 'Correct an in-stock unit (product, identifiers, cost)',
+    description:
+      'Fixes an intake mistake on ONE in-stock unit. The product is re-associated ' +
+      '(fixing model/variant/storage/colour/barcode by pointing at the right ' +
+      'catalogue entry); the unit’s own IMEI, secondary IMEI, serial or cost are ' +
+      'corrected. The branch and status never change here, no unit is created or ' +
+      'deleted, and no past sale, purchase or receipt is altered. Optimistic ' +
+      'concurrency via `updatedAt`; sensitive changes require a reason and cost ' +
+      'requires `cost.view`. Cost and margin are stripped for callers without ' +
+      'cost.view by the global gating interceptor.',
+  })
+  correct(@Param('id') id: string, @Body() dto: CorrectUnitDto) {
+    return this.inventory.correctUnit(id, dto);
   }
 }

@@ -107,6 +107,7 @@ async function drain(units: any[], limit: number): Promise<Stats> {
     {} as never,
     {} as never,
     {} as never,
+    { get: () => undefined } as never,
   );
 
   const seen: string[] = [];

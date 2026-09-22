@@ -141,7 +141,7 @@ function makeStore(units: any[], stock: any[], branchId: Buffer | null = BRANCH)
    */
   const tenant = { branchId: () => branchId, requireUserId: () => USER };
   (db as unknown as Record<string, unknown>).userBranch = { findFirst: async () => ({ id: USER }) };
-  const service = new InventoryService(db as never, tenant as never, {} as never, {} as never, {} as never);
+  const service = new InventoryService(db as never, tenant as never, {} as never, {} as never, {} as never, { get: () => undefined } as never);
   return { service, db };
 }
 
@@ -229,6 +229,7 @@ describe('listStock — branch isolation', () => {
       {} as never,
       {} as never,
       {} as never,
+      { get: () => undefined } as never,
     );
     await expect(service.listStock({})).rejects.toThrow(/No access to the requested branch/);
   });
@@ -245,6 +246,7 @@ describe('listStock — branch isolation', () => {
       {} as never,
       {} as never,
       {} as never,
+      { get: () => undefined } as never,
     );
     await expect(service.listStock({})).rejects.toThrow(
       // Same wording the guard uses, so the two are indistinguishable.
