@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Post } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { AnomaliesService } from './anomalies.service';
@@ -19,16 +19,24 @@ import { AnomaliesService } from './anomalies.service';
 export class AnomaliesController {
   constructor(private readonly anomalies: AnomaliesService) {}
 
+  /**
+   * `limit` and `page` slice an already-ordered list: the overview asks for
+   * three, the full list pages through the rest, and both see the same order.
+   * Without them every row is returned, as before.
+   */
   @Get()
   @RequirePermissions('report.view')
-  @ApiOperation({ summary: 'What needs attention, worked out now from existing figures' })
-  list() {
-    return this.anomalies.list();
+  @ApiOperation({ summary: 'What needs attention, worked out now from existing figures — newest first' })
+  list(@Query('limit') limit?: string, @Query('page') page?: string) {
+    return this.anomalies.list({
+      limit: limit === undefined ? undefined : Number(limit),
+      page: page === undefined ? undefined : Number(page),
+    });
   }
 
   @Post(':key/dismiss')
   @RequirePermissions('report.view')
-  @ApiOperation({ summary: 'Silence one anomaly for seven days, for the whole company' })
+  @ApiOperation({ summary: 'Silence one anomaly for seven days, for the whole company — a repeat answers the same' })
   dismiss(@Param('key') key: string) {
     return this.anomalies.dismiss(key);
   }

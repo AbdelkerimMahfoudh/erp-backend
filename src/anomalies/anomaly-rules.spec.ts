@@ -9,6 +9,7 @@ import {
   NOTIFYING_CODES,
   orderAnomalies,
   overdueDebtAnomalies,
+  pageOf,
   sellerMarginAnomalies,
   SHORTFALL_MIN_COUNT,
   withoutDismissed,
@@ -183,8 +184,9 @@ describe('6 — below-cost cluster', () => {
 });
 
 describe('dismissal, ordering and notification', () => {
-  const a = (key: string, code: Anomaly['code'] = 'anomaly.dead_stock'): Anomaly => ({
+  const a = (key: string, code: Anomaly['code'] = 'anomaly.dead_stock', at: string | null = null): Anomaly => ({
     key,
+    at,
     code,
     severity: 'info',
     messageKey: 'warning.anomaly.deadStock',
@@ -205,6 +207,71 @@ describe('dismissal, ordering and notification', () => {
       { ...a('y', 'anomaly.cash_shortfall'), severity: 'caution' },
     ]);
     expect(ordered[0].severity).toBe('caution');
+  });
+
+  it('lists the newest first, then the serious, then by key — the same way every time', () => {
+    /*
+     * Nothing is stored, so "newest" is each rule's own instant. Two reads of
+     * the same figures must put the same rows in the same places, or the
+     * overview's "three most recent" and the full list would disagree.
+     */
+    const rows: Anomaly[] = [
+      a('anomaly.dead_stock:b', 'anomaly.dead_stock', '2026-09-01T00:00:00.000Z'),
+      { ...a('anomaly.cash_shortfall', 'anomaly.cash_shortfall', '2026-09-01T00:00:00.000Z'), severity: 'caution' },
+      a('anomaly.dead_stock:a', 'anomaly.dead_stock', '2026-09-01T00:00:00.000Z'),
+      a('anomaly.dead_stock:z', 'anomaly.dead_stock', '2026-09-20T00:00:00.000Z'),
+      { ...a('anomaly.overdue_debt', 'anomaly.overdue_debt', null), severity: 'caution' },
+    ];
+    const expected = [
+      'anomaly.dead_stock:z', // newest
+      'anomaly.cash_shortfall', // same day, but must be acted on
+      'anomaly.dead_stock:a', // same day, same weight: by key
+      'anomaly.dead_stock:b',
+      'anomaly.overdue_debt', // no instant of its own: last, whatever its weight
+    ];
+    expect(orderAnomalies(rows).map((x) => x.key)).toEqual(expected);
+    expect(orderAnomalies([...rows].reverse()).map((x) => x.key)).toEqual(expected);
+  });
+
+  it('dates each rule from its own records, never from the clock', () => {
+    const lastSold = new Date('2026-06-01T10:00:00.000Z');
+    const [dead] = deadStockAnomalies([{ productId: 'p', label: 'P', inStock: 1, days: 60, lastSoldAt: lastSold }]);
+    expect(dead.at).toBe(new Date(lastSold.getTime() + 60 * 86_400_000).toISOString());
+    expect(deadStockAnomalies([{ productId: 'p', label: 'P', inStock: 1, days: 60 }])[0].at).toBeNull();
+
+    const due = new Date('2026-09-10T00:00:00.000Z');
+    expect(overdueDebtAnomalies({ count: 1, amount: 10, oldestDueDate: due })[0].at).toBe(due.toISOString());
+
+    const short = new Date('2026-09-18T19:30:00.000Z');
+    expect(cashShortfallAnomalies({ count: 3, amount: -30, latestAt: short })[0].at).toBe(short.toISOString());
+
+    const spent = new Date('2026-09-19T12:00:00.000Z');
+    expect(belowCostAnomalies([{ userId: 'u', name: 'A', count: 3, latestAt: spent }])[0].at).toBe(spent.toISOString());
+
+    const day = new Date('2026-09-22T00:00:00.000Z');
+    const [drop] = sellerMarginAnomalies(
+      [{ userId: 'u', name: 'A', current: { sales: 20, revenue: 1000, margin: 50 }, previous: { sales: 20, revenue: 1000, margin: 300 } }],
+      day,
+    );
+    expect(drop.at).toBe(day.toISOString());
+  });
+
+  it('pages an ordered list without changing it', () => {
+    const rows = ['a', 'b', 'c', 'd'];
+    expect(pageOf(rows, undefined, undefined)).toEqual({ rows, total: 4, page: 1, pageSize: 4 });
+    expect(pageOf(rows, 1, 3)).toEqual({ rows: ['a', 'b', 'c'], total: 4, page: 1, pageSize: 3 });
+    expect(pageOf(rows, 2, 3)).toEqual({ rows: ['d'], total: 4, page: 2, pageSize: 3 });
+    expect(pageOf(rows, 3, 3)).toEqual({ rows: [], total: 4, page: 3, pageSize: 3 });
+    expect(pageOf([], 1, 3)).toEqual({ rows: [], total: 0, page: 1, pageSize: 3 });
+    // A nonsense size or page is read charitably, never as an error a phone has to handle.
+    expect(pageOf(rows, 0, 0)).toEqual({ rows: ['a'], total: 4, page: 1, pageSize: 1 });
+    expect(pageOf(rows, Number.NaN, 1000).pageSize).toBe(100);
+  });
+
+  it('answers a repeated dismissal with the one that already stands', () => {
+    // A double tap, or "I understand" from a stale screen, must not stack rows.
+    expect(SERVICE).toMatch(/anomalyDismissal\.findFirst\(\{\s*where: \{ companyId: this\.tenant\.companyId\(\), anomalyKey: key, suppressedUntil: \{ gt: now \} \}/);
+    expect(SERVICE).toMatch(/if \(standing\) return \{ key, suppressedUntil: standing\.suppressedUntil\.toISOString\(\), replayed: true \}/);
   });
 
   it('interrupts for three of the six, and reads the other three', () => {
@@ -238,7 +305,7 @@ describe('who may see what', () => {
      * Computed-then-filtered is one refactor away from leaking. A figure that
      * is never fetched cannot escape through a log line or an error message.
      */
-    expect(SERVICE).toMatch(/this\.isOwner\(\) \? this\.sellerMargin\(\) : Promise\.resolve\(\[\]\)/);
+    expect(SERVICE).toMatch(/this\.isOwner\(\) \? this\.sellerMargin\(now\) : Promise\.resolve\(\[\]\)/);
     expect(SERVICE).toMatch(/this\.isOwner\(\) \? this\.belowCostCluster\(/);
     expect(SERVICE).toMatch(/this\.may\('loan\.view'\) \? this\.overdueDebt\(/);
   });

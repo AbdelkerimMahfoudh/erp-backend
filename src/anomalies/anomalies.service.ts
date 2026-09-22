@@ -18,6 +18,7 @@ import {
   NOTIFYING_CODES,
   orderAnomalies,
   overdueDebtAnomalies,
+  pageOf,
   sellerMarginAnomalies,
   withoutDismissed,
 } from './anomaly-rules';
@@ -83,23 +84,29 @@ export class AnomaliesService {
    * Computed on read. Nothing is stored, because a stored anomaly is a second
    * copy of a figure that is already stale by the time anybody reads it.
    */
-  async list() {
+  async list(slice: { limit?: number; page?: number } = {}) {
     const now = new Date();
     const suppressed = await this.suppressedKeys(now);
 
     const groups = await Promise.all([
       this.deadStock(),
       this.may('loan.view') ? this.overdueDebt(now) : Promise.resolve([]),
-      this.isOwner() ? this.sellerMargin() : Promise.resolve([]),
+      this.isOwner() ? this.sellerMargin(now) : Promise.resolve([]),
       this.may('closing.perform') || this.isOwner() ? this.cashShortfall(now) : Promise.resolve([]),
       this.isOwner() ? this.belowCostCluster(now) : Promise.resolve([]),
     ]);
 
     const found = orderAnomalies(withoutDismissed(groups.flat(), suppressed));
+    // Everybody who needs telling is told about ALL of them, whatever page the
+    // reader asked for.
     await this.notify(found, now);
+    const page = pageOf(found, slice.page, slice.limit);
 
     return {
-      rows: found,
+      rows: page.rows,
+      total: page.total,
+      page: page.page,
+      pageSize: page.pageSize,
       /*
        * When this was worked out. An anomaly panel with no timestamp invites
        * somebody to act at four o'clock on a figure from the morning.
@@ -123,6 +130,18 @@ export class AnomaliesService {
     if (!userId) throw new ForbiddenException('Not signed in');
 
     const now = new Date();
+    /*
+     * Idempotent. A tap that reached the server twice — or an "I understand"
+     * pressed again from a stale screen — answers with the dismissal that
+     * already stands rather than stacking a second one. The seven days run
+     * from the first answer, which is what the person was told.
+     */
+    const standing = await this.db.anomalyDismissal.findFirst({
+      where: { companyId: this.tenant.companyId(), anomalyKey: key, suppressedUntil: { gt: now } },
+      orderBy: { suppressedUntil: 'desc' },
+      select: { suppressedUntil: true },
+    });
+    if (standing) return { key, suppressedUntil: standing.suppressedUntil.toISOString(), replayed: true };
     const suppressedUntil = new Date(now.getTime() + DISMISSAL_DAYS * 86_400_000);
     const row = await this.db.anomalyDismissal.create({
       data: {
@@ -146,7 +165,7 @@ export class AnomaliesService {
       after: { event: 'anomaly_dismissed', anomalyKey: key, suppressedUntil: suppressedUntil.toISOString() },
     });
 
-    return { key, suppressedUntil: suppressedUntil.toISOString() };
+    return { key, suppressedUntil: suppressedUntil.toISOString(), replayed: false };
   }
 
   /**
@@ -181,6 +200,7 @@ export class AnomaliesService {
         label: row.label ?? row.productId,
         inStock: row.inStock,
         days,
+        lastSoldAt: row.lastSoldAt,
       })),
     );
   }
@@ -200,13 +220,19 @@ export class AnomaliesService {
     };
     const [count, agg] = await Promise.all([
       this.db.sale.count({ where }),
-      this.db.sale.aggregate({ where, _sum: { balanceDue: true } }),
+      this.db.sale.aggregate({ where, _sum: { balanceDue: true }, _min: { dueDate: true } }),
     ]);
-    return overdueDebtAnomalies({ count, amount: Number(agg._sum.balanceDue ?? 0) });
+    return overdueDebtAnomalies({
+      count,
+      amount: Number(agg._sum.balanceDue ?? 0),
+      oldestDueDate: agg._min.dueDate ?? null,
+    });
   }
 
-  private async sellerMargin(): Promise<Anomaly[]> {
+  private async sellerMargin(now: Date): Promise<Anomaly[]> {
     // Two windows from ONE definition of a seller's margin — the dashboard's.
+    // The comparison is dated to its day, so its place in the list holds all day.
+    const windowEnd = new Date(`${dayKey(now)}T00:00:00.000Z`);
     const [current, previous] = await Promise.all([
       this.dashboard.employeePerformance(ANOMALY_WINDOW_DAYS),
       this.dashboard.employeePerformance(ANOMALY_WINDOW_DAYS, ANOMALY_WINDOW_DAYS),
@@ -225,6 +251,7 @@ export class AnomaliesService {
             previous: { sales: before.salesCount, revenue: before.revenue, margin: before.margin },
           };
         }),
+      windowEnd,
     );
   }
 
@@ -242,11 +269,12 @@ export class AnomaliesService {
         amount: { lt: new Prisma.Decimal(0) },
         ...(branchId ? { branchId } : {}),
       },
-      select: { amount: true },
+      select: { amount: true, openedAt: true },
     });
     return cashShortfallAnomalies({
       count: rows.length,
       amount: rows.reduce((sum, r) => sum + Number(r.amount), 0),
+      latestAt: rows.reduce<Date | null>((latest, r) => (!latest || r.openedAt > latest ? r.openedAt : latest), null),
     });
   }
 
@@ -261,6 +289,7 @@ export class AnomaliesService {
       by: ['requesterId'],
       where: { status: 'consumed', belowCost: true, consumedAt: { gte: from } },
       _count: true,
+      _max: { consumedAt: true },
     });
     if (grouped.length === 0) return [];
 
@@ -275,6 +304,7 @@ export class AnomaliesService {
         userId: binToUuid(g.requesterId),
         name: nameByHex.get(g.requesterId.toString('hex')) ?? binToUuid(g.requesterId),
         count: g._count,
+        latestAt: g._max.consumedAt ?? null,
       })),
     );
   }

@@ -51,6 +51,14 @@ export const ANOMALY_WINDOW_DAYS = 30;
 /** An anomaly is a warning that can be dismissed, so it carries an identity. */
 export interface Anomaly extends Warning {
   key: string;
+  /**
+   * The instant this became true, taken from the rule's OWN data — an overdue
+   * due date, the day a shelf went quiet, the latest short closing. Nothing is
+   * stored: a screen that wants "newest first" gets the same order on every
+   * read because the instant comes from the records, not from the clock.
+   * `null` when a rule has no natural instant; those sort last.
+   */
+  at: string | null;
 }
 
 /**
@@ -65,9 +73,11 @@ function anomaly(
   severity: WarningSeverity,
   params: Record<string, string | number>,
   subject?: string,
+  at?: Date | null,
 ): Anomaly {
   return {
     key: subject ? `${code}:${subject}` : code,
+    at: at ? at.toISOString() : null,
     code,
     severity,
     messageKey: messageKeyFor(code),
@@ -89,6 +99,8 @@ export interface DeadStockInput {
   inStock: number;
   /** The shop's own `dead_stock_days` setting, already resolved. */
   days: number;
+  /** When it last sold. The shelf went quiet `days` after this. */
+  lastSoldAt?: Date | null;
 }
 
 /**
@@ -103,7 +115,13 @@ export function deadStockAnomalies(rows: readonly DeadStockInput[]): Anomaly[] {
   return rows
     .filter((row) => row.inStock > 0)
     .map((row) =>
-      anomaly('anomaly.dead_stock', 'info', { product: row.label, days: row.days }, row.productId),
+      anomaly(
+        'anomaly.dead_stock',
+        'info',
+        { product: row.label, days: row.days },
+        row.productId,
+        row.lastSoldAt ? new Date(row.lastSoldAt.getTime() + row.days * 86_400_000) : null,
+      ),
     );
 }
 
@@ -112,6 +130,8 @@ export function deadStockAnomalies(rows: readonly DeadStockInput[]): Anomaly[] {
 export interface OverdueDebtInput {
   count: number;
   amount: number;
+  /** The earliest due date that has passed: when this first became true. */
+  oldestDueDate?: Date | null;
 }
 
 /**
@@ -125,7 +145,13 @@ export interface OverdueDebtInput {
 export function overdueDebtAnomalies(input: OverdueDebtInput): Anomaly[] {
   if (input.count <= 0) return [];
   return [
-    anomaly('anomaly.overdue_debt', 'caution', { count: input.count, amount: round2(input.amount) }),
+    anomaly(
+      'anomaly.overdue_debt',
+      'caution',
+      { count: input.count, amount: round2(input.amount) },
+      undefined,
+      input.oldestDueDate ?? null,
+    ),
   ];
 }
 
@@ -149,7 +175,8 @@ export interface SellerMarginInput {
  * Owner-only, and gated on `cost.view` as well. A manager reading a
  * colleague's margin is a personnel problem the app should not create.
  */
-export function sellerMarginAnomalies(rows: readonly SellerMarginInput[]): Anomaly[] {
+/** `windowEnd` is the day the comparison was made for — the same instant all day. */
+export function sellerMarginAnomalies(rows: readonly SellerMarginInput[], windowEnd?: Date | null): Anomaly[] {
   const out: Anomaly[] = [];
   for (const row of rows) {
     if (row.current.sales < MARGIN_MIN_SALES || row.previous.sales < MARGIN_MIN_SALES) continue;
@@ -168,6 +195,7 @@ export function sellerMarginAnomalies(rows: readonly SellerMarginInput[]): Anoma
         'info',
         { seller: row.name, before: percent(before), after: percent(after), days: ANOMALY_WINDOW_DAYS },
         row.userId,
+        windowEnd ?? null,
       ),
     );
   }
@@ -181,6 +209,8 @@ export interface CashShortfallInput {
   count: number;
   /** The total shortage, as a positive amount. Cash, not cost. */
   amount: number;
+  /** The most recent short closing. */
+  latestAt?: Date | null;
 }
 
 /**
@@ -193,11 +223,17 @@ export interface CashShortfallInput {
 export function cashShortfallAnomalies(input: CashShortfallInput): Anomaly[] {
   if (input.count < SHORTFALL_MIN_COUNT) return [];
   return [
-    anomaly('anomaly.cash_shortfall', 'caution', {
-      count: input.count,
-      amount: round2(Math.abs(input.amount)),
-      days: ANOMALY_WINDOW_DAYS,
-    }),
+    anomaly(
+      'anomaly.cash_shortfall',
+      'caution',
+      {
+        count: input.count,
+        amount: round2(Math.abs(input.amount)),
+        days: ANOMALY_WINDOW_DAYS,
+      },
+      undefined,
+      input.latestAt ?? null,
+    ),
   ];
 }
 
@@ -207,6 +243,8 @@ export interface BelowCostInput {
   userId: string;
   name: string;
   count: number;
+  /** The latest below-cost sale by this person. */
+  latestAt?: Date | null;
 }
 
 /**
@@ -226,6 +264,7 @@ export function belowCostAnomalies(rows: readonly BelowCostInput[]): Anomaly[] {
         'caution',
         { seller: row.name, count: row.count, days: ANOMALY_WINDOW_DAYS },
         row.userId,
+        row.latestAt ?? null,
       ),
     );
 }
@@ -246,8 +285,32 @@ export function withoutDismissed(
 }
 
 /** Cautions first; within a severity, the order the rules ran. */
+/**
+ * Newest first, then the more serious, then by key — a total order, so two reads
+ * of the same figures list the same rows in the same places and "the three most
+ * recent" means the same thing on every screen. A row with no instant sorts last.
+ */
 export function orderAnomalies(anomalies: readonly Anomaly[]): Anomaly[] {
-  return [...anomalies].sort((a, b) => rank(a.severity) - rank(b.severity));
+  return [...anomalies].sort(
+    (a, b) =>
+      instant(b) - instant(a) ||
+      rank(a.severity) - rank(b.severity) ||
+      (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+  );
+}
+
+const instant = (a: Anomaly): number => (a.at ? Date.parse(a.at) : Number.NEGATIVE_INFINITY);
+
+/** One page of an ordered list, and how many rows there were altogether. */
+export function pageOf<T>(
+  rows: readonly T[],
+  page: number | undefined,
+  limit: number | undefined,
+): { rows: T[]; total: number; page: number; pageSize: number } {
+  const pageSize = limit === undefined ? rows.length : Math.min(100, Math.max(1, Math.floor(limit) || 1));
+  const current = Math.max(1, Math.floor(page ?? 1) || 1);
+  const start = (current - 1) * pageSize;
+  return { rows: rows.slice(start, start + pageSize), total: rows.length, page: current, pageSize };
 }
 
 const rank = (severity: WarningSeverity): number => (severity === 'caution' ? 0 : 1);
