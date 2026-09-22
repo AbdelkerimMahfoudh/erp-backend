@@ -13,6 +13,7 @@ import { EntitlementModule } from '../entitlement/entitlement.module';
 import { AuthModule } from '../auth/auth.module';
 import { PortalHandoffService } from './portal-handoff.service';
 import { RegistrationContinuationService } from './registration-continuation.service';
+import { OwnerInvitationService } from './owner-invitation.service';
 import {
   ContactDeliveryProvider,
   outboxAllowed,
@@ -46,6 +47,7 @@ import {
     ContactVerificationService,
     PortalHandoffService,
     RegistrationContinuationService,
+    OwnerInvitationService,
     {
       /*
        * Which delivery provider is real is an environment decision, and the

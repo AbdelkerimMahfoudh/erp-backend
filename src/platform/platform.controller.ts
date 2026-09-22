@@ -48,10 +48,12 @@ import {
 import { PlatformAuditService } from './platform-audit.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
+import { OwnerInvitationService, OWNER_PASSWORD_MIN_LENGTH } from './owner-invitation.service';
 import { BillingService } from '../billing/billing.service';
 import { ContactVerificationService } from './contact-verification.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
+import { randomBytes } from 'node:crypto';
 
 /**
  * The platform-control API.
@@ -121,6 +123,54 @@ class ExtendDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
+class ApproveDto {
+  /** Exactly one of `months` and `periodEnd`. The service refuses both and neither. */
+  @IsOptional() @IsInt() @Min(1) months?: number;
+  /** ISO instant, in the future. */
+  @IsOptional() @IsString() @MaxLength(40) periodEnd?: string;
+  @IsOptional() @IsString() @MaxLength(500) reason?: string;
+  @IsOptional() @IsInt() expectedVersion?: number;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+}
+
+class PeriodDto {
+  /** ISO instant. Shortening the period needs `reason`; the service enforces it. */
+  @IsString() @MinLength(4) @MaxLength(40) periodEnd: string;
+  @IsOptional() @IsString() @MaxLength(500) reason?: string;
+  @IsOptional() @IsInt() expectedVersion?: number;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+}
+
+/**
+ * A business created by an administrator for a shop — the same record public
+ * registration leaves behind, minus the password, which nobody chooses here.
+ */
+class CreateBusinessDto {
+  /** The administrator's own key, so a retry cannot create a second business. */
+  @IsString() @IsNotEmptyish() @MaxLength(80) idempotencyKey: string;
+  @IsString() @MinLength(1) @MaxLength(160) ownerName: string;
+  @IsString() @MinLength(1) @MaxLength(160) businessName: string;
+  @IsOptional() @IsString() @MaxLength(160) branchName?: string;
+  @IsOptional() @IsString() @MaxLength(120) city?: string;
+  /** At least one of `email` and `phone`: it is what the Owner signs in with. */
+  @IsOptional() @IsString() @MaxLength(160) email?: string;
+  @IsOptional() @IsString() @MaxLength(24) phone?: string;
+  @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
+  @IsString() @MinLength(1) @MaxLength(500) reason: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+}
+
+class InvitationDto {
+  @IsOptional() @IsString() @MaxLength(500) reason?: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+}
+
+class AcceptInvitationDto {
+  /** The opaque invitation. Never logged. */
+  @IsString() @MinLength(16) @MaxLength(200) token: string;
+  @IsString() @MinLength(OWNER_PASSWORD_MIN_LENGTH) @MaxLength(200) password: string;
+}
+
 class PaymentDto {
   /** A string, so no float ever rounds somebody's money on the way in. */
   @IsNumberString() amount: string;
@@ -186,6 +236,7 @@ export class PlatformController {
     private readonly tenant: TenantContext,
     private readonly handoff: PortalHandoffService,
     private readonly continuation: RegistrationContinuationService,
+    private readonly invitations: OwnerInvitationService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -449,6 +500,7 @@ export class PlatformController {
         suspended: tally.suspended ?? 0,
         expired: tally.expired ?? 0,
         cancelled: tally.cancelled ?? 0,
+        rejected: tally.rejected ?? 0,
       },
       businesses,
       branches,
@@ -489,11 +541,17 @@ export class PlatformController {
         }
       : {};
 
+    /*
+     * A state is derived from dates, so it cannot be a SQL predicate. With a
+     * state filter, every business matching the search is read and the page
+     * is cut from the filtered list — otherwise the filter used to run on ONE
+     * page of unfiltered rows, and "3 of 40" meant nothing. The platform
+     * counts businesses in the hundreds; reading them once is nothing.
+     */
     const [rows, total] = await Promise.all([
       this.prisma.company.findMany({
         where,
-        skip,
-        take,
+        ...(state ? {} : { skip, take }),
         orderBy: { createdAt: 'desc' },
         select: {
           id: true,
@@ -533,9 +591,12 @@ export class PlatformController {
       };
     });
 
+    if (!state) return { rows: mapped, total, page: Number(page) || 1, pageSize: take };
+
+    const inState = mapped.filter((r) => r.state === state);
     return {
-      rows: state ? mapped.filter((r) => r.state === state) : mapped,
-      total,
+      rows: inState.slice(skip, skip + take),
+      total: inState.length,
       page: Number(page) || 1,
       pageSize: take,
     };
@@ -656,7 +717,180 @@ export class PlatformController {
     }));
   }
 
+  // ── A business the platform creates for a shop ──────────────────────────
+
+  /**
+   * Create a business and its Owner on a shop's behalf, and hand back the
+   * Owner's one-time invitation.
+   *
+   * The same provisioning as public registration — company, first branch,
+   * roles with their permissions, Owner, `pending_activation` subscription —
+   * with one difference: the password is random and known to nobody, and the
+   * invitation returned here is the only way to replace it. Approval is a
+   * separate, separately audited act; creating a business grants it nothing.
+   *
+   * Idempotent by the administrator's key. A retry recognises the business it
+   * already made and returns it **without a new invitation**: a credential is
+   * minted for an explicit request, never for a network hiccup. "Regenerate"
+   * is the route below.
+   */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses')
+  @HttpCode(HttpStatus.CREATED)
+  async createBusiness(@Body() dto: CreateBusinessDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+
+    const result = await this.registration.register({
+      idempotencyKey: `admin:${dto.idempotencyKey}`,
+      ownerName: dto.ownerName,
+      businessName: dto.businessName,
+      branchName: dto.branchName ?? '',
+      city: dto.city,
+      email: dto.email,
+      phone: dto.phone,
+      // Unusable on purpose. The invitation is what sets the real one.
+      password: randomBytes(48).toString('base64url'),
+      language: dto.language,
+      actor: admin.email,
+      note: 'Created by the platform for the shop. Awaiting approval.',
+    });
+
+    if (!result.created) {
+      return { ...result, invitation: null };
+    }
+
+    await this.audit.record({
+      admin,
+      action: 'business.create',
+      targetType: 'Company',
+      targetId: uuidToBin(result.companyId),
+      targetLabel: dto.businessName,
+      reason: dto.reason,
+      after: {
+        publicStoreId: result.publicStoreId,
+        ownerName: dto.ownerName,
+        city: dto.city ?? null,
+        language: dto.language,
+        status: result.status,
+      },
+      ip: req.ip ?? null,
+    });
+
+    const invitation = await this.invitations.issue(result.companyId, {
+      admin,
+      ip: req.ip,
+      reason: dto.reason,
+    });
+
+    return {
+      ...result,
+      invitation: {
+        token: invitation.token,
+        expiresAt: invitation.expiresAt.toISOString(),
+        delivery: invitation.delivery,
+        owner: invitation.owner,
+      },
+    };
+  }
+
+  /** A fresh invitation for the Owner. Every unspent one is revoked by it. */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/owner-invitation')
+  @HttpCode(HttpStatus.CREATED)
+  async ownerInvitation(@Param('id') id: string, @Body() dto: InvitationDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    const invitation = await this.invitations.issue(id, { admin, ip: req.ip, reason: dto.reason });
+    return {
+      token: invitation.token,
+      expiresAt: invitation.expiresAt.toISOString(),
+      delivery: invitation.delivery,
+      owner: invitation.owner,
+      replaced: invitation.replaced,
+    };
+  }
+
+  /**
+   * The Owner spends their invitation and sets a password.
+   *
+   * Public because it runs before any session exists; throttled and
+   * non-enumerating because it is public. It issues no session: the Owner
+   * then signs in exactly as anybody does, and the subscription decides what
+   * they may do.
+   */
+  @Public()
+  @Throttle(PUBLIC_THROTTLE)
+  @Post('owner-invitation/accept')
+  @HttpCode(HttpStatus.OK)
+  async acceptOwnerInvitation(@Body() dto: AcceptInvitationDto, @Req() req: Request) {
+    const result = await this.invitations.accept(dto.token, dto.password, { ip: req.ip });
+    return { ...result, next: 'sign_in' };
+  }
+
   // ── Lifecycle actions ────────────────────────────────────────────────────
+
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/approve')
+  @HttpCode(HttpStatus.OK)
+  async approve(@Param('id') id: string, @Body() dto: ApproveDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    const r = await this.lifecycle.approve(
+      id,
+      {
+        months: dto.months,
+        periodEnd: dto.periodEnd === undefined ? undefined : new Date(dto.periodEnd),
+        reason: dto.reason,
+        expectedVersion: dto.expectedVersion,
+      },
+      { admin, ip: req.ip },
+    );
+    return {
+      applied: r.applied,
+      version: r.subscription.version,
+      status: r.subscription.status,
+      periodEnd: r.subscription.currentPeriodEnd?.toISOString() ?? null,
+    };
+  }
+
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/reject')
+  @HttpCode(HttpStatus.OK)
+  async reject(@Param('id') id: string, @Body() dto: ReasonDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    const r = await this.lifecycle.reject(
+      id,
+      { reason: dto.reason, expectedVersion: dto.expectedVersion },
+      { admin, ip: req.ip },
+    );
+    return { applied: r.applied, version: r.subscription.version, status: r.subscription.status };
+  }
+
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/period')
+  @HttpCode(HttpStatus.OK)
+  async setPeriod(@Param('id') id: string, @Body() dto: PeriodDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    const r = await this.lifecycle.setPeriodEnd(
+      id,
+      { periodEnd: new Date(dto.periodEnd), reason: dto.reason, expectedVersion: dto.expectedVersion },
+      { admin, ip: req.ip },
+    );
+    return {
+      applied: r.applied,
+      version: r.subscription.version,
+      status: r.subscription.status,
+      periodEnd: r.subscription.currentPeriodEnd?.toISOString() ?? null,
+    };
+  }
 
   @Public()
   @UseGuards(PlatformAdminGuard)
