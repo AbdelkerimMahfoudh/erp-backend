@@ -12,6 +12,7 @@ import {
   type SubscriptionRecord,
   canRead,
   ENTITLEMENT_PENDING,
+  ENTITLEMENT_REJECTED,
   ENTITLEMENT_SUSPENDED,
   type EntitlementState,
 } from './entitlement-rules';
@@ -126,12 +127,17 @@ export class EntitlementService {
     const state = stateOf(record, this.clock.now());
     if (canRead(state)) return null;
 
+    // Each closed state names itself. The app shows the right screen from the
+    // code, and the Owner is told what actually happened — not a guess.
+    if (state === 'pending') {
+      return { code: ENTITLEMENT_PENDING, message: 'This business is waiting to be activated.', state };
+    }
+    if (state === 'rejected') {
+      return { code: ENTITLEMENT_REJECTED, message: 'This registration was not approved.', state };
+    }
     return {
-      code: state === 'pending' ? ENTITLEMENT_PENDING : ENTITLEMENT_SUSPENDED,
-      message:
-        state === 'pending'
-          ? 'This business is waiting to be activated.'
-          : 'This business is not active. Open your account page to see why.',
+      code: ENTITLEMENT_SUSPENDED,
+      message: 'This business is not active. Open your account page to see why.',
       state,
     };
   }

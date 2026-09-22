@@ -23,7 +23,13 @@
  * subscription behaved before this existed, so every pre-existing row carries
  * it and nothing about their behaviour changes.
  */
-export type SubscriptionStatus = 'pending_activation' | 'activated' | 'suspended' | 'cancelled';
+export type SubscriptionStatus =
+  | 'pending_activation'
+  | 'activated'
+  | 'suspended'
+  | 'cancelled'
+  /** Refused before it ever ran (0075). Not an ended subscription: nothing was granted. */
+  | 'rejected';
 
 export type EntitlementState =
   | 'pending'
@@ -32,7 +38,8 @@ export type EntitlementState =
   | 'expired'
   | 'complimentary'
   | 'suspended'
-  | 'cancelled';
+  | 'cancelled'
+  | 'rejected';
 
 /** Exactly 72 hours. Derived from the period, never stored beside it. */
 export const GRACE_HOURS = 72;
@@ -88,6 +95,9 @@ export function stateOf(sub: SubscriptionRecord, now: Date): EntitlementState {
   if (status === 'cancelled') return 'cancelled';
   if (status === 'suspended') return 'suspended';
   if (status === 'pending_activation') return 'pending';
+  // Refused. Its own state, so a shop told "no" is not told "your
+  // subscription ended" — it never had one.
+  if (status === 'rejected') return 'rejected';
 
   /*
    * A value that is none of the four.
@@ -152,7 +162,7 @@ export function canWrite(state: EntitlementState): boolean {
  * is ever locked out of finding out *why* — see `docs/37`.
  */
 export function canRead(state: EntitlementState = 'active'): boolean {
-  return state !== 'pending' && state !== 'suspended' && state !== 'cancelled';
+  return state !== 'pending' && state !== 'suspended' && state !== 'cancelled' && state !== 'rejected';
 }
 
 export function graceEndsAt(sub: SubscriptionRecord): Date | null {
@@ -221,6 +231,8 @@ export const ENTITLEMENT_WRITE_BLOCKED = 'ENTITLEMENT_WRITE_BLOCKED';
 export const ENTITLEMENT_PENDING = 'ENTITLEMENT_PENDING';
 /// Deliberately stopped. Distinct from pending so the client can say which.
 export const ENTITLEMENT_SUSPENDED = 'ENTITLEMENT_SUSPENDED';
+/// Refused at registration. Its own code, so the client never calls it "ended".
+export const ENTITLEMENT_REJECTED = 'ENTITLEMENT_REJECTED';
 export const SEAT_LIMIT_REACHED = 'SEAT_LIMIT_REACHED';
 
 export interface Entitlement {

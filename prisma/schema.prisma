@@ -66,6 +66,12 @@ enum SubscriptionEventKind {
   suspended
   reinstated
   cancelled
+  /// 0075: a pending registration became a running subscription.
+  approved
+  /// 0075: a pending registration was refused, with a reason.
+  rejected
+  /// 0075: an administrator set the period end directly, with a reason.
+  period_corrected
 }
 
 /// Where a subscription sits in its lifecycle (0056).
@@ -78,6 +84,9 @@ enum SubscriptionStatus {
   suspended
   /// Ended. History is kept; nothing is deleted.
   cancelled
+  /// Refused before it ever ran (0075). A decision, like `suspended`, and not
+  /// an ended subscription: nothing was ever granted to it.
+  rejected
 }
 
 /// How money actually arrived. No provider is integrated in this checkpoint,
@@ -291,6 +300,7 @@ model Company {
 
   branches                       Branch[]
   users                          User[]
+  ownerInvitations               OwnerInvitation[]
   roles                          Role[]
   rolePermissions                RolePermission[]
   userBranches                   UserBranch[]
@@ -473,6 +483,7 @@ model User {
   counterpartiesCreated    Counterparty[]           @relation("CounterpartyCreatedBy")
   paymentsRecorded         Payment[]                @relation("PaymentRecordedBy")
   consignmentLedgerEntries ConsignmentLedgerEntry[]
+  ownerInvitations         OwnerInvitation[]
 
   /// Loan roles. Named, because who proposed and who decided must stay
   /// distinguishable even when an owner does both.
@@ -3979,6 +3990,35 @@ model RegistrationAttempt {
 
   @@index([createdAt], map: "ix_registration_created")
   @@map("registration_attempts")
+}
+
+/// A one-time key that lets a business's Owner set their first password (0075).
+///
+/// Minted by a platform administrator for a business they created for a shop —
+/// or minted again when the first one was lost. Only the hash is stored; the
+/// token itself exists in one administrator response and nowhere else. It is
+/// single-use, short-lived, and every unaccepted one is revoked when a new one
+/// is issued. It is not a session and it grants no entitlement: accepting it
+/// sets a password, and the subscription decides the rest.
+model OwnerInvitation {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  userId    Bytes @map("user_id") @db.Binary(16)
+
+  tokenHash String @unique(map: "ux_owner_invitations_token") @map("token_hash") @db.VarChar(255)
+  /// Which administrator issued it. Text, so the row reads after the admin row is gone.
+  issuedBy  String @map("issued_by") @db.VarChar(160)
+
+  expiresAt  DateTime  @map("expires_at") @db.DateTime(6)
+  acceptedAt DateTime? @map("accepted_at") @db.DateTime(6)
+  revokedAt  DateTime? @map("revoked_at") @db.DateTime(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([companyId, createdAt], map: "ix_owner_invitations_company")
+  @@map("owner_invitations")
 }
 
 /// A code sent to prove somebody holds a contact.

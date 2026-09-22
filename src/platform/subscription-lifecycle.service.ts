@@ -28,12 +28,25 @@ import type { PlatformAdminIdentity } from './platform-admin.service';
 
 export type LifecycleAction =
   | 'activate_grant'
+  | 'approve'
+  | 'reject'
+  | 'set_period'
   | 'extend'
   | 'suspend'
   | 'reinstate'
   | 'cancel'
   | 'payment_recorded'
   | 'payment_confirmed';
+
+/** The longest period one approval or correction may set. Sixty months, as `extend` allows. */
+const MAX_PERIOD_MONTHS = 60;
+
+/** Calendar months from an instant — the same arithmetic `extend` uses. */
+function monthsFrom(from: Date, months: number): Date {
+  const end = new Date(from);
+  end.setMonth(end.getMonth() + months);
+  return end;
+}
 
 interface ActorContext {
   admin: PlatformAdminIdentity;
@@ -212,6 +225,224 @@ export class SubscriptionLifecycleService {
      * not have.
      */
     await this.billing.openPeriod(id, before.id, after.complimentaryUntil);
+
+    return { subscription: after, applied: true };
+  }
+
+  /**
+   * Approve a pending registration: it becomes a running subscription with a
+   * paid period that ends on a date the administrator chose.
+   *
+   * Distinct from a grant on purpose. A grant is "we gave this shop access,
+   * for a reason, for a while" and sets the complimentary fields; an approval
+   * is "this shop is a customer from today", sets the paid period, and opens
+   * the billing period that freezes today's prices. Months later the two must
+   * still read differently.
+   *
+   * A refused registration may be approved after all — the decision was
+   * recorded, and so is its reversal. A suspended or cancelled business is
+   * not pending and is refused here; reinstatement is its own audited act.
+   */
+  async approve(
+    companyId: string,
+    input: { months?: number; periodEnd?: Date; reason?: string; expectedVersion?: number },
+    ctx: ActorContext,
+  ) {
+    const hasMonths = input.months !== undefined;
+    const hasEnd = input.periodEnd !== undefined;
+    if (hasMonths === hasEnd) {
+      throw new BadRequestException('Say how long: a number of months, or an end date — one of the two.');
+    }
+    if (hasMonths && (!Number.isInteger(input.months) || input.months! < 1 || input.months! > MAX_PERIOD_MONTHS)) {
+      throw new BadRequestException(`Approve for between 1 and ${MAX_PERIOD_MONTHS} months.`);
+    }
+    if (hasEnd && (Number.isNaN(input.periodEnd!.getTime()) || input.periodEnd!.getTime() <= Date.now())) {
+      throw new BadRequestException('The end date must be in the future.');
+    }
+
+    const id = this.companyIdOf(companyId);
+    const before = await this.loadOrThrow(id);
+
+    // A retry after a dropped response: already approved, nothing to redo.
+    if (before.status === 'activated') return { subscription: before, applied: false };
+    if (before.status !== 'pending_activation' && before.status !== 'rejected') {
+      throw new BadRequestException(
+        'Only a pending or refused registration can be approved. Reinstate a suspended business instead.',
+      );
+    }
+
+    const now = new Date();
+    const end = hasEnd ? new Date(input.periodEnd!) : monthsFrom(now, input.months!);
+
+    const after = await this.transition(id, input.expectedVersion, {
+      status: 'activated' as SubscriptionStatus,
+      currentPeriodEnd: end,
+    });
+
+    await this.prisma.subscriptionEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId: id,
+        subscriptionId: before.id,
+        kind: 'approved',
+        note: input.reason?.slice(0, 255) ?? null,
+        periodEndAfter: end,
+        branchesAfter: after.subscribedBranchCount,
+        seatsAfter: after.additionalSeats,
+        actor: ctx.admin.email,
+      },
+    });
+
+    await this.audit.record({
+      admin: ctx.admin,
+      action: 'subscription.approve',
+      targetType: 'Company',
+      targetId: id,
+      targetLabel: before.company.name,
+      reason: input.reason ?? null,
+      before: this.snapshot(before),
+      after: {
+        ...this.snapshot(after),
+        ...(hasMonths ? { months: input.months } : {}),
+        approvedAt: now.toISOString(),
+        paymentRecorded: false,
+      },
+      ip: ctx.ip ?? null,
+    });
+
+    // The first billing period, at today's prices — see `activateByGrant`.
+    await this.billing.openPeriod(id, before.id, end);
+
+    return { subscription: after, applied: true };
+  }
+
+  /**
+   * Refuse a pending registration, with a reason.
+   *
+   * Its own status rather than `cancelled`: a shop that was told "no" was
+   * never a customer, and the record must not read as one that ended. Nothing
+   * is deleted — the company, its Owner and the attempt all stay, and the
+   * refusal can be reversed by approving.
+   */
+  async reject(
+    companyId: string,
+    input: { reason: string; expectedVersion?: number },
+    ctx: ActorContext,
+  ) {
+    if (!input.reason?.trim()) throw new BadRequestException('A refusal needs a reason.');
+
+    const id = this.companyIdOf(companyId);
+    const before = await this.loadOrThrow(id);
+
+    if (before.status === 'rejected') return { subscription: before, applied: false };
+    if (before.status !== 'pending_activation') {
+      throw new BadRequestException(
+        'Only a pending registration can be refused. Suspend or cancel a running business instead.',
+      );
+    }
+
+    const after = await this.transition(id, input.expectedVersion, {
+      status: 'rejected' as SubscriptionStatus,
+    });
+
+    await this.prisma.subscriptionEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId: id,
+        subscriptionId: before.id,
+        kind: 'rejected',
+        note: input.reason.slice(0, 255),
+        periodEndAfter: after.currentPeriodEnd,
+        branchesAfter: after.subscribedBranchCount,
+        seatsAfter: after.additionalSeats,
+        actor: ctx.admin.email,
+      },
+    });
+
+    await this.audit.record({
+      admin: ctx.admin,
+      action: 'subscription.reject',
+      targetType: 'Company',
+      targetId: id,
+      targetLabel: before.company.name,
+      reason: input.reason,
+      before: this.snapshot(before),
+      after: this.snapshot(after),
+      ip: ctx.ip ?? null,
+    });
+
+    return { subscription: after, applied: true };
+  }
+
+  /**
+   * Set the period end directly — a correction, recorded as one.
+   *
+   * `extend` adds whole months and says "extended". This says exactly what
+   * date was set and why, which is what a mistyped approval or a negotiated
+   * settlement needs. Shortening a period takes money-worth of access away
+   * from a shop, so it needs a reason; lengthening does not.
+   *
+   * Grace is not set here and cannot be: it is always the seventy-two hours
+   * after this date, derived and never stored, so a corrected period carries
+   * its grace with it.
+   */
+  async setPeriodEnd(
+    companyId: string,
+    input: { periodEnd: Date; reason?: string; expectedVersion?: number },
+    ctx: ActorContext,
+  ) {
+    if (Number.isNaN(input.periodEnd.getTime())) throw new BadRequestException('Give a real date.');
+    if (input.periodEnd.getTime() > monthsFrom(new Date(), MAX_PERIOD_MONTHS).getTime()) {
+      throw new BadRequestException(`A period may run at most ${MAX_PERIOD_MONTHS} months from today.`);
+    }
+
+    const id = this.companyIdOf(companyId);
+    const before = await this.loadOrThrow(id);
+
+    if (before.status !== 'activated') {
+      throw new BadRequestException(
+        'Only a running business has a period to correct. Approve or reinstate it first.',
+      );
+    }
+
+    const current = before.currentPeriodEnd?.getTime() ?? null;
+    if (current !== null && current === input.periodEnd.getTime()) {
+      return { subscription: before, applied: false };
+    }
+    const shortened = current !== null && input.periodEnd.getTime() < current;
+    if (shortened && !input.reason?.trim()) {
+      throw new BadRequestException('Shortening a period needs a reason.');
+    }
+
+    const after = await this.transition(id, input.expectedVersion, {
+      currentPeriodEnd: input.periodEnd,
+    });
+
+    await this.prisma.subscriptionEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId: id,
+        subscriptionId: before.id,
+        kind: 'period_corrected',
+        note: input.reason?.slice(0, 255) ?? null,
+        periodEndAfter: input.periodEnd,
+        branchesAfter: after.subscribedBranchCount,
+        seatsAfter: after.additionalSeats,
+        actor: ctx.admin.email,
+      },
+    });
+
+    await this.audit.record({
+      admin: ctx.admin,
+      action: 'subscription.set_period',
+      targetType: 'Company',
+      targetId: id,
+      targetLabel: before.company.name,
+      reason: input.reason ?? null,
+      before: this.snapshot(before),
+      after: { ...this.snapshot(after), direction: shortened ? 'shortened' : 'lengthened' },
+      ip: ctx.ip ?? null,
+    });
 
     return { subscription: after, applied: true };
   }

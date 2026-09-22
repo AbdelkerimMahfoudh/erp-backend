@@ -84,6 +84,23 @@ describe('a decision outranks the calendar', () => {
     expect(stateOf(sub({ status: 'cancelled' }), NOW)).toBe('cancelled');
   });
 
+  it('a refused registration is rejected, not expired and not cancelled', () => {
+    /*
+      A shop told "no" was never a customer. `cancelled` would read as a
+      subscription that once ran; `expired` as one that ran out. Neither is
+      true, and the state says which one it is — whatever the dates or a
+      stray grant might say.
+    */
+    expect(stateOf(sub({ status: 'rejected', currentPeriodEnd: null }), NOW)).toBe('rejected');
+    expect(stateOf(sub({ status: 'rejected' }), NOW)).toBe('rejected');
+    expect(
+      stateOf(
+        sub({ status: 'rejected', isComplimentary: true, complimentaryUntil: new Date(NOW.getTime() + 30 * DAY) }),
+        NOW,
+      ),
+    ).toBe('rejected');
+  });
+
   it('a status nobody recognises fails to `expired`, not to open', () => {
     /*
       This MySQL server runs with an EMPTY sql_mode, so a bad ENUM written
@@ -107,6 +124,7 @@ describe('what each state may do', () => {
     expect(canWrite('pending')).toBe(false);
     expect(canWrite('suspended')).toBe(false);
     expect(canWrite('cancelled')).toBe(false);
+    expect(canWrite('rejected')).toBe(false);
   });
 
   it('EXPIRY still hides nothing', () => {
@@ -117,10 +135,26 @@ describe('what each state may do', () => {
     expect(canRead('complimentary')).toBe(true);
   });
 
-  it('but the two deliberate states close the operational app', () => {
+  it('but the deliberate states close the operational app', () => {
     expect(canRead('pending')).toBe(false);
     expect(canRead('suspended')).toBe(false);
     expect(canRead('cancelled')).toBe(false);
+    expect(canRead('rejected')).toBe(false);
+  });
+});
+
+describe('a refused registration, as the client is told', () => {
+  it('travels as its own state and status, and is never complimentary', () => {
+    const e = buildEntitlement(
+      sub({ status: 'rejected', currentPeriodEnd: null }),
+      { seatsUsed: 0, activeBranchCount: 1 },
+      NOW,
+    );
+    expect(e.state).toBe('rejected');
+    expect(e.status).toBe('rejected');
+    expect(e.canRead).toBe(false);
+    expect(e.canWrite).toBe(false);
+    expect(e.isComplimentary).toBe(false);
   });
 });
 

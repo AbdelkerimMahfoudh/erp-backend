@@ -56,6 +56,12 @@ export function redact(value: unknown, depth = 0): unknown {
 
 export interface AuditInput {
   admin: PlatformAdminIdentity | null;
+  /**
+   * Who acted, when it was not an administrator — an Owner accepting an
+   * invitation, say. Absent, the administrator's address is used, and with no
+   * administrator either the record says `system`.
+   */
+  actor?: string;
   action: string;
   targetType: string;
   targetId?: Buffer | null;
@@ -76,7 +82,7 @@ export class PlatformAuditService {
         id: newUuidV7Bin(),
         adminId: input.admin?.id ?? null,
         // Kept as text as well, so the record still reads if the admin row goes.
-        actor: input.admin?.email ?? 'system',
+        actor: (input.actor ?? input.admin?.email ?? 'system').slice(0, 160),
         action: input.action,
         targetType: input.targetType,
         targetId: input.targetId ?? null,

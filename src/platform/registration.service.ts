@@ -47,6 +47,13 @@ export interface RegistrationInput {
   phone?: string;
   password: string;
   language: 'en' | 'ar' | 'fr';
+  /**
+   * Who is registering this business, for the `registered` event. Absent means
+   * the shop did it itself. A platform administrator creating a business on a
+   * shop's behalf passes their own address, so the trail says so.
+   */
+  actor?: string;
+  note?: string;
 }
 
 export interface RegistrationResult {
@@ -234,8 +241,8 @@ export class RegistrationService {
             companyId,
             subscriptionId,
             kind: 'registered',
-            note: 'Self-service registration. Awaiting activation.',
-            actor: 'self-service',
+            note: input.note?.slice(0, 255) ?? 'Self-service registration. Awaiting activation.',
+            actor: input.actor?.slice(0, 120) ?? 'self-service',
           },
         });
       });
