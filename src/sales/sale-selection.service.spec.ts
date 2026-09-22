@@ -25,13 +25,32 @@ function unitAt(branchId: Buffer, status = 'in_stock') {
   };
 }
 
-function service(found: unknown, permissions: string[]) {
+function service(
+  found: unknown,
+  permissions: string[],
+  extra: { product?: unknown; stock?: unknown } = {},
+) {
   const findFirst = jest.fn().mockResolvedValue(found);
-  const db = { unit: { findFirst } };
+  const productFindFirst = jest.fn().mockResolvedValue(extra.product ?? null);
+  const stockFindFirst = jest.fn().mockResolvedValue(extra.stock ?? null);
+  const db = {
+    unit: { findFirst },
+    // The barcode fallback, exercised only when no unit matches.
+    product: { findFirst: productFindFirst },
+    stockItem: { findFirst: stockFindFirst },
+  };
   const tenant = { requireBranchId: () => here };
-  const pricing = { getUnitPricing: jest.fn().mockResolvedValue({ price: 30000 }) };
+  const pricing = {
+    getUnitPricing: jest.fn().mockResolvedValue({ price: 30000 }),
+    getProductPricing: jest.fn().mockResolvedValue({ price: 25000 }),
+  };
   const cls = { get: () => new Set(permissions) };
-  return { svc: new SaleSelectionService(db as never, tenant as never, pricing as never, cls as never), findFirst };
+  return {
+    svc: new SaleSelectionService(db as never, tenant as never, pricing as never, cls as never),
+    findFirst,
+    productFindFirst,
+    stockFindFirst,
+  };
 }
 
 async function failure(p: Promise<unknown>) {
@@ -105,8 +124,9 @@ describe('company isolation and malformed input', () => {
     expect(src).toContain('@Inject(TENANT_PRISMA) private readonly db: TenantPrisma');
   });
   it.each([
-    ['', 'imei_missing'],
-    ['49015420323751', 'imei_length'],
+    ['', 'identifier_missing'],
+    // A fifteen-digit number with a bad checksum is an INVALID IMEI, said so —
+    // never quietly reinterpreted as a barcode.
     ['490154203237519', 'imei_checksum'],
   ])('refuses %p (%s) before any lookup', async (raw, code) => {
     const { svc, findFirst } = service(unitAt(here), ['sale.create', 'branch.manage']);
@@ -114,5 +134,59 @@ describe('company isolation and malformed input', () => {
     expect(f?.type).toBe(BadRequestException);
     expect(f?.body.code).toBe(code);
     expect(findFirst).not.toHaveBeenCalled();
+  });
+
+  it('a non-IMEI code (a serial or barcode) is allowed through to the lookup, never guessed at', async () => {
+    // 14 digits used to be refused as a short IMEI; now it may be a barcode, so
+    // the lookup runs and decides. Nothing found → the generic not-here answer.
+    const { svc, findFirst } = service(null, ['sale.create']);
+    expect((await failure(svc.select('49015420323751')))?.body.code).toBe('not_available_here');
+    expect(findFirst).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a barcode finds a counted product to sell', () => {
+  const CABLE = {
+    id: Buffer.alloc(16, 9),
+    brand: 'Anker',
+    model: 'USB-C Cable',
+    variant: '1m',
+    specifications: null,
+    trackingType: 'quantity',
+  };
+
+  it('returns a product selection with the branch stock available, and no unit or cost', async () => {
+    const { svc } = service(null, ['sale.create'], {
+      product: CABLE,
+      stock: { quantity: 10, reservedQuantity: 3 },
+    });
+    const r = (await svc.select('6901234567890')) as Record<string, unknown>;
+    expect(r.kind).toBe('product');
+    expect(r.unitId).toBeNull();
+    expect(r.availability).toBe('available');
+    expect(r.matchedBy).toBe('barcode');
+    expect(r.identifierMasked).toBe('6901234567890'); // a barcode is shown whole, not masked
+    expect(r.quantityAvailable).toBe(7); // owned minus reserved
+    expect(r.price).toBe(25000);
+    expect('cost' in r).toBe(false); // a counted product has no single per-unit cost
+  });
+
+  it('is unavailable when nothing is sellable at the branch, and quotes no price', async () => {
+    const { svc } = service(null, ['sale.create'], {
+      product: CABLE,
+      stock: { quantity: 3, reservedQuantity: 3 },
+    });
+    const r = (await svc.select('6901234567890')) as Record<string, unknown>;
+    expect(r.availability).toBe('unavailable');
+    expect(r.quantityAvailable).toBe(0);
+    expect(r.price).toBeNull();
+  });
+
+  it('does not sell a SERIALIZED product by its box barcode — that needs the unit', async () => {
+    const { svc } = service(null, ['sale.create'], {
+      product: { ...CABLE, trackingType: 'imei' },
+    });
+    // Falls through to the generic not-found answer; a specific unit is required.
+    expect((await failure(svc.select('6901234567890')))?.body.code).toBe('not_available_here');
   });
 });

@@ -65,11 +65,15 @@ export class SaleSelectionService {
       },
     });
     const canViewBranches = this.may('branch.manage');
-    // Without branch.manage, "nowhere" and "another branch" are one answer, so
-    // the difference cannot reveal another branch's stock.
+    // No unit by that IMEI or serial — try it as a product barcode next. A
+    // counted accessory is sold by its barcode, not a per-unit identifier.
     if (!unit) {
+      const byBarcode = await this.selectByBarcode(identifier, branchId);
+      if (byBarcode) return byBarcode;
+      // Without branch.manage, "nowhere" and "another branch" are one answer, so
+      // the difference cannot reveal another branch's stock.
       throw new NotFoundException(
-        canViewBranches ? { code: 'not_found', message: 'No phone in this shop has that number' } : NOT_AVAILABLE_HERE,
+        canViewBranches ? { code: 'not_found', message: 'No item in this shop has that identifier' } : NOT_AVAILABLE_HERE,
       );
     }
     const disclosure = branchDisclosure(unit.branchId, branchId, canViewBranches);
@@ -87,6 +91,8 @@ export class SaleSelectionService {
     );
 
     return {
+      // A specific physical unit, found by IMEI or serial.
+      kind: 'unit' as const,
       unitId: binToUuid(unit.id),
       availability,
       status: unit.status,
@@ -111,6 +117,64 @@ export class SaleSelectionService {
        */
       cost: Number(unit.cost),
       dateIn: unit.dateIn,
+    };
+  }
+
+  /**
+   * The counted product behind a barcode, at this branch — or null when the
+   * barcode is not a sellable counted item here.
+   *
+   * Only **quantity-tracked** products answer to a barcode this way. A
+   * serialized product's box barcode names a model, not the phone in the
+   * customer's hand, so it cannot pick one to sell: that must go through the
+   * unit's own IMEI or serial. Availability is this branch's own sellable stock
+   * (owned minus reserved); another branch's stock is never read, so there is no
+   * cross-branch disclosure to make. No cost is returned — a counted product has
+   * no single per-unit cost, only per-receipt.
+   */
+  private async selectByBarcode(identifier: string, branchId: Buffer) {
+    const product = await this.db.product.findFirst({
+      where: { barcode: identifier, deletedAt: null },
+      select: { id: true, brand: true, model: true, variant: true, specifications: true, trackingType: true },
+    });
+    if (!product || product.trackingType !== 'quantity') return null;
+
+    const stock = await this.db.stockItem.findFirst({
+      where: { productId: product.id, branchId },
+      select: { quantity: true, reservedQuantity: true },
+    });
+    const available = stock ? stock.quantity - stock.reservedQuantity : 0;
+    const isAvailable = available > 0;
+    const price = isAvailable ? (await this.pricing.getProductPricing(binToUuid(product.id))).price : null;
+    const { storage, colour } = variantParts(
+      product.variant,
+      (product.specifications as Record<string, unknown> | null) ?? null,
+    );
+
+    return {
+      // A counted product, sold by the piece — no specific unit.
+      kind: 'product' as const,
+      unitId: null,
+      productId: binToUuid(product.id),
+      availability: isAvailable ? ('available' as const) : ('unavailable' as const),
+      status: isAvailable ? 'in_stock' : 'out_of_stock',
+      matchedBy: 'barcode' as const,
+      // A barcode is a product code, not a personal identifier, so it is shown
+      // whole rather than masked — labelled as a barcode on the screen.
+      identifierMasked: identifier,
+      hasSecondImei: false,
+      product: {
+        brand: product.brand,
+        model: product.model,
+        variant: product.variant,
+        storage,
+        colour,
+        trackingType: product.trackingType,
+      },
+      price,
+      otherBranch: null,
+      /** How many can be sold here right now — owned minus reserved. */
+      quantityAvailable: available,
     };
   }
 }

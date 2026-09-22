@@ -24,27 +24,36 @@ describe('normalising what was typed or scanned', () => {
   });
 });
 
-describe('an IMEI must be a real one', () => {
-  it('accepts 15 digits with a valid checksum', () => {
-    expect(() => assertLookupIdentifier('490154203237518')).not.toThrow();
+describe('the lookup gate lets three kinds of code through, and refuses only two things', () => {
+  const code = (v: string) => {
+    try {
+      assertLookupIdentifier(v);
+      return null;
+    } catch (e) {
+      expect(e).toBeInstanceOf(BadRequestException);
+      return ((e as BadRequestException).getResponse() as { code: string }).code;
+    }
+  };
+
+  it('accepts a real IMEI — 15 digits with a valid checksum', () => {
+    expect(code('490154203237518')).toBeNull();
   });
-  it('refuses an empty, short, long or wrong-checksum IMEI, each with its own code', () => {
-    const code = (v: string) => {
-      try {
-        assertLookupIdentifier(v);
-        return null;
-      } catch (e) {
-        expect(e).toBeInstanceOf(BadRequestException);
-        return ((e as BadRequestException).getResponse() as { code: string }).code;
-      }
-    };
-    expect(code('')).toBe('imei_missing');
-    expect(code('49015420323751')).toBe('imei_length');
-    expect(code('4901542032375180')).toBe('imei_length');
+  it('refuses nothing at all', () => {
+    expect(code('')).toBe('identifier_missing');
+  });
+  it('refuses a 15-digit number with a wrong checksum as an INVALID IMEI, not a barcode', () => {
+    // The one guess it must never make: a mistyped IMEI is an invalid IMEI.
     expect(code('490154203237519')).toBe('imei_checksum');
   });
-  it('lets a serial number through for serial-tracked devices', () => {
-    expect(() => assertLookupIdentifier('C02XK1ABJHD5')).not.toThrow();
+  it('lets a serial number through — serial-tracked devices carry one', () => {
+    expect(code('C02XK1ABJHD5')).toBeNull();
+  });
+  it('lets a barcode through — a shorter or longer number may be a product code', () => {
+    // 13-digit EAN, 14-digit and other numeric codes are candidates for a
+    // product barcode; the lookup decides, this gate does not pre-judge them.
+    expect(code('6901234567890')).toBeNull();
+    expect(code('49015420323751')).toBeNull();
+    expect(code('4901542032375180')).toBeNull();
   });
 });
 
@@ -108,7 +117,10 @@ describe('finding a phone to sell only reads', () => {
     expect(service).toContain("availability === 'available' ? (await this.pricing.getUnitPricing(identifier)).price : null");
   });
   it('returns no margin, history, staff or full identifier; cost is left to the gating interceptor', () => {
-    const returned = service.slice(service.indexOf('return {'));
+    // Just the unit return OBJECT — from `return {` to its close — so a query's
+    // `where: { branchId }` further down the file is not mistaken for a leak.
+    const from = service.indexOf('return {');
+    const returned = service.slice(from, service.indexOf('\n    };', from));
     expect(returned).not.toMatch(/margin|timeline|user|imeiPrimary:|imeiSecondary:|serialNo:|branchId:/);
     expect(returned).toContain("otherBranch: disclosure === 'shown'");
     // `cost` is only in the response because the global interceptor strips it

@@ -31,22 +31,29 @@ export function normalizeIdentifier(raw: string): string {
   return raw.trim().replace(/[\s\-./]+/g, '');
 }
 
+/** A fifteen-digit all-number code — the one shape that is an IMEI. */
+export function looksLikeImei(identifier: string): boolean {
+  return /^\d{15}$/.test(identifier);
+}
+
 /**
- * An all-digit identifier is an IMEI and must be a valid one: exactly fifteen
- * digits with a correct checksum. Anything with a letter is treated as a
- * serial number, which serial-tracked devices carry instead.
+ * The one gate every identifier passes before it is looked up.
+ *
+ * An item can be found three ways — an IMEI, a serial number, or a product
+ * barcode — so this no longer assumes every code is an IMEI. It refuses only
+ * two things: nothing at all, and a fifteen-digit number whose checksum is
+ * wrong. That second rule matters: a mistyped IMEI is an **invalid IMEI**, and
+ * must be told so — never quietly reinterpreted as a barcode, which is exactly
+ * the "guess the type from altered digits" mistake that attaches a code to the
+ * wrong thing. Everything else (a serial, a barcode, a shorter or longer
+ * number) is allowed through, and the lookup decides what it is.
  */
 export function assertLookupIdentifier(identifier: string): void {
   if (identifier.length === 0) {
-    throw new BadRequestException({ code: 'imei_missing', message: 'Enter the IMEI' });
+    throw new BadRequestException({ code: 'identifier_missing', message: 'Enter an identifier' });
   }
-  if (/^\d+$/.test(identifier)) {
-    if (identifier.length !== 15) {
-      throw new BadRequestException({ code: 'imei_length', message: 'An IMEI has exactly 15 digits' });
-    }
-    if (!isValidImei(identifier)) {
-      throw new BadRequestException({ code: 'imei_checksum', message: 'That is not a valid IMEI — check the digits' });
-    }
+  if (looksLikeImei(identifier) && !isValidImei(identifier)) {
+    throw new BadRequestException({ code: 'imei_checksum', message: 'That is not a valid IMEI — check the digits' });
   }
 }
 
