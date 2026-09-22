@@ -21,15 +21,21 @@ export class SalesPolicyService {
     return Math.round((n + Number.EPSILON) * 100) / 100;
   }
 
-  /** A serialized unit must be in stock at the active branch to be sold. */
+  /**
+   * A serialized unit must be in stock at the active branch to be sold.
+   *
+   * The refusal names the unit by whichever identifier it actually carries —
+   * a camera or a console has a serial number and no IMEI, and "Unit null is
+   * reserved" told the seller nothing.
+   */
   assertSellable(unit: Unit, branchId: Buffer): void {
+    const name = unit.imeiPrimary ?? unit.serialNo;
+    const who = name ? `Unit ${name}` : 'That unit';
     if (unit.status !== 'in_stock') {
-      throw new ConflictException(
-        `Unit ${unit.imeiPrimary} is '${unit.status}' and cannot be sold`,
-      );
+      throw new ConflictException(`${who} is '${unit.status}' and cannot be sold`);
     }
     if (!unit.branchId.equals(branchId)) {
-      throw new ConflictException(`Unit ${unit.imeiPrimary} is not at this branch`);
+      throw new ConflictException(`${who} is not at this branch`);
     }
   }
 

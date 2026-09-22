@@ -127,6 +127,13 @@ describe('SalesPolicyService', () => {
     it('blocks wrong branch', () => {
       expect(() => policy.assertSellable(unit('in_stock', branchA), branchB)).toThrow(ConflictException);
     });
+    it('names a serial-tracked unit by its serial, never "Unit null"', () => {
+      const camera = { ...unit('reserved', branchA), imeiPrimary: null, serialNo: 'CAN-1662030-0019' };
+      expect(() => policy.assertSellable(camera, branchA)).toThrow(/CAN-1662030-0019 is 'reserved'/);
+      expect(() => policy.assertSellable(camera, branchA)).not.toThrow(/null/);
+      const bare = { ...unit('in_stock', branchA), imeiPrimary: null, serialNo: null };
+      expect(() => policy.assertSellable(bare, branchB)).toThrow(/^That unit is not at this branch$/);
+    });
   });
 });
 // A balance needing a debtor is now `assertDebtorForBalance`, which also accepts
