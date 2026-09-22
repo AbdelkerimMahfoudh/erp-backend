@@ -78,7 +78,7 @@ describe('without branch.manage', () => {
     const { svc } = service(unitAt(there), ['sale.create']);
     const f = await failure(svc.select(IMEI));
     expect(f?.type).toBe(NotFoundException);
-    expect(f?.body).toEqual({ code: 'not_available_here', message: 'This phone is not available in this branch.' });
+    expect(f?.body).toEqual({ code: 'not_available_here', message: 'This item is not available in this branch.' });
     expect(JSON.stringify(f?.body)).not.toMatch(/Tevragh|iPhone|in_stock/);
   });
   it('a phone sold at another branch gets the same answer', async () => {
@@ -96,6 +96,22 @@ describe('without branch.manage', () => {
     expect(r.availability).toBe('available');
     expect(r.otherBranch).toBeNull();
     expect(r.identifierMasked).toBe('•••• 7518');
+  });
+});
+
+describe('a serial number with punctuation', () => {
+  it('is looked up whole, so a dashed serial finds its unit', async () => {
+    // The live defect: CAN-1662030-0019 was stripped to CAN16620300019 before
+    // the lookup, and no unit carries that. The serial is kept as written.
+    const SERIAL = 'CAN-1662030-0019';
+    const found = { ...unitAt(here), imeiPrimary: null, serialNo: SERIAL, product: { ...unitAt(here).product, trackingType: 'serial' } };
+    const { svc, findFirst } = service(found, ['sale.create']);
+    const r = await svc.select(SERIAL);
+    expect(r.kind).toBe('unit');
+    expect(r.matchedBy).toBe('serial');
+    const where = findFirst.mock.calls[0][0].where;
+    expect(JSON.stringify(where)).toContain(SERIAL);
+    expect(JSON.stringify(where)).not.toContain('CAN16620300019');
   });
 });
 

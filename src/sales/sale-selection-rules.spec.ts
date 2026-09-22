@@ -15,12 +15,22 @@ const here = Buffer.from('aa', 'hex');
 const there = Buffer.from('bb', 'hex');
 
 describe('normalising what was typed or scanned', () => {
-  it('removes only presentation characters', () => {
+  it('removes presentation characters from an IMEI', () => {
     expect(normalizeIdentifier(' 35 123-4000.0010/16 ')).toBe('351234000001016');
   });
-  it('keeps letters, so a mistyped IMEI is caught and a serial survives', () => {
+  it('keeps letters, so a mistyped IMEI is caught rather than silently repaired', () => {
     expect(normalizeIdentifier('35123400000101O')).toBe('35123400000101O');
-    expect(normalizeIdentifier('SN-AB12')).toBe('SNAB12');
+  });
+  it('keeps a serial number whole — its dashes are part of it', () => {
+    // The live defect: every serial-tracked item carried a serial like
+    // CAN-1662030-0019, and stripping the dashes produced a value no unit has,
+    // so nothing serial-tracked could be found to sell.
+    expect(normalizeIdentifier('CAN-1662030-0019')).toBe('CAN-1662030-0019');
+    expect(normalizeIdentifier('  SN-AB12  ')).toBe('SN-AB12');
+    expect(normalizeIdentifier('C02XK1ABJHD5')).toBe('C02XK1ABJHD5');
+  });
+  it('keeps a barcode whole, trimming only around it', () => {
+    expect(normalizeIdentifier(' 6901234567890 ')).toBe('6901234567890');
   });
 });
 

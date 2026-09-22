@@ -98,7 +98,18 @@ export class SalesService {
       const existing = await this.db.sale.findFirst({
         where: { companyId, clientUuid: uuidToBin(dto.clientUuid) },
       });
-      if (existing) return this.toResponse(existing);
+      if (existing) {
+        /**
+         * A replay answers with the sale it already made — but only a REPLAY.
+         * The same key carrying different lines, quantities, prices or payments
+         * is not a retry; it is a second sale wearing the first one's identity,
+         * and answering it with the first sale would tell the counter that the
+         * new details were recorded when they were not. It is refused, and the
+         * client refreshes and starts again with a fresh key.
+         */
+        await this.assertReplayMatches(existing, dto);
+        return this.toResponse(existing);
+      }
     }
 
     // Each line is a serialized unit (identifier) XOR a quantity product (productId+quantity).
@@ -1198,6 +1209,98 @@ export class SalesService {
       if (warning) out.push(warning);
     }
     return out;
+  }
+
+  /**
+   * The sale a client key already made, if any — how a phone finds out what
+   * happened to a submission whose answer was lost.
+   *
+   * A timeout is the one outcome where the client genuinely does not know: the
+   * request may have been processed and only the response dropped. Before it
+   * offers another submission it asks here, with its own key, and gets either
+   * the sale (so it can finish as a success) or a 404 (so it can retry with the
+   * SAME key). Company-scoped by the tenant client; the key is the client's own
+   * random uuid, so nothing enumerable is exposed.
+   */
+  async findByClientUuid(clientUuid: string) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientUuid)) {
+      throw new BadRequestException({ code: 'client_uuid_invalid', message: 'That is not a client key' });
+    }
+    const existing = await this.db.sale.findFirst({
+      where: { companyId: this.tenant.companyId(), clientUuid: uuidToBin(clientUuid) },
+    });
+    if (!existing) throw new NotFoundException({ code: 'not_found', message: 'No sale was recorded for that key' });
+    return this.toResponse(existing);
+  }
+
+  /**
+   * Is this payload the one the existing sale was made from?
+   *
+   * Compared on what the sale actually is: each line's unit (resolved from its
+   * identifier the same way the sale resolved it) or product-and-quantity, the
+   * price when the client stated one, the money taken at the counter, and the
+   * discount. Anything else in the body — a note, a return window — does not
+   * change what was sold, so it does not make a replay a different sale.
+   */
+  private async assertReplayMatches(existing: Sale, dto: CreateSaleDto): Promise<void> {
+    const [items, payments] = await Promise.all([
+      this.db.saleItem.findMany({
+        where: { saleId: existing.id },
+        select: { unitId: true, productId: true, quantity: true, price: true },
+      }),
+      this.db.payment.findMany({ where: { saleId: existing.id, kind: 'at_sale' }, select: { method: true, amount: true } }),
+    ]);
+
+    const stored = items
+      .map((i) =>
+        i.unitId
+          ? `u:${i.unitId.toString('hex')}@${Number(i.price)}`
+          : `p:${i.productId!.toString('hex')}x${i.quantity}@${Number(i.price)}`,
+      )
+      .sort();
+
+    const requested: string[] = [];
+    for (const l of dto.lines) {
+      if (l.identifier) {
+        const unit = await this.db.unit.findFirst({
+          where: {
+            OR: [{ imeiPrimary: l.identifier }, { imeiSecondary: l.identifier }, { serialNo: l.identifier }],
+          },
+          select: { id: true },
+        });
+        const hex = unit ? unit.id.toString('hex') : `missing:${l.identifier}`;
+        // A stated price must match; an omitted one means "the ladder", which is
+        // whatever the sale stored — so only the unit is compared then.
+        const match = stored.find((s) => s.startsWith(`u:${hex}@`));
+        requested.push(match && l.price === undefined ? match : `u:${hex}@${l.price ?? 'ladder'}`);
+      } else {
+        const hex = uuidToBin(l.productId as string).toString('hex');
+        const qty = l.quantity ?? 1;
+        const match = stored.find((s) => s.startsWith(`p:${hex}x${qty}@`));
+        requested.push(match && l.price === undefined ? match : `p:${hex}x${qty}@${l.price ?? 'ladder'}`);
+      }
+    }
+    requested.sort();
+
+    const storedPayments = payments.map((p) => `${p.method}:${Number(p.amount)}`).sort();
+    const requestedPayments = dto.payments.map((p) => `${p.method}:${p.amount}`).sort();
+    const requestedDiscount = this.policy.round(
+      dto.lines.reduce((s, l) => s + (l.discount ?? 0), 0) + (dto.saleDiscount ?? 0),
+    );
+
+    const same =
+      stored.length === requested.length &&
+      stored.every((s, i) => s === requested[i]) &&
+      storedPayments.length === requestedPayments.length &&
+      storedPayments.every((s, i) => s === requestedPayments[i]) &&
+      requestedDiscount === Number(existing.discount);
+
+    if (!same) {
+      throw new ConflictException({
+        code: 'idempotency_conflict',
+        message: 'This key already recorded a different sale. Refresh and start the sale again.',
+      });
+    }
   }
 
   private toResponse(sale: Sale) {

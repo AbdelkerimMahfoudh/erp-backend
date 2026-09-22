@@ -23,12 +23,21 @@ export type Availability =
   | 'unavailable';
 
 /**
- * Presentation characters only: spaces, dashes, dots, slashes. Anything else is
- * kept, so a serial number with letters survives and a mistyped letter in an
- * IMEI is caught by validation rather than silently removed.
+ * The identifier as it must be looked up.
+ *
+ * An IMEI is often written with spaces or dashes ("35 0000-000000-006"), so
+ * presentation characters are removed — but ONLY when what remains is an IMEI
+ * (fifteen digits). A serial number keeps every character it was given: the
+ * dash in `CAN-1662030-0019` is part of the serial, and stripping it produced a
+ * value no unit carries. That is exactly how every serial-tracked item became
+ * unfindable at the counter while the same serial sold fine through
+ * `POST /sales`, which never normalised. A barcode is likewise kept whole
+ * (only surrounding whitespace trimmed).
  */
 export function normalizeIdentifier(raw: string): string {
-  return raw.trim().replace(/[\s\-./]+/g, '');
+  const trimmed = raw.trim();
+  const digitsOnly = trimmed.replace(/[\s\-./]+/g, '');
+  return /^\d{15}$/.test(digitsOnly) ? digitsOnly : trimmed;
 }
 
 /** A fifteen-digit all-number code — the one shape that is an IMEI. */
@@ -112,7 +121,7 @@ export function maskIdentifier(identifier: string | null): string | null {
 /** The one answer a caller without `branch.manage` gets for a phone that is not here. */
 export const NOT_AVAILABLE_HERE = {
   code: 'not_available_here',
-  message: 'This phone is not available in this branch.',
+  message: 'This item is not available in this branch.',
 } as const;
 
 /**

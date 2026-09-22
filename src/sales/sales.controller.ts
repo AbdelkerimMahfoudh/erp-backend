@@ -74,9 +74,27 @@ export class SalesController {
    */
   @Get('selection/:identifier')
   @RequirePermissions('sale.create')
-  @ApiOperation({ summary: 'Find the existing phone to sell, with its availability and selling price' })
+  @ApiOperation({ summary: 'Find the existing item to sell — by IMEI, serial or product barcode — with its availability and selling price' })
   selectPhone(@Param('identifier') identifier: string) {
     return this.selection.select(identifier);
+  }
+
+  /**
+   * What happened to a submission whose answer was lost. `sale.create`: the
+   * person who may sell may ask about their own key. Two path segments, so it
+   * cannot collide with `:id`.
+   */
+  @Get('client/:clientUuid')
+  @RequirePermissions('sale.create')
+  @ApiOperation({
+    summary: 'The sale a client idempotency key already recorded, or 404',
+    description:
+      'After a timeout the phone does not know whether its sale was recorded. It asks here with its own ' +
+      'key before offering another submission: the sale if it exists (finish as a success), 404 if it does ' +
+      'not (retry with the same key). Company-scoped.',
+  })
+  byClientUuid(@Param('clientUuid') clientUuid: string) {
+    return this.sales.findByClientUuid(clientUuid);
   }
 
   @Get(':id')
