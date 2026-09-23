@@ -10,6 +10,7 @@ import { DashboardService } from './dashboard.service';
 import { DashboardController } from './dashboard.controller';
 import { HealthService } from './health.service';
 import { HealthController } from './health.controller';
+import { ConsignmentModule } from '../consignment/consignment.module';
 
 /**
  * Analytics rollups + reads (2D.1–2D.2). SpineEventBus (global EventsModule)
@@ -18,6 +19,7 @@ import { HealthController } from './health.controller';
  * ROLLUP_QUEUE is exported so receiving can refresh branch snapshots on intake.
  */
 @Module({
+  imports: [ConsignmentModule],
   controllers: [AnalyticsController, DashboardController, HealthController],
   providers: [
     SummaryService,

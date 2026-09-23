@@ -4,8 +4,16 @@ import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { binToUuid } from '../common/utils/uuid.util';
+import { ClsService } from 'nestjs-cls';
+import { AppClsStore } from '../common/context/request-context';
 import { dayKey } from '../common/utils/date.util';
+import { periodRange, shiftDate, type DateRange, type HomePeriod } from '../common/business-day';
+import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
+import { assertAssignedToBranch } from '../rbac/active-branch';
+import { previousDayNeedsReview, standingOf } from '../closing/closing-lifecycle';
+import { PartnerRankingService } from '../consignment/partner-ranking.service';
 import { AnalyticsService } from './analytics.service';
+import { barsSumTo, dailyBars, groupedBars, hourlyBars, type Bar } from './home-series';
 
 const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -22,10 +30,199 @@ export class DashboardService {
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
     private readonly tenant: TenantContext,
     private readonly analytics: AnalyticsService,
+    private readonly cls: ClsService<AppClsStore>,
+    private readonly businessDay: BusinessDayService,
+    private readonly ranking: PartnerRankingService,
   ) {}
 
+  /**
+   * Home (docs/50 §3.5): one read for the whole screen.
+   *
+   * No route-level permission — Home is for everyone — so each section is
+   * gated here by what the caller may see: money needs `report.view`, the top
+   * partner `consignment.view`, the closing card `closing.count`; the
+   * arrivals need only membership of the branch, which is asserted because
+   * a route without a permission skips the guard's branch check.
+   *
+   * Every figure keys on STORED business dates (0076), the ranges are the
+   * server's, and the bars are the sales value cut up — never a second query
+   * — so what is plotted adds up to what is stated.
+   */
+  async home(period: HomePeriod = 'week') {
+    const branchId = this.tenant.requireBranchId();
+    await assertAssignedToBranch(this.db, this.tenant.requireUserId(), branchId);
+    const perms = this.cls.get('permissions') ?? new Set<string>();
+    const described = await this.businessDay.describe(branchId);
+    const range = periodRange(period, described.businessDate);
+    const dateRange = { gte: dateValue(range.from), lte: dateValue(range.to) };
+
+    const [figures, partner, arrivals, closing] = await Promise.all([
+      perms.has('report.view') ? this.homeFigures(branchId, period, range, dateRange, described.timezone, described.businessDate) : Promise.resolve(null),
+      perms.has('consignment.view') ? this.ranking.top() : Promise.resolve(null),
+      this.arrivals(branchId),
+      perms.has('closing.count') ? this.closingCard(branchId, described.businessDate) : Promise.resolve(null),
+    ]);
+
+    return {
+      period,
+      range,
+      businessDay: {
+        businessDate: described.businessDate,
+        timezone: described.timezone,
+        startsAt: described.startsAt,
+        endsAt: described.endsAt,
+        startedEarly: described.startedEarly,
+      },
+      figures: figures?.figures ?? null,
+      series: figures?.series ?? null,
+      topPartner: partner ? partner.top : null,
+      partners: partner ? { available: true, partnersExist: partner.partnersExist, ranked: partner.rankedPartners } : { available: false, partnersExist: false, ranked: 0 },
+      arrivals,
+      closing,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  private async homeFigures(
+    branchId: Buffer,
+    period: HomePeriod,
+    range: DateRange,
+    dateRange: { gte: Date; lte: Date },
+    timezone: string,
+    businessDate: string,
+  ) {
+    const companyId = this.tenant.companyId();
+    const saleWhere = { branchId, isReversed: false, businessDate: dateRange };
+
+    const [sales, collected, expenses, phones] = await Promise.all([
+      /**
+       * The sales themselves — the series is cut from these rows, so the bars
+       * and the sales value are one number.
+       */
+      period === 'today'
+        ? this.db.sale.findMany({ where: saleWhere, select: { soldAt: true, total: true, balanceDue: true } })
+        : this.db.sale.groupBy({ by: ['businessDate'], where: saleWhere, _sum: { total: true, balanceDue: true }, _count: true }),
+      // Money actually received on these business dates — including a balance
+      // collected today on an older sale.
+      this.db.payment.aggregate({ where: { businessDate: dateRange, sale: { branchId } }, _sum: { amount: true } }),
+      // Authorised outflows: confirmed expenses, keyed as the rollup keys them.
+      this.db.$queryRaw<{ total: unknown; count: bigint }[]>(Prisma.sql`
+        SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+          FROM expenses
+         WHERE company_id = ${companyId} AND branch_id = ${branchId} AND status = 'confirmed'
+           AND IF(expense_class = 'fixed', due_date, confirmation_date) BETWEEN ${range.from} AND ${range.to}`),
+      this.db.saleItem.count({
+        where: { voided: false, unit: { product: { trackingType: 'imei' } }, sale: saleWhere },
+      }),
+    ]);
+
+    let salesValue = 0;
+    let stillOwed = 0;
+    let salesCount = 0;
+    let bars: Bar[];
+    if (period === 'today') {
+      const rows = sales as { soldAt: Date; total: Prisma.Decimal; balanceDue: Prisma.Decimal }[];
+      salesValue = round2(rows.reduce((n, r) => n + num(r.total), 0));
+      stillOwed = round2(rows.reduce((n, r) => n + num(r.balanceDue), 0));
+      salesCount = rows.length;
+      bars = hourlyBars(rows.map((r) => ({ soldAt: r.soldAt, total: num(r.total) })), timezone, businessDate);
+    } else {
+      const groups = sales as { businessDate: Date; _sum: { total: Prisma.Decimal | null; balanceDue: Prisma.Decimal | null }; _count: number }[];
+      const days = groups.map((g) => ({ date: dateKey(g.businessDate), value: round2(num(g._sum.total)) }));
+      salesValue = round2(days.reduce((n, d) => n + d.value, 0));
+      stillOwed = round2(groups.reduce((n, g) => n + num(g._sum.balanceDue), 0));
+      salesCount = groups.reduce((n, g) => n + g._count, 0);
+      bars = period === 'week' ? dailyBars(days, range) : groupedBars(days, range);
+    }
+    if (!barsSumTo(bars, salesValue)) {
+      // Cannot happen by construction; if it ever does, say so rather than plot a lie.
+      throw new Error('Home series does not add up to the sales value');
+    }
+
+    return {
+      figures: {
+        salesValue,
+        salesCount,
+        phonesSold: phones,
+        collected: round2(num(collected._sum.amount)),
+        expenses: round2(Number(expenses[0]?.total ?? 0)),
+        expensesCount: Number(expenses[0]?.count ?? 0),
+        /** Outstanding today on the sales made in these business dates. */
+        stillOwed,
+        stillOwedScope: 'these_sales' as const,
+      },
+      series: {
+        unit: period === 'today' ? ('hour' as const) : period === 'week' ? ('day' as const) : ('week' as const),
+        total: salesValue,
+        bars,
+      },
+    };
+  }
+
+  /**
+   * The three most recently received phones at this branch, whatever their
+   * status now — the same three the Stock screen shows first with Phones and
+   * All statuses, because both order by `id` (UUIDv7, i.e. intake order).
+   * Units exist only once an intake is confirmed: a draft import commits none.
+   * The identifier is masked to its last four digits; the full IMEI never
+   * travels in this payload.
+   */
+  private async arrivals(branchId: Buffer) {
+    const units = await this.db.unit.findMany({
+      where: { branchId, product: { trackingType: 'imei' } },
+      orderBy: { id: 'desc' },
+      take: 3,
+      select: {
+        id: true,
+        dateIn: true,
+        status: true,
+        imeiPrimary: true,
+        serialNo: true,
+        product: { select: { brand: true, model: true, variant: true } },
+      },
+    });
+    return units.map((u) => {
+      const identifier = u.imeiPrimary ?? u.serialNo ?? '';
+      return {
+        unitId: binToUuid(u.id),
+        label: `${u.product.brand} ${u.product.model}`.trim(),
+        variant: u.product.variant,
+        receivedAt: u.dateIn,
+        status: u.status,
+        identifierKind: u.imeiPrimary ? ('imei' as const) : ('serial' as const),
+        identifierLast4: identifier.slice(-4),
+      };
+    });
+  }
+
+  /** The closing card: where today stands, and whether yesterday still needs a look. */
+  private async closingCard(branchId: Buffer, businessDate: string) {
+    const previousDate = shiftDate(businessDate, -1);
+    const [today, previous] = await Promise.all([
+      this.db.dailyClosing.findUnique({
+        where: { branchId_closingDate: { branchId, closingDate: dateValue(businessDate) } },
+        select: { status: true, countedAt: true, firstClosedAt: true, closedAt: true, reopenedAt: true, reopenCount: true },
+      }),
+      this.db.dailyClosing.findUnique({
+        where: { branchId_closingDate: { branchId, closingDate: dateValue(previousDate) } },
+        select: { status: true },
+      }),
+    ]);
+    const prevRow = previous ? { status: previous.status, businessDate: previousDate } : null;
+    return {
+      businessDate,
+      standing: standingOf(today ? { status: today.status, businessDate } : null, businessDate),
+      lastCountedAt: today?.countedAt ?? null,
+      firstClosedAt: today?.firstClosedAt ?? null,
+      closedAt: today?.status === 'locked' ? today.closedAt : null,
+      reopenedAt: today?.status === 'reopened' ? today.reopenedAt : null,
+      reopenCount: today?.reopenCount ?? 0,
+      previousDay: { businessDate: previousDate, standing: standingOf(prevRow, businessDate), needsReview: previousDayNeedsReview(prevRow) },
+    };
+  }
+
   /** Compact "how is my store doing right now?" snapshot. */
-  async home() {
+  async snapshot() {
     const branchId = this.tenant.branchId();
     const now = new Date();
     const todayDate = new Date(`${dayKey(now)}T00:00:00.000Z`);
@@ -67,7 +264,7 @@ export class DashboardService {
   /** Full dashboard: snapshot + rankings + dead stock + comparisons. */
   async dashboard() {
     const [home, performance, deadStock, branchComparison, employeePerformance] = await Promise.all([
-      this.home(),
+      this.snapshot(),
       this.analytics.productPerformance(30),
       this.deadStock(10),
       this.branchComparison(30),

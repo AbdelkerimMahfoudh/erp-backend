@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { ConnectionsService } from './connections.service';
+import { PartnerRankingService } from './partner-ranking.service';
 import {
   BlockConnectionDto,
   ConnectionVersionDto,
@@ -14,7 +15,24 @@ import {
 @ApiBearerAuth()
 @Controller({ version: '1' })
 export class ConnectionsController {
-  constructor(private readonly connections: ConnectionsService) {}
+  constructor(
+    private readonly connections: ConnectionsService,
+    private readonly ranking: PartnerRankingService,
+  ) {}
+
+  /**
+   * "Most business together" (0076): partners ranked by the value of the
+   * trades this branch completed with them, all time. Readable with
+   * `consignment.view`, like the list and the summary.
+   */
+  @Get('partners/ranking')
+  @RequirePermissions('consignment.view')
+  @ApiQuery({ name: 'page', required: false })
+  @ApiQuery({ name: 'limit', required: false, description: '1–50, default 20' })
+  @ApiOperation({ summary: 'Partners ranked by completed-trade value, all time, paginated' })
+  partnerRanking(@Query('page') page?: string, @Query('limit') limit?: string) {
+    return this.ranking.ranking(Number(page) || 1, Number(limit) || 20);
+  }
 
   /**
    * Search for another shop.

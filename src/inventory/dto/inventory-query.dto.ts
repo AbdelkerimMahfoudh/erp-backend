@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { UnitStatus } from '@prisma/client';
+import { TrackingType, UnitStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from 'class-validator';
 
@@ -13,6 +13,17 @@ export class InventoryQueryDto {
   @IsOptional()
   @IsUUID()
   productId?: string;
+
+  @ApiPropertyOptional({
+    enum: TrackingType,
+    description:
+      'Only stock of this tracking type (0076). `imei` is the Stock screen’s “Phones”; with `imei` or ' +
+      '`serial` no quantity rows are returned. Ordering is unchanged — newest received first — so the ' +
+      'first three phones here are the three Home shows as latest received.',
+  })
+  @IsOptional()
+  @IsEnum(TrackingType)
+  trackingType?: TrackingType;
 
   @ApiPropertyOptional({
     description:

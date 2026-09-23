@@ -4,6 +4,7 @@ import { ConnectionsController } from './connections.controller';
 import { ConsignmentsController } from './consignments.controller';
 import { ConsignmentsService } from './consignments.service';
 import { ConnectionsService } from './connections.service';
+import { PartnerRankingService } from './partner-ranking.service';
 
 /**
  * Inter-store consignment (Milestone H).
@@ -21,7 +22,7 @@ import { ConnectionsService } from './connections.service';
 @Module({
   imports: [NotificationsModule],
   controllers: [ConnectionsController, ConsignmentsController],
-  providers: [ConnectionsService, ConsignmentsService],
-  exports: [ConnectionsService, ConsignmentsService],
+  providers: [ConnectionsService, ConsignmentsService, PartnerRankingService],
+  exports: [ConnectionsService, ConsignmentsService, PartnerRankingService],
 })
 export class ConsignmentModule {}

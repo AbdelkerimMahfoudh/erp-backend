@@ -6,7 +6,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, Product, Unit, UnitStatus } from '@prisma/client';
+import { Prisma, Product, TrackingType, Unit, UnitStatus } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { AppClsStore } from '../common/context/request-context';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -94,6 +94,8 @@ const MAX_PAGE_SIZE = 200;
 export interface InventoryFilter {
   status?: UnitStatus;
   productId?: string;
+  /** Only this tracking type; `imei` is "Phones". Quantity rows only when unset or `quantity`. */
+  trackingType?: TrackingType;
   /** Free text across product name, barcode and serialized identifiers. */
   search?: string;
   cursor?: string;
@@ -959,12 +961,14 @@ export class InventoryService {
 
     // Quantity stock has no lifecycle, so it only belongs under "in stock" and
     // the unfiltered view. Listing it under Sold or Faulty would be meaningless.
-    const includeQuantity = !filter.status || filter.status === 'in_stock';
+    const includeQuantity =
+      (!filter.status || filter.status === 'in_stock') && (!filter.trackingType || filter.trackingType === 'quantity');
 
     const unitWhere = {
       ...(branchId ? { branchId } : {}),
       ...(filter.status ? { status: filter.status } : {}),
       ...(productId ? { productId } : {}),
+      ...(filter.trackingType ? { product: { trackingType: filter.trackingType } } : {}),
       ...(search ? { OR: unitSearchClauses(search) } : {}),
     };
     const stockWhere = {
