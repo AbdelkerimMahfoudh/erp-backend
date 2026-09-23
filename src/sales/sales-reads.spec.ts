@@ -70,6 +70,7 @@ function makeService(opts: {
     // A1: references and the acknowledgement gate. Reads raise no warnings.
     {} as never,
     {} as never,
+    { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never, { autoReopenTx: async () => ({ reopened: false, closingId: null, reopenCount: 0, at: null }), afterSaleCommitted: async () => undefined, afterReopenCommitted: async () => undefined } as never,
   );
   return { service, recorded };
 }
@@ -163,13 +164,14 @@ describe('every filter is applied by the database', () => {
     await expect(service.list(query({ paymentMethod: 'cheque' }))).rejects.toThrow(/Unknown payment method/);
   });
 
-  it('turns a date range into a soldAt filter covering whole days', async () => {
+  it('turns two bare dates into a BUSINESS-date filter (0076), never a timestamp window', async () => {
     const { service, recorded } = makeService({});
     await service.list(query({ from: '2026-08-03', to: '2026-08-03' }));
-    expect(recorded.findMany[0].where.soldAt).toEqual({
+    expect(recorded.findMany[0].where.businessDate).toEqual({
       gte: new Date('2026-08-03T00:00:00.000Z'),
-      lt: new Date('2026-08-04T00:00:00.000Z'),
+      lte: new Date('2026-08-03T00:00:00.000Z'),
     });
+    expect(recorded.findMany[0].where.soldAt).toBeUndefined();
   });
 });
 

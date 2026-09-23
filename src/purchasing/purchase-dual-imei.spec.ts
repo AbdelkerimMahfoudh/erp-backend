@@ -87,6 +87,7 @@ function makeService(registered: string[] = []) {
     { learn: jest.fn() } as never,
     { enqueueTx: jest.fn(async () => {}), processNow: jest.fn(async () => {}) } as never,
     { enqueueBranchRefresh: jest.fn() } as never,
+    { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
   );
 
   return { service, created, lookups, stockReceipts: () => stockReceipts };

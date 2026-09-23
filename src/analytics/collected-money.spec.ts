@@ -50,17 +50,20 @@ describe('money collected', () => {
     // A balance collected on the 19th for a sale on the 18th is money collected
     // on the 19th. Dating it by the sale would put it on a day that may already
     // be closed, and leave the day it actually arrived short.
+    // 0076: the STORED business date each payment was assigned — the day the
+    // money arrived on by the branch's 06:00 rule — never the sale's.
     const method = COLLECTED_METHOD;
-    expect(method).toContain('paidAt: { gte: start, lt: end }');
+    expect(method).toContain('businessDate: { gte:');
     expect(method).not.toContain('soldAt');
+    expect(method).not.toContain('paidAt');
   });
 
   it('includes the whole of the last day of an inclusive window', () => {
     // `to` is an inclusive DAY. Bounding at its midnight would drop that day's
     // takings — the day a shopkeeper is most often looking at.
+    // An inclusive DATE range on a DATE column: `lte` on the last day itself.
     const method = COLLECTED_METHOD;
-    expect(method).toContain('86_400_000');
-    expect(method).toContain('lt: end');
+    expect(method).toMatch(/lte: new Date\(`\$\{toISO\}T00:00:00\.000Z`\)/);
   });
 
   it('splits by payment method, so an unattributed non-cash payment is not lost', () => {

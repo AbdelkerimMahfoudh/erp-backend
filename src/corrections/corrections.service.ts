@@ -8,6 +8,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
+import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { RollupService } from '../analytics/rollup.service';
 import {
   assertDayOpen,
@@ -57,6 +58,7 @@ export class CorrectionsService {
     private readonly audit: AuditService,
     private readonly rollups: RollupService,
     private readonly cls: ClsService<AppClsStore>,
+    private readonly businessDay: BusinessDayService,
   ) {}
 
   // ─────────────────────────────── request ───────────────────────────────
@@ -179,8 +181,8 @@ export class CorrectionsService {
      * branch that paid — never to the original payment's day. If that day is
      * closed, the correction waits rather than a filed closing being reopened.
      */
-    const day = dayKey(new Date());
-    const correctionDate = new Date(`${day}T00:00:00.000Z`);
+    const day = await this.businessDay.today(correction.branchId);
+    const correctionDate = dateValue(day);
     const closing = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId: correction.branchId, closingDate: correctionDate } },
     });

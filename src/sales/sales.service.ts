@@ -15,7 +15,9 @@ import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
 import { SpineEventBus } from '../common/events/spine-event-bus';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
-import { dayKey } from '../common/utils/date.util';
+import { isDateString } from '../common/business-day';
+import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
+import { ClosingService, type AutoReopenResult } from '../closing/closing.service';
 import { canTransition } from '../inventory/unit-state-machine';
 import { PricingService } from '../pricing/pricing.service';
 import { SalesPolicyService } from './sales-policy.service';
@@ -82,6 +84,8 @@ export class SalesService {
     private readonly approvals: DiscountApprovalsService,
     private readonly magnitude: MagnitudeService,
     private readonly gate: WarningGate,
+    private readonly businessDay: BusinessDayService,
+    private readonly closing: ClosingService,
   ) {}
 
   async createSale(dto: CreateSaleDto) {
@@ -127,6 +131,8 @@ export class SalesService {
       balanceDue: number;
       payStatus: Sale['payStatus'];
       soldAt: Date;
+      businessDate: string;
+      reopen: AutoReopenResult;
       returnWindowHours: number;
       returnDeadlineAt: Date | null;
     };
@@ -351,6 +357,13 @@ export class SalesService {
          * snapshot a window that was changed a moment earlier and half-applied.
          */
         const soldAt = new Date();
+        /**
+         * The business date this sale belongs to (0076), assigned here and
+         * stored beside the instant: the branch's 06:00 rule, or the next date
+         * when the Owner started it early. Read inside the transaction, so the
+         * election and the sale cannot straddle each other.
+         */
+        const businessDate = await this.businessDay.assign(branchId, soldAt, tx as unknown as Prisma.TransactionClient);
         const settings = await tx.companySettings.findUnique({
           where: { companyId },
           select: { returnWindowHours: true },
@@ -377,6 +390,7 @@ export class SalesService {
             counterpartyId: debtor.counterpartyId,
             invoiceNo,
             soldAt,
+            businessDate: dateValue(businessDate),
             subtotal,
             discount: discountTotal,
             taxTotal: 0,
@@ -539,6 +553,7 @@ export class SalesService {
               kind: 'at_sale',
               recordedById: userId,
               paidAt: soldAt,
+              businessDate: dateValue(businessDate),
               method: pay.method,
               amount: pay.amount,
               receivingAccountId: accountBin,
@@ -609,6 +624,17 @@ export class SalesService {
           });
         }
 
+        /**
+         * A sale after a counted close reopens the day, inside this very
+         * transaction (0076). A close is a counted snapshot and a history
+         * event; it never refuses a sale. The Owner is told after commit.
+         */
+        const reopen = await this.closing.autoReopenTx(tx, {
+          branchId,
+          businessDate,
+          cause: { kind: 'sale', id: saleId },
+        });
+
         // In-app notification, atomic with the sale.
         await tx.notification.create({
           data: {
@@ -631,6 +657,8 @@ export class SalesService {
           balanceDue,
           payStatus,
           soldAt,
+          businessDate,
+          reopen,
           returnWindowHours: policySnapshot.windowHours,
           returnDeadlineAt: policySnapshot.deadlineAt,
         };
@@ -653,10 +681,12 @@ export class SalesService {
       saleId: result.saleId,
       companyId,
       branchId,
-      day: dayKey(new Date()),
+      day: result.businessDate,
       total: result.total,
       margin: result.margin,
     });
+    // After commit, never inside it: a notice that fails must not undo a sale.
+    void this.closing.afterSaleCommitted(result.saleId, result.reopen);
 
     return {
       id: binToUuid(result.saleId),
@@ -669,6 +699,7 @@ export class SalesService {
       // time and the deadline measured from it must come from the same machine,
       // and it is not the one in the customer's hand.
       soldAt: result.soldAt,
+      businessDate: result.businessDate,
       // A receipt that does not state the return policy is how a shop ends up
       // arguing about one.
       returnPolicy: {
@@ -871,7 +902,7 @@ export class SalesService {
     const rows = await this.db.$queryRaw<
       { day: string; sales: bigint; value: unknown; owed: unknown; phones: unknown }[]
     >(Prisma.sql`
-      SELECT DATE_FORMAT(s.sold_at, '%Y-%m-%d') AS day,
+      SELECT DATE_FORMAT(s.business_date, '%Y-%m-%d') AS day,
              COUNT(*)                            AS sales,
              SUM(s.total)                        AS value,
              SUM(s.balance_due)                  AS owed,
@@ -882,7 +913,7 @@ export class SalesService {
       FROM sales s
       WHERE s.company_id = ${companyId} AND s.branch_id = ${branchId}
         AND s.is_reversed = 0
-        AND s.sold_at >= ${range.gte} AND s.sold_at < ${range.lt}
+        AND s.business_date BETWEEN ${from} AND ${to}
       GROUP BY day
       ORDER BY day DESC`);
 
@@ -912,7 +943,13 @@ export class SalesService {
         branchId,
         ...(payStatuses.length > 0 ? { payStatus: { in: payStatuses } } : {}),
         ...(methods.length > 0 ? { payments: { some: { method: { in: methods } } } } : {}),
-        ...(soldAt ? { soldAt } : {}),
+        // Two bare dates mean business dates (0076); an instant range still
+        // filters on the moment of sale.
+        ...(query.from && query.to && isDateString(query.from) && isDateString(query.to)
+          ? { businessDate: { gte: dateValue(query.from), lte: dateValue(query.to) } }
+          : soldAt
+            ? { soldAt }
+            : {}),
         ...this.searchWhere(query.search),
       },
       include: {

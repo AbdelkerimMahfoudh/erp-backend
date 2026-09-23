@@ -4,6 +4,7 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { ClosingService } from './closing.service';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
+import { ReopenClosingDto } from './dto/reopen-closing.dto';
 import { ResolveDiscrepancyDto } from './dto/resolve-discrepancy.dto';
 import { CreateDebtEntryDto } from './dto/create-debt-entry.dto';
 import { DiscrepanciesService } from './discrepancies.service';
@@ -47,12 +48,36 @@ export class ClosingController {
     return this.closing.overview(from, to);
   }
 
+  /**
+   * Which business day it is at this branch (0076): the date, its window, the
+   * zone, whether the Owner may start the next date early, and how the
+   * previous day stands. Anybody who can count may ask.
+   */
+  @Get('closings/business-day')
+  @RequirePermissions('closing.count')
+  @ApiOperation({ summary: 'The branch’s current business date, its window and the previous day’s standing' })
+  businessDay() {
+    return this.closing.businessDayView();
+  }
+
   @Get('closings/open/view')
   @RequirePermissions('closing.count')
-  @ApiQuery({ name: 'date', required: false, description: 'Day to view; defaults to today (UTC)' })
-  @ApiOperation({ summary: 'Live per-channel view of the day being counted' })
+  @ApiQuery({ name: 'date', required: false, description: 'Business day to view; defaults to the current one' })
+  @ApiOperation({ summary: 'The business day as it stands: channels, lifecycle, reopen choices and history' })
   openView(@Query('date') date?: string) {
     return this.closing.openView(date);
+  }
+
+  /**
+   * Reopen the current business day after a counted close (0076), or — the
+   * Owner alone, between midnight and 06:00 — start the next business date
+   * now. Same authority as closing: the Owner and the two named delegates.
+   */
+  @Post('closings/reopen')
+  @RequirePermissions('closing.perform')
+  @ApiOperation({ summary: 'Reopen the current business day, or start the next one early (Owner)' })
+  reopen(@Body() dto: ReopenClosingDto) {
+    return this.closing.reopen(dto);
   }
 
   /**
@@ -71,7 +96,7 @@ export class ClosingController {
 
   @Post('closings')
   @RequirePermissions('closing.perform')
-  @ApiOperation({ summary: 'Close the day: digest + net profit + cash reconciliation (one transaction)' })
+  @ApiOperation({ summary: 'Close the business day — or close it again after a reopen, with a fresh count' })
   close(@Body() dto: CreateClosingDto) {
     return this.closing.close(dto);
   }

@@ -25,27 +25,31 @@ describe('period movements', () => {
     ]);
   });
 
-  it('every DATE-keyed component reads the whole range, none only one day', () => {
+  it('every component reads the whole range of STORED dates, none only one day (0076)', () => {
     expect(movements).not.toMatch(/= \$\{day\}/);
-    expect((movements.match(/BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(4);
+    // cash payments, account payments, refunds, settlements, purchase payments, expenses, corrections
+    expect((movements.match(/BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(7);
   });
 
-  it('timestamp-keyed components use the half-open window of the range', () => {
-    expect(movements).toMatch(/p\.paid_at >= \$\{start\} AND p\.paid_at < \$\{end\}/);
-    expect(movements).toMatch(/paid_at >= \$\{start\} AND sp\.paid_at < \$\{end\}/);
-    expect(movements).toMatch(/getTime\(\) \+ 86_400_000/);
+  it('no component reads a timestamp window any more — every day is a stored date', () => {
+    expect(movements).not.toMatch(/paid_at >= /);
+    expect(movements).not.toMatch(/86_400_000/);
+    expect(movements).toMatch(/p\.business_date BETWEEN \$\{fromDay\} AND \$\{toDay\}/);
+    expect(movements).toMatch(/sp\.business_date BETWEEN \$\{fromDay\} AND \$\{toDay\}/);
   });
 
-  it('sale money is dated by when it arrived, never by the sale (0074)', () => {
+  it('sale money is dated by the business date it arrived on, never by the sale (0074, 0076)', () => {
     // A later collection must land on the day it was received. Dating it by
     // the sale would count it on a day that may already be signed off.
-    expect(movements).not.toMatch(/s\.sold_at >= \$\{start\}/);
-    expect((movements.match(/p\.paid_at >= \$\{start\} AND p\.paid_at < \$\{end\}/g) ?? []).length).toBe(2);
+    expect(movements).not.toMatch(/s\.sold_at/);
+    expect((movements.match(/\bp\.business_date BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(2);
   });
 
-  it('the closing still asks for exactly one day', () => {
+  it('the closing still asks for exactly one day, with the drawer’s opening balance', () => {
     expect(service).not.toMatch(/expectedChannels\(companyId, branchId, day, dayDate\)/);
-    expect((service.match(/expectedChannels\(companyId, branchId, day, day\)/g) ?? []).length).toBe(3);
+    expect((service.match(/expectedChannels\(companyId, branchId, day, day, openingCash\)/g) ?? []).length).toBe(3);
+    // Money's period view never carries an opening balance: a period's net is what moved.
+    expect(service).toMatch(/expectedChannels\(companyId, branchId, from, to\)/);
   });
 
   it('in and out are the closing components, and net is its expected figure', () => {

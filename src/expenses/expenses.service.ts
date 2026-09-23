@@ -9,6 +9,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
+import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import {
   assertAmount,
   assertClassAndDueDate,
@@ -58,6 +59,7 @@ export class ExpensesService {
     private readonly cls: ClsService<AppClsStore>,
     @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
     @Inject(STORAGE_PROVIDER) private readonly storage: StorageProvider,
+    private readonly businessDay: BusinessDayService,
   ) {}
 
   private has(permission: string): boolean {
@@ -152,7 +154,7 @@ export class ExpensesService {
         amount: dto.amount,
         // Kept for continuity with the pre-workflow column; the ACCOUNTING date
         // is `confirmationDate` (variable) or `dueDate` (fixed).
-        spentOn: new Date(`${dto.spentOn ?? dayKey(new Date())}T00:00:00.000Z`),
+        spentOn: dateValue(dto.spentOn ?? (await this.businessDay.today(branchId))),
         status: 'reported',
         expenseClass: cls,
         isSalary: dto.isSalary ?? false,
@@ -196,8 +198,9 @@ export class ExpensesService {
     assertDecidable(expense);
 
     const companyId = this.tenant.companyId();
-    const day = dayKey(new Date());
-    const confirmationDate = new Date(`${day}T00:00:00.000Z`);
+    // The branch's current BUSINESS date (0076), not the calendar day.
+    const day = await this.businessDay.today(expense.branchId!);
+    const confirmationDate = dateValue(day);
 
     /**
      * Only a VARIABLE expense touches today's till, so only it needs today

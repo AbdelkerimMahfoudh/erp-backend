@@ -17,6 +17,7 @@ import { assertTransition as assertUnitTransition } from '../inventory/unit-stat
 import { evaluateEligibility } from '../sales/return-policy';
 import { RollupService } from '../analytics/rollup.service';
 import { dayKey } from '../common/utils/date.util';
+import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { parseDateRange, parseEnumList } from '../sales/sale-query';
 import { payoutNotCorrected } from '../corrections/correction-sql';
 import { toNum } from '../analytics/held-value';
@@ -90,6 +91,7 @@ export class ReturnsService {
     private readonly notifier: ReturnNotifier,
     private readonly rollups: RollupService,
     private readonly cls: ClsService<AppClsStore>,
+    private readonly businessDay: BusinessDayService,
   ) {}
 
   // ────────────────────────────── create ──────────────────────────────
@@ -532,8 +534,8 @@ export class ReturnsService {
      * rather than reopening a closing. That refusal is the single accounting
      * rule this phase must not get wrong.
      */
-    const approvalDay = dayKey(new Date());
-    const approvalDate = new Date(`${approvalDay}T00:00:00.000Z`);
+    const approvalDay = await this.businessDay.today(branchId);
+    const approvalDate = dateValue(approvalDay);
     const closing = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId, closingDate: approvalDate } },
     });
@@ -953,8 +955,8 @@ export class ReturnsService {
     // happened rather than refusing somebody who simply lost the response.
     if (payout.status === 'confirmed') return this.detail(idStr);
 
-    const confirmationDay = dayKey(new Date());
-    const confirmationDate = new Date(`${confirmationDay}T00:00:00.000Z`);
+    const confirmationDay = await this.businessDay.today(branchId);
+    const confirmationDate = dateValue(confirmationDay);
 
     /**
      * The same rule approval already obeys: a locked day's snapshot must never

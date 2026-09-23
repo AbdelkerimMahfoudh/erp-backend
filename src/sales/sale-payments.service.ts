@@ -11,7 +11,8 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
-import { dayKey } from '../common/utils/date.util';
+import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
+import { ClosingService, type AutoReopenResult } from '../closing/closing.service';
 import { assertDayOpen } from '../expenses/expense-rules';
 import { RecordSalePaymentDto } from './dto/record-payment.dto';
 import { afterPayment, assertCollectable, collectionFingerprint, resolvePaidAt } from './sale-payment-rules';
@@ -52,12 +53,16 @@ export class SalePaymentsService {
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
+    private readonly businessDay: BusinessDayService,
+    private readonly closing: ClosingService,
   ) {}
 
   async record(saleIdStr: string, dto: RecordSalePaymentDto) {
     if (!isUuid(saleIdStr)) throw new NotFoundException('No such sale');
     const companyId = this.tenant.companyId();
     const branchId = this.tenant.requireBranchId();
+    let reopen: AutoReopenResult = { reopened: false, closingId: null, reopenCount: 0, at: null };
+    let reopenDay = '';
     const userId = this.tenant.userId();
     if (!userId) throw new BadRequestException('No authenticated user');
 
@@ -127,12 +132,25 @@ export class SalePaymentsService {
          * off day would change a count the shop has already reconciled — the
          * same rule an expense and a correction follow.
          */
-        const day = dayKey(paidAt);
+        const reader = tx as unknown as Prisma.TransactionClient;
+        const day = await this.businessDay.assign(branchId, paidAt, reader);
+        const today = await this.businessDay.today(branchId, reader);
         const closing = await tx.dailyClosing.findUnique({
-          where: { branchId_closingDate: { branchId, closingDate: new Date(`${day}T00:00:00.000Z`) } },
+          where: { branchId_closingDate: { branchId, closingDate: dateValue(day) } },
           select: { isLocked: true },
         });
-        assertDayOpen(closing, day);
+        if (day === today) {
+          /**
+           * Money arriving on the CURRENT business day after a counted close
+           * reopens the day (0076), exactly as a sale does. A payment back-dated
+           * into an earlier locked day is still refused: that day is behind the
+           * boundary and is corrected through Milestone B.
+           */
+          reopen = await this.closing.autoReopenTx(tx, { branchId, businessDate: day, cause: { kind: 'payment', id: saleId } });
+          reopenDay = day;
+        } else {
+          assertDayOpen(closing, day);
+        }
 
         const account = accountBin
           ? await tx.receivingAccount.findFirst({
@@ -159,6 +177,7 @@ export class SalePaymentsService {
             method: dto.method,
             amount: dto.amount,
             paidAt,
+            businessDate: dateValue(day),
             recordedById: userId,
             clientUuid,
             clientRequestHash: hash,
@@ -211,6 +230,7 @@ export class SalePaymentsService {
       throw e;
     }
 
+    if (reopen.reopened) void this.closing.afterReopenCommitted(branchId, reopenDay, reopen);
     return this.state(saleId);
   }
 

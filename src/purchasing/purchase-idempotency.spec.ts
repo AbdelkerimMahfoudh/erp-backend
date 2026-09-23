@@ -120,6 +120,7 @@ function makeService(companyId: Buffer = COMPANY) {
       processNow: jest.fn(async () => {}),
     } as never,
     { enqueueDailyRecompute: jest.fn(), enqueueBranchRefresh: jest.fn() } as never,
+    { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
   );
 
   return { service, purchases, learn: () => learnCalls };

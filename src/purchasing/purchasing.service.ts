@@ -18,6 +18,7 @@ import { TrackingStrategyRegistry } from '../tracking/tracking-strategy.registry
 import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
 import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
+import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
 
@@ -125,6 +126,7 @@ export class PurchasingService {
     private readonly recognition: RecognitionService,
     private readonly outbox: RecognitionOutboxService,
     @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
+    private readonly businessDay: BusinessDayService,
   ) {}
 
   async createPurchase(dto: CreatePurchaseDto) {
@@ -402,6 +404,8 @@ export class PurchasingService {
             method: dto.paymentMethod,
             receivingAccountId: account?.id ?? null,
             accountLabelSnapshot: account?.label ?? null,
+            // The business date the money left on (0076).
+            businessDate: dateValue(await this.businessDay.assign(branchId, new Date(), tx as unknown as Prisma.TransactionClient)),
             createdById: this.tenant.userId() ?? null,
           },
         });

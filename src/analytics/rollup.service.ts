@@ -87,8 +87,9 @@ export class RollupService {
   constructor(private readonly prisma: PrismaService) {}
 
   async recomputeDaily(companyId: Buffer, branchId: Buffer, day: string): Promise<void> {
-    const start = new Date(`${day}T00:00:00.000Z`);
-    const end = new Date(start.getTime() + 86_400_000);
+    // The day is a STORED business date (0076): every sale carries the date it
+    // was assigned when written, so this recompute can never move a sale
+    // between days, whatever the zone or the rule says now.
     const dayDate = new Date(`${day}T00:00:00.000Z`);
     const now = new Date();
 
@@ -103,7 +104,7 @@ export class RollupService {
       WHERE si.company_id = ${companyId}
         AND s.branch_id = ${branchId}
         AND si.voided = 0
-        AND s.sold_at >= ${start} AND s.sold_at < ${end}
+        AND s.business_date = ${day}
     `);
     /**
      * Expenses for this day (Milestone D). Three things changed here, and each
@@ -347,7 +348,7 @@ export class RollupService {
       WHERE si.company_id = ${companyId}
         AND s.branch_id = ${branchId}
         AND si.voided = 0
-        AND s.sold_at >= ${start} AND s.sold_at < ${end}
+        AND s.business_date = ${day}
       GROUP BY product_id, p.category_id, p.tracking_type
     `);
 

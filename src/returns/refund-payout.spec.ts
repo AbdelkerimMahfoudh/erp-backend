@@ -195,7 +195,8 @@ describe('the database guarantees, not conventions', () => {
 
 describe('confirmation moves cash, and only cash', () => {
   it('settles on the confirmation day, taken from the server', () => {
-    expect(service).toMatch(/const confirmationDay = dayKey\(new Date\(\)\)/);
+    // 0076: the branch's business date, from the one service every writer uses.
+    expect(service).toMatch(/const confirmationDay = await this\.businessDay\.today\(branchId\)/);
   });
 
   it('refuses a locked day rather than reopening it', () => {

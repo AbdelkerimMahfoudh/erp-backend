@@ -75,6 +75,13 @@ export interface ChannelRow {
   supplierOut: number;
   expensesOut: number;
   correctionsIn: number;
+  /**
+   * Cash only (0076): what the drawer held when the business day began — the
+   * counted cash at the last locked close plus the net cash movement of any
+   * unclosed day between. A balance carried forward, never income; zero for
+   * accounts and for a shop that has never closed a day.
+   */
+  openingBalance: number;
   expected: number;
 }
 
@@ -100,7 +107,7 @@ const empty = () => ({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0
  *   nothing is expected; listing it would be asking for a count nobody needs.
  * - **The unattributed bucket appears only when it has movement.**
  */
-export function buildChannels(movements: MovementRow[], accounts: AccountRow[]): ChannelRow[] {
+export function buildChannels(movements: MovementRow[], accounts: AccountRow[], cashOpening = 0): ChannelRow[] {
   const totals = new Map<string, ReturnType<typeof empty>>();
   const keyOf = (channel: Channel, accountId: string | null) => `${channel}:${accountId ?? 'NONE'}`;
 
@@ -139,8 +146,10 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[]):
     const accountId = rawAccount === 'NONE' ? null : rawAccount;
     const isUnattributed = channel === 'account' && accountId === null;
 
+    const openingBalance = channel === 'cash' ? round2(cashOpening) : 0;
     const expected = round2(
-      COMPONENT_SIGN.salesIn * sums.salesIn +
+      openingBalance +
+        COMPONENT_SIGN.salesIn * sums.salesIn +
         COMPONENT_SIGN.refundsOut * sums.refundsOut +
         COMPONENT_SIGN.supplierOut * sums.supplierOut +
         COMPONENT_SIGN.expensesOut * sums.expensesOut +
@@ -169,6 +178,7 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[]):
       supplierOut: round2(sums.supplierOut),
       expensesOut: round2(sums.expensesOut),
       correctionsIn: round2(sums.correctionsIn),
+      openingBalance,
       expected,
     });
   }

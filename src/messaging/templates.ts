@@ -71,8 +71,46 @@ export const AUTH_OTP_TEMPLATE: TemplateDefinition = {
   providerTemplateName: null,
 };
 
+/**
+ * The Owner's closing notices (docs/50 §3.4). Operational, not authentication:
+ * a day reopened after a counted close, each sale completed while it was
+ * open again, and the reclose. The variables are composed by
+ * `closing/closing-notices.ts`, which refuses a full identifier or a cost.
+ *
+ * Registered in all three app languages because the shop chooses its Owner's
+ * language in Settings; like the OTP template, `providerTemplateName` stays
+ * null until a provider has approved the copy, and a send through the
+ * `disabled` channel reports `channel_unavailable` rather than pretending.
+ */
+export const CLOSING_REOPENED_TEMPLATE: TemplateDefinition = {
+  key: 'closing.reopened',
+  category: 'operational',
+  variables: ['branch', 'time', 'date', 'what'],
+  languages: ['en', 'ar', 'fr'],
+  providerTemplateName: null,
+};
+
+export const CLOSING_SALE_TEMPLATE: TemplateDefinition = {
+  key: 'closing.sale',
+  category: 'operational',
+  variables: ['branch', 'time', 'date', 'item', 'money'],
+  languages: ['en', 'ar', 'fr'],
+  providerTemplateName: null,
+};
+
+export const CLOSING_RECLOSED_TEMPLATE: TemplateDefinition = {
+  key: 'closing.reclosed',
+  category: 'operational',
+  variables: ['branch', 'time', 'date', 'since', 'whole'],
+  languages: ['en', 'ar', 'fr'],
+  providerTemplateName: null,
+};
+
 const REGISTRY: Record<string, TemplateDefinition> = {
   [AUTH_OTP_TEMPLATE.key]: AUTH_OTP_TEMPLATE,
+  [CLOSING_REOPENED_TEMPLATE.key]: CLOSING_REOPENED_TEMPLATE,
+  [CLOSING_SALE_TEMPLATE.key]: CLOSING_SALE_TEMPLATE,
+  [CLOSING_RECLOSED_TEMPLATE.key]: CLOSING_RECLOSED_TEMPLATE,
 };
 
 export type TemplateKey = keyof typeof REGISTRY & string;

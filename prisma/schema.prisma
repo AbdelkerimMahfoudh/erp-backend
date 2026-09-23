@@ -343,6 +343,7 @@ model Company {
   loansAgainstUs                 Loan[]                         @relation("LoanCounterpartyCompany")
   loansProposed                  Loan[]                         @relation("LoanProposedByCompany")
   loanLedger                     LoanLedgerEntry[]              @relation("LoanLedgerCompany")
+  closingEvents                  ClosingEvent[]
   loanLedgerAgainstUs            LoanLedgerEntry[]              @relation("LoanLedgerCounterparty")
   loanLedgerActed                LoanLedgerEntry[]              @relation("LoanLedgerActing")
   closingChannelCounts           ClosingChannelCount[]
@@ -418,6 +419,7 @@ model Branch {
   consignments         Consignment[]
   loans                Loan[]
   closingDiscrepancies ClosingDiscrepancy[]
+  closingEvents        ClosingEvent[]
   employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests         DailyDigest[]
   notifications        Notification[]
@@ -528,6 +530,9 @@ model User {
 
   userBranches          UserBranch[]
   grantsMade            UserBranchPermission[] @relation("GrantsMade")
+  closingsFirstClosed   DailyClosing[]         @relation("ClosingFirstClosedBy")
+  closingsReopened      DailyClosing[]         @relation("ClosingReopenedBy")
+  closingEvents         ClosingEvent[]         @relation("ClosingEventActor")
   branchPricesSet       BranchVariantPrice[]   @relation("BranchPriceSetBy")
   unitPricesSet         UnitPriceOverride[]    @relation("UnitPriceSetBy")
   priceChanges          PriceChangeEvent[]     @relation("PriceChangeActor")
@@ -1182,6 +1187,8 @@ model SupplierPayment {
   /// Frozen at payment time, so renaming the account cannot retitle history.
   accountLabelSnapshot String?       @map("account_label_snapshot") @db.VarChar(80)
   paidAt               DateTime      @default(now()) @map("paid_at") @db.DateTime(6)
+  /// The business date the money left on (0076). Same rule as `Payment`.
+  businessDate         DateTime      @map("business_date") @db.Date
   createdById          Bytes?        @map("created_by") @db.Binary(16)
 
   company          Company           @relation(fields: [companyId], references: [id])
@@ -1194,6 +1201,7 @@ model SupplierPayment {
   @@index([purchaseId])
   @@index([createdById])
   @@index([companyId, receivingAccountId], map: "ix_supplier_payments_account")
+  @@index([companyId, businessDate], map: "ix_supplier_payments_business_date")
   @@map("supplier_payments")
 }
 
@@ -1259,6 +1267,11 @@ model Sale {
   counterpartyId Bytes?        @map("counterparty_id") @db.Binary(16)
   invoiceNo      String        @map("invoice_no") @db.VarChar(24)
   soldAt         DateTime      @default(now()) @map("sold_at") @db.DateTime(6)
+  /// The business date this sale belongs to (0076): the branch's local date,
+  /// minus one when sold before 06:00, or the next date when the Owner started
+  /// it early. Assigned once at the sale and never recomputed — every report,
+  /// rollup and closing keys on it, never on `soldAt`'s calendar day.
+  businessDate   DateTime      @map("business_date") @db.Date
   subtotal       Decimal       @db.Decimal(14, 2)
   discount       Decimal       @default(0) @db.Decimal(14, 2)
   taxTotal       Decimal       @default(0) @map("tax_total") @db.Decimal(14, 2)
@@ -1306,6 +1319,7 @@ model Sale {
   @@unique([companyId, clientUuid])
   @@index([companyId, returnDeadlineAt], map: "sales_return_deadline_idx")
   @@index([companyId, branchId, soldAt])
+  @@index([companyId, branchId, businessDate], map: "ix_sales_business_date")
   @@index([companyId, userId, soldAt])
   @@index([customerId])
   @@index([counterpartyId], map: "ix_sales_counterparty")
@@ -1353,6 +1367,10 @@ model Payment {
   /// dated by this, never by the sale — a balance paid a week later belongs to
   /// the week it was paid.
   paidAt            DateTime        @default(now()) @map("paid_at") @db.DateTime(6)
+  /// The business date the money arrived on (0076), assigned from `paidAt` by
+  /// the branch's 06:00 rule. Expected cash, per-channel movement and
+  /// "collected" key on this.
+  businessDate      DateTime        @map("business_date") @db.Date
   /// Who confirmed the money arrived (0074). Backfilled from the seller for
   /// every payment taken before, which is who took it.
   recordedById      Bytes?          @map("recorded_by_id") @db.Binary(16)
@@ -1398,6 +1416,7 @@ model Payment {
   @@index([companyId])
   @@index([companyId, receivingAccountId], map: "ix_payments_account")
   @@index([companyId, paidAt], map: "ix_payments_paid_at")
+  @@index([companyId, businessDate], map: "ix_payments_business_date")
   @@index([recordedById], map: "ix_payments_recorded_by")
   @@map("payments")
 }
@@ -1673,20 +1692,33 @@ model DailyClosing {
   countedAt                DateTime?     @map("counted_at") @db.DateTime(6)
   /// Optimistic concurrency: two people finishing one day, one winner.
   version                  Int           @default(0)
+  /// The first sign-off, kept forever (0076). `closedAt`/`closedById` move
+  /// to the latest reclose; these two never do, so the first count, its actor
+  /// and its time survive every reopen.
+  firstClosedAt            DateTime?     @map("first_closed_at") @db.DateTime(6)
+  firstClosedById          Bytes?        @map("first_closed_by_id") @db.Binary(16)
+  /// Set while the day is `reopened`: the count that follows must be taken
+  /// after this instant, or it is the stale one from before the reopen.
+  reopenedAt               DateTime?     @map("reopened_at") @db.DateTime(6)
+  reopenedById             Bytes?        @map("reopened_by_id") @db.Binary(16)
+  reopenCount              Int           @default(0) @map("reopen_count")
 
   isLocked   Boolean  @default(true) @map("is_locked")
   notes      String?  @db.Text
   closedById Bytes?   @map("closed_by") @db.Binary(16)
   closedAt   DateTime @default(now()) @map("closed_at") @db.DateTime(6)
 
-  company   Company      @relation(fields: [companyId], references: [id])
-  branch    Branch       @relation(fields: [branchId], references: [id])
-  closedBy  User?        @relation(fields: [closedById], references: [id])
-  countedBy User?        @relation("ClosingCountedBy", fields: [countedById], references: [id])
-  digest    DailyDigest?
+  company       Company      @relation(fields: [companyId], references: [id])
+  branch        Branch       @relation(fields: [branchId], references: [id])
+  closedBy      User?        @relation(fields: [closedById], references: [id])
+  countedBy     User?        @relation("ClosingCountedBy", fields: [countedById], references: [id])
+  firstClosedBy User?        @relation("ClosingFirstClosedBy", fields: [firstClosedById], references: [id])
+  reopenedBy    User?        @relation("ClosingReopenedBy", fields: [reopenedById], references: [id])
+  digest        DailyDigest?
 
   channelCounts ClosingChannelCount[]
   discrepancies ClosingDiscrepancy[]
+  events        ClosingEvent[]
 
   @@unique([branchId, closingDate])
   @@index([companyId])
@@ -1700,8 +1732,13 @@ enum ClosingStatus {
   counting
   /// A count has been entered. Not signed off — the day is still correctable.
   counted
-  /// Signed off. The figures are a snapshot and never move again.
+  /// Signed off. The figures are a snapshot and never move again — until the
+  /// same business day is reopened (0076).
   locked
+  /// Signed off once, then reopened before the day's boundary (0076). Figures
+  /// move again; the first snapshot stays on the row and in `closing_events`;
+  /// a fresh count and a reclose are due.
+  reopened
 }
 
 enum ClosingChannel {
@@ -1730,11 +1767,16 @@ model ClosingChannelCount {
   ///   expected = salesIn − refundsOut − supplierOut − expensesOut + correctionsIn
   /// Stored individually so a channel can answer for its own figure rather than
   /// merely assert it.
-  salesIn       Decimal @default(0) @map("sales_in") @db.Decimal(14, 2)
-  refundsOut    Decimal @default(0) @map("refunds_out") @db.Decimal(14, 2)
-  supplierOut   Decimal @default(0) @map("supplier_out") @db.Decimal(14, 2)
-  expensesOut   Decimal @default(0) @map("expenses_out") @db.Decimal(14, 2)
-  correctionsIn Decimal @default(0) @map("corrections_in") @db.Decimal(14, 2)
+  salesIn        Decimal @default(0) @map("sales_in") @db.Decimal(14, 2)
+  refundsOut     Decimal @default(0) @map("refunds_out") @db.Decimal(14, 2)
+  supplierOut    Decimal @default(0) @map("supplier_out") @db.Decimal(14, 2)
+  expensesOut    Decimal @default(0) @map("expenses_out") @db.Decimal(14, 2)
+  correctionsIn  Decimal @default(0) @map("corrections_in") @db.Decimal(14, 2)
+  /// Cash only (0076): what the drawer held at the start of the business day —
+  /// the counted cash at the last locked close plus the net cash movement of
+  /// any unclosed day between. Carried forward as a balance, never as income.
+  /// Zero for accounts, which stay recorded movement rather than a balance.
+  openingBalance Decimal @default(0) @map("opening_balance") @db.Decimal(14, 2)
 
   expected   Decimal  @default(0) @db.Decimal(14, 2)
   /// NULL means genuinely not counted yet, which is not the same as counted as
@@ -1830,6 +1872,50 @@ model ClosingDiscrepancy {
   @@index([channelCountId])
   @@index([resolvedById])
   @@map("closing_discrepancies")
+}
+
+/// What happened to a business day (0076): every close, reopen and reclose,
+/// every saved count, and the Owner's early start of a date. A close is a
+/// counted snapshot AND a history event; the snapshot the event froze travels
+/// in `payload`, so an earlier count survives a later one on the closing row.
+enum ClosingEventKind {
+  count_saved
+  closed
+  reopened
+  /// A seller sold after the close and the day reopened itself, audited.
+  auto_reopened
+  reclosed
+  /// The Owner started the next business date before 06:00.
+  day_started_early
+}
+
+model ClosingEvent {
+  id           Bytes            @id @db.Binary(16)
+  companyId    Bytes            @map("company_id") @db.Binary(16)
+  branchId     Bytes            @map("branch_id") @db.Binary(16)
+  businessDate DateTime         @map("business_date") @db.Date
+  /// NULL only for `day_started_early`, which precedes any closing row.
+  closingId    Bytes?           @map("closing_id") @db.Binary(16)
+  kind         ClosingEventKind
+  at           DateTime         @db.DateTime(6)
+  actorId      Bytes?           @map("actor_id") @db.Binary(16)
+  /// The figures the event froze, and the outcome of the Owner notice it
+  /// caused. Never a full identifier, a cost or a customer's number.
+  payload      Json?            @db.Json
+  /// Stable server event id — what a retried notice deduplicates on.
+  dedupeKey    String?          @map("dedupe_key") @db.VarChar(120)
+  createdAt    DateTime         @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company       @relation(fields: [companyId], references: [id])
+  branch  Branch        @relation(fields: [branchId], references: [id])
+  closing DailyClosing? @relation(fields: [closingId], references: [id])
+  actor   User?         @relation("ClosingEventActor", fields: [actorId], references: [id])
+
+  @@unique([companyId, dedupeKey], map: "ux_closing_events_dedupe")
+  @@index([branchId, businessDate, at], map: "ix_closing_events_day")
+  @@index([closingId])
+  @@index([actorId])
+  @@map("closing_events")
 }
 
 enum DebtEntryKind {

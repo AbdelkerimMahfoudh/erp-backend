@@ -21,7 +21,8 @@ import { TemplateKey } from './templates';
 /** E.164, e.g. `+2223xxxxxx`. Canonical form is the caller's responsibility. */
 export type E164 = string;
 
-export type MessageLanguage = 'en' | 'ar';
+/** What may be asked for; a template still declares what it supports. */
+export type MessageLanguage = 'en' | 'ar' | 'fr';
 
 export interface WhatsAppMessage {
   /** Canonical E.164 destination. Adapters must not reformat it silently. */

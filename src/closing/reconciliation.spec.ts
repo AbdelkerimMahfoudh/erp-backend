@@ -54,6 +54,7 @@ const equation = closing
 
 /** Every term the equation is allowed to contain, and its sign. */
 const TERMS = [
+  { name: 'openingCash', sign: '+', why: 'the drawer’s opening balance (0076): carried forward, never income' },
   { name: 'cash._sum.amount', sign: '+', why: 'cash taken in from sales' },
   { name: 'refundedCash', sign: '-', why: 'refunds handed back in cash (I3)' },
   { name: 'supplierPaid.cash', sign: '-', why: 'paid for stock in cash: settlements (J1) and purchases paid at receipt' },
@@ -81,7 +82,7 @@ describe('the reconciliation equation', () => {
     });
   }
 
-  it('contains NOTHING but those five terms', () => {
+  it('contains NOTHING but those six terms', () => {
     /**
      * The assertion that actually catches a sixth movement being bolted on
      * without being reasoned about. If a term is genuinely needed, it is added
@@ -121,7 +122,8 @@ describe('only CONFIRMED movements reach the equation', () => {
     expect(stockPaid).toContain('FROM supplier_payments sp');
     expect(stockPaid).toContain('JOIN purchases p ON p.id = sp.purchase_id');
     expect(stockPaid).toContain('p.branch_id = ${branchId}');
-    expect(stockPaid).toContain('sp.paid_at >= ${dayDate} AND sp.paid_at < ${end}');
+    // 0076: keyed on the STORED business date, never on the timestamp's calendar day.
+    expect(stockPaid).toContain('sp.business_date = ${dayDate}');
   });
 
   it('expenses: confirmed only', () => {
@@ -197,7 +199,9 @@ describe('the per-channel path is the same equation, not a second one', () => {
 
   it('the signs live in exactly one table', () => {
     expect(channels).toMatch(/COMPONENT_SIGN: Record<Component, 1 \| -1>/);
-    expect(channels.match(/COMPONENT_SIGN\.\w+/g) ?? []).toHaveLength(TERMS.length);
+    // The opening balance (0076) is a starting balance, not a movement: it has
+    // no sign of its own, so the five movement components are what is signed.
+    expect(channels.match(/COMPONENT_SIGN\.\w+/g) ?? []).toHaveLength(TERMS.filter((t) => t.name !== 'openingCash').length);
   });
 
   it('every cash term has a per-channel counterpart', () => {

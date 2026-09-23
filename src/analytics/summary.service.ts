@@ -252,16 +252,13 @@ export class SummaryService {
    */
   private async collectedInPeriod(fromISO: string, toISO: string) {
     const branchId = this.tenant.branchId() ?? null;
-    const start = new Date(`${fromISO}T00:00:00.000Z`);
-    // Exclusive upper bound: `to` is an INCLUSIVE day, so the window runs to
-    // the end of it. Comparing against midnight would silently drop the last
-    // day's takings — the day a shopkeeper is most likely to be looking at.
-    const end = new Date(new Date(`${toISO}T00:00:00.000Z`).getTime() + 86_400_000);
 
     const rows = await this.db.payment.groupBy({
       by: ['method'],
       where: {
-        paidAt: { gte: start, lt: end },
+        // The STORED business date each payment was assigned (0076) — the day
+        // the money arrived on, by the branch's 06:00 rule.
+        businessDate: { gte: new Date(`${fromISO}T00:00:00.000Z`), lte: new Date(`${toISO}T00:00:00.000Z`) },
         ...(branchId ? { sale: { branchId } } : {}),
       },
       _sum: { amount: true },
@@ -289,8 +286,6 @@ export class SummaryService {
   private async stockPaidInPeriod(fromISO: string, toISO: string): Promise<number> {
     const branchId = this.tenant.branchId() ?? null;
     const companyId = this.tenant.companyId();
-    const start = new Date(`${fromISO}T00:00:00.000Z`);
-    const end = new Date(new Date(`${toISO}T00:00:00.000Z`).getTime() + 86_400_000);
     const purchaseBranch = branchId ? Prisma.sql`AND p.branch_id = ${branchId}` : Prisma.empty;
     const settlementBranch = branchId ? Prisma.sql`AND branch_id = ${branchId}` : Prisma.empty;
     const rows = await this.db.$queryRaw<{ total: unknown }[]>(Prisma.sql`
@@ -298,13 +293,13 @@ export class SummaryService {
         FROM supplier_payments sp
         JOIN purchases p ON p.id = sp.purchase_id
        WHERE sp.company_id = ${companyId}
-         AND sp.paid_at >= ${start} AND sp.paid_at < ${end}
+         AND sp.business_date BETWEEN ${fromISO} AND ${toISO}
          ${purchaseBranch}
       UNION ALL
       SELECT COALESCE(SUM(amount), 0)
         FROM supplier_settlements
        WHERE company_id = ${companyId} AND status = 'confirmed'
-         AND confirmation_date >= ${start} AND confirmation_date < ${end}
+         AND confirmation_date BETWEEN ${fromISO} AND ${toISO}
          ${settlementBranch}`);
     return round2(rows.reduce((a, r) => a + num(r.total), 0));
   }

@@ -192,7 +192,8 @@ describe('the original day stays exactly as it was', () => {
   });
 
   it('the correction day is today, never the payment’s day', () => {
-    expect(code(service)).toMatch(/const day = dayKey\(new Date\(\)\)/);
+    // 0076: the paying branch's business date, from the one service every writer uses.
+    expect(code(service)).toMatch(/const day = await this\.businessDay\.today\(correction\.branchId\)/);
     expect(code(service)).toMatch(/correctionDate,/);
   });
 });

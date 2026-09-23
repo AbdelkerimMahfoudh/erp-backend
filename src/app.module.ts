@@ -52,6 +52,7 @@ import { GoalsModule } from './goals/goals.module';
 import { ImportsModule } from './imports/imports.module';
 import { ConsignmentModule } from './consignment/consignment.module';
 import { LoansModule } from './loans/loans.module';
+import { BusinessDayModule } from './common/business-day/business-day.module';
 
 @Module({
   imports: [
@@ -167,6 +168,7 @@ import { LoansModule } from './loans/loans.module';
     ReportsModule,
     DiscountApprovalsModule,
     ExpensesModule,
+    BusinessDayModule,
     ClosingModule,
     GoalsModule,
     ImportsModule,

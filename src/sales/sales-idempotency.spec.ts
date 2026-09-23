@@ -40,6 +40,7 @@ function harness(existing: unknown) {
   const policy: any = { round: (n: number) => Math.round(n * 100) / 100 };
   const service = new SalesService(
     db, tenant, {} as never, policy, {} as never, {} as never, {} as never, cls, {} as never, {} as never, {} as never,
+    { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never, { autoReopenTx: async () => ({ reopened: false, closingId: null, reopenCount: 0, at: null }), afterSaleCommitted: async () => undefined, afterReopenCommitted: async () => undefined } as never,
   );
   return { service, db };
 }

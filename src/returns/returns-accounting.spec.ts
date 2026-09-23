@@ -54,7 +54,8 @@ describe('the original sale is never touched', () => {
 
 describe('the reversal is dated, immutable and singular', () => {
   it('is dated the approval day, taken from the server', () => {
-    expect(code).toMatch(/const approvalDay = dayKey\(new Date\(\)\)/);
+    // 0076: the branch's business date, from the one service every writer uses.
+    expect(code).toMatch(/const approvalDay = await this\.businessDay\.today\(branchId\)/);
     expect(code).toMatch(/approvalDate,/);
     // Never the sale's day — that is what keeps the original day recomputable.
     expect(code).not.toMatch(/approvalDate:\s*\w*\.?soldAt/);

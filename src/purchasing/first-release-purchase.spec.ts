@@ -77,6 +77,7 @@ function harness(account: { isActive: boolean } | null = { isActive: true }, fai
     {} as never,
     { enqueueTx: async () => ({}), processNow: async () => ({}) } as never,
     { enqueueBranchRefresh: () => undefined } as never,
+    { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
   );
   return { service, writes, db };
 }
