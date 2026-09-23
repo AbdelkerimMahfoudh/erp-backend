@@ -177,6 +177,8 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0031_transfer_permissions_and_lifecycle'),
     // First release: inventory import is Owner-only.
     sqlOf('0073_import_owner_only'),
+    // 0076: the Store Manager signs the day off only as a named delegate.
+    sqlOf('0076_business_day_and_reopen'),
   ];
 
   for (const role of ['store_manager', 'store_employee'] as const) {

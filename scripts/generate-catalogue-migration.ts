@@ -87,6 +87,8 @@ export function catalogueKeys(): string[] {
  */
 export const PUBLISHED_AFTER_CATALOGUE: ReadonlyMap<string, string> = new Map([
   ['customer.manage', '0068_customer_manage_permission'],
+  // 0076: the Owner's early start of the next business day.
+  ['closing.start_early', '0076_business_day_and_reopen'],
 ]);
 
 function committedSql(): string {

@@ -340,6 +340,7 @@ describe('listing the team', () => {
         branchName: 'Main Store',
         role: 'owner',
         canDelegate: false,
+        canDelegateClosing: false,
         grantedPermissions: [],
       },
     ]);

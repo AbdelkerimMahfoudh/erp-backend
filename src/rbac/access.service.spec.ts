@@ -60,7 +60,7 @@ function makeService(assignments: Assignment[], grants: Grant[] = []) {
         const ids: Buffer[] = where.userBranchId.in;
         return grants
           .filter((g) => ids.some((i) => i.equals(g.userBranchId)))
-          .map((g) => ({ permission: { key: g.key } }));
+          .map((g) => ({ userBranchId: g.userBranchId, permission: { key: g.key } }));
       }),
     },
   };
@@ -117,6 +117,17 @@ describe('per-branch delegated grants (Stage 2)', () => {
     const downgraded: Assignment = { ...managerInA, roleId: ROLE_EMPLOYEE, roleKey: 'store_employee' };
     const svc = makeService([downgraded], [{ userBranchId: UB_A, key: 'price.edit' }]);
     expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('price.edit')).toBe(false);
+  });
+
+  it('a closing grant is honoured on an employee AND on a manager, in its branch only (0076)', async () => {
+    const svc = makeService([managerInA, employeeInB], [{ userBranchId: UB_B, key: 'closing.perform' }]);
+    expect((await svc.getEffectivePermissions(USER, BRANCH_B)).has('closing.perform')).toBe(true);
+    expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('closing.perform')).toBe(false);
+    const onManager = makeService([managerInA], [{ userBranchId: UB_A, key: 'closing.perform' }]);
+    expect((await onManager.getEffectivePermissions(USER, BRANCH_A)).has('closing.perform')).toBe(true);
+    // Never the early start: that key is not delegatable at all.
+    const early = makeService([managerInA], [{ userBranchId: UB_A, key: 'closing.start_early' }]);
+    expect((await early.getEffectivePermissions(USER, BRANCH_A)).has('closing.start_early')).toBe(false);
   });
 
   it('a grant of a non-delegatable permission is never honoured, even on a manager', async () => {

@@ -2,7 +2,7 @@ import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { binToUuid } from '../common/utils/uuid.util';
-import { isCompanyPermission, isDelegatable, DELEGATION_ELIGIBLE_ROLE } from './permission-scope';
+import { isCompanyPermission, isDelegatable, mayHoldDelegated } from './permission-scope';
 
 /**
  * Resolves a user's effective permissions from `user_branches → role →
@@ -49,22 +49,21 @@ export class AccessService {
     }
 
     // Branch-scoped resolution: the role's permissions at this branch PLUS any
-    // per-branch delegated grants. A grant is honoured only on a
-    // delegation-eligible (store_manager) assignment and only for a delegatable
-    // permission — so downgrading the manager neutralizes it, and a stale or
-    // rogue grant of anything else can never take effect.
+    // per-branch delegated grants. A grant is honoured only for a delegatable
+    // permission and only while the assignment's role may hold THAT key (0076:
+    // price editing is a manager's; closing may be an employee's) — so a role
+    // change neutralizes what it should, and a stale or rogue grant of
+    // anything else can never take effect.
     const effective = new Set(keys);
-    const eligible = assignments
-      .filter((a) => a.role.key === DELEGATION_ELIGIBLE_ROLE)
-      .map((a) => a.id);
-    if (eligible.length > 0) {
-      const grants = await this.db.userBranchPermission.findMany({
-        where: { userBranchId: { in: eligible } },
-        select: { permission: { select: { key: true } } },
-      });
-      for (const g of grants) {
-        if (isDelegatable(g.permission.key)) effective.add(g.permission.key);
-      }
+    const roleOf = new Map(assignments.map((a) => [a.id.toString('hex'), a.role.key]));
+    const grants = await this.db.userBranchPermission.findMany({
+      where: { userBranchId: { in: assignments.map((a) => a.id) } },
+      select: { userBranchId: true, permission: { select: { key: true } } },
+    });
+    for (const g of grants) {
+      const key = g.permission.key;
+      const role = roleOf.get(g.userBranchId.toString('hex')) ?? '';
+      if (isDelegatable(key) && mayHoldDelegated(key, role)) effective.add(key);
     }
     return effective;
   }

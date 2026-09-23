@@ -38,10 +38,33 @@ export function isCompanyPermission(key: string): boolean {
  * rejects any key outside this set, and resolution honours only these, so a
  * malicious or stale grant of another permission can never take effect.
  */
-export const DELEGATABLE_PERMISSIONS: ReadonlySet<string> = new Set<string>(['price.edit']);
+export const DELEGATABLE_PERMISSIONS: ReadonlySet<string> = new Set<string>(['price.edit', 'closing.perform']);
 
 export function isDelegatable(key: string): boolean {
   return DELEGATABLE_PERMISSIONS.has(key);
+}
+
+/**
+ * Which assignments may receive — and keep — each delegated key (0076).
+ *
+ * `price.edit` stays a Store Manager's. `closing.perform` is the Owner's two
+ * named closers per branch, who may be a manager or an employee: the person
+ * holding the drawer at 22:00 is usually the employee. Resolution honours a
+ * grant only while the assignment's role is eligible for that key, so a role
+ * change neutralises what it should and leaves the rest.
+ */
+export const DELEGATION_ELIGIBLE_ROLES: Readonly<Record<string, readonly string[]>> = {
+  'price.edit': ['store_manager'],
+  'closing.perform': ['store_manager', 'store_employee'],
+};
+
+export function mayHoldDelegated(key: string, roleKey: string): boolean {
+  return (DELEGATION_ELIGIBLE_ROLES[key] ?? []).includes(roleKey);
+}
+
+/** The delegated keys a role may keep after a role change. */
+export function delegatedKeysKeptBy(roleKey: string): string[] {
+  return [...DELEGATABLE_PERMISSIONS].filter((k) => mayHoldDelegated(k, roleKey));
 }
 
 /**

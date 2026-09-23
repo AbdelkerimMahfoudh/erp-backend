@@ -72,4 +72,29 @@ export class UsersController {
   revokePriceEdit(@Param('userId') userId: string, @Param('branchId') branchId: string) {
     return this.users.revokePriceEdit(userId, branchId);
   }
+
+  /*
+   * Closing delegation (0076). The same shape as price editing — the authority
+   * named in the path, nothing to ask for in a body — with one more rule the
+   * service enforces: at most two delegates per branch.
+   */
+
+  @Put(':userId/branches/:branchId/delegations/closing')
+  @RequirePermissions('user.manage')
+  @ApiOperation({
+    summary: 'Name a closing delegate for ONE branch (at most two per branch)',
+    description:
+      'Owner-only. The target must hold an active Store Manager or Store Employee assignment in that branch. ' +
+      'A delegate may count, close, reopen and reclose the business day; starting the next day early stays the Owner’s.',
+  })
+  grantClosing(@Param('userId') userId: string, @Param('branchId') branchId: string) {
+    return this.users.grantClosing(userId, branchId);
+  }
+
+  @Delete(':userId/branches/:branchId/delegations/closing')
+  @RequirePermissions('user.manage')
+  @ApiOperation({ summary: 'Withdraw a closing delegation (safe if it was never granted)' })
+  revokeClosing(@Param('userId') userId: string, @Param('branchId') branchId: string) {
+    return this.users.revokeClosing(userId, branchId);
+  }
 }

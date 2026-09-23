@@ -12,7 +12,8 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
-import { isDelegatable, DELEGATION_ELIGIBLE_ROLE, DELEGATABLE_PERMISSIONS } from '../rbac/permission-scope';
+import { isDelegatable, mayHoldDelegated, DELEGATION_ELIGIBLE_ROLE, DELEGATABLE_PERMISSIONS } from '../rbac/permission-scope';
+import { CLOSING_DELEGATES_MAX, delegationAllowed } from '../closing/closing-lifecycle';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { toE164, isValidEmail } from './contact.util';
 import { normalisePhone, normaliseEmail } from '../auth/identifier';
@@ -30,6 +31,8 @@ import { SEAT_LIMIT_REACHED } from '../entitlement/entitlement-rules';
  * different body.
  */
 const DELEGATED_PERMISSION = 'price.edit';
+/** The Owner's two named closers per branch (0076). */
+const CLOSING_PERMISSION = 'closing.perform';
 
 /**
  * `active` — usable and contactable. `inactive` — deactivated (never deleted).
@@ -45,6 +48,8 @@ export interface UserBranchView {
   role: string;
   /** Whether this assignment may receive delegated permissions (store_manager). */
   canDelegate: boolean;
+  /** Whether this assignment may be one of the branch's two closing delegates (0076). */
+  canDelegateClosing: boolean;
   /** Delegatable permissions currently granted on THIS assignment (Stage 2). */
   grantedPermissions: string[];
 }
@@ -379,6 +384,66 @@ export class UserManagementService {
     return this.getOne(userIdStr);
   }
 
+  // --------------------------------------------------- delegated closing.perform (0076)
+
+  /**
+   * Name one of the branch's closing delegates: the Owner plus at most
+   * `CLOSING_DELEGATES_MAX` assignments per branch may count, close, reopen
+   * and reclose the business day. A manager or an employee — whoever holds
+   * the drawer in the evening. A third is refused with a 409 that says so;
+   * the Owner revokes one first. Idempotent for somebody already named.
+   */
+  async grantClosing(userIdStr: string, branchIdStr: string): Promise<UserView> {
+    const assignment = await this.assignment(userIdStr, branchIdStr);
+    if (assignment.user.deletedAt || !assignment.user.isActive) {
+      throw new ConflictException('This user is deactivated and cannot receive delegated authority');
+    }
+    if (!mayHoldDelegated(CLOSING_PERMISSION, assignment.role.key)) {
+      throw new ConflictException('Closing can only be delegated to a Store Manager or Store Employee in that branch');
+    }
+    const permission = await this.delegatedPermission(CLOSING_PERMISSION);
+    const holders = await this.db.userBranchPermission.findMany({
+      where: { permissionId: permission.id, userBranch: { branchId: uuidToBin(branchIdStr) } },
+      select: { userBranchId: true },
+    });
+    const already = holders.some((g) => g.userBranchId.equals(assignment.id));
+    const verdict = delegationAllowed(holders.length, already);
+    if (!verdict.ok) {
+      throw new ConflictException({
+        code: 'closing_delegates_limit',
+        message: `Closing can be delegated to at most ${CLOSING_DELEGATES_MAX} people per branch; revoke one first`,
+        max: CLOSING_DELEGATES_MAX,
+      });
+    }
+    try {
+      await this.db.userBranchPermission.create({
+        data: {
+          companyId: this.tenant.companyId(),
+          userBranchId: assignment.id,
+          permissionId: permission.id,
+          grantedById: this.tenant.requireUserId(),
+        },
+      });
+      await this.recordDelegation('create', userIdStr, branchIdStr, assignment.branchName, CLOSING_PERMISSION);
+    } catch (e) {
+      if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+    }
+    return this.getOne(userIdStr);
+  }
+
+  /** Withdraw a closing delegation. Idempotent, and never blocked by eligibility. */
+  async revokeClosing(userIdStr: string, branchIdStr: string): Promise<UserView> {
+    const assignment = await this.assignment(userIdStr, branchIdStr);
+    const permission = await this.delegatedPermission(CLOSING_PERMISSION);
+    const { count } = await this.db.userBranchPermission.deleteMany({
+      where: { userBranchId: assignment.id, permissionId: permission.id },
+    });
+    if (count > 0) {
+      await this.recordDelegation('delete', userIdStr, branchIdStr, assignment.branchName, CLOSING_PERMISSION);
+    }
+    return this.getOne(userIdStr);
+  }
+
   /** The assignment, scoped to this company by the tenant client. */
   private async assignment(userIdStr: string, branchIdStr: string) {
     if (!isUuid(userIdStr) || !isUuid(branchIdStr)) {
@@ -419,17 +484,15 @@ export class UserManagementService {
     return found;
   }
 
-  private async delegatedPermission() {
+  private async delegatedPermission(key: string = DELEGATED_PERMISSION) {
     const permission = await this.db.permission.findUnique({
-      where: { key: DELEGATED_PERMISSION },
+      where: { key },
       select: { id: true },
     });
     if (!permission) {
       // Migration 0022 guarantees this row exists; a miss means the database is
       // behind the code, which is worth saying plainly rather than 500-ing.
-      throw new ConflictException(
-        `The "${DELEGATED_PERMISSION}" permission is missing — apply pending migrations`,
-      );
+      throw new ConflictException(`The "${key}" permission is missing — apply pending migrations`);
     }
     return permission;
   }
@@ -440,12 +503,13 @@ export class UserManagementService {
     userIdStr: string,
     branchIdStr: string,
     branchName: string,
+    permission: string = DELEGATED_PERMISSION,
   ): Promise<void> {
     const payload = {
       targetUserId: userIdStr,
       branchId: branchIdStr,
       branchName,
-      permission: DELEGATED_PERMISSION,
+      permission,
     };
     return this.audit.record({
       entityType: 'UserBranchPermission',
@@ -454,10 +518,7 @@ export class UserManagementService {
       branchId: uuidToBin(branchIdStr),
       before: action === 'delete' ? payload : undefined,
       after: action === 'create' ? payload : undefined,
-      reason:
-        action === 'create'
-          ? `Delegated ${DELEGATED_PERMISSION} in ${branchName}`
-          : `Revoked ${DELEGATED_PERMISSION} in ${branchName}`,
+      reason: action === 'create' ? `Delegated ${permission} in ${branchName}` : `Revoked ${permission} in ${branchName}`,
     });
   }
 
@@ -532,6 +593,7 @@ export class UserManagementService {
         branchName: ub.branch.name,
         role: ub.role.key,
         canDelegate: ub.role.key === DELEGATION_ELIGIBLE_ROLE,
+        canDelegateClosing: mayHoldDelegated(CLOSING_PERMISSION, ub.role.key),
         // Only delegatable grants are ever meaningful; filter defensively.
         grantedPermissions: ub.permissions
           .map((p) => p.permission.key)

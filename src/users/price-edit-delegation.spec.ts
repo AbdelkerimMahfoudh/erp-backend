@@ -364,7 +364,8 @@ describe('audit and exposure', () => {
 
     const v = await service.getOne(id(m));
 
-    expect(v.delegatablePermissions).toEqual([PRICE_EDIT]);
+    // 0076 added closing; still one explicit control per key, never a picker.
+    expect(v.delegatablePermissions).toEqual([PRICE_EDIT, 'closing.perform']);
     expect(v.delegatablePermissions).not.toContain('discount.override');
   });
 

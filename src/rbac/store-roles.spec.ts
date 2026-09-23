@@ -69,7 +69,8 @@ describe('store-facing roles', () => {
     // is the signal that a phase added authority — it should never move by
     // accident, and it moving LATE means a phase shipped a drift.
     // 61 → 62 in 4a — `customer.manage`.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(62);
+    // 62 → 63 in 0076 — `closing.start_early`.
+    expect(ROLE_PERMISSIONS.owner.length).toBe(63);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);
@@ -244,11 +245,20 @@ describe('Store Manager', () => {
       'transfer.ship',
       'transfer.receive',
       'transfer.cancel',
-      'closing.perform',
       'report.view',
     ]) {
       expect(has('store_manager', perm)).toBe(true);
     }
+  });
+
+  it('signs the day off only as one of the Owner’s two named delegates (0076)', () => {
+    // Counting stays; closing, reopening and reclosing arrive per branch, per
+    // assignment, by an explicit Owner grant — never from the base role.
+    expect(has('store_manager', 'closing.count')).toBe(true);
+    expect(has('store_manager', 'closing.perform')).toBe(false);
+    expect(has('store_manager', 'closing.start_early')).toBe(false);
+    expect(has('store_employee', 'closing.start_early')).toBe(false);
+    expect(has('owner', 'closing.start_early')).toBe(true);
   });
 
   it('cannot sell below cost without explicit Owner delegation', () => {

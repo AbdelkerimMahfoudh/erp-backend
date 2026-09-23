@@ -1,4 +1,4 @@
-import { DELEGATION_ELIGIBLE_ROLE } from './permission-scope';
+import { DELEGATABLE_PERMISSIONS, delegatedKeysKeptBy } from './permission-scope';
 
 /**
  * What must happen to delegated grants when an assignment's ROLE changes.
@@ -20,7 +20,7 @@ import { DELEGATION_ELIGIBLE_ROLE } from './permission-scope';
 
 /** True when an assignment with this role may KEEP delegated grants. */
 export function roleKeepsDelegatedGrants(roleKey: string): boolean {
-  return roleKey === DELEGATION_ELIGIBLE_ROLE;
+  return delegatedKeysKeptBy(roleKey).length > 0;
 }
 
 /**
@@ -30,7 +30,9 @@ export function roleKeepsDelegatedGrants(roleKey: string): boolean {
  */
 export interface GrantPruningClient {
   userBranchPermission: {
-    deleteMany(args: { where: { userBranchId: Buffer } }): Promise<{ count: number }>;
+    deleteMany(args: {
+      where: { userBranchId: Buffer; permission?: { key: { notIn: string[] } } };
+    }): Promise<{ count: number }>;
   };
 }
 
@@ -50,7 +52,12 @@ export async function pruneGrantsForRole(
   userBranchId: Buffer,
   newRoleKey: string,
 ): Promise<number> {
-  if (roleKeepsDelegatedGrants(newRoleKey)) return 0;
-  const { count } = await client.userBranchPermission.deleteMany({ where: { userBranchId } });
+  // 0076: a role keeps the delegated keys it may hold and loses the rest — a
+  // manager made employee keeps a closing grant and loses price editing.
+  const kept = delegatedKeysKeptBy(newRoleKey);
+  if (kept.length === DELEGATABLE_PERMISSIONS.size) return 0;
+  const { count } = await client.userBranchPermission.deleteMany({
+    where: { userBranchId, ...(kept.length > 0 ? { permission: { key: { notIn: kept } } } : {}) },
+  });
   return count;
 }

@@ -33,13 +33,15 @@ describe('the canonical catalogue', () => {
     // 61 → 62 in 4a: `customer.manage`, the authority to ADD a customer.
     // Finding one stays under `sale.create`, because a credit sale requires a
     // customer and gating the lookup would gate the sale.
-    expect(PERMISSIONS).toHaveLength(62);
-    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(62);
+    // 62 → 63 in 0076 — `closing.start_early`, the Owner's alone.
+    expect(PERMISSIONS).toHaveLength(63);
+    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(63);
   });
 
   it('gives Owner 62, Manager 44 and Employee 20', () => {
-    expect(ROLE_PERMISSIONS.owner).toHaveLength(62);
-    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(43);
+    expect(ROLE_PERMISSIONS.owner).toHaveLength(63);
+    // 43 → 42 in 0076: a manager signs the day off only as a named delegate.
+    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(42);
     // The Employee is deliberately unchanged: they attribute a sale to an
     // existing customer, and do not create one.
     expect(ROLE_PERMISSIONS.store_employee).toHaveLength(20);
@@ -101,7 +103,7 @@ describe(`migration ${CATALOGUE_MIGRATION}`, () => {
      * Each entry here is a single additive insert, guarded by NOT EXISTS on the
      * key. Adding to this list is part of writing such a migration.
      */
-    const additive = ['0068_customer_manage_permission'];
+    const additive = ['0068_customer_manage_permission', '0076_business_day_and_reopen'];
     expect(touching).toEqual(additive);
 
     for (const name of additive) {

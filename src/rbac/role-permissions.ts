@@ -91,9 +91,19 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    * two separate acts with two separate keys.
    */
   { key: 'closing.count',       label: 'Enter an end-of-day count' },
+  /**
+   * 0076: held by the Owner by role, and by at most two named delegates per
+   * branch (Store Manager or Store Employee) through Team — never by the Store
+   * Manager role itself any more. Reopening a day is the same authority.
+   */
   { key: 'closing.perform',     label: 'Perform & lock daily closing' },
   /**
-   * Deliberately NOT folded into `closing.perform`, which a Manager holds.
+   * 0076: only the Owner may start the next business date before 06:00.
+   * Never delegatable, never the administrator's.
+   */
+  { key: 'closing.start_early', label: 'Start the next business day before 06:00' },
+  /**
+   * Deliberately NOT folded into `closing.perform`, which a delegate holds.
    * Deciding that a named person owes the business money, or writing that debt
    * off, is the Owner's call and nobody else's.
    */
@@ -189,7 +199,13 @@ export const ALL_PERMISSION_KEYS = PERMISSIONS.map((p) => p.key);
 // technical/setup role (D11), not a commercial one.
 const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
   // `import.run` is the Owner's alone (0073, first-release scope).
-  (k) => k !== 'cost.view' && k !== 'discount.override' && k !== 'price.edit' && k !== 'import.run',
+  (k) =>
+    k !== 'cost.view' &&
+    k !== 'discount.override' &&
+    k !== 'price.edit' &&
+    k !== 'import.run' &&
+    // 0076: starting a shop's day early is the Owner's call alone.
+    k !== 'closing.start_early',
 );
 
 /**
@@ -268,7 +284,9 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
      * business owes another business money is not a branch decision.
      */
     'loan.view', 'loan.payment.report',
-    'purchase.manage', 'supplier.manage', 'closing.count', 'closing.perform', 'report.view',
+    // 0076: `closing.perform` left this list — a manager signs the day off
+    // only as one of the Owner's two named delegates for the branch.
+    'purchase.manage', 'supplier.manage', 'closing.count', 'report.view',
     // H1.2: the approval authority, branch-scoped like everything else. A
     // manager approves and cancels within the branch they are managing.
     'transfer.view', 'transfer.request', 'transfer.approve',

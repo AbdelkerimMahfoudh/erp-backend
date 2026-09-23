@@ -28,9 +28,10 @@ const ROLE_MANAGER = newUuidV7Bin();
 const ROLE_EMPLOYEE = newUuidV7Bin();
 
 describe('roleKeepsDelegatedGrants', () => {
-  it('only a Store Manager may hold delegated grants', () => {
+  it('a Store Manager or a Store Employee may hold delegated grants (0076: closing may be an employee’s)', () => {
     expect(roleKeepsDelegatedGrants('store_manager')).toBe(true);
-    for (const role of ['owner', 'store_employee', 'administrator', 'branch_manager']) {
+    expect(roleKeepsDelegatedGrants('store_employee')).toBe(true);
+    for (const role of ['owner', 'administrator', 'branch_manager']) {
       expect(roleKeepsDelegatedGrants(role)).toBe(false);
     }
   });
@@ -54,7 +55,10 @@ describe('pruneGrantsForRole', () => {
     const removed = await pruneGrantsForRole(c, UB_A, 'store_employee');
 
     expect(removed).toBe(1);
-    expect(deleteMany).toHaveBeenCalledWith({ where: { userBranchId: UB_A } });
+    // An employee keeps a closing grant and loses price editing (0076).
+    expect(deleteMany).toHaveBeenCalledWith({
+      where: { userBranchId: UB_A, permission: { key: { notIn: ['closing.perform'] } } },
+    });
   });
 
   it('leaves a manager assignment alone — and does not even query', async () => {
@@ -77,7 +81,8 @@ describe('pruneGrantsForRole', () => {
     await pruneGrantsForRole(c, UB_A, 'store_employee');
 
     const [[args]] = deleteMany.mock.calls as unknown as [[{ where: Record<string, unknown> }]];
-    expect(Object.keys(args.where)).toEqual(['userBranchId']);
+    expect(args.where.userBranchId).toBe(UB_A);
+    expect(args.where).not.toHaveProperty('userId');
   });
 });
 
@@ -94,7 +99,7 @@ describe('downgrade → re-promotion cannot revive a grant', () => {
         findMany: jest.fn(async () => [{ permission: { key: 'sale.create' } }]),
       },
       userBranchPermission: {
-        findMany: jest.fn(async () => state.grants.map((key) => ({ permission: { key } }))),
+        findMany: jest.fn(async () => state.grants.map((key) => ({ userBranchId: UB_A, permission: { key } }))),
         deleteMany: jest.fn(async () => {
           const count = state.grants.length;
           state.grants = [];
