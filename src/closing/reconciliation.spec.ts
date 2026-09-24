@@ -200,12 +200,15 @@ describe('the per-channel path is the same equation, not a second one', () => {
   it('the signs live in exactly one table', () => {
     expect(channels).toMatch(/COMPONENT_SIGN: Record<Component, 1 \| -1>/);
     // The opening balance (0076) is a starting balance, not a movement: it has
-    // no sign of its own, so the five movement components are what is signed.
-    expect(channels.match(/COMPONENT_SIGN\.\w+/g) ?? []).toHaveLength(TERMS.filter((t) => t.name !== 'openingCash').length);
+    // no sign of its own. The cash equation's `correctedCash` is the cash
+    // channel's NET correction — money coming back in minus a payment
+    // reclassified out (0078) — so the channel table signs one more component
+    // than the equation has movement terms.
+    expect(channels.match(/COMPONENT_SIGN\.\w+/g) ?? []).toHaveLength(TERMS.filter((t) => t.name !== 'openingCash').length + 1);
   });
 
   it('every cash term has a per-channel counterpart', () => {
-    for (const component of ['salesIn', 'refundsOut', 'supplierOut', 'expensesOut', 'correctionsIn']) {
+    for (const component of ['salesIn', 'refundsOut', 'supplierOut', 'expensesOut', 'correctionsIn', 'correctionsOut']) {
       expect(channels).toContain(`${component}:`);
       expect(closing).toContain(`'${component}'`);
     }

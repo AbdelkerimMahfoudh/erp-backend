@@ -13,15 +13,18 @@
  * five movements with the same signs that `reconciliation.spec.ts` pins for
  * cash:
  *
- *   expected = salesIn − refundsOut − supplierOut − expensesOut + correctionsIn
+ *   expected = salesIn − refundsOut − supplierOut − expensesOut + correctionsIn − correctionsOut
  *
- * Cash is simply the channel whose account is NULL.
+ * Cash is simply the channel whose account is NULL. `correctionsOut` (0078) is
+ * the other leg of a payment reclassified to another channel: the money leaves
+ * the channel it was wrongly recorded in and enters the one it really reached, so
+ * the total across channels is unchanged.
  */
 
 export type Channel = 'cash' | 'account';
 
 /** The five movements, named exactly as the cash equation names them. */
-export type Component = 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn';
+export type Component = 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut';
 
 /** How each component enters `expected`. The single source of the signs. */
 export const COMPONENT_SIGN: Record<Component, 1 | -1> = {
@@ -30,6 +33,7 @@ export const COMPONENT_SIGN: Record<Component, 1 | -1> = {
   supplierOut: -1,
   expensesOut: -1,
   correctionsIn: 1,
+  correctionsOut: -1,
 };
 
 /**
@@ -75,6 +79,8 @@ export interface ChannelRow {
   supplierOut: number;
   expensesOut: number;
   correctionsIn: number;
+  /** A reclassified payment leaving this channel (0078). */
+  correctionsOut: number;
   /**
    * Cash only (0076): what the drawer held when the business day began — the
    * counted cash at the last locked close plus the net cash movement of any
@@ -87,7 +93,7 @@ export interface ChannelRow {
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
-const empty = () => ({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0 });
+const empty = () => ({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0, correctionsOut: 0 });
 
 /**
  * Which channels this branch has to account for today, and what each is
@@ -153,7 +159,8 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
         COMPONENT_SIGN.refundsOut * sums.refundsOut +
         COMPONENT_SIGN.supplierOut * sums.supplierOut +
         COMPONENT_SIGN.expensesOut * sums.expensesOut +
-        COMPONENT_SIGN.correctionsIn * sums.correctionsIn,
+        COMPONENT_SIGN.correctionsIn * sums.correctionsIn +
+        COMPONENT_SIGN.correctionsOut * sums.correctionsOut,
     );
 
     rows.push({
@@ -178,6 +185,7 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
       supplierOut: round2(sums.supplierOut),
       expensesOut: round2(sums.expensesOut),
       correctionsIn: round2(sums.correctionsIn),
+      correctionsOut: round2(sums.correctionsOut),
       openingBalance,
       expected,
     });

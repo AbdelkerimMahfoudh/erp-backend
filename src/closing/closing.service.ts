@@ -17,7 +17,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RollupService } from '../analytics/rollup.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
-import { isDateString, localParts, localTimeOf, shiftDate } from '../common/business-day';
+import { dayWindow, isDateString, localParts, localTimeOf, shiftDate } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
@@ -39,7 +39,10 @@ import {
   closeKindOf,
   doorState,
   freshCounts,
+  NOT_VERIFIED_AT_CLOSE,
   openingOf,
+  verificationOf,
+  type Verification,
   previousDayNeedsReview,
   reconcileDiscrepancy,
   reopenChoices,
@@ -48,6 +51,27 @@ import {
 } from './closing-lifecycle';
 import { reclosedNotice, reopenedNotice, saleNotice, type Notice } from './closing-notices';
 import { ClosingNoticeService, type NoticeOutcome } from './closing-notice.service';
+import {
+  assembleReport,
+  gateReport,
+  reportInvariants,
+  reportVersion,
+  type ChannelCountState,
+  type ClosingReport,
+  type OpeningCash,
+  type ReportPermissions,
+} from './closing-report';
+import {
+  channelSplits,
+  collectedForSales,
+  dayActivity,
+  expenseLines,
+  movementFingerprint,
+  openDiscrepancies,
+  pendingReports,
+  returnFigures,
+  salesFigures,
+} from './closing-report.queries';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -80,8 +104,8 @@ interface TimelineClosing {
   status: string;
   firstClosedAt: Date | null;
   closedAt: Date;
-  countedCash: Prisma.Decimal;
-  difference: Prisma.Decimal;
+  countedCash: Prisma.Decimal | null;
+  difference: Prisma.Decimal | null;
   closedBy: { name: string } | null;
   channelCounts: {
     labelSnapshot: string;
@@ -140,13 +164,15 @@ export class ClosingService {
         select: { status: true },
       }),
     ]);
+    const previousActive = previous ? true : await dayActivity(this.db, this.tenant.companyId(), branchId, previousDate);
+    const previousRow = previous ? { status: previous.status, businessDate: previousDate } : null;
     return {
       ...described,
       standing: standingOf(current ? { status: current.status, businessDate: described.businessDate } : null, described.businessDate),
       previousDay: {
         businessDate: previousDate,
-        standing: standingOf(previous ? { status: previous.status, businessDate: previousDate } : null, described.businessDate),
-        needsReview: previousDayNeedsReview(previous ? { status: previous.status, businessDate: previousDate } : null),
+        standing: standingOf(previousRow, described.businessDate, previousActive, previousDate),
+        needsReview: previousDayNeedsReview(previousRow, previousActive),
       },
     };
   }
@@ -159,37 +185,109 @@ export class ClosingService {
 
   // ── Closing ─────────────────────────────────────────────────────────────
 
+  /**
+   * Close the business day on the report the server built (docs/51 D2, D5).
+   *
+   * Physical checks are optional. A channel counted after any reopen is closed as
+   * counted, with its difference and its discrepancy. Every other countable
+   * channel is closed as NOT VERIFIED — never as counted, matched or zero — and
+   * that requires the person closing to acknowledge it with a reason. The close
+   * stores the whole report in its event, so every earlier close keeps the figures
+   * it was made on, and it is safe to retry: the same `clientUuid` replays it.
+   */
   async close(dto: CreateClosingDto) {
     const companyId = this.tenant.companyId();
     const branchId = this.tenant.requireBranchId();
-    const today = await this.businessDay.today(branchId);
+    const described = await this.businessDay.describe(branchId);
+    const today = described.businessDate;
     const day = this.requireDate(dto.date, today);
     if (day > today) throw new BadRequestException('A business day cannot be closed before it begins');
     const dayDate = dateValue(day);
     const now = new Date();
     const userId = this.tenant.userId() ?? null;
+    const perms = this.permissions();
+
+    /**
+     * A double tap, or a retry after a network failure whose first attempt did
+     * land: the same idempotency key on a day it already closed returns that
+     * close instead of a 409 the person cannot interpret.
+     */
+    const replayed = await this.replayClose(branchId, dayDate, dto.clientUuid, perms, day, today);
+    if (replayed) return replayed;
 
     /**
      * A day being counted already has a closing row (E-CP1), so existence is not
      * the test — being LOCKED is. A locked day stays locked until it is reopened
      * (0076), and a reopened day closes again as a RECLOSE: the first snapshot
-     * stays on the row and in its event; a fresh count is required.
+     * stays on the row and in its event.
      */
-    const already = await this.db.dailyClosing.findUnique({
+    let already = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
       include: { channelCounts: true },
     });
     if (already?.status === 'locked') {
-      throw new ConflictException(`Day ${day} is already closed for this branch`);
+      throw new ConflictException({ code: 'already_closed', message: `Day ${day} is already closed for this branch` });
     }
     const kind = closeKindOf(already);
-    if (kind === 'already_locked') throw new ConflictException(`Day ${day} is already closed for this branch`);
+    if (kind === 'already_locked') throw new ConflictException({ code: 'already_closed', message: `Day ${day} is already closed for this branch` });
 
-    // Authoritative aggregation: refresh then read the branch-day rollup.
+    /**
+     * The closing row exists before anything is locked, so a sale committing
+     * during this close and the close itself lock the SAME row (docs/51 §12.6).
+     */
+    if (!already) {
+      try {
+        await this.db.dailyClosing.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            branchId,
+            closingDate: dayDate,
+            expectedCash: 0,
+            countedCash: null,
+            difference: null,
+            totalSales: 0,
+            totalProfit: 0,
+            status: 'counting',
+            isLocked: false,
+          },
+        });
+      } catch (e) {
+        if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+      }
+      already = await this.db.dailyClosing.findUnique({
+        where: { branchId_closingDate: { branchId, closingDate: dayDate } },
+        include: { channelCounts: true },
+      });
+      if (!already) throw new ConflictException({ code: 'refresh_required', message: 'This day changed while you were closing it' });
+      if (already.status === 'locked') throw new ConflictException({ code: 'already_closed', message: `Day ${day} is already closed for this branch` });
+    }
+    const closingId = already.id;
+
+    // What moved, read BEFORE the report: anything landing after this is caught inside the transaction.
+    const fingerprintBefore = await movementFingerprint(this.db, companyId, branchId, day);
+
+    // The rollup is the digest's source; refresh it, then read the report.
     await this.rollups.recomputeDaily(companyId, branchId, day);
     const rollup = await this.db.dailyRollup.findUnique({
       where: { branchId_day: { branchId, day: dayDate } },
     });
+    const built = await this.buildReport(companyId, branchId, day, today, described.timezone);
+    if (built.invariantFailures.length > 0) {
+      throw new ConflictException({
+        code: 'report_integrity',
+        message: 'The figures for this day do not add up, so it cannot be closed. Nothing was changed.',
+        failures: built.invariantFailures,
+      });
+    }
+    if (dto.reportVersion && dto.reportVersion !== built.version) {
+      throw new ConflictException({
+        code: 'report_changed',
+        message: 'The figures changed while you were reviewing them. Review the new report before closing.',
+        report: this.gatedFor(built.report, built.version, perms, day === today),
+      });
+    }
+
     const revenue = round2(num(rollup?.revenue ?? 0));
     const cogs = round2(num(rollup?.cogs ?? 0));
     const grossProfit = round2(num(rollup?.grossProfit ?? 0));
@@ -212,14 +310,17 @@ export class ClosingService {
     });
     const refundedCash = round2(num(rollup?.refundsPaidCash ?? 0));
     const supplierPaid = await this.stockPaidOn(branchId, dayDate);
-    const correctedCash = round2(num(rollup?.correctionsCash ?? 0));
+    const finalChannels = built.channels;
+    const cashChannel = finalChannels.find((c) => c.channel === 'cash');
+    // Corrections in cash, NET: money a correction brought back, minus a payment reclassified out of the drawer (0078).
+    const correctedCash = round2((cashChannel?.correctionsIn ?? 0) - (cashChannel?.correctionsOut ?? 0));
     const expensesCash = round2(num(rollup?.expensesCash ?? 0));
     /**
-     * What the drawer held when the day began (0076): the counted cash at the
-     * last locked close plus the net cash movement of any unclosed day between.
+     * What the drawer held when the day began (0076, D4): the counted cash at the
+     * last close whose drawer was counted, plus the net cash movement since.
      * A balance carried forward, never income — it appears in no profit figure.
      */
-    const openingCash = await this.openingCash(companyId, branchId, day);
+    const openingCash = built.opening.amount;
 
     /**
      * **The reconciliation equation.** Every movement appears exactly once:
@@ -229,311 +330,690 @@ export class ClosingService {
      *            − refunds paid in cash
      *            − supplier payments in cash
      *            − expenses paid in cash
-     *            + corrections returned in cash
+     *            + corrections returned in cash (net of payments reclassified out)
      *
      * Pending reports appear nowhere — only confirmed movements are here.
      */
     const expectedCash = round2(
       openingCash + num(cash._sum.amount) - refundedCash - supplierPaid.cash - expensesCash + correctedCash,
     );
+    if (Math.abs(expectedCash - built.report.expected.cash.expected) >= 0.005) {
+      throw new ConflictException({
+        code: 'report_integrity',
+        message: 'The drawer figure does not agree with the report, so the day cannot be closed. Nothing was changed.',
+        failures: [`expected cash ${expectedCash} ≠ report ${built.report.expected.cash.expected}`],
+      });
+    }
 
     /**
-     * Where the counted cash comes from (E-CP1). A count entered through
-     * `closing.count` by the person holding the drawer is the record; signing
-     * the day off must not quietly replace it. On a reclose the count must be
-     * FRESH — taken after the reopen — or it describes a drawer that has since
-     * changed (0076).
+     * Which channels were physically checked (D2). A count taken after any reopen
+     * is a verification; a person's skip, a count from before a reopen and a
+     * channel nobody touched are not. The legacy one-step `countedCash` is a count
+     * of the drawer and is recorded as one; it never replaces a count already made.
      */
-    const finalChannels = await this.expectedChannels(companyId, branchId, day, day, openingCash);
+    const reopenedAt = already.status === 'reopened' ? already.reopenedAt : null;
     const countsByChannel = new Map<string, RecordedCount>(
-      (already?.channelCounts ?? []).map((c) => [
+      already.channelCounts.map((c) => [
         keyOf({ channel: c.channel, accountId: c.receivingAccountId ? binToUuid(c.receivingAccountId) : null }),
         c,
       ]),
     );
-    if (kind === 'reclose') {
-      const fresh = freshCounts(
-        finalChannels.map((ch) => {
-          const saved = countsByChannel.get(keyOf(ch));
-          return {
-            key: keyOf(ch),
-            countable: isCountable(ch),
-            counted: saved?.counted == null ? null : num(saved.counted),
-            isSkipped: saved?.isSkipped ?? false,
-            countedAt: saved?.countedAt ?? null,
-          };
-        }),
-        already?.reopenedAt ?? null,
+    const verificationOfKey = (key: string): Verification => {
+      const c = countsByChannel.get(key);
+      return verificationOf(
+        c ? { counted: c.counted == null ? null : num(c.counted), isSkipped: c.isSkipped, skipReason: c.skipReason, countedAt: c.countedAt } : null,
+        reopenedAt,
       );
-      if (!fresh.complete) {
-        throw new ConflictException({
-          code: 'fresh_count_required',
-          message: 'This day was reopened; count every channel again before closing it',
-          stale: fresh.stale,
-          outstanding: fresh.outstanding,
-        });
+    };
+    const cashVerification = verificationOfKey('cash:NONE');
+    let oneStepCash: number | null = null;
+    if (dto.countedCash != null) {
+      if (cashVerification === 'counted') {
+        const recorded = round2(num(countsByChannel.get('cash:NONE')!.counted));
+        if (round2(dto.countedCash) !== recorded) {
+          throw new ConflictException(
+            `A cash count of ${recorded} was already recorded for ${day}; recount it rather than overriding it at sign-off`,
+          );
+        }
+      } else {
+        oneStepCash = round2(dto.countedCash);
       }
     }
-    const recordedCash = countsByChannel.get('cash:NONE');
-    const hasRecordedCash = !!recordedCash && !recordedCash.isSkipped && recordedCash.counted != null;
-    if (hasRecordedCash) {
-      const recorded = round2(num(recordedCash!.counted));
-      if (dto.countedCash != null && round2(dto.countedCash) !== recorded) {
-        throw new ConflictException(
-          `A cash count of ${recorded} was already recorded for ${day}; recount it rather than overriding it at sign-off`,
-        );
-      }
-    } else if (dto.countedCash == null || kind === 'reclose') {
-      throw new BadRequestException('Nobody has counted the cash for this day yet');
+    const unverified = built.report.close.unverified.filter((key) => !(key === 'cash:NONE' && oneStepCash !== null));
+    const reason = dto.reason?.trim() ?? '';
+    if (unverified.length > 0 && (dto.acknowledgeUnverified !== true || reason.length === 0)) {
+      throw new BadRequestException({
+        code: 'acknowledgement_required',
+        message: 'Some balances were not physically checked. Confirm that, and say why, to close without them.',
+        unverified,
+      });
     }
-    const countedCash = hasRecordedCash ? round2(num(recordedCash!.counted)) : round2(dto.countedCash as number);
-    const difference = round2(countedCash - expectedCash);
+
+    const cashCounted = cashVerification === 'counted' ? round2(num(countsByChannel.get('cash:NONE')!.counted)) : oneStepCash;
+    const countedCash = cashCounted;
+    const difference = countedCash === null ? null : round2(countedCash - expectedCash);
 
     const lines = await this.buildDigestLines(branchId, dayDate);
-    const sinceFirst = kind === 'reclose' && already?.firstClosedAt ? await this.movementSince(branchId, dayDate, already.firstClosedAt) : null;
+    const sinceFirst = kind === 'reclose' && already.firstClosedAt ? await this.movementSince(branchId, dayDate, already.firstClosedAt) : null;
+    const verification = {
+      verified: built.report.close.verified.concat(oneStepCash !== null ? ['cash:NONE'] : []),
+      unverified,
+      acknowledged: unverified.length > 0,
+      reason: unverified.length > 0 ? reason : null,
+    };
+    const frozenReport: ClosingReport = oneStepCash === null
+      ? built.report
+      : {
+          ...built.report,
+          expected: {
+            ...built.report.expected,
+            cash: { ...built.report.expected.cash, counted: oneStepCash, difference, verification: 'counted', countedAt: now.toISOString() },
+          },
+          close: { ...built.report.close, unverified, verified: verification.verified, requiresAcknowledgement: unverified.length > 0 },
+        };
+    const frozenVersion = reportVersion(frozenReport);
+    const alreadyVersion = already.version;
 
-    const result = await this.db.$transaction(async (tx) => {
-      const closingId = already?.id ?? newUuidV7Bin();
-      const snapshot = {
-        expectedCash,
-        countedCash,
-        difference,
-        totalSales: revenue,
-        totalProfit: netProfit,
-        totalReturns,
-        totalReturnsProfitImpact,
-        totalReturnAdjustments,
-        totalReturnsCogsCredited,
-        refundsPaidTotal,
-        refundsPaidCash,
-        supplierPaidTotal: supplierPaid.total,
-        supplierPaidCash: supplierPaid.cash,
-        correctionsTotal: round2(num(rollup?.correctionsTotal ?? 0)),
-        correctionsCash: correctedCash,
-        expensesCash,
-        status: 'locked' as const,
-        isLocked: true,
-        closedById: userId,
-        closedAt: now,
-        // The first sign-off is written once and never moved (0076).
-        ...(kind === 'first' ? { firstClosedAt: now, firstClosedById: userId } : {}),
-      };
+    let result: { eventId: Buffer; reopenCount: number };
+    try {
+      result = await this.db.$transaction(async (tx) => {
+        /**
+         * Lock the row every sale and correction on this day also locks, then check
+         * that nothing moved since the report was read. Anything that did is in the
+         * fresh report the person is sent back to — never silently outside a close.
+         */
+        await tx.$queryRaw(Prisma.sql`
+          SELECT id FROM daily_closings WHERE id = ${closingId} FOR UPDATE`);
+        const fingerprintNow = await movementFingerprint(tx, companyId, branchId, day);
+        if (fingerprintNow !== fingerprintBefore) {
+          throw new ConflictException({
+            code: 'report_changed',
+            message: 'Something was recorded on this day while you were closing it. Review the new report before closing.',
+          });
+        }
 
-      if (already) {
+        const snapshot = {
+          expectedCash,
+          countedCash,
+          difference,
+          totalSales: revenue,
+          totalProfit: netProfit,
+          totalReturns,
+          totalReturnsProfitImpact,
+          totalReturnAdjustments,
+          totalReturnsCogsCredited,
+          refundsPaidTotal,
+          refundsPaidCash,
+          supplierPaidTotal: supplierPaid.total,
+          supplierPaidCash: supplierPaid.cash,
+          correctionsTotal: round2(num(rollup?.correctionsTotal ?? 0)),
+          correctionsCash: correctedCash,
+          expensesCash,
+          status: 'locked' as const,
+          isLocked: true,
+          closedById: userId,
+          closedAt: now,
+          // The first sign-off is written once and never moved (0076).
+          ...(kind === 'first' ? { firstClosedAt: now, firstClosedById: userId } : {}),
+        };
         /**
          * Guarded on the version AND on not already being locked, so two people
          * signing off the same day produce one closing and one 409 rather than
          * two conflicting snapshots.
          */
         const won = await tx.dailyClosing.updateMany({
-          where: { id: closingId, version: already.version, status: { not: 'locked' } },
+          where: { id: closingId, version: alreadyVersion, status: { not: 'locked' } },
           data: { ...snapshot, version: { increment: 1 } },
         });
         if (won.count === 0) {
-          throw new ConflictException('refresh_required: this day was changed while you were closing it');
+          throw new ConflictException({ code: 'refresh_required', message: 'This day was changed while you were closing it' });
         }
-      } else {
-        await tx.dailyClosing.create({
-          data: { id: closingId, companyId, branchId, closingDate: dayDate, ...snapshot },
-        });
-      }
 
-      // Freeze each channel as it stood at sign-off, carrying whatever count or
-      // recorded skip it already had.
-      const frozenRows: { key: string; id: Buffer; counted: number | null; isSkipped: boolean; difference: number | null }[] = [];
-      for (const ch of finalChannels) {
-        const saved = countsByChannel.get(keyOf(ch));
-        const counted = saved?.counted == null ? null : round2(num(saved.counted));
-        const frozen = {
-          labelSnapshot: ch.labelSnapshot,
-          salesIn: ch.salesIn,
-          refundsOut: ch.refundsOut,
-          supplierOut: ch.supplierOut,
-          expensesOut: ch.expensesOut,
-          correctionsIn: ch.correctionsIn,
-          openingBalance: ch.openingBalance,
-          expected: ch.expected,
-          counted,
-          difference: counted == null ? null : round2(counted - ch.expected),
-          isSkipped: saved?.isSkipped ?? false,
-          skipReason: saved?.skipReason ?? null,
-          countedById: saved?.countedById ?? null,
-          countedAt: saved?.countedAt ?? null,
-        };
-        let rowId: Buffer;
-        if (saved) {
-          await tx.closingChannelCount.update({ where: { id: saved.id }, data: frozen });
-          rowId = saved.id;
+        /**
+         * Freeze each channel as it stood at sign-off. A fresh count stays a count.
+         * Every other countable channel becomes NOT VERIFIED — `counted` NULL, never
+         * a zero or the expected figure — except a person's own skip, which keeps
+         * their reason. A count from before a reopen is not reused: it described a
+         * drawer that has since changed (its figure survives in its count event).
+         */
+        const frozenRows: { key: string; id: Buffer; difference: number | null }[] = [];
+        for (const ch of finalChannels) {
+          const key = keyOf(ch);
+          const saved = countsByChannel.get(key);
+          const v = key === 'cash:NONE' && oneStepCash !== null ? 'counted' : verificationOfKey(key);
+          const countable = isCountable(ch);
+          let counted: number | null = null;
+          let isSkipped = false;
+          let skipReason: string | null = null;
+          let countedById: Buffer | null = saved?.countedById ?? null;
+          let countedAt: Date | null = saved?.countedAt ?? null;
+          if (v === 'counted') {
+            counted = key === 'cash:NONE' && oneStepCash !== null ? oneStepCash : round2(num(saved!.counted));
+            if (key === 'cash:NONE' && oneStepCash !== null) {
+              countedById = userId;
+              countedAt = now;
+            }
+          } else if (v === 'skipped') {
+            isSkipped = true;
+            skipReason = saved?.skipReason ?? NOT_VERIFIED_AT_CLOSE;
+          } else if (countable) {
+            isSkipped = true;
+            skipReason = NOT_VERIFIED_AT_CLOSE;
+            countedById = userId;
+            countedAt = now;
+          }
+          const diff = counted === null ? null : round2(counted - ch.expected);
+          const frozen = {
+            labelSnapshot: ch.labelSnapshot,
+            salesIn: ch.salesIn,
+            refundsOut: ch.refundsOut,
+            supplierOut: ch.supplierOut,
+            expensesOut: ch.expensesOut,
+            correctionsIn: ch.correctionsIn,
+            correctionsOut: ch.correctionsOut,
+            openingBalance: ch.openingBalance,
+            expected: ch.expected,
+            counted,
+            difference: diff,
+            isSkipped,
+            skipReason,
+            countedById,
+            countedAt,
+          };
+          let rowId: Buffer;
+          if (saved) {
+            await tx.closingChannelCount.update({ where: { id: saved.id }, data: frozen });
+            rowId = saved.id;
+          } else {
+            rowId = newUuidV7Bin();
+            await tx.closingChannelCount.create({
+              data: {
+                id: rowId,
+                companyId,
+                closingId,
+                channel: ch.channel,
+                receivingAccountId: ch.accountId ? uuidToBin(ch.accountId) : null,
+                ...frozen,
+              },
+            });
+          }
+          frozenRows.push({ key, id: rowId, difference: countable ? diff : null });
+        }
+
+        /**
+         * A difference becomes a question, not a number (E-CP2), opened
+         * `pending_investigation` and never assigned. A channel nobody checked at
+         * this close answers nothing: an earlier question stays as it was (D2).
+         */
+        for (const row of frozenRows) {
+          const existing = await tx.closingDiscrepancy.findMany({
+            where: { closingId, channelCountId: row.id },
+            orderBy: { openedAt: 'asc' },
+          });
+          const action = reconcileDiscrepancy(
+            existing.map((d) => ({ status: d.status, amount: num(d.amount) })),
+            row.difference,
+          );
+          const pending = existing.find((d) => d.status === 'pending_investigation') ?? null;
+          if (action.kind === 'none') continue;
+          if (action.kind === 'open') {
+            await tx.closingDiscrepancy.create({
+              data: { id: newUuidV7Bin(), companyId, branchId, closingId, channelCountId: row.id, amount: action.amount },
+            });
+          } else if (action.kind === 'update' && pending) {
+            await tx.closingDiscrepancy.update({
+              where: { id: pending.id },
+              data: { amount: action.amount, version: { increment: 1 } },
+            });
+          } else if (action.kind === 'resolve_no_difference' && pending) {
+            await tx.closingDiscrepancy.update({
+              where: { id: pending.id },
+              data: {
+                status: 'resolved',
+                resolution: 'error_corrected',
+                resolutionReason: 'Reclosed after a reopen: no difference remains',
+                resolvedById: userId,
+                resolvedAt: now,
+                version: { increment: 1 },
+              },
+            });
+          }
+        }
+
+        // The digest: one per closing. A reclose rewrites it from the same lines;
+        // each close's own report is kept whole in its event below.
+        const existingDigest = await tx.dailyDigest.findUnique({ where: { closingId }, select: { id: true } });
+        const digestId = existingDigest?.id ?? newUuidV7Bin();
+        if (existingDigest) {
+          await tx.dailyDigest.update({
+            where: { id: digestId },
+            data: { revenue, costOfGoodsSold: cogs, grossProfit },
+          });
+          await tx.digestLine.deleteMany({ where: { digestId } });
         } else {
-          rowId = newUuidV7Bin();
-          await tx.closingChannelCount.create({
-            data: {
-              id: rowId,
-              companyId,
-              closingId,
-              channel: ch.channel,
-              receivingAccountId: ch.accountId ? uuidToBin(ch.accountId) : null,
-              ...frozen,
-            },
+          await tx.dailyDigest.create({
+            data: { id: digestId, companyId, branchId, closingId, digestDate: dayDate, revenue, costOfGoodsSold: cogs, grossProfit },
           });
         }
-        frozenRows.push({ key: keyOf(ch), id: rowId, counted, isSkipped: frozen.isSkipped, difference: frozen.difference });
-      }
-
-      /**
-       * A difference becomes a question, not a number (E-CP2). Opened
-       * `pending_investigation` and never assigned to anybody. On a reclose
-       * (0076) an undecided question follows the new figure and a decided one
-       * stays decided — `reconcileDiscrepancy` says which.
-       */
-      for (const row of frozenRows) {
-        const existing = await tx.closingDiscrepancy.findFirst({
-          where: { closingId, channelCountId: row.id },
-          orderBy: { openedAt: 'desc' },
-        });
-        const shaped = { counted: row.counted, isSkipped: row.isSkipped, difference: row.difference };
-        const wanted = opensDiscrepancy(shaped) ? row.difference : null;
-        const action = reconcileDiscrepancy(
-          existing ? { status: existing.status, amount: num(existing.amount) } : null,
-          wanted,
-        );
-        if (action.kind === 'none') continue;
-        if (action.kind === 'open' || action.kind === 'open_delta') {
-          await tx.closingDiscrepancy.create({
-            data: { id: newUuidV7Bin(), companyId, branchId, closingId, channelCountId: row.id, amount: action.amount },
-          });
-        } else if (action.kind === 'update' && existing) {
-          await tx.closingDiscrepancy.update({
-            where: { id: existing.id },
-            data: { amount: action.amount, version: { increment: 1 } },
-          });
-        } else if (action.kind === 'resolve_no_difference' && existing) {
-          await tx.closingDiscrepancy.update({
-            where: { id: existing.id },
-            data: {
-              status: 'resolved',
-              resolution: 'error_corrected',
-              resolutionReason: 'Reclosed after a reopen: no difference remains',
-              resolvedById: userId,
-              resolvedAt: now,
-              version: { increment: 1 },
-            },
-          });
+        if (lines.length > 0) {
+          await tx.digestLine.createMany({ data: lines.map((l) => ({ ...l, id: newUuidV7Bin(), companyId, digestId })) });
         }
-      }
 
-      // The digest: one per closing. A reclose rewrites it from the same lines.
-      const existingDigest = await tx.dailyDigest.findUnique({ where: { closingId }, select: { id: true } });
-      const digestId = existingDigest?.id ?? newUuidV7Bin();
-      if (existingDigest) {
-        await tx.dailyDigest.update({
-          where: { id: digestId },
-          data: { revenue, costOfGoodsSold: cogs, grossProfit },
+        const eventId = newUuidV7Bin();
+        const reopenCount = already!.reopenCount ?? 0;
+        await tx.closingEvent.create({
+          data: {
+            id: eventId,
+            companyId,
+            branchId,
+            businessDate: dayDate,
+            closingId,
+            kind: kind === 'first' ? 'closed' : 'reclosed',
+            at: now,
+            actorId: userId,
+            dedupeKey: kind === 'first' ? `closing:${closingId.toString('hex')}:closed` : `closing:${closingId.toString('hex')}:reclosed:${reopenCount}`,
+            payload: {
+              expectedCash,
+              countedCash,
+              difference,
+              openingCash,
+              verified: unverified.length === 0,
+              unverifiedCount: unverified.length,
+              verification,
+              clientUuid: dto.clientUuid ?? null,
+              reportVersion: frozenVersion,
+              report: frozenReport,
+              ...(sinceFirst ? { sinceFirstCount: sinceFirst } : {}),
+            } as unknown as Prisma.InputJsonValue,
+          },
         });
-        await tx.digestLine.deleteMany({ where: { digestId } });
-      } else {
-        await tx.dailyDigest.create({
-          data: { id: digestId, companyId, branchId, closingId, digestDate: dayDate, revenue, costOfGoodsSold: cogs, grossProfit },
-        });
-      }
-      if (lines.length > 0) {
-        await tx.digestLine.createMany({ data: lines.map((l) => ({ ...l, id: newUuidV7Bin(), companyId, digestId })) });
-      }
 
-      const frozenSummary = finalChannels.map((ch) => {
-        const saved = countsByChannel.get(keyOf(ch));
-        const counted = saved?.counted == null ? null : round2(num(saved.counted));
-        return { key: keyOf(ch), label: ch.labelSnapshot, expected: ch.expected, counted, skipped: saved?.isSkipped ?? false };
-      });
-      const eventId = newUuidV7Bin();
-      const reopenCount = already?.reopenCount ?? 0;
-      await tx.closingEvent.create({
-        data: {
-          id: eventId,
-          companyId,
+        await this.audit.recordTx(tx, {
+          entityType: 'DailyClosing',
+          entityId: closingId,
+          action: kind === 'first' ? 'create' : 'status_change',
+          reason: unverified.length > 0 ? `closed_not_verified: ${reason}`.slice(0, 255) : kind === 'first' ? undefined : 'reclosed',
+          after: { day, kind, expectedCash, countedCash, difference, verified: verification.verified, unverified, reportVersion: frozenVersion },
           branchId,
-          businessDate: dayDate,
-          closingId,
-          kind: kind === 'first' ? 'closed' : 'reclosed',
-          at: now,
-          actorId: userId,
-          dedupeKey: kind === 'first' ? `closing:${closingId.toString('hex')}:closed` : `closing:${closingId.toString('hex')}:reclosed:${reopenCount}`,
-          payload: {
-            expectedCash,
-            countedCash,
-            difference,
-            openingCash,
-            totalSales: revenue,
-            netProfit,
-            channels: frozenSummary,
-            ...(sinceFirst ? { sinceFirstCount: sinceFirst } : {}),
-          } as Prisma.InputJsonValue,
-        },
+        });
+        return { eventId, reopenCount };
       });
-
-      await this.audit.recordTx(tx, {
-        entityType: 'DailyClosing',
-        entityId: closingId,
-        action: kind === 'first' ? 'create' : 'status_change',
-        reason: kind === 'first' ? undefined : 'reclosed',
-        after: { day, revenue, netProfit, difference, kind },
-        branchId,
-      });
-      return { closingId, digestId, eventId, reopenCount };
-    });
+    } catch (e) {
+      /**
+       * Two taps at the same moment with the same key: the first closed the day, so
+       * the second meets the lock and the version guard. That is not a failure —
+       * it is the same close — so it is answered with it.
+       */
+      if (e instanceof ConflictException) {
+        const again = await this.replayClose(branchId, dayDate, dto.clientUuid, perms, day, today);
+        if (again) return again;
+      }
+      throw e;
+    }
 
     if (kind === 'first') {
+      // No figures in a broadcast (docs/51 §12.2): the report is one tap away, behind its own permissions.
       await this.notifications.emit({
         type: 'closing.completed',
         title: `Day ${day} closed`,
-        body: `Revenue ${revenue} · Net profit ${netProfit}`,
+        body: unverified.length > 0 ? 'Closed without a physical check of every balance' : 'Closed with every balance counted',
         branchId,
       });
     } else {
       // After commit, never before: a delivery problem is not the close's problem.
       void this.tellOwner(companyId, branchId, day, result.eventId, (ctx) =>
         reclosedNotice(ctx, {
-          closingIdHex: result.closingId.toString('hex'),
+          closingIdHex: closingId.toString('hex'),
           reopenCount: result.reopenCount,
           at: now,
           sinceFirstCount: sinceFirst ?? { salesValue: 0, cashIn: 0, salesCount: 0 },
-          wholeDay: { salesValue: revenue, expectedCash, countedCash, difference },
+          wholeDay: { salesValue: built.report.sales.value, expectedCash, countedCash, difference },
         }),
       );
     }
 
-    const comparison = await this.historicalComparison(branchId, dayDate);
     return {
-      closingId: binToUuid(result.closingId),
+      closingId: binToUuid(closingId),
       date: day,
       kind,
-      digest: { revenue, costOfGoodsSold: cogs, grossProfit, expenses, netProfit, lineCount: lines.length },
-      cash: { expected: expectedCash, counted: countedCash, difference, opening: openingCash },
-      channels: finalChannels.map((ch) => {
-        const saved = countsByChannel.get(keyOf(ch));
-        const counted = saved?.counted == null ? null : round2(num(saved.counted));
+      replayed: false,
+      verification,
+      report: { ...this.gatedFor(frozenReport, frozenVersion, perms, day === today), source: 'snapshot' as const },
+      digest: perms.costView && (perms.reportView || perms.perform) ? { revenue, costOfGoodsSold: cogs, grossProfit, expenses, netProfit, lineCount: lines.length } : null,
+    };
+  }
+
+  /** The gated view of a report for this caller. */
+  private gatedFor(report: ClosingReport, version: string, perms: ReportPermissions, isToday: boolean) {
+    const canClose = perms.perform && isToday && report.close.kind !== 'already_locked';
+    return { ...gateReport(report, perms, canClose), reportVersion: version };
+  }
+
+  /** The same idempotency key on a day it already closed returns that close. */
+  private async replayClose(branchId: Buffer, dayDate: Date, clientUuid: string | undefined, perms: ReportPermissions, day: string, today: string) {
+    if (!clientUuid) return null;
+    const row = await this.db.dailyClosing.findUnique({
+      where: { branchId_closingDate: { branchId, closingDate: dayDate } },
+      select: { id: true, status: true },
+    });
+    if (!row || row.status !== 'locked') return null;
+    const event = await this.db.closingEvent.findFirst({
+      where: { closingId: row.id, kind: { in: ['closed', 'reclosed'] } },
+      orderBy: { at: 'desc' },
+      select: { kind: true, payload: true },
+    });
+    const p = (event?.payload ?? null) as Record<string, unknown> | null;
+    if (!p || p.clientUuid !== clientUuid) return null;
+    const stored = snapshotReport(p);
+    if (!stored) return null;
+    return {
+      closingId: binToUuid(row.id),
+      date: day,
+      kind: event!.kind === 'closed' ? ('first' as const) : ('reclose' as const),
+      replayed: true,
+      verification: stored.verification,
+      report: { ...this.gatedFor({ ...stored.report, today, isToday: day === today }, stored.version, perms, day === today), source: 'snapshot' as const },
+      digest: null,
+    };
+  }
+
+  // ── The Daily closing report (docs/51 D1, D6) ─────────────────────────────
+
+  private permissions(): ReportPermissions {
+    const held = this.cls.get('permissions');
+    return {
+      count: held?.has('closing.count') ?? false,
+      reportView: held?.has('report.view') ?? false,
+      perform: held?.has('closing.perform') ?? false,
+      costView: held?.has('cost.view') ?? false,
+    };
+  }
+
+  /**
+   * The report of one business date at this branch, for this caller. A LOCKED day
+   * is shown as it was closed — the report stored with its latest close — and
+   * says so if its live figures have moved since. Any other day is live.
+   */
+  async report(date?: string) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const now = new Date();
+    const described = await this.businessDay.describe(branchId, now);
+    const today = described.businessDate;
+    const day = this.requireDate(date, today);
+    if (day > today) throw new BadRequestException('That business day has not begun');
+    const built = await this.buildReport(companyId, branchId, day, today, described.timezone);
+    const perms = this.permissions();
+    const closing = built.closing;
+    const snapshotEvent =
+      closing?.status === 'locked'
+        ? await this.db.closingEvent.findFirst({
+            where: { closingId: closing.id, kind: { in: ['closed', 'reclosed'] } },
+            orderBy: { at: 'desc' },
+            select: { kind: true, at: true, payload: true, actor: { select: { name: true } } },
+          })
+        : null;
+    const stored = snapshotReport(snapshotEvent?.payload);
+    const shown: ClosingReport = stored ? { ...stored.report, today, isToday: day === today, standing: built.report.standing } : built.report;
+    const warnings = [...shown.warnings];
+    if (stored && stored.version !== built.version) warnings.push({ code: 'changed_since_close', severity: 'warning', section: 'day' });
+    if (!stored && built.invariantFailures.length > 0) {
+      warnings.push({ code: 'figures_disagree', severity: 'error', section: 'day', params: { count: built.invariantFailures.length } });
+    }
+    const canClose = perms.perform && day === today && built.report.close.kind !== 'already_locked';
+    return {
+      ...gateReport({ ...shown, warnings }, perms, canClose),
+      reportVersion: stored ? stored.version : built.version,
+      liveVersion: built.version,
+      source: stored ? ('snapshot' as const) : ('live' as const),
+      snapshot:
+        stored && snapshotEvent
+          ? {
+              kind: snapshotEvent.kind,
+              at: snapshotEvent.at,
+              by: snapshotEvent.actor?.name ?? null,
+              verification: stored.verification,
+            }
+          : null,
+      generatedAt: now.toISOString(),
+    };
+  }
+
+  /**
+   * "Correct a transaction" (docs/51 D9): every source record of (branch, date)
+   * with its date, amount, channel and status, and what can be done about it —
+   * the existing flow it opens, or a refusal by name. Nothing here corrects
+   * anything; it only says where the correction lives.
+   */
+  async sources(date?: string) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const held = this.cls.get('permissions');
+    const canRequest = held?.has('financial.correction.request') ?? false;
+    const perform = held?.has('closing.perform') ?? false;
+    if (!canRequest && !perform) {
+      throw new ForbiddenException('Correcting a transaction needs the closing or the correction authority');
+    }
+    const now = new Date();
+    const described = await this.businessDay.describe(branchId, now);
+    const today = described.businessDate;
+    const day = this.requireDate(date, today);
+    if (day > today) throw new BadRequestException('That business day has not begun');
+    const dayDate = dateValue(day);
+    const tz = described.timezone;
+
+    const [payments, refunds, expenses, supplier, corrections] = await Promise.all([
+      this.db.payment.findMany({
+        where: { businessDate: dayDate, sale: { branchId } },
+        orderBy: { paidAt: 'asc' },
+        select: {
+          id: true,
+          kind: true,
+          method: true,
+          amount: true,
+          paidAt: true,
+          accountLabelSnapshot: true,
+          receivingAccountId: true,
+          recordedBy: { select: { name: true } },
+          sale: { select: { id: true, invoiceNo: true, businessDate: true } },
+          corrections: { select: { status: true } },
+        },
+      }),
+      this.db.refundPayout.findMany({
+        where: { branchId, status: 'confirmed', confirmationDate: dayDate },
+        select: { id: true, returnRequestId: true, method: true, reportedAmount: true, accountLabelSnapshot: true, confirmedAt: true, correctedById: true },
+      }),
+      this.db.$queryRaw<
+        { id: Buffer; category: string; amount: unknown; method: string; label: string | null; confirmed_at: Date | null; expense_class: string }[]
+      >(Prisma.sql`
+        SELECT id, category, amount, method, account_label_snapshot AS label, confirmed_at, expense_class
+          FROM expenses
+         WHERE company_id = ${companyId} AND branch_id = ${branchId} AND status = 'confirmed'
+           AND IF(expense_class = 'fixed', due_date, confirmation_date) = ${day}
+         ORDER BY confirmed_at`),
+      this.db.$queryRaw<{ id: Buffer; amount: unknown; method: string; label: string | null; paid_at: Date; purchase_id: Buffer }[]>(Prisma.sql`
+        SELECT sp.id, sp.amount, sp.method, sp.account_label_snapshot AS label, sp.paid_at, sp.purchase_id
+          FROM supplier_payments sp JOIN purchases pu ON pu.id = sp.purchase_id
+         WHERE sp.company_id = ${companyId} AND pu.branch_id = ${branchId} AND sp.business_date = ${day}
+         ORDER BY sp.paid_at`),
+      this.db.financialCorrection.findMany({
+        where: { branchId, status: 'approved', correctionDate: dayDate },
+        select: { id: true, targetKind: true, amount: true, method: true, toMethod: true, toAccountLabelSnapshot: true, accountLabelSnapshot: true, decidedAt: true },
+      }),
+    ]);
+
+    const time = (d: Date | null) => (d ? localTimeOf(d, tz) : null);
+    type SourceRow = {
+      kind: 'payment' | 'refund' | 'expense' | 'supplier_payment' | 'correction';
+      id: string;
+      at: Date | null;
+      localTime: string | null;
+      amount: number;
+      channel: string;
+      accountLabel: string | null;
+      status: string;
+      detail: Record<string, unknown>;
+      recordedBy: string | null;
+      action: 'reclassify_payment' | 'open_return' | 'open_expense' | 'open_sale' | null;
+      refusal: string | null;
+    };
+    const rows: SourceRow[] = [
+      ...payments.map((p): SourceRow => {
+        const approved = p.corrections.some((c) => c.status === 'approved');
+        const pending = p.corrections.some((c) => c.status === 'requested');
+        const refusal = !canRequest ? 'not_permitted' : approved ? 'already_corrected' : pending ? 'request_pending' : null;
         return {
-          channel: ch.channel,
-          accountId: ch.accountId,
-          label: ch.labelSnapshot,
-          isUnattributed: ch.isUnattributed,
-          openingBalance: ch.openingBalance,
-          expected: ch.expected,
-          counted,
-          difference: counted == null ? null : round2(counted - ch.expected),
-          skipped: saved?.isSkipped ?? false,
-          skipReason: saved?.skipReason ?? null,
+          kind: 'payment',
+          id: binToUuid(p.id),
+          at: p.paidAt,
+          localTime: time(p.paidAt),
+          amount: round2(num(p.amount)),
+          channel: p.method === 'cash' ? 'cash' : 'account',
+          accountLabel: p.method === 'cash' ? null : p.accountLabelSnapshot,
+          status: approved ? 'corrected' : pending ? 'correction_requested' : 'recorded',
+          detail: {
+            saleId: binToUuid(p.sale.id),
+            invoiceNo: p.sale.invoiceNo,
+            paymentKind: p.kind,
+            olderSale: dateKey(p.sale.businessDate) < day,
+            accountId: p.method === 'cash' ? null : p.receivingAccountId ? binToUuid(p.receivingAccountId) : null,
+          },
+          recordedBy: p.recordedBy?.name ?? null,
+          action: refusal ? 'open_sale' : 'reclassify_payment',
+          refusal,
         };
       }),
-      paidOut: {
-        refundsTotal: refundsPaidTotal,
-        refundsCash: refundsPaidCash,
-        supplierTotal: supplierPaid.total,
-        supplierCash: supplierPaid.cash,
-      },
-      sinceFirstCount: sinceFirst,
-      comparison,
-    };
+      ...refunds.map((r): SourceRow => ({
+        kind: 'refund',
+        id: binToUuid(r.id),
+        at: r.confirmedAt,
+        localTime: time(r.confirmedAt),
+        amount: round2(num(r.reportedAmount)),
+        channel: r.method,
+        accountLabel: r.accountLabelSnapshot,
+        status: r.correctedById ? 'corrected' : 'confirmed',
+        detail: { returnId: binToUuid(r.returnRequestId) },
+        recordedBy: null,
+        // The existing Milestone B flow lives on the return itself.
+        action: 'open_return',
+        refusal: r.correctedById ? 'already_corrected' : null,
+      })),
+      ...expenses.map((e): SourceRow => ({
+        kind: 'expense',
+        id: binToUuid(e.id),
+        at: e.confirmed_at,
+        localTime: time(e.confirmed_at),
+        amount: round2(num(e.amount as Prisma.Decimal)),
+        channel: e.method === 'cash' ? 'cash' : 'account',
+        accountLabel: e.label,
+        status: 'confirmed',
+        detail: { category: e.category, expenseClass: e.expense_class },
+        recordedBy: null,
+        action: 'open_expense',
+        // A confirmed expense cannot be corrected yet (owed, docs/51 §13).
+        refusal: 'expense_not_correctable',
+      })),
+      ...supplier.map((sp): SourceRow => ({
+        kind: 'supplier_payment',
+        id: binToUuid(sp.id),
+        at: sp.paid_at,
+        localTime: time(sp.paid_at),
+        amount: round2(num(sp.amount as Prisma.Decimal)),
+        channel: sp.method === 'cash' ? 'cash' : 'account',
+        accountLabel: sp.label,
+        status: 'paid',
+        detail: { purchaseId: binToUuid(sp.purchase_id) },
+        recordedBy: null,
+        action: null,
+        refusal: 'purchase_payment_not_correctable',
+      })),
+      ...corrections.map((c): SourceRow => ({
+        kind: 'correction',
+        id: binToUuid(c.id),
+        at: c.decidedAt,
+        localTime: time(c.decidedAt),
+        amount: round2(num(c.amount)),
+        channel: (c.targetKind === 'sale_payment' ? c.toMethod : c.method) ?? c.method,
+        accountLabel: c.targetKind === 'sale_payment' ? c.toAccountLabelSnapshot : c.accountLabelSnapshot,
+        status: 'approved',
+        detail: { targetKind: c.targetKind, fromMethod: c.method, fromAccountLabel: c.accountLabelSnapshot },
+        recordedBy: null,
+        action: null,
+        refusal: null,
+      })),
+    ];
+    rows.sort((a, b) => (a.at?.getTime() ?? 0) - (b.at?.getTime() ?? 0));
+    return { date: day, today, canRequest, rows };
+  }
+
+  /** Reads every figure of (branch, date) and assembles the full, ungated report. */
+  private async buildReport(companyId: Buffer, branchId: Buffer, day: string, today: string, timezone: string) {
+    const dayDate = dateValue(day);
+    const closing = await this.db.dailyClosing.findUnique({
+      where: { branchId_closingDate: { branchId, closingDate: dayDate } },
+      include: { channelCounts: true },
+    });
+    const opening = await this.openingCashDetail(companyId, branchId, day);
+    const [channels, splits, sales, returns, collected, expenses, pending, discrepancies, active] = await Promise.all([
+      this.expectedChannels(companyId, branchId, day, day, opening.amount),
+      channelSplits(this.db, companyId, branchId, day),
+      salesFigures(this.db, companyId, branchId, day),
+      returnFigures(this.db, companyId, branchId, day),
+      collectedForSales(this.db, companyId, branchId, day),
+      expenseLines(this.db, companyId, branchId, day),
+      day === today ? pendingReports(this.db, companyId, branchId) : Promise.resolve(null),
+      openDiscrepancies(this.db, companyId, branchId),
+      closing ? Promise.resolve(true) : day < today ? dayActivity(this.db, companyId, branchId, day) : Promise.resolve(true),
+    ]);
+    const reopenedAt = closing?.status === 'reopened' ? closing.reopenedAt : null;
+    const counts = new Map<string, ChannelCountState>();
+    for (const c of closing?.channelCounts ?? []) {
+      const key = keyOf({ channel: c.channel, accountId: c.receivingAccountId ? binToUuid(c.receivingAccountId) : null });
+      const counted = c.counted == null ? null : round2(num(c.counted));
+      counts.set(key, {
+        verification: verificationOf({ counted, isSkipped: c.isSkipped, skipReason: c.skipReason, countedAt: c.countedAt }, reopenedAt),
+        counted,
+        countedAt: c.countedAt,
+        skipReason: c.skipReason,
+      });
+    }
+    const standing = standingOf(closing ? { status: closing.status, businessDate: day } : null, today, active, day);
+    const previousDate = shiftDate(day, -1);
+    let previousDay: { businessDate: string; standing: DayStanding; needsReview: boolean } | null = null;
+    if (day === today) {
+      const prev = await this.db.dailyClosing.findUnique({
+        where: { branchId_closingDate: { branchId, closingDate: dateValue(previousDate) } },
+        select: { status: true },
+      });
+      const prevActive = prev ? true : await dayActivity(this.db, companyId, branchId, previousDate);
+      const row = prev ? { status: prev.status, businessDate: previousDate } : null;
+      previousDay = { businessDate: previousDate, standing: standingOf(row, today, prevActive, previousDate), needsReview: previousDayNeedsReview(row, prevActive) };
+    }
+    const window = dayWindowOf(day, timezone);
+    const report = assembleReport({
+      date: day,
+      today,
+      timezone,
+      window,
+      standing,
+      sales,
+      returns,
+      collected,
+      channels,
+      splits,
+      expenses,
+      counts,
+      opening,
+      pending,
+      openDiscrepancies: discrepancies,
+      previousDay,
+      closeKind: closeKindOf(closing),
+    });
+    const invariantFailures = reportInvariants(report, channels, splits);
+    if (invariantFailures.length > 0) {
+      this.logger.error(`Daily closing report for ${day} does not reconcile: ${invariantFailures.join('; ')}`);
+    }
+    return { report, version: reportVersion(report), invariantFailures, channels, closing, opening };
   }
 
   // ── Reopening ───────────────────────────────────────────────────────────
@@ -731,11 +1211,22 @@ export class ClosingService {
    * caller commits, through `afterSaleCommitted`.
    */
   async autoReopenTx(
-    tx: Pick<TenantPrisma, 'auditLog' | 'dailyClosing' | 'closingEvent'>,
-    args: { branchId: Buffer; businessDate: string; cause: { kind: 'sale' | 'payment'; id: Buffer } },
+    tx: Pick<TenantPrisma, 'auditLog' | 'dailyClosing' | 'closingEvent' | '$queryRaw'>,
+    args: { branchId: Buffer; businessDate: string; cause: { kind: 'sale' | 'payment' | 'purchase'; id: Buffer } },
   ): Promise<AutoReopenResult> {
     const companyId = this.tenant.companyId();
     const dayDate = dateValue(args.businessDate);
+    /**
+     * The same row lock the close takes (docs/51 §12.6). A close holding it makes
+     * this wait, then see the day locked and reopen it; this holding it makes the
+     * close wait, then see the movement and refuse with the fresh report. Either
+     * way the money is in exactly one snapshot or in the reopened day — never lost
+     * in a day that locked without it.
+     */
+    await tx.$queryRaw(Prisma.sql`
+      SELECT id FROM daily_closings
+       WHERE company_id = ${companyId} AND branch_id = ${args.branchId} AND closing_date = ${args.businessDate}
+       FOR UPDATE`);
     const row = await tx.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId: args.branchId, closingDate: dayDate } },
     });
@@ -939,7 +1430,7 @@ export class ClosingService {
         label: ch.labelSnapshot,
         isUnattributed: ch.isUnattributed,
         moneyIn: round2(ch.salesIn + ch.correctionsIn),
-        moneyOut: round2(ch.refundsOut + ch.supplierOut + ch.expensesOut),
+        moneyOut: round2(ch.refundsOut + ch.supplierOut + ch.expensesOut + ch.correctionsOut),
         net: ch.expected,
       })),
     };
@@ -1015,7 +1506,7 @@ export class ClosingService {
           label: c.labelSnapshot,
           isUnattributed: c.isUnattributed,
           moneyIn: round2(c.salesIn + c.correctionsIn),
-          moneyOut: round2(c.refundsOut + c.supplierOut + c.expensesOut),
+          moneyOut: round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut),
           net: c.expected,
         })),
       period: {
@@ -1095,8 +1586,9 @@ export class ClosingService {
     );
     const cashRow = rows.find((r) => r.channel === 'cash');
     const savedCash = recorded.get('cash:NONE');
-    // A day behind the boundary with no closing row was never even counted: it needs review, it is not "open".
-    const standing: DayStanding = closing ? standingOf({ status: closing.status, businessDate: day }, today) : day < today ? 'needs_review' : 'open';
+    // A day behind the boundary with no closing row needs review if anything happened on it, and is inactive if nothing did (D8).
+    const active = closing ? true : day < today ? await dayActivity(this.db, companyId, branchId, day) : true;
+    const standing: DayStanding = standingOf(closing ? { status: closing.status, businessDate: day } : null, today, active, day);
     const reopenVerdict = canReopen(closing ? { status: closing.status, businessDate: day } : null, today);
     const mayStartEarly = this.cls.get('permissions')?.has('closing.start_early') ?? false;
     const timeline = await this.timeline(branchId, dayDate, described.timezone, closing);
@@ -1148,7 +1640,12 @@ export class ClosingService {
                 select: { status: true },
               });
               const row = prev ? { status: prev.status, businessDate: previousDate } : null;
-              return { businessDate: previousDate, standing: standingOf(row, today), needsReview: previousDayNeedsReview(row) };
+              const prevActive = prev ? true : await dayActivity(this.db, companyId, branchId, previousDate);
+              return {
+                businessDate: previousDate,
+                standing: standingOf(row, today, prevActive, previousDate),
+                needsReview: previousDayNeedsReview(row, prevActive),
+              };
             })()
           : null,
     };
@@ -1222,7 +1719,7 @@ export class ClosingService {
         kind: e.kind as string,
         at: e.at,
         actor: e.actor?.name ?? null,
-        payload: (e.payload && typeof e.payload === 'object' ? e.payload : {}) as Record<string, unknown>,
+        payload: timelinePayload(e.kind as string, e.payload),
       })),
       ...(firstSale ? [{ kind: 'first_activity', at: firstSale.soldAt, actor: firstSale.user?.name ?? null, payload: salePayload(firstSale) }] : []),
       ...later.map((sale) => ({ kind: 'sale', at: sale.soldAt, actor: sale.user?.name ?? null, payload: salePayload(sale) })),
@@ -1334,6 +1831,9 @@ export class ClosingService {
       throw new BadRequestException('Unattributed money has no balance to count against');
     }
 
+    if (dto.channel === 'cash' && dto.counted != null && dto.counted < 0) {
+      throw new BadRequestException('A drawer cannot hold less than nothing');
+    }
     const counted = dto.counted == null ? null : round2(dto.counted);
     const difference = counted == null ? null : round2(counted - target.expected);
     const userId = this.tenant.userId() ?? null;
@@ -1347,10 +1847,10 @@ export class ClosingService {
               companyId,
               branchId,
               closingDate: dayDate,
-              // The snapshot columns stay at zero until the day is locked.
+              // Nothing is counted until somebody counts (0078): NULL, never a placeholder zero.
               expectedCash: 0,
-              countedCash: 0,
-              difference: 0,
+              countedCash: null,
+              difference: null,
               totalSales: 0,
               totalProfit: 0,
               status: 'counting',
@@ -1371,6 +1871,7 @@ export class ClosingService {
       supplierOut: target.supplierOut,
       expensesOut: target.expensesOut,
       correctionsIn: target.correctionsIn,
+      correctionsOut: target.correctionsOut,
       openingBalance: target.openingBalance,
       expected: target.expected,
       counted,
@@ -1489,28 +1990,34 @@ export class ClosingService {
   }
 
   /**
-   * What the drawer held when a business day began (0076).
+   * What the drawer held when a business day began (0076, D4).
    *
-   * The counted cash at the most recent LOCKED close before the day, plus the
-   * net cash movement of every unclosed day between that close and this one —
-   * the same movements the closing counts, over that range. A shop that has
-   * never locked a day starts from zero, exactly as before; the first close
-   * anchors the chain.
+   * The counted cash at the most recent locked close whose drawer was actually
+   * COUNTED, plus the net cash movement of every day between that close and this
+   * one — the same movements the closing counts, over that range. A locked day
+   * closed without a physical check anchors nothing: it is carried forward by its
+   * recorded movement like an unclosed day. A shop that has never counted a
+   * closed drawer starts from zero; the first counted close anchors the chain.
    */
   private async openingCash(companyId: Buffer, branchId: Buffer, day: string): Promise<number> {
+    return (await this.openingCashDetail(companyId, branchId, day)).amount;
+  }
+
+  private async openingCashDetail(companyId: Buffer, branchId: Buffer, day: string): Promise<OpeningCash> {
     const last = await this.db.dailyClosing.findFirst({
-      where: { branchId, status: 'locked', closingDate: { lt: dateValue(day) } },
+      where: { branchId, status: 'locked', countedCash: { not: null }, closingDate: { lt: dateValue(day) } },
       orderBy: { closingDate: 'desc' },
       select: { closingDate: true, countedCash: true },
     });
-    if (!last) return 0;
+    if (!last) return { amount: 0, anchorDate: null, anchorVerified: false, carriedDays: 0 };
     const lastDay = dateKey(last.closingDate);
     const from = shiftDate(lastDay, 1);
     const to = shiftDate(day, -1);
-    if (from > to) return round2(num(last.countedCash));
+    if (from > to) return { amount: round2(num(last.countedCash)), anchorDate: lastDay, anchorVerified: true, carriedDays: 0 };
     const between = await this.expectedChannels(companyId, branchId, from, to);
     const cash = between.find((c) => c.channel === 'cash');
-    return round2(num(last.countedCash) + (cash?.expected ?? 0));
+    const carriedDays = Math.round((dateValue(to).getTime() - dateValue(from).getTime()) / 86_400_000) + 1;
+    return { amount: round2(num(last.countedCash) + (cash?.expected ?? 0)), anchorDate: lastDay, anchorVerified: true, carriedDays };
   }
 
   /**
@@ -1622,8 +2129,34 @@ export class ClosingService {
       LEFT JOIN refund_payouts rp ON rp.id = fc.target_refund_payout_id
       LEFT JOIN supplier_settlements ss ON ss.id = fc.target_supplier_settlement_id
       WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
+        AND fc.target_kind IN ('refund_payout', 'supplier_settlement')
         AND fc.status = 'approved' AND fc.correction_date BETWEEN ${fromDay} AND ${toDay}
       GROUP BY fc.method, COALESCE(rp.receiving_account_id, ss.receiving_account_id)
+
+      UNION ALL
+      -- A payment reclassified to another channel (0078): the money ENTERS the
+      -- channel it really reached, on the correction's day...
+      SELECT IF(fc.to_method = 'cash', 'cash', 'account'),
+             IF(fc.to_method = 'cash', NULL, fc.to_receiving_account_id),
+             'correctionsIn', SUM(fc.amount)
+      FROM financial_corrections fc
+      WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
+        AND fc.target_kind = 'sale_payment'
+        AND fc.status = 'approved' AND fc.correction_date BETWEEN ${fromDay} AND ${toDay}
+      GROUP BY fc.to_method, fc.to_receiving_account_id
+
+      UNION ALL
+      -- ...and LEAVES the channel it was wrongly recorded in. The payment row itself
+      -- is never written; its own day's figures and snapshots stay as they were.
+      SELECT IF(p.method = 'cash', 'cash', 'account'),
+             IF(p.method = 'cash', NULL, p.receiving_account_id),
+             'correctionsOut', SUM(fc.amount)
+      FROM financial_corrections fc
+      JOIN payments p ON p.id = fc.target_payment_id
+      WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
+        AND fc.target_kind = 'sale_payment'
+        AND fc.status = 'approved' AND fc.correction_date BETWEEN ${fromDay} AND ${toDay}
+      GROUP BY IF(p.method = 'cash', 'cash', 'account'), IF(p.method = 'cash', NULL, p.receiving_account_id)
     `);
 
     return rows
@@ -1685,4 +2218,54 @@ export class ClosingService {
       monthToDate: { revenue: round2(num(mtd._sum.revenue)), netProfit: round2(num(mtd._sum.netProfit)) },
     };
   }
+}
+
+/**
+ * What the timeline shows of an event's payload (docs/51 §12.1). The stored payload
+ * of a close carries the whole report — sales, profit — and the timeline is read by
+ * anyone who may count; so only the fields that line needs leave the server.
+ */
+const TIMELINE_FIELDS: Record<string, readonly string[]> = {
+  count_saved: ['channel', 'accountId', 'label', 'counted', 'expected', 'difference', 'skipped', 'fromRow'],
+  closed: ['expectedCash', 'countedCash', 'difference', 'verified', 'unverifiedCount', 'fromRow'],
+  reclosed: ['expectedCash', 'countedCash', 'difference', 'verified', 'unverifiedCount'],
+  reopened: ['mode', 'automatic', 'reopenCount'],
+  auto_reopened: ['mode', 'automatic', 'cause', 'reopenCount'],
+  day_started_early: ['previousDate', 'startedAt'],
+  opened: ['openedAt', 'localTime', 'nth'],
+};
+
+export function timelinePayload(kind: string, payload: unknown): Record<string, unknown> {
+  const source = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+  const allowed = TIMELINE_FIELDS[kind] ?? [];
+  const out: Record<string, unknown> = {};
+  for (const k of allowed) if (k in source) out[k] = source[k];
+  return out;
+}
+
+/** The report stored with a close, when the close stored one (every close since 0078 does). */
+function snapshotReport(payload: unknown): {
+  report: ClosingReport;
+  version: string;
+  verification: { verified: string[]; unverified: string[]; acknowledged: boolean; reason: string | null };
+} | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  if (!p.report || typeof p.report !== 'object' || typeof p.reportVersion !== 'string') return null;
+  const v = (p.verification ?? {}) as Record<string, unknown>;
+  return {
+    report: p.report as ClosingReport,
+    version: p.reportVersion,
+    verification: {
+      verified: Array.isArray(v.verified) ? (v.verified as string[]) : [],
+      unverified: Array.isArray(v.unverified) ? (v.unverified as string[]) : [],
+      acknowledged: v.acknowledged === true,
+      reason: typeof v.reason === 'string' ? v.reason : null,
+    },
+  };
+}
+
+function dayWindowOf(day: string, timezone: string): { startsAt: string; endsAt: string } {
+  const w = dayWindow(day, timezone);
+  return { startsAt: w.start.toISOString(), endsAt: w.end.toISOString() };
 }

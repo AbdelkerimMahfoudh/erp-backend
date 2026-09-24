@@ -61,6 +61,34 @@ export class ClosingController {
     return this.closing.businessDayView();
   }
 
+  /**
+   * The Daily closing report (docs/51): sales, money by channel, expenses, the
+   * result and the expected balances of one business date, built from server
+   * records only. Readable by whoever may count; each section is gated inside —
+   * sales and expenses need report.view or closing.perform, the result also
+   * cost.view. Reading it confers nothing: closing stays closing.perform.
+   */
+  @Get('closings/report')
+  @RequirePermissions('closing.count')
+  @ApiQuery({ name: 'date', required: false, description: 'Business day to report; defaults to the current one' })
+  @ApiOperation({ summary: 'The Daily closing report of one business date' })
+  report(@Query('date') date?: string) {
+    return this.closing.report(date);
+  }
+
+  /**
+   * "Correct a transaction": the date's source records and where each one's
+   * correction lives, or why it cannot be corrected. Needs the closing or the
+   * correction authority (checked in the service); corrects nothing itself.
+   */
+  @Get('closings/sources')
+  @RequirePermissions('closing.count')
+  @ApiQuery({ name: 'date', required: false })
+  @ApiOperation({ summary: 'The source records of a business date, with their correction paths' })
+  sources(@Query('date') date?: string) {
+    return this.closing.sources(date);
+  }
+
   @Get('closings/open/view')
   @RequirePermissions('closing.count')
   @ApiQuery({ name: 'date', required: false, description: 'Business day to view; defaults to the current one' })

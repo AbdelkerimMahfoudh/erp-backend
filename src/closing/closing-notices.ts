@@ -59,6 +59,7 @@ const WORDS: Record<NoticeLanguage, Record<string, string>> = {
     collected: 'collected',
     owed: 'still owed',
     hidden: 'amounts hidden by your settings',
+    notVerified: 'cash not counted',
     since: 'since the first count',
     whole: 'whole day',
     at: 'at',
@@ -72,6 +73,7 @@ const WORDS: Record<NoticeLanguage, Record<string, string>> = {
     collected: 'encaissé',
     owed: 'reste dû',
     hidden: 'montants masqués par vos réglages',
+    notVerified: 'caisse non comptée',
     since: 'depuis le premier comptage',
     whole: 'journée entière',
     at: 'à',
@@ -85,6 +87,7 @@ const WORDS: Record<NoticeLanguage, Record<string, string>> = {
     collected: 'محصّل',
     owed: 'متبقٍ',
     hidden: 'المبالغ مخفية حسب إعداداتك',
+    notVerified: 'لم يُعدّ النقد',
     since: 'منذ العدّ الأول',
     whole: 'اليوم كاملًا',
     at: 'في',
@@ -173,7 +176,8 @@ export interface ReclosedEvent {
   reopenCount: number;
   at: Date;
   sinceFirstCount: { salesValue: number; cashIn: number; salesCount: number };
-  wholeDay: { salesValue: number; expectedCash: number; countedCash: number; difference: number };
+  /** `countedCash`/`difference` are null when the drawer was not counted at this close (0078). */
+  wholeDay: { salesValue: number; expectedCash: number; countedCash: number | null; difference: number | null };
 }
 
 export function reclosedNotice(ctx: NoticeContext, ev: ReclosedEvent): Notice {
@@ -182,7 +186,7 @@ export function reclosedNotice(ctx: NoticeContext, ev: ReclosedEvent): Notice {
     ? `${word(ctx.language, 'since')}: ${ev.sinceFirstCount.salesCount} · ${formatAmount(ev.sinceFirstCount.salesValue, ctx.currency)}`
     : `${word(ctx.language, 'since')}: ${ev.sinceFirstCount.salesCount}`;
   const whole = ctx.includeAmounts
-    ? `${word(ctx.language, 'whole')}: ${formatAmount(ev.wholeDay.salesValue, ctx.currency)} · ${formatAmount(ev.wholeDay.difference, ctx.currency)}`
+    ? `${word(ctx.language, 'whole')}: ${formatAmount(ev.wholeDay.salesValue, ctx.currency)} · ${ev.wholeDay.difference === null ? word(ctx.language, 'notVerified') : formatAmount(ev.wholeDay.difference, ctx.currency)}`
     : word(ctx.language, 'hidden');
   const variables = { branch: ctx.branchName, time, date: ctx.businessDate, since, whole };
   assertNoticeSafe(variables);

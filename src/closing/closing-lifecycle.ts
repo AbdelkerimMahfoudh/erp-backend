@@ -12,16 +12,30 @@
 
 export type ClosingStatus = 'counting' | 'counted' | 'locked' | 'reopened';
 
-/** What the day is, in words the screen shows beside its colour. */
-export type DayStanding = 'open' | 'counting' | 'counted' | 'closed' | 'reopened' | 'needs_review';
+/**
+ * What the day is, in words the screen shows beside its colour. `inactive` is a
+ * day behind the boundary on which nothing at all was recorded (docs/51 D8): it
+ * is not an overdue closing, and saying so would be a false alarm.
+ */
+export type DayStanding = 'open' | 'counting' | 'counted' | 'closed' | 'reopened' | 'needs_review' | 'inactive';
 
 export interface DayRow {
   status: ClosingStatus;
   businessDate: string;
 }
 
-export function standingOf(row: DayRow | null, currentBusinessDate: string): DayStanding {
-  if (!row) return 'open';
+/**
+ * `hadActivity` answers "was anything recorded on this date?" (a sale, a
+ * payment, a count, a close, an opening, an expense, a refund, a correction —
+ * see `dayActivity`). It matters only for a day with no closing row: today
+ * that is simply open; a past one needs review if something happened on it and
+ * is inactive if nothing did.
+ */
+export function standingOf(row: DayRow | null, currentBusinessDate: string, hadActivity = true, date?: string): DayStanding {
+  if (!row) {
+    if (date !== undefined && date < currentBusinessDate) return hadActivity ? 'needs_review' : 'inactive';
+    return 'open';
+  }
   const past = row.businessDate < currentBusinessDate;
   switch (row.status) {
     case 'locked':
@@ -35,9 +49,12 @@ export function standingOf(row: DayRow | null, currentBusinessDate: string): Day
   }
 }
 
-/** A day with no row that is already behind us was never closed either. */
-export function previousDayNeedsReview(row: DayRow | null): boolean {
-  return !row || row.status !== 'locked';
+/**
+ * A day behind us needs review when it was not closed — but only if something
+ * was recorded on it. A day on which nothing happened has nothing to review.
+ */
+export function previousDayNeedsReview(row: DayRow | null, hadActivity = true): boolean {
+  return row ? row.status !== 'locked' : hadActivity;
 }
 
 export type ReopenRefusal = 'not_closed' | 'past_day' | 'future_day';
@@ -156,24 +173,89 @@ export type DiscrepancyAction =
   | { kind: 'none' }
   | { kind: 'open'; amount: number }
   | { kind: 'update'; amount: number }
-  | { kind: 'resolve_no_difference' }
-  | { kind: 'open_delta'; amount: number };
+  | { kind: 'resolve_no_difference' };
 
 /**
- * What a reclose does to a channel's discrepancy. Nothing financial is ever
- * deleted: an unresolved question is updated to the new difference or closed
- * as "no difference remains"; a question somebody already decided stays as
- * decided, and any remaining delta becomes a new question.
+ * What a close does to a channel's discrepancies, given EVERY discrepancy row the
+ * channel already has and the difference it shows now.
+ *
+ * - `difference === null` means nobody claimed a figure at this close (the channel
+ *   was not verified, or was skipped): **nothing happens**. An earlier question
+ *   stays exactly as it was — it came from a real count, and a close that did not
+ *   look at the drawer cannot answer it (docs/51 D2).
+ * - Otherwise the difference still unexplained is `difference − Σ decided`. An
+ *   undecided question follows it (or closes as "no difference remains"); if there
+ *   is none, a new one opens for any remainder.
+ *
+ * Comparing against the sum of decided rows, not only the newest row, is what
+ * stops repeated recloses from counting the same shortage twice (docs/51 §4).
+ * Nothing financial is ever deleted; a decided question is never rewritten.
  */
-export function reconcileDiscrepancy(existing: ExistingDiscrepancy | null, difference: number | null): DiscrepancyAction {
-  const diff = difference === null ? 0 : round2(difference);
-  if (!existing) return diff !== 0 ? { kind: 'open', amount: diff } : { kind: 'none' };
-  if (existing.status === 'pending_investigation') {
-    if (diff === 0) return { kind: 'resolve_no_difference' };
-    return round2(existing.amount) === diff ? { kind: 'none' } : { kind: 'update', amount: diff };
+export function reconcileDiscrepancy(existing: ExistingDiscrepancy[] | null, difference: number | null): DiscrepancyAction {
+  if (difference === null) return { kind: 'none' };
+  const rows = existing ?? [];
+  const decided = round2(rows.filter((r) => r.status === 'resolved').reduce((n, r) => n + r.amount, 0));
+  const pending = rows.find((r) => r.status === 'pending_investigation') ?? null;
+  const remainder = round2(round2(difference) - decided);
+  if (pending) {
+    if (remainder === 0) return { kind: 'resolve_no_difference' };
+    return round2(pending.amount) === remainder ? { kind: 'none' } : { kind: 'update', amount: remainder };
   }
-  const delta = round2(diff - existing.amount);
-  return delta !== 0 ? { kind: 'open_delta', amount: delta } : { kind: 'none' };
+  return remainder !== 0 ? { kind: 'open', amount: remainder } : { kind: 'none' };
+}
+
+// ── Physical verification at a close (docs/51 D2) ────────────────────────────
+
+/**
+ * The machine key a channel carries when the person closing did not check it.
+ * Stored in `skip_reason` (like `CASH` in `label_snapshot`), so it is never
+ * mistaken for a person's own skip reason and never displayed as copy.
+ */
+export const NOT_VERIFIED_AT_CLOSE = 'NOT_VERIFIED_AT_CLOSE';
+
+/**
+ * How one channel stands against its expected figure:
+ *
+ * - `counted` — a person counted it, after any reopen;
+ * - `skipped` — a person recorded that it could not be counted, with their reason;
+ * - `not_verified` — closed without anybody checking it (acknowledged at the close);
+ * - `stale` — counted before the day was reopened, so it describes a drawer that has
+ *   since changed and proves nothing about it now;
+ * - `not_counted` — nothing recorded yet.
+ *
+ * Only `counted` is a physical verification. The others are never shown as matched.
+ */
+export type Verification = 'counted' | 'skipped' | 'not_verified' | 'stale' | 'not_counted';
+
+export function verificationOf(
+  row: { counted: number | null; isSkipped: boolean; skipReason: string | null; countedAt: Date | null } | null,
+  reopenedAt: Date | null,
+): Verification {
+  if (!row) return 'not_counted';
+  if (reopenedAt && row.countedAt && row.countedAt.getTime() < reopenedAt.getTime()) return 'stale';
+  if (reopenedAt && !row.countedAt && (row.counted !== null || row.isSkipped)) return 'stale';
+  if (row.isSkipped) return row.skipReason === NOT_VERIFIED_AT_CLOSE ? 'not_verified' : 'skipped';
+  return row.counted === null ? 'not_counted' : 'counted';
+}
+
+/**
+ * What a close needs from the person confirming it. Every countable channel that
+ * is not freshly counted is closed as NOT VERIFIED — which requires an explicit
+ * acknowledgement and a reason. A day on which every channel was counted needs
+ * neither: the counts are the verification.
+ */
+export function closeVerification(channels: { key: string; countable: boolean; verification: Verification }[]): {
+  verified: string[];
+  unverified: string[];
+  requiresAcknowledgement: boolean;
+} {
+  const verified: string[] = [];
+  const unverified: string[] = [];
+  for (const c of channels) {
+    if (!c.countable) continue;
+    (c.verification === 'counted' ? verified : unverified).push(c.key);
+  }
+  return { verified, unverified, requiresAcknowledgement: unverified.length > 0 };
 }
 
 /** The Owner plus at most this many named delegates per branch (docs/50 §3.3). */

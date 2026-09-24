@@ -11,6 +11,9 @@ import {
   canOpen,
   doorState,
   openingOf,
+  closeVerification,
+  NOT_VERIFIED_AT_CLOSE,
+  verificationOf,
 } from './closing-lifecycle';
 
 const today = '2026-09-23';
@@ -28,6 +31,22 @@ describe('standingOf', () => {
     expect(previousDayNeedsReview(null)).toBe(true);
     expect(previousDayNeedsReview({ status: 'locked', businessDate: '2026-09-22' })).toBe(false);
     expect(previousDayNeedsReview({ status: 'reopened', businessDate: '2026-09-22' })).toBe(true);
+  });
+
+  it('a past day with no closing row needs review only if something was recorded on it (docs/51 D8)', () => {
+    // Real unclosed activity — a sale, a payment, a count, an opening — still needs review.
+    expect(standingOf(null, today, true, '2026-09-22')).toBe('needs_review');
+    // Nothing recorded at all: an honest "no activity", never an overdue closing.
+    expect(standingOf(null, today, false, '2026-09-22')).toBe('inactive');
+    // Today is simply open, activity or not.
+    expect(standingOf(null, today, false, today)).toBe('open');
+    expect(standingOf(null, today, true, today)).toBe('open');
+    // A closing row is itself activity: its status decides, whatever the flag says.
+    expect(standingOf({ status: 'counting', businessDate: '2026-09-22' }, today, false, '2026-09-22')).toBe('needs_review');
+    expect(standingOf({ status: 'locked', businessDate: '2026-09-22' }, today, false, '2026-09-22')).toBe('closed');
+    expect(previousDayNeedsReview(null, false)).toBe(false);
+    expect(previousDayNeedsReview(null, true)).toBe(true);
+    expect(previousDayNeedsReview({ status: 'reopened', businessDate: '2026-09-22' }, false)).toBe(true);
   });
 });
 
@@ -131,22 +150,68 @@ describe('reopenChoices', () => {
 describe('reconcileDiscrepancy', () => {
   it('opens a new question only for a real difference', () => {
     expect(reconcileDiscrepancy(null, -500)).toEqual({ kind: 'open', amount: -500 });
-    expect(reconcileDiscrepancy(null, 0)).toEqual({ kind: 'none' });
+    expect(reconcileDiscrepancy([], 0)).toEqual({ kind: 'none' });
+  });
+
+  it('a channel nobody checked at this close answers nothing: an earlier question stays as it was', () => {
     expect(reconcileDiscrepancy(null, null)).toEqual({ kind: 'none' });
+    expect(reconcileDiscrepancy([{ status: 'pending_investigation', amount: -500 }], null)).toEqual({ kind: 'none' });
+    expect(reconcileDiscrepancy([{ status: 'resolved', amount: -500 }], null)).toEqual({ kind: 'none' });
   });
 
   it('updates an undecided question, or closes it when no difference remains', () => {
-    const pending = { status: 'pending_investigation' as const, amount: -500 };
+    const pending = [{ status: 'pending_investigation' as const, amount: -500 }];
     expect(reconcileDiscrepancy(pending, -200)).toEqual({ kind: 'update', amount: -200 });
     expect(reconcileDiscrepancy(pending, -500)).toEqual({ kind: 'none' });
     expect(reconcileDiscrepancy(pending, 0)).toEqual({ kind: 'resolve_no_difference' });
   });
 
   it('never rewrites a decided question — the remainder becomes a new one', () => {
-    const decided = { status: 'resolved' as const, amount: -500 };
+    const decided = [{ status: 'resolved' as const, amount: -500 }];
     expect(reconcileDiscrepancy(decided, -500)).toEqual({ kind: 'none' });
-    expect(reconcileDiscrepancy(decided, -300)).toEqual({ kind: 'open_delta', amount: 200 });
-    expect(reconcileDiscrepancy(decided, 0)).toEqual({ kind: 'open_delta', amount: 500 });
+    expect(reconcileDiscrepancy(decided, -300)).toEqual({ kind: 'open', amount: 200 });
+    expect(reconcileDiscrepancy(decided, 0)).toEqual({ kind: 'open', amount: 500 });
+  });
+
+  it('repeated recloses never count the same shortage twice', () => {
+    // First close: −1 200, decided. Reclose: −700 → a +500 remainder opens.
+    const afterFirst = [{ status: 'resolved' as const, amount: -1200 }];
+    expect(reconcileDiscrepancy(afterFirst, -700)).toEqual({ kind: 'open', amount: 500 });
+    // Reclose again at the same −700: the +500 question already says so — nothing new.
+    const afterSecond = [...afterFirst, { status: 'pending_investigation' as const, amount: 500 }];
+    expect(reconcileDiscrepancy(afterSecond, -700)).toEqual({ kind: 'none' });
+    // Σ of every row equals the current difference: −1 200 + 500 = −700.
+    expect(afterSecond.reduce((n, r) => n + r.amount, 0)).toBe(-700);
+  });
+});
+
+describe('physical verification at a close (docs/51 D2)', () => {
+  const reopenedAt = new Date('2026-09-23T15:00:00Z');
+  const before = new Date('2026-09-23T14:00:00Z');
+  const after = new Date('2026-09-23T16:00:00Z');
+
+  it('only a fresh count is a verification; a skip, a close without checking and a stale count are not', () => {
+    expect(verificationOf(null, null)).toBe('not_counted');
+    expect(verificationOf({ counted: 1000, isSkipped: false, skipReason: null, countedAt: before }, null)).toBe('counted');
+    expect(verificationOf({ counted: null, isSkipped: true, skipReason: 'Balance not readable', countedAt: before }, null)).toBe('skipped');
+    expect(verificationOf({ counted: null, isSkipped: true, skipReason: NOT_VERIFIED_AT_CLOSE, countedAt: before }, null)).toBe('not_verified');
+    expect(verificationOf({ counted: 1000, isSkipped: false, skipReason: null, countedAt: before }, reopenedAt)).toBe('stale');
+    expect(verificationOf({ counted: 1000, isSkipped: false, skipReason: null, countedAt: after }, reopenedAt)).toBe('counted');
+    expect(verificationOf({ counted: null, isSkipped: false, skipReason: null, countedAt: null }, null)).toBe('not_counted');
+  });
+
+  it('a close with any unchecked channel needs an acknowledgement; a fully counted one does not', () => {
+    expect(closeVerification([
+      { key: 'cash:NONE', countable: true, verification: 'counted' },
+      { key: 'account:A', countable: true, verification: 'counted' },
+      { key: 'account:NONE', countable: false, verification: 'not_counted' },
+    ])).toEqual({ verified: ['cash:NONE', 'account:A'], unverified: [], requiresAcknowledgement: false });
+    expect(closeVerification([
+      { key: 'cash:NONE', countable: true, verification: 'counted' },
+      { key: 'account:A', countable: true, verification: 'skipped' },
+      { key: 'account:B', countable: true, verification: 'stale' },
+      { key: 'account:C', countable: true, verification: 'not_counted' },
+    ])).toEqual({ verified: ['cash:NONE'], unverified: ['account:A', 'account:B', 'account:C'], requiresAcknowledgement: true });
   });
 });
 

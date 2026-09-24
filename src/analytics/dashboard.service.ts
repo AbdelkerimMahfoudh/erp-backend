@@ -11,6 +11,7 @@ import { periodRange, shiftDate, type DateRange, type HomePeriod } from '../comm
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
 import { assertAssignedToBranch } from '../rbac/active-branch';
 import { previousDayNeedsReview, standingOf } from '../closing/closing-lifecycle';
+import { dayActivity } from '../closing/closing-report.queries';
 import { PartnerRankingService } from '../consignment/partner-ranking.service';
 import { AnalyticsService } from './analytics.service';
 import { barsSumTo, dailyBars, groupedBars, hourlyBars, type Bar } from './home-series';
@@ -209,6 +210,8 @@ export class DashboardService {
       }),
     ]);
     const prevRow = previous ? { status: previous.status, businessDate: previousDate } : null;
+    // Nothing recorded yesterday is not an overdue closing (docs/51 D8): the same test Closing & history uses.
+    const prevActive = previous ? true : await dayActivity(this.db, this.tenant.companyId(), branchId, previousDate);
     return {
       businessDate,
       standing: standingOf(today ? { status: today.status, businessDate } : null, businessDate),
@@ -217,7 +220,11 @@ export class DashboardService {
       closedAt: today?.status === 'locked' ? today.closedAt : null,
       reopenedAt: today?.status === 'reopened' ? today.reopenedAt : null,
       reopenCount: today?.reopenCount ?? 0,
-      previousDay: { businessDate: previousDate, standing: standingOf(prevRow, businessDate), needsReview: previousDayNeedsReview(prevRow) },
+      previousDay: {
+        businessDate: previousDate,
+        standing: standingOf(prevRow, businessDate, prevActive, previousDate),
+        needsReview: previousDayNeedsReview(prevRow, prevActive),
+      },
     };
   }
 

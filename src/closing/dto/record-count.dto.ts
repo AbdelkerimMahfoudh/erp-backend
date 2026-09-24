@@ -8,7 +8,6 @@ import {
   IsString,
   IsUUID,
   MaxLength,
-  Min,
 } from 'class-validator';
 import { IsMoney } from '../../common/money/is-money.decorator';
 
@@ -32,12 +31,15 @@ export class RecordCountDto {
   /**
    * Zero is a real count and must stay distinguishable from "not counted yet",
    * which is why this is optional rather than defaulted.
+   *
+   * Cash is what the drawer holds, never below zero (checked in the service). An
+   * account's figure is its NET movement for the day as the provider shows it —
+   * received minus paid out — which can be negative (docs/51 §12.4).
    */
-  @ApiPropertyOptional({ minimum: 0, description: 'What was actually counted' })
+  @ApiPropertyOptional({ description: 'What was actually counted: the drawer for cash, the day’s net movement for an account' })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0)
-  @IsMoney({ min: 0 })
+  @IsMoney()
   counted?: number;
 
   /**

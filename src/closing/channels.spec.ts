@@ -46,7 +46,24 @@ describe('the signs match the cash equation exactly', () => {
       supplierOut: -1,
       expensesOut: -1,
       correctionsIn: 1,
+      correctionsOut: -1,
     });
+  });
+
+  it('a payment reclassified to another channel moves between channels and leaves the total alone (0078)', () => {
+    const rows = buildChannels(
+      [
+        move('cash', null, 'salesIn', 10000),
+        move('cash', null, 'correctionsOut', 4000),
+        move('account', 'bankily', 'correctionsIn', 4000),
+      ],
+      [{ id: 'bankily', label: 'Bankily', isActive: true, sortOrder: 1 }],
+    );
+    const cash = rows.find((r) => r.channel === 'cash')!;
+    const bankily = rows.find((r) => r.accountId === 'bankily')!;
+    expect(cash.expected).toBe(6000);
+    expect(bankily.expected).toBe(4000);
+    expect(cash.expected + bankily.expected).toBe(10000);
   });
 
   it('a channel with every movement computes the same expression the till does', () => {

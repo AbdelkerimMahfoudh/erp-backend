@@ -27,8 +27,9 @@ describe('period movements', () => {
 
   it('every component reads the whole range of STORED dates, none only one day (0076)', () => {
     expect(movements).not.toMatch(/= \$\{day\}/);
-    // cash payments, account payments, refunds, settlements, purchase payments, expenses, corrections
-    expect((movements.match(/BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(7);
+    // cash payments, account payments, refunds, settlements, purchase payments, expenses, corrections,
+    // and the two legs of a payment reclassified to another channel (0078)
+    expect((movements.match(/BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(9);
   });
 
   it('no component reads a timestamp window any more — every day is a stored date', () => {
@@ -47,7 +48,10 @@ describe('period movements', () => {
 
   it('the closing still asks for exactly one day, with the drawer’s opening balance', () => {
     expect(service).not.toMatch(/expectedChannels\(companyId, branchId, day, dayDate\)/);
-    expect((service.match(/expectedChannels\(companyId, branchId, day, day, openingCash\)/g) ?? []).length).toBe(3);
+    // The count and the live view ask with the opening; the report (which the close is built on) asks with
+    // the opening it reports, anchored on a counted close only (0078, D4).
+    expect((service.match(/expectedChannels\(companyId, branchId, day, day, openingCash\)/g) ?? []).length).toBe(2);
+    expect(service).toMatch(/expectedChannels\(companyId, branchId, day, day, opening\.amount\)/);
     // Money's period view never carries an opening balance: a period's net is what moved.
     expect(service).toMatch(/expectedChannels\(companyId, branchId, from, to\)/);
   });
@@ -55,7 +59,7 @@ describe('period movements', () => {
   it('in and out are the closing components, and net is its expected figure', () => {
     const block = service.slice(service.indexOf('async periodMovements('), service.indexOf('async openView('));
     expect(block).toMatch(/moneyIn: round2\(ch\.salesIn \+ ch\.correctionsIn\)/);
-    expect(block).toMatch(/moneyOut: round2\(ch\.refundsOut \+ ch\.supplierOut \+ ch\.expensesOut\)/);
+    expect(block).toMatch(/moneyOut: round2\(ch\.refundsOut \+ ch\.supplierOut \+ ch\.expensesOut \+ ch\.correctionsOut\)/);
     expect(block).toMatch(/net: ch\.expected/);
     expect(block).toMatch(/requireBranchId\(\)/);
   });

@@ -1410,6 +1410,7 @@ model Payment {
   sale             Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)
   receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
   recordedBy       User?             @relation("PaymentRecordedBy", fields: [recordedById], references: [id], onDelete: Restrict, map: "fk_payments_recorded_by")
+  corrections      FinancialCorrection[]
 
   @@unique([companyId, clientUuid], map: "ux_payments_client_uuid")
   @@index([saleId])
@@ -1653,8 +1654,10 @@ model DailyClosing {
   branchId     Bytes    @map("branch_id") @db.Binary(16)
   closingDate  DateTime @map("closing_date") @db.Date
   expectedCash Decimal  @map("expected_cash") @db.Decimal(14, 2)
-  countedCash  Decimal  @map("counted_cash") @db.Decimal(14, 2)
-  difference   Decimal  @db.Decimal(14, 2)
+  /// NULL = the drawer was NOT verified at this close (0078). Never 0 for "not counted";
+  /// NULL together with `difference`, never one without the other.
+  countedCash  Decimal? @map("counted_cash") @db.Decimal(14, 2)
+  difference   Decimal? @db.Decimal(14, 2)
   totalSales   Decimal  @map("total_sales") @db.Decimal(14, 2)
   totalProfit  Decimal  @map("total_profit") @db.Decimal(14, 2)
 
@@ -1772,6 +1775,8 @@ model ClosingChannelCount {
   supplierOut    Decimal @default(0) @map("supplier_out") @db.Decimal(14, 2)
   expensesOut    Decimal @default(0) @map("expenses_out") @db.Decimal(14, 2)
   correctionsIn  Decimal @default(0) @map("corrections_in") @db.Decimal(14, 2)
+  /// Money a correction moved OUT of this channel — a payment reclassified to another one (0078).
+  correctionsOut Decimal @default(0) @map("corrections_out") @db.Decimal(14, 2)
   /// Cash only (0076): what the drawer held at the start of the business day —
   /// the counted cash at the last locked close plus the net cash movement of
   /// any unclosed day between. Carried forward as a balance, never as income.
@@ -2282,6 +2287,7 @@ model ReceivingAccount {
   loanLedger        LoanLedgerEntry[]
   payments          Payment[]
   channelCounts     ClosingChannelCount[]
+  correctionsTo     FinancialCorrection[] @relation("CorrectionToAccount")
 
   id        Bytes             @id @db.Binary(16)
   companyId Bytes             @map("company_id") @db.Binary(16)
@@ -3156,6 +3162,8 @@ model SupplierSettlementAllocation {
 enum FinancialCorrectionKind {
   refund_payout
   supplier_settlement
+  /// A checkout or later payment recorded against the wrong channel (0078).
+  sale_payment
 }
 
 enum FinancialCorrectionStatus {
@@ -3189,6 +3197,8 @@ model FinancialCorrection {
   /// than one polymorphic id, so both keep a real foreign key.
   targetRefundPayoutId       Bytes?                  @map("target_refund_payout_id") @db.Binary(16)
   targetSupplierSettlementId Bytes?                  @map("target_supplier_settlement_id") @db.Binary(16)
+  /// The payment being reclassified (`sale_payment`, 0078). The payment row is never written.
+  targetPaymentId            Bytes?                  @map("target_payment_id") @db.Binary(16)
 
   status FinancialCorrectionStatus @default(requested)
 
@@ -3202,6 +3212,11 @@ model FinancialCorrection {
   amount               Decimal      @db.Decimal(14, 2)
   method               RefundMethod
   accountLabelSnapshot String?      @map("account_label_snapshot") @db.VarChar(80)
+
+  /// Where a reclassified payment's money actually went (`sale_payment` only, 0078).
+  toMethod               RefundMethod? @map("to_method")
+  toReceivingAccountId   Bytes?        @map("to_receiving_account_id") @db.Binary(16)
+  toAccountLabelSnapshot String?       @map("to_account_label_snapshot") @db.VarChar(80)
 
   requestedById  Bytes?    @map("requested_by_id") @db.Binary(16)
   requestedAt    DateTime  @default(now()) @map("requested_at") @db.DateTime(6)
@@ -3224,6 +3239,8 @@ model FinancialCorrection {
   branch           Branch              @relation(fields: [branchId], references: [id])
   targetPayout     RefundPayout?       @relation(fields: [targetRefundPayoutId], references: [id])
   targetSettlement SupplierSettlement? @relation(fields: [targetSupplierSettlementId], references: [id])
+  targetPayment    Payment?            @relation(fields: [targetPaymentId], references: [id])
+  toAccount        ReceivingAccount?   @relation("CorrectionToAccount", fields: [toReceivingAccountId], references: [id])
   requestedBy      User?               @relation("CorrectionRequestedBy", fields: [requestedById], references: [id])
   decidedBy        User?               @relation("CorrectionDecidedBy", fields: [decidedById], references: [id])
 

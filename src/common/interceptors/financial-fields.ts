@@ -19,6 +19,12 @@ export const FINANCIAL_FIELDS: ReadonlySet<string> = new Set([
   'grossProfit',
   'netProfit',
   'totalProfit',
+  // The Daily closing report's result (docs/51 D6). The service already leaves the
+  // whole result out for a caller without cost.view; these keys are the second line.
+  'costOfUnitsSold',
+  'returnsCostCredited',
+  'resultBeforeFixed',
+  'resultAfterExpenses',
   // inventory valuation
   'inventoryValue',
   'expectedProfit',
