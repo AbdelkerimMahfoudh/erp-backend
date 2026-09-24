@@ -17,11 +17,12 @@ import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RollupService } from '../analytics/rollup.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
-import { isDateString, shiftDate } from '../common/business-day';
+import { isDateString, localParts, localTimeOf, shiftDate } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
+import { OpenDayDto } from './dto/open-day.dto';
 import {
   buildChannels,
   countingComplete,
@@ -33,9 +34,12 @@ import {
 } from './channels';
 import { opensDiscrepancy } from './debt-rules';
 import {
+  canOpen,
   canReopen,
   closeKindOf,
+  doorState,
   freshCounts,
+  openingOf,
   previousDayNeedsReview,
   reconcileDiscrepancy,
   reopenChoices,
@@ -69,6 +73,30 @@ interface RecordedCount {
   countedById: Buffer | null;
   countedAt: Date | null;
   expected: Prisma.Decimal;
+}
+
+/** What the timeline needs from a closing row: its status, its close and its counts, with the people. */
+interface TimelineClosing {
+  status: string;
+  firstClosedAt: Date | null;
+  closedAt: Date;
+  countedCash: Prisma.Decimal;
+  difference: Prisma.Decimal;
+  closedBy: { name: string } | null;
+  channelCounts: {
+    labelSnapshot: string;
+    counted: Prisma.Decimal | null;
+    isSkipped: boolean;
+    countedAt: Date | null;
+    countedBy: { name: string } | null;
+  }[];
+}
+
+interface TimelineRow {
+  kind: string;
+  at: Date;
+  actor: string | null;
+  payload: Record<string, unknown>;
 }
 
 /**
@@ -631,6 +659,72 @@ export class ClosingService {
   }
 
   /**
+   * "Open the boutique" (docs/50 §6, 0077): the physical opening — an explicit,
+   * dated, attributed event that the 06:00 boundary never invents. Recorded by
+   * whoever opens, under the counting permission. A closed day is not opened
+   * but reopened, with the closing authority, so that is refused and named.
+   */
+  async open(dto: OpenDayDto) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const userId = this.tenant.userId() ?? null;
+    const now = new Date();
+    const described = await this.businessDay.describe(branchId, now);
+    const day = this.requireDate(dto.date, described.businessDate);
+    const dayDate = dateValue(day);
+    const [row, events] = await Promise.all([
+      this.db.dailyClosing.findUnique({
+        where: { branchId_closingDate: { branchId, closingDate: dayDate } },
+        select: { id: true, status: true },
+      }),
+      this.db.closingEvent.findMany({ where: { branchId, businessDate: dayDate }, orderBy: { at: 'asc' }, select: { kind: true } }),
+    ]);
+    const verdict = canOpen(row ? { status: row.status, businessDate: day } : null, doorState(events), day, described.businessDate);
+    if (!verdict.ok) {
+      throw new ConflictException({
+        code: `open_${verdict.why}`,
+        message:
+          verdict.why === 'already_open'
+            ? `Day ${day} is already open`
+            : verdict.why === 'day_closed'
+              ? `Day ${day} is closed — reopening it needs the closing authority`
+              : verdict.why === 'past_day'
+                ? `Day ${day} is behind the business day boundary; only the current day can be opened`
+                : `Day ${day} has not begun`,
+      });
+    }
+    const n = events.filter((e) => e.kind === 'opened').length + 1;
+    try {
+      await this.db.closingEvent.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId,
+          branchId,
+          businessDate: dayDate,
+          closingId: row?.id ?? null,
+          kind: 'opened',
+          at: now,
+          actorId: userId,
+          dedupeKey: `closing:open:${branchId.toString('hex')}:${day}:${n}`,
+          payload: { openedAt: now.toISOString(), localTime: localTimeOf(now, described.timezone), nth: n } as Prisma.InputJsonValue,
+        },
+      });
+      await this.audit.record({
+        entityType: 'BusinessDay',
+        entityId: branchId,
+        action: 'create',
+        reason: 'opened',
+        after: { businessDate: day, at: now.toISOString(), nth: n },
+        branchId,
+      });
+    } catch (e) {
+      // Two taps at once: the first opened the boutique; the second changes nothing.
+      if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+    }
+    return this.openView(day);
+  }
+
+  /**
    * A sale after the close reopens the day by itself, inside the sale's own
    * transaction (docs/50 §3.2). Never refuses: a close is a counted snapshot
    * and a history event, not a lock on selling. The notices go out after the
@@ -966,7 +1060,7 @@ export class ClosingService {
 
     const closing = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
-      include: { channelCounts: true },
+      include: { channelCounts: { include: { countedBy: { select: { name: true } } } }, closedBy: { select: { name: true } } },
     });
     const openingCash = await this.openingCash(companyId, branchId, day);
     const channels = await this.expectedChannels(companyId, branchId, day, day, openingCash);
@@ -1001,10 +1095,12 @@ export class ClosingService {
     );
     const cashRow = rows.find((r) => r.channel === 'cash');
     const savedCash = recorded.get('cash:NONE');
-    const standing: DayStanding = standingOf(closing ? { status: closing.status, businessDate: day } : null, today);
+    // A day behind the boundary with no closing row was never even counted: it needs review, it is not "open".
+    const standing: DayStanding = closing ? standingOf({ status: closing.status, businessDate: day }, today) : day < today ? 'needs_review' : 'open';
     const reopenVerdict = canReopen(closing ? { status: closing.status, businessDate: day } : null, today);
     const mayStartEarly = this.cls.get('permissions')?.has('closing.start_early') ?? false;
-    const history = await this.history(branchId, dayDate, closing?.firstClosedAt ?? null);
+    const timeline = await this.timeline(branchId, dayDate, described.timezone, closing);
+    const openVerdict = canOpen(closing ? { status: closing.status, businessDate: day } : null, timeline.door, day, today);
 
     return {
       date: day,
@@ -1024,6 +1120,7 @@ export class ClosingService {
       /** Movement since the last cash count: today's expected minus what it was when counted. */
       sinceLastCount: savedCash?.counted != null ? round2((cashRow?.expected ?? 0) - num(savedCash.expected)) : null,
       lastCountedAt: closing?.countedAt ?? null,
+      lastCountedLocalTime: closing?.countedAt ? localTimeOf(closing.countedAt, described.timezone) : null,
       firstClosedAt: closing?.firstClosedAt ?? null,
       closedAt: closing?.status === 'locked' ? closing.closedAt : null,
       reopenedAt: closing?.status === 'reopened' ? closing.reopenedAt : null,
@@ -1032,7 +1129,16 @@ export class ClosingService {
       reopenRefusal: reopenVerdict.ok ? null : reopenVerdict.why,
       reopenChoices: reopenChoices(described.canStartEarly && day === today, mayStartEarly),
       nextDate: shiftDate(day, 1),
-      history,
+      history: timeline.rows,
+      /** Whether the boutique is physically open on this date, from its recorded openings and closes (0077). */
+      door: timeline.door,
+      /** The latest recorded opening of the date — explicit or a reopen — or null: "No opening time recorded". */
+      opening: timeline.opening,
+      canOpen: openVerdict.ok,
+      openRefusal: openVerdict.ok ? null : openVerdict.why,
+      /** The store's wall clock now — what a sheet shows as "at 07:25", never the phone's clock. */
+      localNow: localTimeOf(now, described.timezone),
+      localNowDate: localParts(now, described.timezone).date,
       previousDay:
         day === today
           ? await (async () => {
@@ -1048,62 +1154,114 @@ export class ClosingService {
     };
   }
 
-  /** The day's events and, after the first close, the sales made since — in time order. */
-  private async history(branchId: Buffer, dayDate: Date, firstClosedAt: Date | null) {
+  /**
+   * The day's timeline (docs/50 §6): every event, the first sale as "First
+   * activity", and — after the first close — each sale made since, in time
+   * order, each with its store-local date and time. A day closed before the
+   * timeline existed has no events, so its closing row and channel counts are
+   * read back as the events they were; nothing recorded is ever dropped.
+   */
+  private async timeline(branchId: Buffer, dayDate: Date, timezone: string, closing: TimelineClosing | null) {
     const events = await this.db.closingEvent.findMany({
       where: { branchId, businessDate: dayDate },
       orderBy: { at: 'asc' },
       select: { id: true, kind: true, at: true, payload: true, actor: { select: { name: true } } },
     });
-    const sales = firstClosedAt
+    const saleSelect = {
+      id: true,
+      soldAt: true,
+      total: true,
+      amountPaid: true,
+      balanceDue: true,
+      user: { select: { name: true } },
+      payments: { select: { method: true, amount: true } },
+      items: {
+        where: { voided: false },
+        select: {
+          quantity: true,
+          product: { select: { brand: true, model: true } },
+          unit: { select: { product: { select: { brand: true, model: true } } } },
+        },
+      },
+    } satisfies Prisma.SaleSelect;
+    const firstSale = await this.db.sale.findFirst({
+      where: { branchId, businessDate: dayDate, isReversed: false },
+      orderBy: { soldAt: 'asc' },
+      select: saleSelect,
+    });
+    const firstClosedAt = closing?.firstClosedAt ?? null;
+    const later = firstClosedAt
       ? await this.db.sale.findMany({
-          where: { branchId, businessDate: dayDate, isReversed: false, soldAt: { gte: firstClosedAt } },
-          orderBy: { soldAt: 'asc' },
-          select: {
-            id: true,
-            soldAt: true,
-            total: true,
-            amountPaid: true,
-            balanceDue: true,
-            payments: { select: { method: true, amount: true } },
-            items: {
-              where: { voided: false },
-              select: {
-                quantity: true,
-                product: { select: { brand: true, model: true } },
-                unit: { select: { product: { select: { brand: true, model: true } } } },
-              },
-            },
+          where: {
+            branchId,
+            businessDate: dayDate,
+            isReversed: false,
+            soldAt: { gte: firstClosedAt },
+            ...(firstSale ? { id: { not: firstSale.id } } : {}),
           },
+          orderBy: { soldAt: 'asc' },
+          select: saleSelect,
         })
       : [];
-    const rows: { kind: string; at: Date; actor: string | null; payload: Record<string, unknown> }[] = [
+    type SaleRow = NonNullable<typeof firstSale>;
+    const salePayload = (s: SaleRow): Record<string, unknown> => {
+      const first = s.items[0];
+      const product = first?.product ?? first?.unit?.product ?? null;
+      return {
+        saleId: binToUuid(s.id),
+        item: product ? `${product.brand} ${product.model}`.trim() : null,
+        itemCount: s.items.reduce((n, it) => n + it.quantity, 0),
+        total: num(s.total),
+        collected: num(s.amountPaid),
+        owed: num(s.balanceDue),
+        cashIn: round2(s.payments.filter((p) => p.method === 'cash').reduce((n, p) => n + num(p.amount), 0)),
+      };
+    };
+    const rows: TimelineRow[] = [
       ...events.map((e) => ({
-        kind: e.kind,
+        kind: e.kind as string,
         at: e.at,
         actor: e.actor?.name ?? null,
         payload: (e.payload && typeof e.payload === 'object' ? e.payload : {}) as Record<string, unknown>,
       })),
-      ...sales.map((s) => {
-        const first = s.items[0];
-        const product = first?.product ?? first?.unit?.product ?? null;
-        return {
-          kind: 'sale',
-          at: s.soldAt,
-          actor: null,
-          payload: {
-            saleId: binToUuid(s.id),
-            item: product ? `${product.brand} ${product.model}`.trim() : null,
-            itemCount: s.items.reduce((n, it) => n + it.quantity, 0),
-            total: num(s.total),
-            collected: num(s.amountPaid),
-            owed: num(s.balanceDue),
-            cashIn: round2(s.payments.filter((p) => p.method === 'cash').reduce((n, p) => n + num(p.amount), 0)),
-          },
-        };
-      }),
+      ...(firstSale ? [{ kind: 'first_activity', at: firstSale.soldAt, actor: firstSale.user?.name ?? null, payload: salePayload(firstSale) }] : []),
+      ...later.map((sale) => ({ kind: 'sale', at: sale.soldAt, actor: sale.user?.name ?? null, payload: salePayload(sale) })),
     ];
-    return rows.sort((a, b) => a.at.getTime() - b.at.getTime());
+    // A day closed before the timeline existed: its row and its counts, as the events they were.
+    if (closing && closing.status === 'locked' && !events.some((e) => e.kind === 'closed' || e.kind === 'reclosed')) {
+      rows.push({
+        kind: 'closed',
+        at: closing.closedAt,
+        actor: closing.closedBy?.name ?? null,
+        payload: { countedCash: num(closing.countedCash), difference: num(closing.difference), fromRow: true },
+      });
+    }
+    if (closing && !events.some((e) => e.kind === 'count_saved')) {
+      for (const c of closing.channelCounts) {
+        if (!c.countedAt) continue;
+        rows.push({
+          kind: 'count_saved',
+          at: c.countedAt,
+          actor: c.countedBy?.name ?? null,
+          payload: { label: c.labelSnapshot, counted: c.counted == null ? null : num(c.counted), skipped: c.isSkipped, fromRow: true },
+        });
+      }
+    }
+    rows.sort((a, b) => a.at.getTime() - b.at.getTime());
+    const opening = openingOf(events);
+    return {
+      rows: rows.map((r) => ({ ...r, localDate: localParts(r.at, timezone).date, localTime: localTimeOf(r.at, timezone) })),
+      door: doorState(events),
+      opening: opening
+        ? {
+            kind: opening.kind as string,
+            at: opening.at,
+            actor: opening.actor?.name ?? null,
+            localDate: localParts(opening.at, timezone).date,
+            localTime: localTimeOf(opening.at, timezone),
+          }
+        : null,
+    };
   }
 
   /** Sales and cash taken since an instant within a business day — the reclose's "since the first count". */

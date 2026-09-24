@@ -21,6 +21,10 @@ describe('closing routes and authority (0076)', () => {
     expect(perms(ClosingController, 'close')).toEqual(['closing.perform']);
   });
 
+  it('opening the boutique is whoever may count; a closed day is reopened with the closing authority', () => {
+    expect(perms(ClosingController, 'open')).toEqual(['closing.count']);
+  });
+
   it('the business day and the live view are readable by whoever may count', () => {
     expect(perms(ClosingController, 'businessDay')).toEqual(['closing.count']);
     expect(perms(ClosingController, 'openView')).toEqual(['closing.count']);

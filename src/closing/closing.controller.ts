@@ -5,6 +5,7 @@ import { ClosingService } from './closing.service';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
+import { OpenDayDto } from './dto/open-day.dto';
 import { ResolveDiscrepancyDto } from './dto/resolve-discrepancy.dto';
 import { CreateDebtEntryDto } from './dto/create-debt-entry.dto';
 import { DiscrepanciesService } from './discrepancies.service';
@@ -78,6 +79,19 @@ export class ClosingController {
   @ApiOperation({ summary: 'Reopen the current business day, or start the next one early (Owner)' })
   reopen(@Body() dto: ReopenClosingDto) {
     return this.closing.reopen(dto);
+  }
+
+  /**
+   * "Open the boutique" (0077): the physical opening, recorded by whoever
+   * opens — an explicit, dated, attributed event the 06:00 boundary never
+   * invents. Gated on `closing.count`: the person unlocking the door is the
+   * one who reports it. A closed day is reopened instead, with `closing.perform`.
+   */
+  @Post('closings/open')
+  @RequirePermissions('closing.count')
+  @ApiOperation({ summary: 'Record that the boutique opened for the current business day' })
+  open(@Body() dto: OpenDayDto) {
+    return this.closing.open(dto);
   }
 
   /**

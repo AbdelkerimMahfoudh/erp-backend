@@ -1887,6 +1887,9 @@ enum ClosingEventKind {
   reclosed
   /// The Owner started the next business date before 06:00.
   day_started_early
+  /// Somebody opened the boutique — the physical opening, recorded only when
+  /// a person records it. The 06:00 boundary never invents one (0077).
+  opened
 }
 
 model ClosingEvent {

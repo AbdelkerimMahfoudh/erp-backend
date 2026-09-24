@@ -71,6 +71,12 @@ export function localParts(instant: Date, timezone: string): LocalParts {
   return { date: `${yyyy}-${mm}-${dd}`, hour, minute: get('minute'), second: get('second') };
 }
 
+/** The wall-clock time of an instant in a zone, HH:mm — what a history row shows beside its date. */
+export function localTimeOf(instant: Date, timezone: string): string {
+  const p = localParts(instant, timezone);
+  return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
+}
+
 /** Calendar arithmetic on a YYYY-MM-DD, with no timezone involved. */
 export function shiftDate(date: string, days: number): string {
   if (!DATE_RE.test(date)) throw new Error(`Not a date: ${date}`);

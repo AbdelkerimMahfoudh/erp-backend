@@ -10,6 +10,7 @@ import {
   offsetMinutes,
   periodRange,
   shiftDate,
+  localTimeOf,
 } from './business-day';
 
 /**
@@ -108,5 +109,13 @@ describe('dates and periods', () => {
     expect(isBeforeDayStart(new Date('2026-09-23T23:30:00.000Z'), tz, '2026-09-23')).toBe(false);
     expect(isBeforeDayStart(new Date('2026-09-24T06:00:00.000Z'), tz, '2026-09-23')).toBe(false);
     expect(localDateOf(new Date('2026-09-24T03:00:00.000Z'), tz)).toBe('2026-09-24');
+  });
+});
+
+describe('localTimeOf', () => {
+  it('reads the wall clock of the zone, zero-padded, on a 24-hour dial', () => {
+    expect(localTimeOf(new Date('2026-09-24T07:25:00Z'), 'UTC')).toBe('07:25');
+    expect(localTimeOf(new Date('2026-09-24T03:05:00Z'), 'Asia/Dubai')).toBe('07:05');
+    expect(localTimeOf(new Date('2026-09-24T23:59:30Z'), 'UTC')).toBe('23:59');
   });
 });

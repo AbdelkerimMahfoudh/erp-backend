@@ -49,6 +49,54 @@ export function canReopen(row: DayRow | null, currentBusinessDate: string): { ok
   return { ok: true };
 }
 
+// ── The door ────────────────────────────────────────────────────────────
+
+/**
+ * Whether the boutique is physically open on a business date, read from the
+ * day's events in time order: an explicit opening or a reopen opens it, a
+ * close closes it. The 06:00 boundary is a reporting boundary and says nothing
+ * here — a day nobody opened stays "never opened", however many sales it has.
+ */
+export type DoorState = 'never_opened' | 'open' | 'closed';
+
+export const DOOR_OPENS: readonly string[] = ['opened', 'reopened', 'auto_reopened'];
+export const DOOR_CLOSES: readonly string[] = ['closed', 'reclosed'];
+
+export function doorState(events: readonly { kind: string }[]): DoorState {
+  let state: DoorState = 'never_opened';
+  for (const e of events) {
+    if (DOOR_OPENS.includes(e.kind)) state = 'open';
+    else if (DOOR_CLOSES.includes(e.kind)) state = 'closed';
+  }
+  return state;
+}
+
+/** The day's latest opening — an explicit open or a reopen — or null when none was recorded. */
+export function openingOf<T extends { kind: string }>(events: readonly T[]): T | null {
+  let last: T | null = null;
+  for (const e of events) if (DOOR_OPENS.includes(e.kind)) last = e;
+  return last;
+}
+
+export type OpenRefusal = 'past_day' | 'future_day' | 'day_closed' | 'already_open';
+
+/**
+ * Whether "Open the boutique" applies: only the current business date; never a
+ * closed day (that is a reopen, with the closing authority); and not twice.
+ */
+export function canOpen(
+  row: DayRow | null,
+  door: DoorState,
+  businessDate: string,
+  currentBusinessDate: string,
+): { ok: true } | { ok: false; why: OpenRefusal } {
+  if (businessDate < currentBusinessDate) return { ok: false, why: 'past_day' };
+  if (businessDate > currentBusinessDate) return { ok: false, why: 'future_day' };
+  if (row?.status === 'locked') return { ok: false, why: 'day_closed' };
+  if (door === 'open') return { ok: false, why: 'already_open' };
+  return { ok: true };
+}
+
 export type CloseKind = 'first' | 'reclose';
 
 export function closeKindOf(row: { status: ClosingStatus } | null): CloseKind | 'already_locked' {

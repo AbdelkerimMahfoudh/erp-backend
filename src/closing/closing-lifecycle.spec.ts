@@ -8,6 +8,9 @@ import {
   reconcileDiscrepancy,
   reopenChoices,
   standingOf,
+  canOpen,
+  doorState,
+  openingOf,
 } from './closing-lifecycle';
 
 const today = '2026-09-23';
@@ -83,6 +86,36 @@ describe('freshCounts', () => {
     expect(freshCounts([{ key: 'cash', countable: true, counted: 1, isSkipped: false, countedAt: t0 }], null).complete).toBe(
       true,
     );
+  });
+});
+
+describe('the door (0077)', () => {
+  const ev = (...kinds: string[]) => kinds.map((kind, i) => ({ kind, at: new Date(2026, 8, 24, 7, i) }));
+
+  it('is never opened until somebody opens it — sales and the 06:00 boundary do not count', () => {
+    expect(doorState([])).toBe('never_opened');
+    expect(doorState(ev('count_saved', 'day_started_early'))).toBe('never_opened');
+    expect(doorState(ev('opened'))).toBe('open');
+    expect(doorState(ev('opened', 'closed'))).toBe('closed');
+    expect(doorState(ev('opened', 'closed', 'reopened'))).toBe('open');
+    expect(doorState(ev('closed', 'auto_reopened', 'reclosed'))).toBe('closed');
+  });
+
+  it('names the latest opening, or nothing when none was recorded', () => {
+    expect(openingOf(ev('count_saved', 'closed'))).toBeNull();
+    expect(openingOf(ev('opened', 'closed'))?.kind).toBe('opened');
+    expect(openingOf(ev('opened', 'closed', 'reopened', 'reclosed'))?.kind).toBe('reopened');
+  });
+
+  it('opens only the current business date, never a closed day, and never twice', () => {
+    const day = '2026-09-24';
+    expect(canOpen(null, 'never_opened', day, day)).toEqual({ ok: true });
+    expect(canOpen({ status: 'counted', businessDate: day }, 'closed', day, day)).toEqual({ ok: true });
+    expect(canOpen(null, 'open', day, day)).toEqual({ ok: false, why: 'already_open' });
+    expect(canOpen({ status: 'reopened', businessDate: day }, 'open', day, day)).toEqual({ ok: false, why: 'already_open' });
+    expect(canOpen({ status: 'locked', businessDate: day }, 'closed', day, day)).toEqual({ ok: false, why: 'day_closed' });
+    expect(canOpen(null, 'never_opened', '2026-09-23', day)).toEqual({ ok: false, why: 'past_day' });
+    expect(canOpen(null, 'never_opened', '2026-09-25', day)).toEqual({ ok: false, why: 'future_day' });
   });
 });
 
