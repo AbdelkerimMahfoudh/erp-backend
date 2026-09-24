@@ -402,32 +402,44 @@ export class UserManagementService {
       throw new ConflictException('Closing can only be delegated to a Store Manager or Store Employee in that branch');
     }
     const permission = await this.delegatedPermission(CLOSING_PERMISSION);
-    const holders = await this.db.userBranchPermission.findMany({
-      where: { permissionId: permission.id, userBranch: { branchId: uuidToBin(branchIdStr) } },
-      select: { userBranchId: true },
-    });
-    const already = holders.some((g) => g.userBranchId.equals(assignment.id));
-    const verdict = delegationAllowed(holders.length, already);
-    if (!verdict.ok) {
-      throw new ConflictException({
-        code: 'closing_delegates_limit',
-        message: `Closing can be delegated to at most ${CLOSING_DELEGATES_MAX} people per branch; revoke one first`,
-        max: CLOSING_DELEGATES_MAX,
-      });
-    }
+    const branchId = uuidToBin(branchIdStr);
+    /**
+     * Counting the holders and inserting the new one happen under a lock on the
+     * branch row (docs/51 §9.3): two grants made at the same moment are
+     * serialised, so the second one sees the first and the limit of two holds.
+     */
+    let created = false;
     try {
-      await this.db.userBranchPermission.create({
-        data: {
-          companyId: this.tenant.companyId(),
-          userBranchId: assignment.id,
-          permissionId: permission.id,
-          grantedById: this.tenant.requireUserId(),
-        },
+      created = await this.db.$transaction(async (tx) => {
+        await tx.$queryRaw(Prisma.sql`SELECT id FROM branches WHERE id = ${branchId} FOR UPDATE`);
+        const holders = await tx.userBranchPermission.findMany({
+          where: { permissionId: permission.id, userBranch: { branchId } },
+          select: { userBranchId: true },
+        });
+        const already = holders.some((g) => g.userBranchId.equals(assignment.id));
+        const verdict = delegationAllowed(holders.length, already);
+        if (!verdict.ok) {
+          throw new ConflictException({
+            code: 'closing_delegates_limit',
+            message: `Closing can be delegated to at most ${CLOSING_DELEGATES_MAX} people per branch; revoke one first`,
+            max: CLOSING_DELEGATES_MAX,
+          });
+        }
+        if (already) return false;
+        await tx.userBranchPermission.create({
+          data: {
+            companyId: this.tenant.companyId(),
+            userBranchId: assignment.id,
+            permissionId: permission.id,
+            grantedById: this.tenant.requireUserId(),
+          },
+        });
+        return true;
       });
-      await this.recordDelegation('create', userIdStr, branchIdStr, assignment.branchName, CLOSING_PERMISSION);
     } catch (e) {
       if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
     }
+    if (created) await this.recordDelegation('create', userIdStr, branchIdStr, assignment.branchName, CLOSING_PERMISSION);
     return this.getOne(userIdStr);
   }
 

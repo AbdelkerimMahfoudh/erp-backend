@@ -205,7 +205,10 @@ const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
     k !== 'price.edit' &&
     k !== 'import.run' &&
     // 0076: starting a shop's day early is the Owner's call alone.
-    k !== 'closing.start_early',
+    k !== 'closing.start_early' &&
+    // 0078: closing authority is the Owner and at most two named delegates —
+    // never a role that happens to exist (docs/51 §12.5).
+    k !== 'closing.perform',
 );
 
 /**
@@ -401,7 +404,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
     'unit.add', 'unit.transfer',
     'purchase.manage', 'supplier.manage', 'expense.manage',
-    'closing.perform', 'report.view',
+    // 0078: `closing.perform` removed — the Owner and the two delegates only.
+    'report.view',
   ],
   sales_employee: ['sale.create', 'sale.return', 'discount.apply', 'unit.add'],
   warehouse_employee: ['unit.add', 'unit.transfer'],

@@ -273,6 +273,25 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     expect(repair).not.toMatch(/INSERT INTO/);
   });
 
+  it('0078 takes closing.perform from administrator and branch_manager, and from nobody else', () => {
+    /*
+     * Closing authority is the Owner and at most two named delegates (0076,
+     * docs/51 §12.5). Both roles still held the key by the matrix; no user holds
+     * either role on live. The matrix and the migration must agree, and the
+     * Owner — and the store roles, which never held it by role — are untouched.
+     */
+    const repair = sqlOf('0078_closing_report_and_payment_corrections');
+    expect(revokedInSql(repair, 'administrator')).toEqual(['closing.perform']);
+    expect(revokedInSql(repair, 'branch_manager')).toEqual(['closing.perform']);
+    expect(ROLE_PERMISSIONS.administrator).not.toContain('closing.perform');
+    expect(ROLE_PERMISSIONS.branch_manager).not.toContain('closing.perform');
+    expect(ROLE_PERMISSIONS.owner).toContain('closing.perform');
+    for (const role of ['owner', 'store_manager', 'store_employee'] as const) {
+      expect(revokedInSql(repair, role)).toEqual([]);
+    }
+    expect(repair).not.toMatch(/INSERT INTO `role_permissions`/);
+  });
+
   it('the backfill never touches owner or administrator', () => {
     // Owner must be unchanged, and administrator is an internal SaaS role that
     // has no business in a store-role migration.
