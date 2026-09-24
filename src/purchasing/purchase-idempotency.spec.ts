@@ -121,6 +121,8 @@ function makeService(companyId: Buffer = COMPANY) {
     } as never,
     { enqueueDailyRecompute: jest.fn(), enqueueBranchRefresh: jest.fn() } as never,
     { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
+    // The day is never closed here: a purchase reopens nothing (D10 is proven on the live copy).
+    { autoReopenTx: async () => ({ reopened: false, closingId: null, reopenCount: 0, at: null }), afterReopenCommitted: async () => undefined } as never,
   );
 
   return { service, purchases, learn: () => learnCalls };

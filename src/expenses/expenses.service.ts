@@ -9,7 +9,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
-import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
+import { dateKey, BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import {
   assertAmount,
   assertClassAndDueDate,
@@ -203,16 +203,16 @@ export class ExpensesService {
     const confirmationDate = dateValue(day);
 
     /**
-     * Only a VARIABLE expense touches today's till, so only it needs today
-     * open. A fixed expense is recognised on its due date and would not change
-     * a closed day's figures either way.
+     * A VARIABLE expense lands on today, so today must be open. A FIXED one lands
+     * on its own due date — and changes THAT day's expected money and result. If
+     * the due date is a closed day, confirming it now would change a signed-off
+     * report without anybody reopening it, so it is refused the same way (D10).
      */
-    if (expense.expenseClass === 'variable') {
-      const closing = await this.db.dailyClosing.findUnique({
-        where: { branchId_closingDate: { branchId: expense.branchId!, closingDate: confirmationDate } },
-      });
-      assertDayOpen(closing, day);
-    }
+    const landsOn = expense.expenseClass === 'fixed' && expense.dueDate ? dateKey(expense.dueDate) : day;
+    const closing = await this.db.dailyClosing.findUnique({
+      where: { branchId_closingDate: { branchId: expense.branchId!, closingDate: dateValue(landsOn) } },
+    });
+    assertDayOpen(closing, landsOn);
 
     const moved = await this.db.expense.updateMany({
       where: { id: expense.id, companyId, version: dto.expectedVersion, status: 'reported' },

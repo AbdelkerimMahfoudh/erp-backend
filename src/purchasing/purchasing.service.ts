@@ -19,6 +19,7 @@ import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
 import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
+import { ClosingService, type AutoReopenResult } from '../closing/closing.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
 
@@ -127,6 +128,7 @@ export class PurchasingService {
     private readonly outbox: RecognitionOutboxService,
     @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
     private readonly businessDay: BusinessDayService,
+    private readonly closing: ClosingService,
   ) {}
 
   async createPurchase(dto: CreatePurchaseDto) {
@@ -318,6 +320,8 @@ export class PurchasingService {
     preparedStock.sort((a, b) => Buffer.compare(a.productId, b.productId));
 
     let purchaseId: Buffer;
+    let reopen: AutoReopenResult | null = null;
+    let paidDay: string | null = null;
     try {
       /**
        * Retried only if InnoDB rolled the whole transaction back for a lock
@@ -394,6 +398,7 @@ export class PurchasingService {
          * nothing is owed. Closing and the period summary read this row as money
          * leaving the drawer (cash) or the named account.
          */
+        const payDay = await this.businessDay.assign(branchId, new Date(), tx as unknown as Prisma.TransactionClient);
         await tx.supplierPayment.create({
           data: {
             id: newUuidV7Bin(),
@@ -405,10 +410,19 @@ export class PurchasingService {
             receivingAccountId: account?.id ?? null,
             accountLabelSnapshot: account?.label ?? null,
             // The business date the money left on (0076).
-            businessDate: dateValue(await this.businessDay.assign(branchId, new Date(), tx as unknown as Prisma.TransactionClient)),
+            businessDate: dateValue(payDay),
             createdById: this.tenant.userId() ?? null,
           },
         });
+        /**
+         * Money left the drawer or an account on this business day. If the day was
+         * already closed, it reopens — as a sale does — so the payment is in the
+         * next close's figures instead of silently outside every close (D10).
+         */
+        paidDay = payDay;
+        reopen = amountPaid > 0
+          ? await this.closing.autoReopenTx(tx as never, { branchId, businessDate: payDay, cause: { kind: 'purchase', id: pid } })
+          : null;
 
         await this.audit.recordTx(tx, {
           entityType: 'Purchase',
@@ -460,6 +474,9 @@ export class PurchasingService {
       }
       throw e;
     }
+
+    const reopened = reopen as AutoReopenResult | null;
+    if (reopened?.reopened && paidDay) void this.closing.afterReopenCommitted(branchId, paidDay, reopened);
 
     // 5. Post-commit side effects: notifications + recognition learning.
     // Receiving is the STRONGEST learning signal, and only fires on a confirmed

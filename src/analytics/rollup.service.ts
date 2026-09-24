@@ -86,7 +86,32 @@ interface ValuationAcc {
 export class RollupService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** The recompute in flight for each branch-day, so a second caller waits for it rather than interleaving. */
+  private readonly inFlight = new Map<string, Promise<void>>();
+
+  /**
+   * Recompute one branch-day — one at a time per branch-day (docs/51 §12.6).
+   *
+   * The recompute replaces derived rows (delete, then insert). Two callers at the
+   * same moment — a close and a correction approval, two taps on Close — would
+   * interleave those steps and collide on the unique keys, failing a request whose
+   * own work had already committed. Each caller now runs after the one before it
+   * for the same branch-day; both compute the same figures from the same records.
+   * The API is one process, as the in-process rollup queue already assumes.
+   */
   async recomputeDaily(companyId: Buffer, branchId: Buffer, day: string): Promise<void> {
+    const key = `${branchId.toString('hex')}:${day}`;
+    const previous = this.inFlight.get(key) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => this.recomputeDailyNow(companyId, branchId, day));
+    this.inFlight.set(key, run);
+    try {
+      await run;
+    } finally {
+      if (this.inFlight.get(key) === run) this.inFlight.delete(key);
+    }
+  }
+
+  private async recomputeDailyNow(companyId: Buffer, branchId: Buffer, day: string): Promise<void> {
     // The day is a STORED business date (0076): every sale carries the date it
     // was assigned when written, so this recompute can never move a sale
     // between days, whatever the zone or the rule says now.
@@ -261,6 +286,9 @@ export class RollupService {
         AND branch_id = ${branchId}
         AND status = 'approved'
         AND correction_date = ${day}
+        -- Money coming BACK only: a payment reclassified to another channel (0078) moves money
+        -- between channels, and the closing's channel figures carry both of its legs.
+        AND target_kind IN ('refund_payout', 'supplier_settlement')
     `);
     const correctionsTotal = round2(toNum(correctionRows[0].paid_total));
     const correctionsCash = round2(toNum(correctionRows[0].paid_cash));
@@ -274,63 +302,78 @@ export class RollupService {
     // would leave every reader guessing whether the sign was already applied.
     const netProfit = round2(grossProfit - returnsGrossProfit - expenses);
 
-    await this.prisma.dailyRollup.upsert({
-      where: { branchId_day: { branchId, day: dayDate } },
-      create: {
-        id: newUuidV7Bin(),
-        companyId,
-        branchId,
-        day: dayDate,
-        revenue,
-        cogs,
-        grossProfit,
-        salesCount: toNum(totals[0].sales_count),
-        qtySold: toNum(totals[0].qty_sold),
-        expenses,
-        netProfit,
-        returnsRevenue,
-        returnsCogs,
-        returnsAdjustments,
-        returnsGrossProfit,
-        returnsCount,
-        refundsPaidTotal,
-        refundsPaidCash,
-        refundsPaidCount,
-        correctionsTotal,
-        correctionsCash,
-        correctionsCount,
-        expensesCash,
-        expensesCount,
-        expensesFixed,
-        expensesSalary,
-        refreshedAt: now,
-      },
-      update: {
-        revenue,
-        cogs,
-        grossProfit,
-        salesCount: toNum(totals[0].sales_count),
-        qtySold: toNum(totals[0].qty_sold),
-        expenses,
-        netProfit,
-        returnsRevenue,
-        returnsCogs,
-        returnsAdjustments,
-        returnsGrossProfit,
-        returnsCount,
-        refundsPaidTotal,
-        refundsPaidCash,
-        refundsPaidCount,
-        correctionsTotal,
-        correctionsCash,
-        correctionsCount,
-        expensesCash,
-        expensesCount,
-        expensesFixed,
-        expensesSalary,
-        refreshedAt: now,
-      },
-    });
+    /**
+     * Two recomputes of the same branch-day at the same moment — a close and a
+     * correction approval, or two taps — both find no row and both insert; the
+     * loser meets the unique key. The row is derived and both computed the same
+     * figures from the same records, so the loser simply writes again, now as an
+     * update (docs/51 §12.6: a committed correction must never be reported as a
+     * failure because its rollup lost a race).
+     */
+    const write = () =>
+      this.prisma.dailyRollup.upsert({
+        where: { branchId_day: { branchId, day: dayDate } },
+        create: {
+          id: newUuidV7Bin(),
+          companyId,
+          branchId,
+          day: dayDate,
+          revenue,
+          cogs,
+          grossProfit,
+          salesCount: toNum(totals[0].sales_count),
+          qtySold: toNum(totals[0].qty_sold),
+          expenses,
+          netProfit,
+          returnsRevenue,
+          returnsCogs,
+          returnsAdjustments,
+          returnsGrossProfit,
+          returnsCount,
+          refundsPaidTotal,
+          refundsPaidCash,
+          refundsPaidCount,
+          correctionsTotal,
+          correctionsCash,
+          correctionsCount,
+          expensesCash,
+          expensesCount,
+          expensesFixed,
+          expensesSalary,
+          refreshedAt: now,
+        },
+        update: {
+          revenue,
+          cogs,
+          grossProfit,
+          salesCount: toNum(totals[0].sales_count),
+          qtySold: toNum(totals[0].qty_sold),
+          expenses,
+          netProfit,
+          returnsRevenue,
+          returnsCogs,
+          returnsAdjustments,
+          returnsGrossProfit,
+          returnsCount,
+          refundsPaidTotal,
+          refundsPaidCash,
+          refundsPaidCount,
+          correctionsTotal,
+          correctionsCash,
+          correctionsCount,
+          expensesCash,
+          expensesCount,
+          expensesFixed,
+          expensesSalary,
+          refreshedAt: now,
+        },
+      });
+    try {
+      await write();
+    } catch (e) {
+      if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+      await write();
+    }
 
     // 2. Per-product fact — product resolved via COALESCE so serialized units
     //    (product_id NULL, unit_id set) and quantity lines aggregate the same.

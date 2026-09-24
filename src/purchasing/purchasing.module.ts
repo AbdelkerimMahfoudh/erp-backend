@@ -5,10 +5,11 @@ import { TrackingModule } from '../tracking/tracking.module';
 import { RecognitionModule } from '../scanner/recognition.module';
 import { AnalyticsModule } from '../analytics/analytics.module';
 import { PurchasingController } from './purchasing.controller';
+import { ClosingModule } from '../closing/closing.module';
 import { PurchasingService } from './purchasing.service';
 
 @Module({
-  imports: [InventoryModule, NotificationsModule, TrackingModule, RecognitionModule, AnalyticsModule],
+  imports: [InventoryModule, NotificationsModule, TrackingModule, RecognitionModule, AnalyticsModule, ClosingModule],
   controllers: [PurchasingController],
   providers: [PurchasingService],
 })

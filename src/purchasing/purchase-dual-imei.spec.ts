@@ -88,6 +88,8 @@ function makeService(registered: string[] = []) {
     { enqueueTx: jest.fn(async () => {}), processNow: jest.fn(async () => {}) } as never,
     { enqueueBranchRefresh: jest.fn() } as never,
     { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
+    // The day is never closed here: a purchase reopens nothing (D10 is proven on the live copy).
+    { autoReopenTx: async () => ({ reopened: false, closingId: null, reopenCount: 0, at: null }), afterReopenCommitted: async () => undefined } as never,
   );
 
   return { service, created, lookups, stockReceipts: () => stockReceipts };
