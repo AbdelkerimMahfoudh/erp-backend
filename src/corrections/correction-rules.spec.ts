@@ -7,6 +7,7 @@ import {
   assertReasonGiven,
   assertTargetCorrectable,
   fingerprintCorrection,
+  assertReclassifiable,
 } from './correction-rules';
 
 /**
@@ -152,6 +153,53 @@ describe('idempotency fingerprint', () => {
   it('distinguishes the two target kinds', () => {
     expect(fingerprintCorrection({ ...base, targetKind: 'supplier_settlement' })).not.toBe(
       fingerprintCorrection(base),
+    );
+  });
+});
+
+describe('reclassifying a payment to the channel it really reached (0078)', () => {
+  const cashPayment = { amount: 10_000, fromMethod: 'cash' as const, fromAccountId: null };
+  const toBankily = { toMethod: 'account' as const, toAccountId: 'bankily', toAccountActive: true };
+  const code = (f: () => void) => {
+    try {
+      f();
+      return null;
+    } catch (e) {
+      expect(e).toBeInstanceOf(BadRequestException);
+      return ((e as BadRequestException).getResponse() as { code: string }).code;
+    }
+  };
+
+  it('moves all or part of a payment to another channel', () => {
+    expect(code(() => assertReclassifiable(cashPayment, toBankily, 10_000))).toBeNull();
+    expect(code(() => assertReclassifiable(cashPayment, toBankily, 4_000))).toBeNull();
+    expect(code(() => assertReclassifiable({ amount: 8_000, fromMethod: 'account', fromAccountId: 'bankily' }, { toMethod: 'cash', toAccountId: null, toAccountActive: true }, 8_000))).toBeNull();
+    expect(code(() => assertReclassifiable({ amount: 8_000, fromMethod: 'account', fromAccountId: 'bankily' }, { toMethod: 'account', toAccountId: 'masrivi', toAccountActive: true }, 8_000))).toBeNull();
+  });
+
+  it('refuses moving nothing, or more than was paid', () => {
+    expect(code(() => assertReclassifiable(cashPayment, toBankily, 0))).toBe('amount_required');
+    expect(code(() => assertReclassifiable(cashPayment, toBankily, 10_000.01))).toBe('amount_above_payment');
+  });
+
+  it('refuses moving money to the channel it is already in', () => {
+    expect(code(() => assertReclassifiable(cashPayment, { toMethod: 'cash', toAccountId: null, toAccountActive: true }, 1_000))).toBe('same_channel');
+    expect(code(() => assertReclassifiable({ amount: 5_000, fromMethod: 'account', fromAccountId: 'bankily' }, toBankily, 1_000))).toBe('same_channel');
+  });
+
+  it('refuses a destination that could not have been recorded', () => {
+    expect(code(() => assertReclassifiable(cashPayment, { toMethod: 'cash', toAccountId: 'bankily', toAccountActive: true }, 1_000))).toBe('cash_has_no_account');
+    expect(code(() => assertReclassifiable(cashPayment, { toMethod: 'account', toAccountId: null, toAccountActive: true }, 1_000))).toBe('account_required');
+    expect(code(() => assertReclassifiable(cashPayment, { ...toBankily, toAccountActive: false }, 1_000))).toBe('account_inactive');
+  });
+
+  it('where the money goes is part of the request: a retry to another channel is not a retry', () => {
+    const base = { targetKind: 'sale_payment' as const, targetId: 'p1', reason: 'Paid by Bankily' };
+    expect(fingerprintCorrection({ ...base, toMethod: 'account', toAccountId: 'bankily', amount: 4_000 })).not.toBe(
+      fingerprintCorrection({ ...base, toMethod: 'account', toAccountId: 'masrivi', amount: 4_000 }),
+    );
+    expect(fingerprintCorrection({ ...base, toMethod: 'account', toAccountId: 'bankily', amount: 4_000 })).not.toBe(
+      fingerprintCorrection({ ...base, toMethod: 'account', toAccountId: 'bankily', amount: 5_000 }),
     );
   });
 });

@@ -1,5 +1,7 @@
 import 'reflect-metadata';
 import { ClosingController } from './closing.controller';
+import { CorrectionsController } from '../corrections/corrections.controller';
+import { timelinePayload } from './closing.service';
 import { DashboardController } from '../analytics/dashboard.controller';
 import { ConnectionsController } from '../consignment/connections.controller';
 import { UsersController } from '../users/users.controller';
@@ -23,6 +25,35 @@ describe('closing routes and authority (0076)', () => {
 
   it('opening the boutique is whoever may count; a closed day is reopened with the closing authority', () => {
     expect(perms(ClosingController, 'open')).toEqual(['closing.count']);
+  });
+
+  it('the Daily closing report is readable by whoever may count; reading it confers nothing (docs/51 D6)', () => {
+    expect(perms(ClosingController, 'report')).toEqual(['closing.count']);
+    // Closing stays the closing authority — the Owner and at most two delegates.
+    expect(perms(ClosingController, 'close')).toEqual(['closing.perform']);
+    expect(perms(ClosingController, 'reopen')).toEqual(['closing.perform']);
+  });
+
+  it('"Correct a transaction" lists sources to counters, gated again in the service; a preview needs the correction authority', () => {
+    expect(perms(ClosingController, 'sources')).toEqual(['closing.count']);
+    expect(perms(CorrectionsController, 'preview')).toEqual(['financial.correction.request']);
+    expect(perms(CorrectionsController, 'request')).toEqual(['financial.correction.request']);
+    expect(perms(CorrectionsController, 'approve')).toEqual(['financial.correction.approve']);
+  });
+
+  it('the timeline never carries a close’s stored report, sales total or profit (docs/51 §12.1)', () => {
+    const stored = { expectedCash: 28_800, countedCash: null, difference: null, verified: false, unverifiedCount: 2, netProfit: 7_750, totalSales: 45_500, report: { result: { grossProfit: 7_750 } }, clientUuid: 'x', verification: { reason: 'App down' } };
+    const shown = timelinePayload('closed', stored);
+    expect(shown).toEqual({ expectedCash: 28_800, countedCash: null, difference: null, verified: false, unverifiedCount: 2 });
+    expect(JSON.stringify(timelinePayload('reclosed', stored))).not.toMatch(/netProfit|totalSales|report|grossProfit/);
+    expect(timelinePayload('unknown_kind', stored)).toEqual({});
+  });
+
+  it('by role, only the Owner holds the closing authority (0078); every delegate is named', () => {
+    for (const role of ['administrator', 'branch_manager', 'store_manager', 'store_employee'] as const) {
+      expect(ROLE_PERMISSIONS[role]).not.toContain('closing.perform');
+    }
+    expect(ROLE_PERMISSIONS.owner).toContain('closing.perform');
   });
 
   it('the business day and the live view are readable by whoever may count', () => {

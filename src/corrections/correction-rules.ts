@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
  * consequential judgement in the application.
  */
 
-export type CorrectionKind = 'refund_payout' | 'supplier_settlement';
+export type CorrectionKind = 'refund_payout' | 'supplier_settlement' | 'sale_payment';
 export type CorrectionStatus = 'requested' | 'approved' | 'rejected';
 
 /**
@@ -127,15 +127,62 @@ export function fingerprintCorrection(input: {
   targetId: string;
   reason: string;
   supportingReference?: string | null;
+  toMethod?: 'cash' | 'account' | null;
+  toAccountId?: string | null;
+  amount?: number | null;
 }): string {
+  const parts = [input.targetKind, input.targetId, input.reason.trim(), (input.supportingReference ?? '').trim()];
+  // A reclassification is also defined by where the money goes and how much of it (0078).
+  if (input.targetKind === 'sale_payment') parts.push(input.toMethod ?? '', input.toAccountId ?? '', String(input.amount ?? ''));
   return createHash('sha256')
-    .update(
-      [
-        input.targetKind,
-        input.targetId,
-        input.reason.trim(),
-        (input.supportingReference ?? '').trim(),
-      ].join('|'),
-    )
+    .update(parts.join('|'))
     .digest('hex');
+}
+
+// ── Reclassifying a payment to the channel it really reached (0078, docs/51 D9) ──
+
+export interface PaymentTarget {
+  amount: number;
+  /** Where the payment was recorded: cash, or an account (NULL = unattributed). */
+  fromMethod: 'cash' | 'account';
+  fromAccountId: string | null;
+}
+
+export interface Destination {
+  toMethod: 'cash' | 'account';
+  toAccountId: string | null;
+  /** Whether the destination account is active; irrelevant for cash. */
+  toAccountActive: boolean;
+}
+
+/**
+ * A payment recorded against the wrong channel — Cash for Bankily, one account for
+ * another, or part of it — is moved to the channel it really reached. Nothing else
+ * about the sale changes: the amount collected stays the same, so what the customer
+ * owes stays the same.
+ *
+ * Refused, by name: moving nothing or more than was paid; moving money to the
+ * channel it is already in; cash that names an account or an account that names
+ * none; an inactive account.
+ */
+export function assertReclassifiable(target: PaymentTarget, to: Destination, amount: number): void {
+  if (!(amount > 0)) {
+    throw new BadRequestException({ code: 'amount_required', message: 'Say how much of the payment went to another channel.' });
+  }
+  if (Math.round(amount * 100) > Math.round(target.amount * 100)) {
+    throw new BadRequestException({ code: 'amount_above_payment', message: 'You cannot move more than the payment recorded.' });
+  }
+  if (to.toMethod === 'cash' && to.toAccountId) {
+    throw new BadRequestException({ code: 'cash_has_no_account', message: 'Cash belongs to no account.' });
+  }
+  if (to.toMethod === 'account' && !to.toAccountId) {
+    throw new BadRequestException({ code: 'account_required', message: 'Say which account the money reached.' });
+  }
+  if (to.toMethod === 'account' && !to.toAccountActive) {
+    throw new BadRequestException({ code: 'account_inactive', message: 'That account is no longer active.' });
+  }
+  const same = to.toMethod === target.fromMethod && (to.toAccountId ?? null) === (target.fromAccountId ?? null);
+  if (same) {
+    throw new BadRequestException({ code: 'same_channel', message: 'The payment is already recorded in that channel.' });
+  }
 }

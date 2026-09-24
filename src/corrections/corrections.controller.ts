@@ -6,6 +6,7 @@ import {
   DecideCorrectionDto,
   ListCorrectionsDto,
   RequestCorrectionDto,
+  PreviewCorrectionDto,
 } from './dto/correction.dto';
 
 /**
@@ -39,6 +40,17 @@ export class CorrectionsController {
    * Declared BEFORE `:id`, or Nest reads "pending" as a correction id and every
    * request answers 404 — the same ordering trap `refunds/summary` hit.
    */
+  /**
+   * What reclassifying a payment would do (0078): the before and after, the two
+   * legs and the day they post to — nothing is written. Same authority as asking.
+   */
+  @Post('preview')
+  @RequirePermissions('financial.correction.request')
+  @ApiOperation({ summary: 'Preview moving a payment to the channel it really reached' })
+  preview(@Body() dto: PreviewCorrectionDto) {
+    return this.corrections.preview(dto);
+  }
+
   @Get()
   @RequirePermissions('financial.correction.request')
   @ApiOperation({ summary: 'Corrections, newest first' })

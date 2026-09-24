@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, Min } from 'class-validator';
+import { IsEnum, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Length, Min } from 'class-validator';
+import { IsMoney } from '../../common/money/is-money.decorator';
 
 /**
  * Asking for a confirmed payment to be corrected.
@@ -10,13 +11,35 @@ import { IsEnum, IsInt, IsOptional, IsString, IsUUID, Length, Min } from 'class-
  * reverses — there is no field here through which a wrong figure could enter.
  */
 export class RequestCorrectionDto {
-  @ApiProperty({ enum: ['refund_payout', 'supplier_settlement'] })
-  @IsEnum(['refund_payout', 'supplier_settlement'])
-  targetKind!: 'refund_payout' | 'supplier_settlement';
+  @ApiProperty({ enum: ['refund_payout', 'supplier_settlement', 'sale_payment'] })
+  @IsEnum(['refund_payout', 'supplier_settlement', 'sale_payment'])
+  targetKind!: 'refund_payout' | 'supplier_settlement' | 'sale_payment';
 
-  @ApiProperty({ description: 'The confirmed refund payout or supplier settlement being corrected.' })
+  @ApiProperty({ description: 'The confirmed refund payout, supplier settlement or sale payment being corrected.' })
   @IsUUID()
   targetId!: string;
+
+  /**
+   * `sale_payment` only (0078): the channel the money really reached. A payout or a
+   * settlement correction carries no destination — its movement is the exact
+   * opposite of what was paid.
+   */
+  @ApiPropertyOptional({ enum: ['cash', 'account'], description: 'sale_payment only: where the money really went' })
+  @IsOptional()
+  @IsIn(['cash', 'account'])
+  toMethod?: 'cash' | 'account';
+
+  @ApiPropertyOptional({ format: 'uuid', description: 'sale_payment only: the account the money really reached' })
+  @IsOptional()
+  @IsUUID()
+  toAccountId?: string;
+
+  /** `sale_payment` only: how much of the payment went elsewhere; the whole payment when omitted. */
+  @ApiPropertyOptional({ description: 'sale_payment only: the part of the payment that went elsewhere' })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @IsMoney({ min: 0.01 })
+  amount?: number;
 
   @ApiProperty({
     description:
@@ -35,6 +58,32 @@ export class RequestCorrectionDto {
   @ApiProperty({ description: 'Idempotency key. An offline retry must not record two corrections.' })
   @IsUUID()
   clientUuid!: string;
+}
+
+/** What a reclassification would do, before anybody asks for it (0078). */
+export class PreviewCorrectionDto {
+  @ApiProperty({ enum: ['sale_payment'] })
+  @IsEnum(['sale_payment'])
+  targetKind!: 'sale_payment';
+
+  @ApiProperty()
+  @IsUUID()
+  targetId!: string;
+
+  @ApiProperty({ enum: ['cash', 'account'] })
+  @IsIn(['cash', 'account'])
+  toMethod!: 'cash' | 'account';
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  toAccountId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @IsMoney({ min: 0.01 })
+  amount?: number;
 }
 
 /**
