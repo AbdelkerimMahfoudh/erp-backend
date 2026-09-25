@@ -25,6 +25,13 @@ export const FINANCIAL_FIELDS: ReadonlySet<string> = new Set([
   'returnsCostCredited',
   'resultBeforeFixed',
   'resultAfterExpenses',
+  // Results' cost side and its profit comparison (docs/53 D35): each reached a caller without cost.view.
+  'netOperatingProfit',
+  'netCogs',
+  'returnsCogs',
+  'cancelledCogs',
+  'returnsGrossProfit',
+  'cancelledCostCredited',
   // inventory valuation
   'inventoryValue',
   'expectedProfit',
