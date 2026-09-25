@@ -103,6 +103,8 @@ export class SummaryService {
       returnsRevenue: current.returnsRevenue,
       cogs: current.cogs,
       returnsCogs: current.returnsCogs,
+      cancelledRevenue: current.cancelledRevenue,
+      cancelledCogs: current.cancelledCogs,
       expenses: current.expenses,
     });
 
@@ -111,6 +113,8 @@ export class SummaryService {
       returnsRevenue: previous.returnsRevenue,
       cogs: previous.cogs,
       returnsCogs: previous.returnsCogs,
+      cancelledRevenue: previous.cancelledRevenue,
+      cancelledCogs: previous.cancelledCogs,
       expenses: previous.expenses,
     });
 
@@ -218,6 +222,8 @@ export class SummaryService {
       expensesCount: rows.reduce((a, r) => a + Number(r.expensesCount ?? 0), 0),
       returnsRevenue: sum((r) => r.returnsRevenue),
       returnsCogs: sum((r) => r.returnsCogs),
+      cancelledRevenue: sum((r) => r.cancelledRevenue),
+      cancelledCogs: sum((r) => r.cancelledCogs),
       refundsPaid: sum((r) => r.refundsPaidTotal),
       correctionsCash: sum((r) => r.correctionsCash),
       days: rows.length,

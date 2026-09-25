@@ -1,6 +1,14 @@
 import { Prisma } from '@prisma/client';
 import { binToUuid } from '../common/utils/uuid.util';
-import type { ChannelSplit, CollectedForSales, ExpenseLine, ReturnFigures, SalesFigures } from './closing-report';
+import type {
+  CancellationFigures,
+  ChannelSplit,
+  CollectedForSales,
+  ExpenseLine,
+  ExpenseReversalLine,
+  ReturnFigures,
+  SalesFigures,
+} from './closing-report';
 import { MISSING_COST_EPSILON } from './closing-report';
 
 /**
@@ -79,7 +87,74 @@ export async function collectedForSales(db: RawRunner, companyId: Buffer, branch
        AND p.business_date <= ${date}
      GROUP BY p.kind`);
   const of = (k: string) => round2(num(rows.find((r) => r.kind === k)?.total));
-  return { atCheckout: of('at_sale'), laterSameDay: of('collection') };
+  /**
+   * What corrections posted by the end of the date did to that money (0079): the legs
+   * of the date's sales' payments — a payment never received and a cancelled sale's
+   * money given back take it out; a move between channels puts it back in elsewhere
+   * and nets to zero. A correction on a later day belongs to that day, never here.
+   */
+  const [adj] = await db.$queryRaw<{ total: unknown }[]>(Prisma.sql`
+    SELECT COALESCE(SUM(IF(l.direction = 'in', l.amount, -l.amount)), 0) AS total
+      FROM financial_correction_legs l
+      JOIN financial_corrections fc ON fc.id = l.correction_id
+      JOIN payments p ON p.id = l.source_payment_id
+      JOIN sales s ON s.id = p.sale_id
+     WHERE fc.company_id = ${companyId} AND s.branch_id = ${branchId}
+       AND s.business_date = ${date} AND s.is_reversed = 0
+       AND fc.status = 'approved' AND fc.correction_date <= ${date}`);
+  return { atCheckout: of('at_sale'), laterSameDay: of('collection'), corrections: round2(num(adj?.total)) };
+}
+
+/**
+ * Sales cancelled ON the date (0079), whatever day they were sold: their value and
+ * recorded cost come off this date's result, never off the day they were sold. The
+ * lines of a cancelled sale with no recorded cost make the result incalculable here
+ * too, exactly as they did on their own day.
+ */
+export async function cancellationFigures(db: RawRunner, companyId: Buffer, branchId: Buffer, date: string): Promise<CancellationFigures> {
+  const [head] = await db.$queryRaw<{ n: bigint; value: unknown; cost: unknown; own: unknown }[]>(Prisma.sql`
+    SELECT COUNT(*) AS n, COALESCE(SUM(s.total), 0) AS value, COALESCE(SUM(s.total_cost), 0) AS cost,
+           COALESCE(SUM(IF(s.business_date = ${date}, s.total, 0)), 0) AS own
+      FROM financial_corrections fc
+      JOIN sales s ON s.id = fc.target_sale_id
+     WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
+       AND fc.target_kind = 'sale' AND fc.status = 'approved' AND fc.correction_date = ${date}`);
+  const [lines] = await db.$queryRaw<{ missing: unknown }[]>(Prisma.sql`
+    SELECT COALESCE(SUM(si.cost <= ${MISSING_COST_EPSILON}), 0) AS missing
+      FROM financial_corrections fc
+      JOIN sale_items si ON si.sale_id = fc.target_sale_id AND si.voided = 0
+     WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
+       AND fc.target_kind = 'sale' AND fc.status = 'approved' AND fc.correction_date = ${date}`);
+  return {
+    count: Number(head?.n ?? 0),
+    value: round2(num(head?.value)),
+    cost: round2(num(head?.cost)),
+    missingCostLines: Number(num(lines?.missing)),
+    ofTheseSales: round2(num(head?.own)),
+  };
+}
+
+/** Confirmed expenses reversed ON the date (0079), whatever day they were recorded. */
+export async function expenseReversalLines(db: RawRunner, companyId: Buffer, branchId: Buffer, date: string): Promise<ExpenseReversalLine[]> {
+  const rows = await db.$queryRaw<
+    { id: Buffer; expense_id: Buffer; category: string; expense_class: string; is_salary: number; amount: unknown; method: string; label: string | null }[]
+  >(Prisma.sql`
+    SELECT fc.id, e.id AS expense_id, e.category, e.expense_class, e.is_salary, fc.amount, fc.method, fc.account_label_snapshot AS label
+      FROM financial_corrections fc
+      JOIN expenses e ON e.id = fc.target_expense_id
+     WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
+       AND fc.target_kind = 'expense' AND fc.status = 'approved' AND fc.correction_date = ${date}
+     ORDER BY fc.amount DESC, fc.id`);
+  return rows.map((r) => ({
+    correctionId: binToUuid(r.id),
+    expenseId: binToUuid(r.expense_id),
+    category: r.category,
+    expenseClass: r.expense_class === 'fixed' ? 'fixed' : 'variable',
+    isSalary: Number(r.is_salary) === 1,
+    amount: round2(num(r.amount)),
+    method: r.method === 'cash' ? 'cash' : 'account',
+    accountLabel: r.label,
+  }));
 }
 
 /**
@@ -213,6 +288,9 @@ export async function movementFingerprint(db: RawRunner, companyId: Buffer, bran
       (SELECT CONCAT(COUNT(*), '/', COALESCE(SUM(amount), 0)) FROM financial_corrections
         WHERE company_id = ${companyId} AND branch_id = ${branchId} AND status = 'approved' AND correction_date = ${date}) AS c,
       (SELECT CONCAT(COUNT(*), '/', COALESCE(SUM(net_refund_due), 0)) FROM return_reversals
-        WHERE company_id = ${companyId} AND branch_id = ${branchId} AND approval_date = ${date}) AS rr`);
+        WHERE company_id = ${companyId} AND branch_id = ${branchId} AND approval_date = ${date}) AS rr,
+      (SELECT CONCAT(COUNT(*), '/', COALESCE(SUM(l.amount), 0)) FROM financial_correction_legs l
+         JOIN financial_corrections fc ON fc.id = l.correction_id
+        WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId} AND fc.status = 'approved' AND fc.correction_date = ${date}) AS l`);
   return JSON.stringify(r ?? {});
 }

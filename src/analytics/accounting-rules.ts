@@ -147,16 +147,22 @@ export interface ProfitInput {
   cogs: number;
   /** COGS credited back by those same approved returns. */
   returnsCogs: number;
-  /** Confirmed operating expenses, including fixed and salaries. */
+  /** Revenue of sales CANCELLED in the period (0079), on the day each was cancelled. */
+  cancelledRevenue?: number;
+  /** Their recorded cost, credited back. */
+  cancelledCogs?: number;
+  /** Confirmed operating expenses, including fixed and salaries — net of reversals (0079). */
   expenses: number;
 }
 
 export interface ProfitBreakdown {
   grossSales: number;
   returnsRevenue: number;
+  cancelledRevenue: number;
   netRevenue: number;
   cogs: number;
   returnsCogs: number;
+  cancelledCogs: number;
   netCogs: number;
   grossProfit: number;
   expenses: number;
@@ -171,15 +177,20 @@ export interface ProfitBreakdown {
  * undone would understate profit twice over.
  */
 export function profit(input: ProfitInput): ProfitBreakdown {
-  const netRevenue = round2(input.grossSales - input.returnsRevenue);
-  const netCogs = round2(input.cogs - input.returnsCogs);
+  // A cancelled sale should never have been recorded: its revenue and cost come off, like a return's (0079).
+  const cancelledRevenue = round2(input.cancelledRevenue ?? 0);
+  const cancelledCogs = round2(input.cancelledCogs ?? 0);
+  const netRevenue = round2(input.grossSales - input.returnsRevenue - cancelledRevenue);
+  const netCogs = round2(input.cogs - input.returnsCogs - cancelledCogs);
   const grossProfit = round2(netRevenue - netCogs);
   return {
     grossSales: round2(input.grossSales),
     returnsRevenue: round2(input.returnsRevenue),
+    cancelledRevenue,
     netRevenue,
     cogs: round2(input.cogs),
     returnsCogs: round2(input.returnsCogs),
+    cancelledCogs,
     netCogs,
     grossProfit,
     expenses: round2(input.expenses),

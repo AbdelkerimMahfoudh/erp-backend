@@ -107,7 +107,8 @@ describe('the rollup applies that formula', () => {
   });
 
   it('still subtracts it explicitly from net profit', () => {
-    expect(rollup).toMatch(/grossProfit - returnsGrossProfit - expenses/);
+    // 0079: a cancelled sale's effect is subtracted beside the returns', explicitly too.
+    expect(rollup).toMatch(/grossProfit - returnsGrossProfit - \(cancelledRevenue - cancelledCogs\) - expenses/);
   });
 
   it('takes the figures from the reversal snapshot, never from a live product', () => {

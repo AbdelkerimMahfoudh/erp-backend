@@ -62,10 +62,12 @@ import {
   type ReportPermissions,
 } from './closing-report';
 import {
+  cancellationFigures,
   channelSplits,
   collectedForSales,
   dayActivity,
   expenseLines,
+  expenseReversalLines,
   movementFingerprint,
   openDiscrepancies,
   pendingReports,
@@ -401,16 +403,31 @@ export class ClosingService {
       acknowledged: unverified.length > 0,
       reason: unverified.length > 0 ? reason : null,
     };
-    const frozenReport: ClosingReport = oneStepCash === null
-      ? built.report
-      : {
-          ...built.report,
-          expected: {
-            ...built.report.expected,
-            cash: { ...built.report.expected.cash, counted: oneStepCash, difference, verification: 'counted', countedAt: now.toISOString() },
+    /**
+     * The report as this close records it. A balance nobody checked is stored as the
+     * close leaves it — NOT verified — not as the "not counted yet" it read a moment
+     * before: the stored report and the day read back afterwards must agree, or every
+     * closed day with an unchecked account would claim its figures changed since.
+     */
+    const asClosed = (r: ClosingReport): ClosingReport => ({
+      ...r,
+      expected: {
+        cash: unverified.includes('cash:NONE') ? { ...r.expected.cash, verification: 'not_verified' } : r.expected.cash,
+        accounts: r.expected.accounts.map((a) => (unverified.includes(a.key) ? { ...a, verification: 'not_verified' as const } : a)),
+      },
+    });
+    const frozenReport: ClosingReport = asClosed(
+      oneStepCash === null
+        ? built.report
+        : {
+            ...built.report,
+            expected: {
+              ...built.report.expected,
+              cash: { ...built.report.expected.cash, counted: oneStepCash, difference, verification: 'counted', countedAt: now.toISOString() },
+            },
+            close: { ...built.report.close, unverified, verified: verification.verified, requiresAcknowledgement: unverified.length > 0 },
           },
-          close: { ...built.report.close, unverified, verified: verification.verified, requiresAcknowledgement: unverified.length > 0 },
-        };
+    );
     const frozenVersion = reportVersion(frozenReport);
     const alreadyVersion = already.version;
 
@@ -790,6 +807,7 @@ export class ClosingService {
     const branchId = this.tenant.requireBranchId();
     const held = this.cls.get('permissions');
     const canRequest = held?.has('financial.correction.request') ?? false;
+    const canApprove = held?.has('financial.correction.approve') ?? false;
     const perform = held?.has('closing.perform') ?? false;
     if (!canRequest && !perform) {
       throw new ForbiddenException('Correcting a transaction needs the closing or the correction authority');
@@ -801,8 +819,28 @@ export class ClosingService {
     if (day > today) throw new BadRequestException('That business day has not begun');
     const dayDate = dateValue(day);
     const tz = described.timezone;
+    const corrected = { select: { id: true, status: true } } as const;
 
-    const [payments, refunds, expenses, supplier, corrections] = await Promise.all([
+    const [sales, payments, refunds, expenses, purchases, corrections, pending] = await Promise.all([
+      this.db.sale.findMany({
+        where: { branchId, businessDate: dayDate },
+        orderBy: { soldAt: 'asc' },
+        select: {
+          id: true,
+          invoiceNo: true,
+          total: true,
+          soldAt: true,
+          user: { select: { name: true } },
+          customer: { select: { name: true } },
+          counterparty: { select: { name: true } },
+          corrections: corrected,
+          returnRequests: { select: { status: true } },
+          returnReversals: { select: { id: true } },
+          returns: { select: { id: true } },
+          items: { where: { voided: false }, select: { quantity: true, unit: { select: { status: true } } } },
+          payments: { select: { corrections: corrected } },
+        },
+      }),
       this.db.payment.findMany({
         where: { businessDate: dayDate, sale: { branchId } },
         orderBy: { paidAt: 'asc' },
@@ -815,71 +853,214 @@ export class ClosingService {
           accountLabelSnapshot: true,
           receivingAccountId: true,
           recordedBy: { select: { name: true } },
-          sale: { select: { id: true, invoiceNo: true, businessDate: true } },
-          corrections: { select: { status: true } },
+          sale: { select: { id: true, invoiceNo: true, businessDate: true, customerId: true, counterpartyId: true, corrections: corrected } },
+          corrections: corrected,
         },
       }),
       this.db.refundPayout.findMany({
         where: { branchId, status: 'confirmed', confirmationDate: dayDate },
         select: { id: true, returnRequestId: true, method: true, reportedAmount: true, accountLabelSnapshot: true, confirmedAt: true, correctedById: true },
       }),
-      this.db.$queryRaw<
-        { id: Buffer; category: string; amount: unknown; method: string; label: string | null; confirmed_at: Date | null; expense_class: string }[]
-      >(Prisma.sql`
-        SELECT id, category, amount, method, account_label_snapshot AS label, confirmed_at, expense_class
-          FROM expenses
-         WHERE company_id = ${companyId} AND branch_id = ${branchId} AND status = 'confirmed'
-           AND IF(expense_class = 'fixed', due_date, confirmation_date) = ${day}
-         ORDER BY confirmed_at`),
-      this.db.$queryRaw<{ id: Buffer; amount: unknown; method: string; label: string | null; paid_at: Date; purchase_id: Buffer }[]>(Prisma.sql`
-        SELECT sp.id, sp.amount, sp.method, sp.account_label_snapshot AS label, sp.paid_at, sp.purchase_id
-          FROM supplier_payments sp JOIN purchases pu ON pu.id = sp.purchase_id
-         WHERE sp.company_id = ${companyId} AND pu.branch_id = ${branchId} AND sp.business_date = ${day}
-         ORDER BY sp.paid_at`),
+      this.db.expense.findMany({
+        where: {
+          branchId,
+          status: 'confirmed',
+          OR: [
+            { expenseClass: 'variable', confirmationDate: dayDate },
+            { expenseClass: 'fixed', dueDate: dayDate },
+          ],
+        },
+        orderBy: { confirmedAt: 'asc' },
+        select: { id: true, category: true, amount: true, method: true, accountLabelSnapshot: true, receivingAccountId: true, confirmedAt: true, expenseClass: true, corrections: corrected },
+      }),
+      this.db.supplierPayment.findMany({
+        where: { businessDate: dayDate, purchase: { branchId } },
+        orderBy: { paidAt: 'asc' },
+        select: {
+          id: true,
+          amount: true,
+          method: true,
+          accountLabelSnapshot: true,
+          receivingAccountId: true,
+          paidAt: true,
+          createdBy: { select: { name: true } },
+          corrections: corrected,
+          purchase: {
+            select: {
+              id: true,
+              branchId: true,
+              total: true,
+              corrections: corrected,
+              units: { select: { status: true, branchId: true } },
+              _count: { select: { items: true } },
+            },
+          },
+        },
+      }),
       this.db.financialCorrection.findMany({
         where: { branchId, status: 'approved', correctionDate: dayDate },
-        select: { id: true, targetKind: true, amount: true, method: true, toMethod: true, toAccountLabelSnapshot: true, accountLabelSnapshot: true, decidedAt: true },
+        orderBy: { decidedAt: 'asc' },
+        select: {
+          id: true,
+          targetKind: true,
+          action: true,
+          amount: true,
+          method: true,
+          toMethod: true,
+          toAccountLabelSnapshot: true,
+          accountLabelSnapshot: true,
+          decidedAt: true,
+          reason: true,
+          legs: { select: { direction: true, amount: true } },
+        },
+      }),
+      // What is waiting for the Owner at this branch, whatever day it concerns.
+      this.db.financialCorrection.findMany({
+        where: { branchId, status: 'requested' },
+        orderBy: { requestedAt: 'asc' },
+        take: 50,
+        select: {
+          id: true,
+          targetKind: true,
+          action: true,
+          amount: true,
+          method: true,
+          accountLabelSnapshot: true,
+          toMethod: true,
+          toAccountLabelSnapshot: true,
+          reason: true,
+          requestedAt: true,
+          version: true,
+          requestedBy: { select: { name: true } },
+          targetPayment: { select: { sale: { select: { invoiceNo: true } } } },
+          targetSale: { select: { invoiceNo: true } },
+          targetExpense: { select: { category: true } },
+          // Whether the record already carries an approved correction: two requests raced in,
+          // one was approved, and this one can only be rejected now.
+          targetPaymentId: true,
+          targetSaleId: true,
+          targetExpenseId: true,
+          targetSupplierPaymentId: true,
+          targetPurchaseId: true,
+        },
       }),
     ]);
+    const targetOf = (c: { targetPaymentId: Buffer | null; targetSaleId: Buffer | null; targetExpenseId: Buffer | null; targetSupplierPaymentId: Buffer | null; targetPurchaseId: Buffer | null }) =>
+      c.targetPaymentId ?? c.targetSaleId ?? c.targetExpenseId ?? c.targetSupplierPaymentId ?? c.targetPurchaseId;
+    const pendingTargets = pending.map(targetOf).filter((t): t is Buffer => !!t);
+    const decided = pendingTargets.length
+      ? await this.db.financialCorrection.findMany({
+          where: {
+            status: 'approved',
+            OR: [
+              { targetPaymentId: { in: pendingTargets } },
+              { targetSaleId: { in: pendingTargets } },
+              { targetExpenseId: { in: pendingTargets } },
+              { targetSupplierPaymentId: { in: pendingTargets } },
+              { targetPurchaseId: { in: pendingTargets } },
+            ],
+          },
+          select: { targetPaymentId: true, targetSaleId: true, targetExpenseId: true, targetSupplierPaymentId: true, targetPurchaseId: true },
+        })
+      : [];
+    const alreadyCorrected = new Set(decided.map((d) => targetOf(d)!.toString('hex')));
 
     const time = (d: Date | null) => (d ? localTimeOf(d, tz) : null);
+    const state = (rows: { status: string }[]) => ({
+      approved: rows.some((c) => c.status === 'approved'),
+      requested: rows.some((c) => c.status === 'requested'),
+    });
+    type Action = 'cancel_sale' | 'reverse_payment' | 'reclassify_payment' | 'reverse_expense' | 'reclassify_purchase_payment' | 'cancel_purchase';
     type SourceRow = {
-      kind: 'payment' | 'refund' | 'expense' | 'supplier_payment' | 'correction';
+      kind: 'sale' | 'payment' | 'refund' | 'expense' | 'purchase' | 'correction';
       id: string;
       at: Date | null;
       localTime: string | null;
       amount: number;
-      channel: string;
+      channel: 'cash' | 'account' | null;
       accountLabel: string | null;
       status: string;
       detail: Record<string, unknown>;
       recordedBy: string | null;
-      action: 'reclassify_payment' | 'open_return' | 'open_expense' | 'open_sale' | null;
+      /** Every correction that applies to this record now; the preview has the last word. */
+      actions: Action[];
+      /** The record's own screen, where the flow that corrects it (a return) or its history lives. */
+      open: 'sale' | 'return' | 'expense' | null;
+      /** Why nothing can be done here, when nothing can. */
       refusal: string | null;
     };
+    const why = (s: { approved: boolean; requested: boolean }, done: string) => (s.approved ? done : s.requested ? 'request_pending' : null);
+    const channelOf = (method: string) => (method === 'cash' ? ('cash' as const) : ('account' as const));
+
     const rows: SourceRow[] = [
+      ...sales.map((s): SourceRow => {
+        const c = state(s.corrections);
+        const hasReturn = s.returnRequests.some((r) => r.status !== 'rejected') || s.returnReversals.length > 0 || s.returns.length > 0;
+        const moved = s.items.some((i) => i.unit && i.unit.status !== 'sold');
+        const paymentPending = s.payments.some((p) => state(p.corrections).requested);
+        const refusal = c.approved
+          ? 'sale_cancelled'
+          : c.requested
+            ? 'request_pending'
+            : !canRequest
+              ? 'not_permitted'
+              : hasReturn
+                ? 'sale_has_return'
+                : moved
+                  ? 'unit_not_sold'
+                  : paymentPending
+                    ? 'payment_correction_pending'
+                    : null;
+        return {
+          kind: 'sale',
+          id: binToUuid(s.id),
+          at: s.soldAt,
+          localTime: time(s.soldAt),
+          amount: round2(num(s.total)),
+          channel: null,
+          accountLabel: null,
+          status: c.approved ? 'cancelled' : c.requested ? 'cancellation_requested' : 'recorded',
+          detail: {
+            invoiceNo: s.invoiceNo,
+            items: s.items.reduce((n, i) => n + i.quantity, 0),
+            debtor: s.customer?.name ?? s.counterparty?.name ?? null,
+          },
+          recordedBy: s.user?.name ?? null,
+          actions: refusal ? [] : ['cancel_sale'],
+          open: 'sale',
+          refusal,
+        };
+      }),
       ...payments.map((p): SourceRow => {
-        const approved = p.corrections.some((c) => c.status === 'approved');
-        const pending = p.corrections.some((c) => c.status === 'requested');
-        const refusal = !canRequest ? 'not_permitted' : approved ? 'already_corrected' : pending ? 'request_pending' : null;
+        const saleState = state(p.sale.corrections);
+        const own = state(p.corrections);
+        const refusal = saleState.approved
+          ? 'sale_cancelled'
+          : saleState.requested
+            ? 'sale_cancellation_pending'
+            : why(own, 'already_corrected') ?? (!canRequest ? 'not_permitted' : null);
+        const hasDebtor = !!(p.sale.customerId || p.sale.counterpartyId);
         return {
           kind: 'payment',
           id: binToUuid(p.id),
           at: p.paidAt,
           localTime: time(p.paidAt),
           amount: round2(num(p.amount)),
-          channel: p.method === 'cash' ? 'cash' : 'account',
+          channel: channelOf(p.method),
           accountLabel: p.method === 'cash' ? null : p.accountLabelSnapshot,
-          status: approved ? 'corrected' : pending ? 'correction_requested' : 'recorded',
+          status: saleState.approved ? 'sale_cancelled' : own.approved ? 'corrected' : own.requested ? 'correction_requested' : 'recorded',
           detail: {
             saleId: binToUuid(p.sale.id),
             invoiceNo: p.sale.invoiceNo,
             paymentKind: p.kind,
             olderSale: dateKey(p.sale.businessDate) < day,
             accountId: p.method === 'cash' ? null : p.receivingAccountId ? binToUuid(p.receivingAccountId) : null,
+            // Without a customer to owe it, a payment never received means the sale itself was wrong.
+            reversible: hasDebtor,
           },
           recordedBy: p.recordedBy?.name ?? null,
-          action: refusal ? 'open_sale' : 'reclassify_payment',
+          actions: refusal ? [] : hasDebtor ? ['reclassify_payment', 'reverse_payment'] : ['reclassify_payment'],
+          open: 'sale',
           refusal,
         };
       }),
@@ -889,61 +1070,116 @@ export class ClosingService {
         at: r.confirmedAt,
         localTime: time(r.confirmedAt),
         amount: round2(num(r.reportedAmount)),
-        channel: r.method,
+        channel: r.method === 'cash' ? 'cash' : 'account',
         accountLabel: r.accountLabelSnapshot,
         status: r.correctedById ? 'corrected' : 'confirmed',
         detail: { returnId: binToUuid(r.returnRequestId) },
         recordedBy: null,
-        // The existing Milestone B flow lives on the return itself.
-        action: 'open_return',
+        // The Milestone B correction of a refund lives on the return itself.
+        actions: [],
+        open: 'return',
         refusal: r.correctedById ? 'already_corrected' : null,
       })),
-      ...expenses.map((e): SourceRow => ({
-        kind: 'expense',
-        id: binToUuid(e.id),
-        at: e.confirmed_at,
-        localTime: time(e.confirmed_at),
-        amount: round2(num(e.amount as Prisma.Decimal)),
-        channel: e.method === 'cash' ? 'cash' : 'account',
-        accountLabel: e.label,
-        status: 'confirmed',
-        detail: { category: e.category, expenseClass: e.expense_class },
-        recordedBy: null,
-        action: 'open_expense',
-        // A confirmed expense cannot be corrected yet (owed, docs/51 §13).
-        refusal: 'expense_not_correctable',
-      })),
-      ...supplier.map((sp): SourceRow => ({
-        kind: 'supplier_payment',
-        id: binToUuid(sp.id),
-        at: sp.paid_at,
-        localTime: time(sp.paid_at),
-        amount: round2(num(sp.amount as Prisma.Decimal)),
-        channel: sp.method === 'cash' ? 'cash' : 'account',
-        accountLabel: sp.label,
-        status: 'paid',
-        detail: { purchaseId: binToUuid(sp.purchase_id) },
-        recordedBy: null,
-        action: null,
-        refusal: 'purchase_payment_not_correctable',
-      })),
-      ...corrections.map((c): SourceRow => ({
-        kind: 'correction',
-        id: binToUuid(c.id),
-        at: c.decidedAt,
-        localTime: time(c.decidedAt),
-        amount: round2(num(c.amount)),
-        channel: (c.targetKind === 'sale_payment' ? c.toMethod : c.method) ?? c.method,
-        accountLabel: c.targetKind === 'sale_payment' ? c.toAccountLabelSnapshot : c.accountLabelSnapshot,
-        status: 'approved',
-        detail: { targetKind: c.targetKind, fromMethod: c.method, fromAccountLabel: c.accountLabelSnapshot },
-        recordedBy: null,
-        action: null,
-        refusal: null,
-      })),
+      ...expenses.map((e): SourceRow => {
+        const own = state(e.corrections);
+        const refusal = why(own, 'already_corrected') ?? (!canRequest ? 'not_permitted' : null);
+        return {
+          kind: 'expense',
+          id: binToUuid(e.id),
+          at: e.confirmedAt,
+          localTime: time(e.confirmedAt),
+          amount: round2(num(e.amount)),
+          channel: e.method === 'cash' ? 'cash' : 'account',
+          accountLabel: e.method === 'cash' ? null : e.accountLabelSnapshot,
+          status: own.approved ? 'corrected' : own.requested ? 'correction_requested' : 'confirmed',
+          detail: { category: e.category, expenseClass: e.expenseClass },
+          recordedBy: null,
+          actions: refusal ? [] : ['reverse_expense'],
+          open: 'expense',
+          refusal,
+        };
+      }),
+      ...purchases.map((sp): SourceRow => {
+        const own = state(sp.corrections);
+        const purchase = sp.purchase!;
+        const cancel = state(purchase.corrections);
+        const moved = purchase.units.some((u) => u.status !== 'in_stock' || !u.branchId.equals(purchase.branchId));
+        const refusal = cancel.approved
+          ? 'purchase_cancelled'
+          : cancel.requested
+            ? 'purchase_cancellation_pending'
+            : !canRequest
+              ? 'not_permitted'
+              : null;
+        const actions: Action[] = refusal ? [] : [...(own.approved || own.requested ? [] : (['reclassify_purchase_payment'] as Action[])), ...(moved || own.requested ? [] : (['cancel_purchase'] as Action[]))];
+        return {
+          kind: 'purchase',
+          id: binToUuid(sp.id),
+          at: sp.paidAt,
+          localTime: time(sp.paidAt),
+          amount: round2(num(sp.amount)),
+          channel: channelOf(sp.method),
+          accountLabel: sp.method === 'cash' ? null : sp.accountLabelSnapshot,
+          status: cancel.approved ? 'cancelled' : cancel.requested ? 'cancellation_requested' : own.approved ? 'corrected' : own.requested ? 'correction_requested' : 'paid',
+          detail: {
+            purchaseId: binToUuid(purchase.id),
+            total: round2(num(purchase.total)),
+            items: purchase._count.items,
+            accountId: sp.method === 'cash' ? null : sp.receivingAccountId ? binToUuid(sp.receivingAccountId) : null,
+            goodsMoved: moved,
+          },
+          recordedBy: sp.createdBy?.name ?? null,
+          actions,
+          open: null,
+          refusal: refusal ?? (actions.length === 0 ? (own.requested ? 'request_pending' : moved ? 'goods_moved' : 'already_corrected') : null),
+        };
+      }),
+      ...corrections.map((c): SourceRow => {
+        const legsIn = round2(c.legs.filter((l) => l.direction === 'incoming').reduce((n, l) => n + num(l.amount), 0));
+        const legsOut = round2(c.legs.filter((l) => l.direction === 'outgoing').reduce((n, l) => n + num(l.amount), 0));
+        return {
+          kind: 'correction',
+          id: binToUuid(c.id),
+          at: c.decidedAt,
+          localTime: time(c.decidedAt),
+          amount: round2(num(c.amount)),
+          channel: c.action === 'reclassify' ? ((c.toMethod as 'cash' | 'account' | null) ?? null) : ((c.method as 'cash' | 'account' | null) ?? null),
+          accountLabel: c.action === 'reclassify' ? c.toAccountLabelSnapshot : c.accountLabelSnapshot,
+          status: 'approved',
+          detail: { targetKind: c.targetKind, action: c.action, fromMethod: c.method, fromAccountLabel: c.accountLabelSnapshot, moneyIn: legsIn, moneyOut: legsOut, reason: c.reason },
+          recordedBy: null,
+          actions: [],
+          open: null,
+          refusal: null,
+        };
+      }),
     ];
     rows.sort((a, b) => (a.at?.getTime() ?? 0) - (b.at?.getTime() ?? 0));
-    return { date: day, today, canRequest, rows };
+
+    return {
+      date: day,
+      today,
+      canRequest,
+      canApprove,
+      rows,
+      /** Requests at this branch waiting for the Owner, whatever day they concern (approved or rejected in place). */
+      pending: pending.map((c) => ({
+        id: binToUuid(c.id),
+        targetKind: c.targetKind,
+        action: c.action,
+        amount: round2(num(c.amount)),
+        method: c.method,
+        accountLabel: c.accountLabelSnapshot,
+        to: c.action === 'reclassify' ? { method: c.toMethod, accountLabel: c.toAccountLabelSnapshot } : null,
+        reason: c.reason,
+        requestedBy: c.requestedBy?.name ?? null,
+        requestedAt: c.requestedAt.toISOString(),
+        version: c.version,
+        label: c.targetSale?.invoiceNo ?? c.targetPayment?.sale.invoiceNo ?? c.targetExpense?.category ?? null,
+        /** Another request for the same record was approved first: this one can only be rejected. */
+        superseded: !!targetOf(c) && alreadyCorrected.has(targetOf(c)!.toString('hex')),
+      })),
+    };
   }
 
   /** Reads every figure of (branch, date) and assembles the full, ungated report. */
@@ -954,13 +1190,15 @@ export class ClosingService {
       include: { channelCounts: true },
     });
     const opening = await this.openingCashDetail(companyId, branchId, day);
-    const [channels, splits, sales, returns, collected, expenses, pending, discrepancies, active] = await Promise.all([
+    const [channels, splits, sales, returns, cancellations, collected, expenses, expenseReversals, pending, discrepancies, active] = await Promise.all([
       this.expectedChannels(companyId, branchId, day, day, opening.amount),
       channelSplits(this.db, companyId, branchId, day),
       salesFigures(this.db, companyId, branchId, day),
       returnFigures(this.db, companyId, branchId, day),
+      cancellationFigures(this.db, companyId, branchId, day),
       collectedForSales(this.db, companyId, branchId, day),
       expenseLines(this.db, companyId, branchId, day),
+      expenseReversalLines(this.db, companyId, branchId, day),
       day === today ? pendingReports(this.db, companyId, branchId) : Promise.resolve(null),
       openDiscrepancies(this.db, companyId, branchId),
       closing ? Promise.resolve(true) : day < today ? dayActivity(this.db, companyId, branchId, day) : Promise.resolve(true),
@@ -998,10 +1236,12 @@ export class ClosingService {
       standing,
       sales,
       returns,
+      cancellations,
       collected,
       channels,
       splits,
       expenses,
+      expenseReversals,
       counts,
       opening,
       pending,
@@ -1009,7 +1249,7 @@ export class ClosingService {
       previousDay,
       closeKind: closeKindOf(closing),
     });
-    const invariantFailures = reportInvariants(report, channels, splits);
+    const invariantFailures = reportInvariants(report, channels, splits, cancellations.ofTheseSales);
     if (invariantFailures.length > 0) {
       this.logger.error(`Daily closing report for ${day} does not reconcile: ${invariantFailures.join('; ')}`);
     }
@@ -2134,29 +2374,20 @@ export class ClosingService {
       GROUP BY fc.method, COALESCE(rp.receiving_account_id, ss.receiving_account_id)
 
       UNION ALL
-      -- A payment reclassified to another channel (0078): the money ENTERS the
-      -- channel it really reached, on the correction's day...
-      SELECT IF(fc.to_method = 'cash', 'cash', 'account'),
-             IF(fc.to_method = 'cash', NULL, fc.to_receiving_account_id),
-             'correctionsIn', SUM(fc.amount)
-      FROM financial_corrections fc
+      -- Every leg of every other correction approved in the range (0078, 0079): money
+      -- reaching or leaving one channel — a payment moved or never received, a sale
+      -- cancelled, an expense reversed, a purchase payment moved or a purchase
+      -- cancelled. The corrected record is never written; its own day's figures and
+      -- snapshots stay as they were.
+      SELECT IF(l.method = 'cash', 'cash', 'account'),
+             IF(l.method = 'cash', NULL, l.receiving_account_id),
+             IF(l.direction = 'in', 'correctionsIn', 'correctionsOut'),
+             SUM(l.amount)
+      FROM financial_correction_legs l
+      JOIN financial_corrections fc ON fc.id = l.correction_id
       WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
-        AND fc.target_kind = 'sale_payment'
         AND fc.status = 'approved' AND fc.correction_date BETWEEN ${fromDay} AND ${toDay}
-      GROUP BY fc.to_method, fc.to_receiving_account_id
-
-      UNION ALL
-      -- ...and LEAVES the channel it was wrongly recorded in. The payment row itself
-      -- is never written; its own day's figures and snapshots stay as they were.
-      SELECT IF(p.method = 'cash', 'cash', 'account'),
-             IF(p.method = 'cash', NULL, p.receiving_account_id),
-             'correctionsOut', SUM(fc.amount)
-      FROM financial_corrections fc
-      JOIN payments p ON p.id = fc.target_payment_id
-      WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
-        AND fc.target_kind = 'sale_payment'
-        AND fc.status = 'approved' AND fc.correction_date BETWEEN ${fromDay} AND ${toDay}
-      GROUP BY IF(p.method = 'cash', 'cash', 'account'), IF(p.method = 'cash', NULL, p.receiving_account_id)
+      GROUP BY l.method, l.receiving_account_id, l.direction
     `);
 
     return rows

@@ -15,14 +15,18 @@ import { closeVerification } from './closing-lifecycle';
  *
  *   Sales     value   = Σ sales.total                         (sales.business_date = D)
  *             returns = Σ return_reversals.net_refund_due      (approval_date = D)
+ *             cancelled = Σ sales.total of sales cancelled on D (correction_date = D, any sale date — 0079)
  *             collected for these sales = Σ payments on D's sales with payments.business_date ≤ D
- *             still owed on these sales = value − collected    (as it stood at the end of D)
+ *                                         + Σ legs of those payments posted by corrections ≤ D (in − out)
+ *             still owed on these sales = value − collected − D's own sales cancelled by the end of D
  *   Money     per channel, from the one channel builder (channels.ts): in = payments + corrections in;
  *             out = confirmed refunds + stock paid + confirmed expenses + corrections out;
  *             payments split by whether the sale is D's (today's sales) or earlier (older debts)
- *   Expenses  confirmed, a variable one on its confirmation date, a fixed one on its due date
- *   Result    net sales = value − returns;  cost of units sold = Σ sales.total_cost − Σ return line_cost;
- *             gross profit = net sales − cost of units sold;  result after expenses = gross profit − expenses
+ *   Expenses  recorded = confirmed, a variable one on its confirmation date, a fixed one on its due date;
+ *             reversed = expense reversals approved on D;  total = recorded − reversed
+ *   Result    net sales = value − returns − cancelled;
+ *             cost of units sold = Σ sales.total_cost − Σ return line_cost − Σ cancelled sales' total_cost;
+ *             gross profit = net sales − cost of units sold;  result after expenses = gross profit − expenses total
  *   Expected  cash = opening + cash in − cash out;  each account: recorded movement (in − out), never a balance
  */
 
@@ -58,6 +62,35 @@ export interface CollectedForSales {
   atCheckout: number;
   /** Collected later against the same sales, still within the date. */
   laterSameDay: number;
+  /**
+   * What corrections posted by the end of the date did to that money (0079): a payment
+   * never received, or a cancelled sale's money given back, is negative; a move between
+   * channels nets to zero.
+   */
+  corrections: number;
+}
+
+/** Sales cancelled ON the date (0079), whatever day they were sold. */
+export interface CancellationFigures {
+  count: number;
+  value: number;
+  /** Their recorded cost, credited back. */
+  cost: number;
+  missingCostLines: number;
+  /** The part of `value` that is the date's own sales. */
+  ofTheseSales: number;
+}
+
+/** A confirmed expense reversed on the date (0079). */
+export interface ExpenseReversalLine {
+  correctionId: string;
+  expenseId: string;
+  category: string;
+  expenseClass: 'variable' | 'fixed';
+  isSalary: boolean;
+  amount: number;
+  method: 'cash' | 'account';
+  accountLabel: string | null;
 }
 
 export interface ChannelSplit {
@@ -101,10 +134,12 @@ export interface ReportInputs {
   standing: DayStanding;
   sales: SalesFigures;
   returns: ReturnFigures;
+  cancellations: CancellationFigures;
   collected: CollectedForSales;
   channels: ChannelRow[];
   splits: Map<string, ChannelSplit>;
   expenses: ExpenseLine[];
+  expenseReversals: ExpenseReversalLine[];
   counts: Map<string, ChannelCountState>;
   opening: OpeningCash;
   pending: { refundReports: { count: number; amount: number }; expenseReports: { count: number; amount: number } } | null;
@@ -177,6 +212,8 @@ export interface ReportResult {
   netSales: number | null;
   costOfUnitsSold: number | null;
   returnsCostCredited: number | null;
+  /** The recorded cost of the sales cancelled on the date, credited back (0079). */
+  cancelledCostCredited: number | null;
   grossProfit: number | null;
   variableExpenses: number;
   fixedExpenses: number;
@@ -198,8 +235,10 @@ export interface ClosingReport {
     value: number;
     itemsSold: number;
     returns: { count: number; grossRefund: number; adjustments: number; netRefundDue: number };
+    /** Sales cancelled on the date (0079): their value comes off here, on this day, never on the day they were sold. */
+    cancellations: { count: number; value: number };
     netSalesValue: number;
-    collected: { atCheckout: number; laterSameDay: number; total: number };
+    collected: { atCheckout: number; laterSameDay: number; corrections: number; total: number };
     owed: number;
   };
   money: {
@@ -208,7 +247,13 @@ export interface ClosingReport {
     pending: ReportInputs['pending'];
   };
   expenses: {
+    /** Recorded − reversed: what the date's expenses came to. */
     total: number;
+    /** The confirmed expenses of the date, as recorded. */
+    recorded: number;
+    /** Confirmed expenses reversed on the date (0079), whatever day they were recorded. */
+    reversed: number;
+    reversals: ExpenseReversalLine[];
     cash: number;
     account: number;
     count: number;
@@ -257,9 +302,10 @@ const keyOfChannel = (c: { channel: string; accountId: string | null }) => `${c.
 
 export function assembleReport(i: ReportInputs): ClosingReport {
   // ── Sales ──
-  const collectedTotal = round2(i.collected.atCheckout + i.collected.laterSameDay);
-  const owed = round2(i.sales.value - collectedTotal);
-  const netSalesValue = round2(i.sales.value - i.returns.netRefundDue);
+  const collectedTotal = round2(i.collected.atCheckout + i.collected.laterSameDay + i.collected.corrections);
+  // A sale of the date cancelled by its end is owed by nobody (0079).
+  const owed = round2(i.sales.value - collectedTotal - i.cancellations.ofTheseSales);
+  const netSalesValue = round2(i.sales.value - i.returns.netRefundDue - i.cancellations.value);
 
   // ── Money ──
   const channels: ReportChannel[] = i.channels.map((c) => {
@@ -297,8 +343,14 @@ export function assembleReport(i: ReportInputs): ClosingReport {
     c.count += 1;
     categories.set(l.category, c);
   }
+  const recorded = exp(() => true);
+  const reversedBy = (f: (l: ExpenseReversalLine) => boolean) => round2(i.expenseReversals.filter(f).reduce((n, l) => n + l.amount, 0));
+  const reversed = reversedBy(() => true);
   const expenses = {
-    total: exp(() => true),
+    total: round2(recorded - reversed),
+    recorded,
+    reversed,
+    reversals: i.expenseReversals,
     cash: exp((l) => l.method === 'cash'),
     account: exp((l) => l.method === 'account'),
     count: i.expenses.length,
@@ -312,10 +364,12 @@ export function assembleReport(i: ReportInputs): ClosingReport {
   };
 
   // ── Result (D7) ──
-  const missingCostLines = i.sales.missingCostLines + i.returns.missingCostLines;
+  const missingCostLines = i.sales.missingCostLines + i.returns.missingCostLines + i.cancellations.missingCostLines;
   const calculable = missingCostLines === 0;
-  const costOfUnitsSold = round2(i.sales.cost - i.returns.costCredited);
+  const costOfUnitsSold = round2(i.sales.cost - i.returns.costCredited - i.cancellations.cost);
   const grossProfit = round2(netSalesValue - costOfUnitsSold);
+  const variableNet = round2(expenses.variable - reversedBy((l) => l.expenseClass === 'variable'));
+  const fixedNet = round2(expenses.fixed - reversedBy((l) => l.expenseClass === 'fixed'));
   const result: ReportResult = {
     status: calculable ? 'ok' : 'cannot_calculate',
     reason: calculable ? null : 'cost_missing',
@@ -323,10 +377,11 @@ export function assembleReport(i: ReportInputs): ClosingReport {
     netSales: netSalesValue,
     costOfUnitsSold: calculable ? costOfUnitsSold : null,
     returnsCostCredited: calculable ? round2(i.returns.costCredited) : null,
+    cancelledCostCredited: calculable ? round2(i.cancellations.cost) : null,
     grossProfit: calculable ? grossProfit : null,
-    variableExpenses: expenses.variable,
-    fixedExpenses: expenses.fixed,
-    resultBeforeFixed: calculable ? round2(grossProfit - expenses.variable) : null,
+    variableExpenses: variableNet,
+    fixedExpenses: fixedNet,
+    resultBeforeFixed: calculable ? round2(grossProfit - variableNet) : null,
     resultAfterExpenses: calculable ? round2(grossProfit - expenses.total) : null,
     scope: 'fixed_costs_on_due_date',
   };
@@ -411,8 +466,14 @@ export function assembleReport(i: ReportInputs): ClosingReport {
         adjustments: round2(i.returns.adjustments),
         netRefundDue: round2(i.returns.netRefundDue),
       },
+      cancellations: { count: i.cancellations.count, value: round2(i.cancellations.value) },
       netSalesValue,
-      collected: { atCheckout: round2(i.collected.atCheckout), laterSameDay: round2(i.collected.laterSameDay), total: collectedTotal },
+      collected: {
+        atCheckout: round2(i.collected.atCheckout),
+        laterSameDay: round2(i.collected.laterSameDay),
+        corrections: round2(i.collected.corrections),
+        total: collectedTotal,
+      },
       owed,
     },
     money: { channels, totals, pending: i.pending },
@@ -444,24 +505,34 @@ export function assembleReport(i: ReportInputs): ClosingReport {
  * in the figures, never a rounding matter: the service logs it, warns, and a
  * close on such a report is refused.
  */
-export function reportInvariants(r: ClosingReport, channels: ChannelRow[], splits: Map<string, ChannelSplit>): string[] {
+export function reportInvariants(
+  r: ClosingReport,
+  channels: ChannelRow[],
+  splits: Map<string, ChannelSplit>,
+  cancelledOfTheseSales = 0,
+): string[] {
   const fail: string[] = [];
   const eq = (a: number, b: number) => Math.abs(round2(a) - round2(b)) < 0.005;
-  if (!eq(r.sales.value, r.sales.collected.total + r.sales.owed)) fail.push('sales.value = collected + owed');
+  if (!eq(r.sales.value, r.sales.collected.total + r.sales.owed + cancelledOfTheseSales)) fail.push('sales.value = collected + owed + own sales cancelled');
+  if (!eq(r.sales.netSalesValue, r.sales.value - r.sales.returns.netRefundDue - r.sales.cancellations.value)) fail.push('net sales = value − returns − cancelled');
   for (const c of channels) {
     const key = keyOfChannel(c);
     const s = splits.get(key) ?? { todaysSales: 0, olderDebts: 0 };
     if (!eq(s.todaysSales + s.olderDebts, c.salesIn)) fail.push(`${key}: today's sales + older debts = sales in`);
   }
-  if (!eq(r.money.totals.todaysSales, r.sales.collected.total)) fail.push("Σ today's-sales money = collected for these sales");
+  if (!eq(r.money.totals.todaysSales + r.sales.collected.corrections, r.sales.collected.total)) {
+    fail.push("Σ today's-sales money + their corrections = collected for these sales");
+  }
   for (const c of r.money.channels) {
     if (!eq(c.net, c.in.total - c.out.total)) fail.push(`${c.key}: net = in − out`);
   }
   if (!eq(r.money.totals.net, r.money.totals.in - r.money.totals.out)) fail.push('money: net = in − out');
   const lines = r.expenses.lines.reduce((n, l) => n + l.amount, 0);
-  if (!eq(r.expenses.total, lines)) fail.push('expenses.total = Σ lines');
-  if (!eq(r.expenses.total, r.money.channels.reduce((n, c) => n + c.out.expenses, 0))) fail.push('expenses.total = Σ channel expenses out');
-  if (!eq(r.expenses.total, r.expenses.cash + r.expenses.account)) fail.push('expenses: cash + account = total');
+  if (!eq(r.expenses.recorded, lines)) fail.push('expenses.recorded = Σ lines');
+  if (!eq(r.expenses.recorded, r.money.channels.reduce((n, c) => n + c.out.expenses, 0))) fail.push('expenses.recorded = Σ channel expenses out');
+  if (!eq(r.expenses.recorded, r.expenses.cash + r.expenses.account)) fail.push('expenses: cash + account = recorded');
+  if (!eq(r.expenses.reversed, r.expenses.reversals.reduce((n, l) => n + l.amount, 0))) fail.push('expenses.reversed = Σ reversals');
+  if (!eq(r.expenses.total, r.expenses.recorded - r.expenses.reversed)) fail.push('expenses.total = recorded − reversed');
   if (!eq(r.expected.cash.expected, r.expected.cash.opening.amount + r.expected.cash.in - r.expected.cash.out)) fail.push('cash: expected = opening + in − out');
   if (r.result.status === 'ok') {
     if (!eq(r.result.grossProfit!, r.sales.netSalesValue - r.result.costOfUnitsSold!)) fail.push('gross profit = net sales − cost');
@@ -481,7 +552,7 @@ export function reportVersion(r: ClosingReport): string {
   const figures = {
     s: r.sales,
     m: r.money.channels.map((c) => [c.key, c.in, c.out, c.net]),
-    e: [r.expenses.total, r.expenses.lines.map((l) => [l.id, l.amount])],
+    e: [r.expenses.total, r.expenses.lines.map((l) => [l.id, l.amount]), r.expenses.reversals.map((l) => [l.correctionId, l.amount])],
     x: [r.expected.cash.opening.amount, r.expected.cash.expected, r.expected.cash.verification, r.expected.accounts.map((a) => [a.key, a.expectedMovement, a.verification])],
     r: [r.result.status, r.result.costOfUnitsSold, r.result.grossProfit],
   };

@@ -154,7 +154,8 @@ describe('reporting', () => {
    * leaves every consumer guessing whether the sign was already applied.
    */
   it('subtracts returns from net profit explicitly', () => {
-    expect(rollupCode).toMatch(/grossProfit - returnsGrossProfit - expenses/);
+    // 0079: a cancelled sale's effect is subtracted beside the returns', explicitly too.
+    expect(rollupCode).toMatch(/grossProfit - returnsGrossProfit - \(cancelledRevenue - cancelledCogs\) - expenses/);
   });
 
   /**

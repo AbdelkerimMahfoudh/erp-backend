@@ -27,9 +27,10 @@ describe('period movements', () => {
 
   it('every component reads the whole range of STORED dates, none only one day (0076)', () => {
     expect(movements).not.toMatch(/= \$\{day\}/);
-    // cash payments, account payments, refunds, settlements, purchase payments, expenses, corrections,
-    // and the two legs of a payment reclassified to another channel (0078)
-    expect((movements.match(/BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(9);
+    // cash payments, account payments, refunds, settlements, purchase payments, expenses, the older
+    // corrections, and every other correction's legs through one ledger (0078's two arms folded in, 0079)
+    expect((movements.match(/BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(8);
+    expect(movements).toMatch(/fc\.correction_date BETWEEN \$\{fromDay\} AND \$\{toDay\}\s+GROUP BY l\.method, l\.receiving_account_id, l\.direction/);
   });
 
   it('no component reads a timestamp window any more — every day is a stored date', () => {

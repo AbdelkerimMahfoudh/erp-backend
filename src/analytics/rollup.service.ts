@@ -171,8 +171,6 @@ export class RollupService {
     `);
     const expensesCash = round2(toNum(expRows[0].expenses_cash));
     const expensesCount = toNum(expRows[0].expenses_count);
-    const expensesFixed = round2(toNum(expRows[0].expenses_fixed));
-    const expensesSalary = round2(toNum(expRows[0].expenses_salary));
 
     /**
      * Returns approved ON THIS DAY (I2).
@@ -294,13 +292,61 @@ export class RollupService {
     const correctionsCash = round2(toNum(correctionRows[0].paid_cash));
     const correctionsCount = toNum(correctionRows[0].paid_count);
 
+    /**
+     * Sales CANCELLED on this day (0079), on the rollup's own revenue basis — the
+     * cancelled sale's lines as they were recorded. Keyed on the correction day,
+     * never on the sale's day, which recomputes byte-identically and keeps its
+     * closing shut; the line itself is never voided (`released_by_correction_id`
+     * only frees its phone). Positive magnitudes: net profit subtracts
+     * (revenue − cogs), exactly as a return subtracts its effect.
+     */
+    const cancelledRows = await this.prisma.$queryRaw<{ revenue: unknown; cogs: unknown; n: unknown }[]>(Prisma.sql`
+      SELECT COALESCE(SUM(si.price * si.quantity - si.discount), 0) AS revenue,
+             COALESCE(SUM(si.cost * si.quantity), 0)                AS cogs,
+             COUNT(DISTINCT fc.id)                                  AS n
+      FROM financial_corrections fc
+      JOIN sale_items si ON si.sale_id = fc.target_sale_id AND si.voided = 0
+      WHERE fc.company_id = ${companyId}
+        AND fc.branch_id = ${branchId}
+        AND fc.target_kind = 'sale'
+        AND fc.status = 'approved'
+        AND fc.correction_date = ${day}
+    `);
+    const cancelledRevenue = round2(toNum(cancelledRows[0].revenue));
+    const cancelledCogs = round2(toNum(cancelledRows[0].cogs));
+    const cancelledCount = toNum(cancelledRows[0].n);
+
+    /**
+     * Confirmed expenses REVERSED on this day (0079). `expenses` below is net of
+     * them, so profit and every reader of the day's expenses see what was really
+     * spent. `expensesCash` stays the cash that left: the reversal's cash comes
+     * back as a correction leg, which the closing already counts — subtracting it
+     * here as well would count it twice. The fixed and salary figures are net
+     * of their own reversals for the same reason the total is.
+     */
+    const reversalRows = await this.prisma.$queryRaw<{ total: unknown; fixed: unknown; salary: unknown }[]>(Prisma.sql`
+      SELECT COALESCE(SUM(fc.amount), 0)                                           AS total,
+             COALESCE(SUM(CASE WHEN e.expense_class = 'fixed' THEN fc.amount END), 0) AS fixed,
+             COALESCE(SUM(CASE WHEN e.is_salary = 1 THEN fc.amount END), 0)         AS salary
+      FROM financial_corrections fc
+      JOIN expenses e ON e.id = fc.target_expense_id
+      WHERE fc.company_id = ${companyId}
+        AND fc.branch_id = ${branchId}
+        AND fc.target_kind = 'expense'
+        AND fc.status = 'approved'
+        AND fc.correction_date = ${day}
+    `);
+    const expenseReversals = round2(toNum(reversalRows[0].total));
+    const expensesFixed = round2(toNum(expRows[0].expenses_fixed) - toNum(reversalRows[0].fixed));
+    const expensesSalary = round2(toNum(expRows[0].expenses_salary) - toNum(reversalRows[0].salary));
+
     const revenue = round2(toNum(totals[0].revenue));
     const cogs = round2(toNum(totals[0].cogs));
     const grossProfit = round2(revenue - cogs);
-    const expenses = round2(toNum(expRows[0].expenses));
+    const expenses = round2(toNum(expRows[0].expenses) - expenseReversals);
     // Positive magnitudes, subtracted explicitly. A negative stored revenue
     // would leave every reader guessing whether the sign was already applied.
-    const netProfit = round2(grossProfit - returnsGrossProfit - expenses);
+    const netProfit = round2(grossProfit - returnsGrossProfit - (cancelledRevenue - cancelledCogs) - expenses);
 
     /**
      * Two recomputes of the same branch-day at the same moment — a close and a
@@ -340,6 +386,10 @@ export class RollupService {
           expensesCount,
           expensesFixed,
           expensesSalary,
+          cancelledRevenue,
+          cancelledCogs,
+          cancelledCount,
+          expenseReversals,
           refreshedAt: now,
         },
         update: {
@@ -365,6 +415,10 @@ export class RollupService {
           expensesCount,
           expensesFixed,
           expensesSalary,
+          cancelledRevenue,
+          cancelledCogs,
+          cancelledCount,
+          expenseReversals,
           refreshedAt: now,
         },
       });
@@ -440,6 +494,8 @@ export class RollupService {
       JOIN sales s ON s.id = si.sale_id
       LEFT JOIN units u ON u.id = si.unit_id
       WHERE si.company_id = ${companyId} AND s.branch_id = ${branchId} AND si.voided = 0
+        -- A cancelled sale's goods never left (0079).
+        AND si.released_by_correction_id IS NULL
       GROUP BY product_id
     `);
 

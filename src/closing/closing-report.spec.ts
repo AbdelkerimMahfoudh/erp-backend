@@ -82,10 +82,12 @@ function inputs(over: Partial<ReportInputs> = {}): ReportInputs {
     standing: 'counting',
     sales: { count: 3, value: 45_500, itemsSold: 7, cost: 36_250, missingCostLines: 0 },
     returns: { count: 1, grossRefund: 9_000, adjustments: 500, netRefundDue: 8_500, costCredited: 7_000, missingCostLines: 0 },
-    collected: { atCheckout: 25_500, laterSameDay: 7_000 },
+    cancellations: { count: 0, value: 0, cost: 0, missingCostLines: 0, ofTheseSales: 0 },
+    collected: { atCheckout: 25_500, laterSameDay: 7_000, corrections: 0 },
     channels,
     splits,
     expenses,
+    expenseReversals: [],
     counts: new Map<string, ChannelCountState>([
       ['cash:NONE', { verification: 'counted', counted: 28_500, countedAt: new Date('2026-09-24T21:00:00Z'), skipReason: null }],
       [`account:${MASRIVI}`, { verification: 'skipped', counted: null, countedAt: new Date('2026-09-24T21:01:00Z'), skipReason: 'App down' }],
@@ -116,7 +118,7 @@ describe('a worked day, recomputed independently', () => {
   it('sales: 3 sales, 45 500; 32 500 collected for them (25 500 at the till + 7 000 later the same day); 13 000 still owed', () => {
     expect(report.sales.count).toBe(3);
     expect(report.sales.value).toBe(18_000 + 25_000 + 2_500);
-    expect(report.sales.collected).toEqual({ atCheckout: 10_000 + 8_000 + 5_000 + 2_500, laterSameDay: 7_000, total: 32_500 });
+    expect(report.sales.collected).toEqual({ atCheckout: 10_000 + 8_000 + 5_000 + 2_500, laterSameDay: 7_000, corrections: 0, total: 32_500 });
     expect(report.sales.owed).toBe(45_500 - 32_500);
     // A split tender is counted once in sales value, and once per channel in money — never twice anywhere.
     expect(report.sales.itemsSold).toBe(1 + 1 + 5);
@@ -326,5 +328,91 @@ describe('the invariants catch figures that do not add up', () => {
     const channels = buildChannels(movements, accounts, OPENING);
     const r = assembleReport(inputs({ splits: broken }));
     expect(reportInvariants(r, channels, broken)).toEqual(expect.arrayContaining(["cash:NONE: today's sales + older debts = sales in"]));
+  });
+});
+
+/**
+ * The same day with corrections posted on it (0079, docs/51 §15.3), recomputed by hand:
+ *
+ *   S3 (5 cables, 2 500 by Bankily, cost 1 250) cancelled today — one of the date's own sales:
+ *     its 2 500 leaves Bankily                                       Bankily correctionsOut 2 500
+ *   an older sale (10 000, cost 6 000; 4 000 still held in cash) cancelled today:
+ *     its 4 000 leaves the drawer                                    cash correctionsOut 4 000
+ *   300 of the 800 transport expense was wrong: it comes back         cash correctionsIn 300
+ *
+ *   net sales      = 45 500 − 8 500 (returns) − 12 500 (cancelled)          = 24 500
+ *   collected      = 25 500 + 7 000 − 2 500 (S3's money given back)         = 30 000
+ *   owed           = 45 500 − 30 000 − 2 500 (S3 is owed by nobody)         = 13 000
+ *   cost           = 36 250 − 7 000 (returns) − 7 250 (cancelled)           = 22 000
+ *   gross profit   = 24 500 − 22 000                                        =  2 500
+ *   expenses       = 16 200 recorded − 300 reversed                         = 15 900
+ *   result         = 2 500 − 15 900                                         = −13 400
+ *   drawer         = 20 000 + (19 000 + 300) − (6 000 + 1 200 + 3 000 + 4 000) = 25 100
+ */
+describe('a day with corrections posted on it (0079)', () => {
+  const corrected: MovementRow[] = [...movements, acct(BANKILY, 'correctionsOut', 2_500), cash('correctionsOut', 4_000), cash('correctionsIn', 300)];
+  const channels = buildChannels(corrected, accounts, OPENING);
+  const report = assembleReport(
+    inputs({
+      channels,
+      cancellations: { count: 2, value: 12_500, cost: 7_250, missingCostLines: 0, ofTheseSales: 2_500 },
+      collected: { atCheckout: 25_500, laterSameDay: 7_000, corrections: -2_500 },
+      expenseReversals: [
+        { correctionId: 'c1', expenseId: 'e2', category: 'Transport', expenseClass: 'variable', isSalary: false, amount: 300, method: 'cash', accountLabel: null },
+      ],
+    }),
+  );
+
+  it('still reconciles: every total equals the sum of its own lines', () => {
+    expect(reportInvariants(report, channels, splits, 2_500)).toEqual([]);
+  });
+
+  it('sales: cancellations on their own line; net sales, collected and owed as recomputed', () => {
+    expect(report.sales.cancellations).toEqual({ count: 2, value: 12_500 });
+    expect(report.sales.netSalesValue).toBe(24_500);
+    expect(report.sales.collected).toEqual({ atCheckout: 25_500, laterSameDay: 7_000, corrections: -2_500, total: 30_000 });
+    expect(report.sales.owed).toBe(13_000);
+  });
+
+  it('expenses: recorded as before, the reversal apart, the total net of it', () => {
+    expect([report.expenses.recorded, report.expenses.reversed, report.expenses.total]).toEqual([16_200, 300, 15_900]);
+    expect(report.expenses.cash + report.expenses.account).toBe(report.expenses.recorded);
+  });
+
+  it('result: the cancelled sales\' recorded cost credited back, the reversed expense added back', () => {
+    expect(report.result).toMatchObject({
+      status: 'ok',
+      netSales: 24_500,
+      costOfUnitsSold: 22_000,
+      cancelledCostCredited: 7_250,
+      grossProfit: 2_500,
+      variableExpenses: 900,
+      fixedExpenses: 15_000,
+      resultBeforeFixed: 1_600,
+      resultAfterExpenses: -13_400,
+    });
+  });
+
+  it('money: the legs reach the drawer and the account through the one channel builder', () => {
+    const cashRow = report.money.channels.find((c) => c.key === 'cash:NONE')!;
+    expect(cashRow.out.correctionsOut).toBe(3_000 + 4_000);
+    expect(cashRow.in.correctionsIn).toBe(300);
+    expect(report.expected.cash.expected).toBe(25_100);
+    expect(report.money.channels.find((c) => c.key === `account:${BANKILY}`)!.out.correctionsOut).toBe(2_500);
+  });
+
+  it('a cancelled sale with no recorded cost makes the result incalculable on the day it is cancelled too', () => {
+    const r = assembleReport(inputs({ cancellations: { count: 1, value: 2_500, cost: 0, missingCostLines: 1, ofTheseSales: 0 } }));
+    expect(r.result).toMatchObject({ status: 'cannot_calculate', reason: 'cost_missing', costOfUnitsSold: null, grossProfit: null });
+  });
+
+  it('the invariants catch a reversal line that does not add up, and an own cancellation left out', () => {
+    const broken = { ...report, expenses: { ...report.expenses, reversed: 500 } };
+    expect(reportInvariants(broken, channels, splits, 2_500)).toEqual(expect.arrayContaining(['expenses.reversed = Σ reversals']));
+    expect(reportInvariants(report, channels, splits, 0)).toEqual(expect.arrayContaining(['sales.value = collected + owed + own sales cancelled']));
+  });
+
+  it('a correction moves the figures, so it moves the version a close is bound to', () => {
+    expect(reportVersion(report)).not.toBe(reportVersion(assembleReport(inputs())));
   });
 });
