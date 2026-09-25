@@ -7,7 +7,7 @@ import { binToUuid } from '../common/utils/uuid.util';
 import { ClsService } from 'nestjs-cls';
 import { AppClsStore } from '../common/context/request-context';
 import { dayKey } from '../common/utils/date.util';
-import { periodRange, shiftDate, type DateRange, type HomePeriod } from '../common/business-day';
+import { localDateOf, localTimeOf, periodRange, shiftDate, type DateRange, type HomePeriod } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
 import { assertAssignedToBranch } from '../rbac/active-branch';
 import { previousDayNeedsReview, standingOf } from '../closing/closing-lifecycle';
@@ -105,7 +105,7 @@ export class DashboardService {
     const [figures, partner, arrivals, closing] = await Promise.all([
       perms.has('report.view') ? this.homeFigures(branchId, period, range, dateRange, described.timezone, described.businessDate) : Promise.resolve(null),
       perms.has('consignment.view') ? this.ranking.top() : Promise.resolve(null),
-      this.arrivals(branchId),
+      this.arrivals(branchId, described.timezone),
       perms.has('closing.count') ? this.closingCard(branchId, described.businessDate) : Promise.resolve(null),
     ]);
 
@@ -118,6 +118,8 @@ export class DashboardService {
         startsAt: described.startsAt,
         endsAt: described.endsAt,
         startedEarly: described.startedEarly,
+        /** The store's calendar date now, in its timezone — what "Today" means on Home (docs/54). */
+        localDate: described.localDate,
       },
       figures: figures?.figures ?? null,
       series: figures?.series ?? null,
@@ -213,9 +215,11 @@ export class DashboardService {
    * All statuses, because both order by `id` (UUIDv7, i.e. intake order).
    * Units exist only once an intake is confirmed: a draft import commits none.
    * The identifier is masked to its last four digits; the full IMEI never
-   * travels in this payload.
+   * travels in this payload. The date and time are the store's, read in its
+   * timezone here, so a phone set to another zone shows what the shop's clock
+   * said (docs/54).
    */
-  private async arrivals(branchId: Buffer) {
+  private async arrivals(branchId: Buffer, timezone: string) {
     const units = await this.db.unit.findMany({
       // A phone whose purchase was cancelled never arrived (0079).
       where: { branchId, product: { trackingType: 'imei' }, status: { not: 'voided' } },
@@ -237,6 +241,8 @@ export class DashboardService {
         label: `${u.product.brand} ${u.product.model}`.trim(),
         variant: u.product.variant,
         receivedAt: u.dateIn,
+        receivedLocalDate: localDateOf(u.dateIn, timezone),
+        receivedLocalTime: localTimeOf(u.dateIn, timezone),
         status: u.status,
         identifierKind: u.imeiPrimary ? ('imei' as const) : ('serial' as const),
         identifierLast4: identifier.slice(-4),
