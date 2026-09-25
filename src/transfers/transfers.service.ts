@@ -44,6 +44,7 @@ import {
 } from './quantity-reservation';
 import { priceForNewStockRow, receiveQuantityAtCost } from '../inventory/stock-cost';
 import { withLockRetry } from '../common/db/deadlock-retry';
+import { requestRollupTx, type RollupCause } from '../analytics/rollup-queue';
 
 /**
  * The transaction client of the TENANT-scoped client, not the plain
@@ -481,6 +482,19 @@ export class TransfersService {
    * and is told to refresh rather than silently overwriting a decision somebody
    * else just made.
    */
+  /**
+   * Both ends' stock snapshots — valuation and velocity — must be refreshed:
+   * requested inside the shipment or receipt, so the request commits with the
+   * movement or not at all (0081, docs/52). The event after commit only works it sooner.
+   */
+  private async requestRefreshTx(tx: TransferTx, transfer: StockTransfer, cause: RollupCause): Promise<void> {
+    const companyId = this.tenant.companyId();
+    await requestRollupTx(tx as never, [
+      { kind: 'branch', companyId, branchId: transfer.fromBranchId, cause, sourceId: transfer.id },
+      { kind: 'branch', companyId, branchId: transfer.toBranchId, cause, sourceId: transfer.id },
+    ]);
+  }
+
   private async transitionTx(
     tx: TransferTx,
     transfer: StockTransfer,
@@ -813,6 +827,7 @@ export class TransfersService {
         actorId: this.tenant.userId() ?? null,
         units: countLines(items).totalQuantity,
       });
+      await this.requestRefreshTx(tx, transfer, 'transfer_shipped');
     });
 
     /**
@@ -965,6 +980,7 @@ export class TransfersService {
         actorId: this.tenant.userId() ?? null,
         units: report.matched.length + countLines(quantityLines).totalQuantity,
       });
+      await this.requestRefreshTx(tx, transfer, 'transfer_received');
     }));
 
     this.events.emit('stock.moved', {

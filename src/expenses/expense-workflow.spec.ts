@@ -230,18 +230,19 @@ describe('accounting — the three defects stay fixed', () => {
     }
   });
 
-  it('a report changes no figure — no recompute is queued', () => {
+  it('a report changes no figure — no recompute is requested', () => {
     const create = service.slice(service.indexOf('async create('), service.indexOf('async confirm('));
-    expect(code(create)).not.toMatch(/enqueueDailyRecompute/);
+    expect(code(create)).not.toMatch(/requestRollupTx|processNow/);
   });
 
   it('a rejection changes no figure either', () => {
     const reject = service.slice(service.indexOf('async reject('), service.indexOf('async list('));
-    expect(code(reject)).not.toMatch(/enqueueDailyRecompute/);
+    expect(code(reject)).not.toMatch(/requestRollupTx|processNow/);
   });
 
-  it('confirmation recomputes the RIGHT day for each class', () => {
-    expect(code(service)).toMatch(/expenseClass === 'fixed' && expense\.dueDate\s*\?\s*dayKey\(expense\.dueDate\)/);
+  it('confirmation recomputes the RIGHT day for each class — requested with the confirmation (0081)', () => {
+    expect(code(service)).toMatch(/const landsOn = expense\.expenseClass === 'fixed' && expense\.dueDate \? dateKey\(expense\.dueDate\) : day;/);
+    expect(code(service)).toMatch(/day: landsOn, cause: 'expense_confirmed'/);
   });
 });
 

@@ -186,11 +186,12 @@ describe('reporting', () => {
     expect(closing).toMatch(/totalReturnsProfitImpact,/);
   });
 
-  it('recomputes only the approval day, after the transaction commits', () => {
+  it('recomputes only the approval day: requested inside the approval, worked after it commits (0081)', () => {
     const approve = code.slice(code.indexOf('async approve('));
-    expect(approve).toMatch(/await this\.rollups\.recomputeDaily\(companyId, branchId, approvalDay\)/);
-    // After the commit: a rolled-back approval must not leave a rollup claiming
-    // a refund that never happened.
-    expect(approve.indexOf('recomputeDaily')).toBeGreaterThan(approve.indexOf('await this.db.$transaction'));
+    expect(approve).toMatch(/requestRollupTx\(tx as never, \[\s*\{ kind: 'daily', companyId, branchId, day: approvalDay, cause: 'return_approved'/);
+    // Inside the transaction: a rolled-back approval leaves no request, so no rollup
+    // can claim a refund that never happened; a committed one cannot lose its request.
+    expect(approve.indexOf('requestRollupTx')).toBeGreaterThan(approve.indexOf('await this.db.$transaction'));
+    expect(approve.indexOf('await this.rollups.processNow()')).toBeGreaterThan(approve.indexOf('requestRollupTx'));
   });
 });

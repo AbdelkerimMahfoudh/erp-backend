@@ -6,7 +6,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { AppClsStore } from '../common/context/request-context';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
-import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
+import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-queue';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { dateKey, BusinessDayService, dateValue } from '../common/business-day/business-day.service';
@@ -214,17 +214,30 @@ export class ExpensesService {
     });
     assertDayOpen(closing, landsOn);
 
-    const moved = await this.db.expense.updateMany({
-      where: { id: expense.id, companyId, version: dto.expectedVersion, status: 'reported' },
-      data: {
-        status: 'confirmed',
-        confirmedById: this.tenant.userId() ?? null,
-        confirmedAt: new Date(),
-        confirmationDate,
-        // Recorded as an explicit state, never as invented copy.
-        reasonOmitted: dto.reasonOmitted ?? needsReasonWarning(expense),
-        version: { increment: 1 },
-      },
+    /**
+     * The confirmation and the request to recompute the day it lands on commit
+     * together (0081, docs/52): a stop or a failed recompute after this can delay
+     * the figures, never lose them.
+     */
+    const moved = await this.db.$transaction(async (tx) => {
+      const changed = await tx.expense.updateMany({
+        where: { id: expense.id, companyId, version: dto.expectedVersion, status: 'reported' },
+        data: {
+          status: 'confirmed',
+          confirmedById: this.tenant.userId() ?? null,
+          confirmedAt: new Date(),
+          confirmationDate,
+          // Recorded as an explicit state, never as invented copy.
+          reasonOmitted: dto.reasonOmitted ?? needsReasonWarning(expense),
+          version: { increment: 1 },
+        },
+      });
+      if (changed.count > 0) {
+        await requestRollupTx(tx as never, [
+          { kind: 'daily', companyId, branchId: expense.branchId!, day: landsOn, cause: 'expense_confirmed', sourceId: expense.id },
+        ]);
+      }
+      return changed;
     });
     if (moved.count === 0) {
       throw new ConflictException({
@@ -242,13 +255,11 @@ export class ExpensesService {
     });
 
     /**
-     * The accounting day: today for a variable expense, the due date for a
-     * fixed one. Recomputing the wrong day would leave the movement invisible
-     * where it belongs and phantom where it does not.
+     * Work the request now. It names the accounting day — today for a variable
+     * expense, the due date for a fixed one (`landsOn`): recomputing the wrong day
+     * would leave the movement invisible where it belongs and phantom where it does not.
      */
-    const accountingDay =
-      expense.expenseClass === 'fixed' && expense.dueDate ? dayKey(expense.dueDate) : day;
-    this.rollups.enqueueDailyRecompute({ companyId, branchId: expense.branchId!, day: accountingDay });
+    void this.rollups.processNow();
 
     return this.detail(idStr);
   }

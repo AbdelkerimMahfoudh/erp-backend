@@ -15,7 +15,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { assertTransition as assertUnitTransition } from '../inventory/unit-state-machine';
 import { evaluateEligibility } from '../sales/return-policy';
-import { RollupService } from '../analytics/rollup.service';
+import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-queue';
 import { dayKey } from '../common/utils/date.util';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { parseDateRange, parseEnumList } from '../sales/sale-query';
@@ -89,7 +89,7 @@ export class ReturnsService {
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
     private readonly notifier: ReturnNotifier,
-    private readonly rollups: RollupService,
+    @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
     private readonly cls: ClsService<AppClsStore>,
     private readonly businessDay: BusinessDayService,
   ) {}
@@ -636,14 +636,20 @@ export class ReturnsService {
         invoiceNo: request.sale.invoiceNo,
         actorId: userId ?? null,
       });
+
+      // The approval day's figures must be recomputed: requested with the approval, so neither exists without the other (0081).
+      await requestRollupTx(tx as never, [
+        { kind: 'daily', companyId, branchId, day: approvalDay, cause: 'return_approved', sourceId: reversalId },
+      ]);
     });
 
     /**
      * After commit, so a rolled-back approval never leaves a rollup claiming a
      * refund that did not happen. The rollup is derived, so recomputing the
-     * approval day is additive and touches no sale row.
+     * approval day is additive and touches no sale row. A failure here no longer
+     * fails an approval that committed: the request stays and is retried.
      */
-    await this.rollups.recomputeDaily(companyId, branchId, approvalDay);
+    await this.rollups.processNow();
 
     return this.detail(idStr);
   }
@@ -1023,14 +1029,19 @@ export class ReturnsService {
         invoiceNo: request.sale.invoiceNo,
         actorId: userId ?? null,
       });
+
+      await requestRollupTx(tx as never, [
+        { kind: 'daily', companyId, branchId, day: confirmationDay, cause: 'refund_confirmed', sourceId: payout.id },
+      ]);
     });
 
     /**
      * After commit. The rollup is derived, so recomputing the CONFIRMATION day
      * adds the cash movement without touching the approval day's profit — the
-     * two dates stay separate, which is the whole point.
+     * two dates stay separate, which is the whole point. The request committed
+     * with the confirmation; a failure here leaves it to be retried.
      */
-    await this.rollups.recomputeDaily(companyId, branchId, confirmationDay);
+    await this.rollups.processNow();
 
     return this.detail(idStr);
   }

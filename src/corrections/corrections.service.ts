@@ -9,8 +9,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
-import { RollupService } from '../analytics/rollup.service';
-import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
+import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-queue';
 import { receiveQuantityAtCost } from '../inventory/stock-cost';
 import {
   actionOf,
@@ -68,7 +67,6 @@ export class CorrectionsService {
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
-    private readonly rollups: RollupService,
     private readonly cls: ClsService<AppClsStore>,
     private readonly businessDay: BusinessDayService,
     @Inject(ROLLUP_QUEUE) private readonly queue: RollupQueue,
@@ -347,6 +345,16 @@ export class CorrectionsService {
             after: this.jsonOf(after),
             branchId: correction.branchId,
           });
+
+          /**
+           * The correction day's figures — and the branch's stock snapshots when goods
+           * moved — must be recomputed: requested here, last, so the requests commit
+           * with the approval or not at all (0081, docs/52).
+           */
+          await requestRollupTx(tx as never, [
+            { kind: 'daily', companyId, branchId: correction.branchId, day, cause: 'correction_approved', sourceId: correction.id },
+            ...(stockChanged ? [{ kind: 'branch' as const, companyId, branchId: correction.branchId, cause: 'correction_approved' as const, sourceId: correction.id }] : []),
+          ]);
         },
         { timeout: 20_000 },
       );
@@ -359,12 +367,12 @@ export class CorrectionsService {
     }
 
     /**
-     * Recompute the day's figures. Without this the movement never reaches the
-     * rollup or expected cash — the correction would restore the liability and
-     * leave the till reporting a shortage that no longer exists.
+     * Work the requests now. Without the recompute the movement never reaches the
+     * rollup — the correction would restore the liability and leave the figures
+     * reporting what no longer exists. A failure here no longer fails an approval
+     * that committed: the requests stay and are retried.
      */
-    await this.rollups.recomputeDaily(companyId, correction.branchId, day);
-    if (stockChanged) this.queue.enqueueBranchRefresh({ companyId, branchId: correction.branchId });
+    await this.queue.processNow();
 
     return this.detail(idStr);
   }

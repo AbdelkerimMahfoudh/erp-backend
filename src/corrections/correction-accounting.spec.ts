@@ -187,8 +187,9 @@ describe('the original day stays exactly as it was', () => {
    * figures at all.
    */
   it('recomputes the correction day, or the movement reaches nothing', () => {
-    // `[^)]*` would stop at the `)` inside `companyId()`.
-    expect(code(service)).toMatch(/rollups\.recomputeDaily\(.*correction\.branchId, day\)/);
+    // Requested inside the approval's transaction, worked after it commits (0081).
+    expect(code(service)).toMatch(/requestRollupTx\(tx as never, \[\s*\{ kind: 'daily', companyId, branchId: correction\.branchId, day, cause: 'correction_approved'/);
+    expect(code(service)).toMatch(/await this\.queue\.processNow\(\);/);
   });
 
   it('the correction day is today, never the payment’s day', () => {

@@ -67,6 +67,7 @@ function makeService(registered: string[] = [], voided: Voided = {}) {
           return 1;
         }),
         $queryRaw: jest.fn(async () => []),
+        rollupRequest: { createMany: jest.fn(async () => ({})) },
       }),
     ),
   };
@@ -96,7 +97,7 @@ function makeService(registered: string[] = [], voided: Voided = {}) {
     new TrackingStrategyRegistry(),
     { learn: jest.fn() } as never,
     { enqueueTx: jest.fn(async () => {}), processNow: jest.fn(async () => {}) } as never,
-    { enqueueBranchRefresh: jest.fn() } as never,
+    { processNow: jest.fn(async () => undefined) } as never,
     { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
     // The day is never closed here: a purchase reopens nothing (D10 is proven on the live copy).
     { autoReopenTx: async () => ({ reopened: false, closingId: null, reopenCount: 0, at: null }), afterReopenCommitted: async () => undefined } as never,

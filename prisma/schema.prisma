@@ -379,6 +379,7 @@ model Company {
   productCategories              ProductCategory[]
   productRecognitions            ProductRecognition[]
   recognitionOutbox              RecognitionOutbox[]
+  rollupRequests                 RollupRequest[]
   supplierSettlements            SupplierSettlement[]
   supplierSettlementAllocations  SupplierSettlementAllocation[]
   subscription                   Subscription?
@@ -435,6 +436,7 @@ model Branch {
   unitPriceOverrides   UnitPriceOverride[]
   priceChangeEvents    PriceChangeEvent[]
   supplierSettlements  SupplierSettlement[]
+  rollupRequests       RollupRequest[]
 
   @@unique([companyId, name]) // company_id is the leftmost column → covers company scans
   @@map("branches")
@@ -1264,6 +1266,54 @@ model RecognitionOutbox {
   @@index([status, updatedAt])
   @@index([status, nextAttemptAt, claimedUntil])
   @@map("recognition_outbox")
+}
+
+/// A durable request to recompute derived figures (0081, docs/52): written INSIDE the
+/// transaction that changed them, so it commits with the change or not at all, and
+/// drained after commit, at start-up and on a timer. `daily` recomputes one
+/// branch-day; `branch` refreshes the branch's stock snapshots. The recompute
+/// rebuilds from the source records, so working a request twice counts nothing twice.
+model RollupRequest {
+  id            Bytes               @id @db.Binary(16)
+  companyId     Bytes               @map("company_id") @db.Binary(16)
+  branchId      Bytes               @map("branch_id") @db.Binary(16)
+  kind          RollupRequestKind
+  /// The branch-day for `daily`; NULL for `branch`.
+  day           DateTime?           @db.Date
+  /// What asked: sale, expense_confirmed, return_approved, refund_confirmed, …
+  cause         String              @db.VarChar(32)
+  /// The record that asked, for tracing a stale day back to its cause.
+  sourceId      Bytes?              @map("source_id") @db.Binary(16)
+  status        RollupRequestStatus @default(pending)
+  attempts      Int                 @default(0)
+  lastError     String?             @map("last_error") @db.VarChar(500)
+  requestedAt   DateTime            @map("requested_at") @db.DateTime(6)
+  nextAttemptAt DateTime            @map("next_attempt_at") @db.DateTime(6)
+  /// The worker pass holding the row; with `claimedUntil`, a lease — a worker that
+  /// dies lets it expire and the row is taken again.
+  claimToken    Bytes?              @map("claim_token") @db.Binary(16)
+  claimedUntil  DateTime?           @map("claimed_until") @db.DateTime(6)
+  processedAt   DateTime?           @map("processed_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id], map: "fk_rr_company")
+  branch  Branch  @relation(fields: [branchId], references: [id], map: "fk_rr_branch")
+
+  @@index([status, nextAttemptAt], map: "ix_rr_due")
+  @@index([claimToken], map: "ix_rr_claim")
+  @@index([branchId, kind, day], map: "ix_rr_scope")
+  @@index([companyId], map: "ix_rr_company")
+  @@map("rollup_requests")
+}
+
+enum RollupRequestKind {
+  daily
+  branch
+}
+
+enum RollupRequestStatus {
+  pending
+  processing
+  done
 }
 
 model Sale {

@@ -17,7 +17,7 @@ import { withLockRetry } from '../common/db/deadlock-retry';
 import { TrackingStrategyRegistry } from '../tracking/tracking-strategy.registry';
 import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
-import { ROLLUP_QUEUE, RollupQueue } from '../analytics/rollup-queue';
+import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-queue';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { ClosingService, type AutoReopenResult } from '../closing/closing.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
@@ -483,6 +483,11 @@ export class PurchasingService {
           source: 'receiving',
         })));
 
+        // Intake changes the branch's stock: its valuation and velocity snapshots are refreshed — requested with the purchase (0081).
+        if (committableUnits.length + preparedStock.length > 0) {
+          await requestRollupTx(tx as never, [{ kind: 'branch', companyId, branchId, cause: 'purchase_received', sourceId: pid }]);
+        }
+
         return pid;
       }));
     } catch (e) {
@@ -527,8 +532,8 @@ export class PurchasingService {
         title: `Received ${received} item(s)`,
         body: `Purchase total ${total}`,
       });
-      // Intake changed inventory → refresh the branch valuation/velocity snapshot.
-      this.rollups.enqueueBranchRefresh({ companyId, branchId });
+      // Intake changed inventory: work the branch refresh requested with the purchase.
+      void this.rollups.processNow();
     }
 
     return {

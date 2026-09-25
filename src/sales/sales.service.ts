@@ -14,6 +14,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
 import { SpineEventBus } from '../common/events/spine-event-bus';
+import { requestRollupTx } from '../analytics/rollup-queue';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { isDateString } from '../common/business-day';
@@ -650,6 +651,16 @@ export class SalesService {
           },
         });
 
+        /**
+         * The day's figures and the branch's stock snapshots must be recomputed —
+         * requested here, so the request commits with the sale or not at all
+         * (0081, docs/52). The event after commit only works it sooner.
+         */
+        await requestRollupTx(tx as never, [
+          { kind: 'daily', companyId, branchId, day: businessDate, cause: 'sale', sourceId: saleId },
+          { kind: 'branch', companyId, branchId, cause: 'sale', sourceId: saleId },
+        ]);
+
         return {
           saleId,
           invoiceNo,
@@ -677,7 +688,7 @@ export class SalesService {
       throw e;
     }
 
-    // After commit: trigger derived side effects (rollups/closing/external in 2D).
+    // After commit: work the requests written above now (they survive a stop), and the closing's side effects.
     this.events.emit('sale.recorded', {
       saleId: result.saleId,
       companyId,

@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { RollupService } from './rollup.service';
 import { RollupListener } from './rollup.listener';
 import { ROLLUP_QUEUE } from './rollup-queue';
-import { InProcessRollupQueue } from './in-process-rollup-queue';
+import { RollupOutboxService } from './rollup-outbox.service';
 import { AnalyticsService } from './analytics.service';
 import { SummaryService } from './summary.service';
 import { AnalyticsController } from './analytics.controller';
@@ -14,9 +14,9 @@ import { ConsignmentModule } from '../consignment/consignment.module';
 
 /**
  * Analytics rollups + reads (2D.1–2D.2). SpineEventBus (global EventsModule)
- * drives the listener; PrismaService (global) backs the recompute. The queue
- * binding is the only thing that changes to move rollups onto BullMQ later.
- * ROLLUP_QUEUE is exported so receiving can refresh branch snapshots on intake.
+ * kicks the queue after a commit; PrismaService (global) backs the recompute. The
+ * queue works durable requests written inside each business transaction (0081,
+ * docs/52); ROLLUP_QUEUE is exported so the modules that commit changes can kick it.
  */
 @Module({
   imports: [ConsignmentModule],
@@ -24,7 +24,8 @@ import { ConsignmentModule } from '../consignment/consignment.module';
   providers: [
     SummaryService,
     RollupService,
-    { provide: ROLLUP_QUEUE, useClass: InProcessRollupQueue },
+    RollupOutboxService,
+    { provide: ROLLUP_QUEUE, useExisting: RollupOutboxService },
     RollupListener,
     AnalyticsService,
     DashboardService,

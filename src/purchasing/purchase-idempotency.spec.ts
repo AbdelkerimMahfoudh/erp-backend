@@ -85,6 +85,7 @@ function makeService(companyId: Buffer = COMPANY) {
         unit: { create: jest.fn(async () => ({ id: uuidToBin(PRODUCT) })) },
         stockItem: { upsert: jest.fn(async () => ({})) },
         auditLog: { create: jest.fn(async () => ({})) },
+        rollupRequest: { createMany: jest.fn(async () => ({})) },
       }),
     ),
   };
@@ -121,7 +122,7 @@ function makeService(companyId: Buffer = COMPANY) {
       enqueueTx: jest.fn(async (_tx: unknown, intents: unknown[]) => { learnCalls += intents.length; }),
       processNow: jest.fn(async () => {}),
     } as never,
-    { enqueueDailyRecompute: jest.fn(), enqueueBranchRefresh: jest.fn() } as never,
+    { processNow: jest.fn(async () => undefined) } as never,
     { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
     // The day is never closed here: a purchase reopens nothing (D10 is proven on the live copy).
     { autoReopenTx: async () => ({ reopened: false, closingId: null, reopenCount: 0, at: null }), afterReopenCommitted: async () => undefined } as never,
