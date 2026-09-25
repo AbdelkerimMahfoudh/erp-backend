@@ -12,6 +12,21 @@ import { CreateGoalDto } from './dto/create-goal.dto';
 import { ArchiveGoalDto } from './dto/archive-goal.dto';
 
 const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ? 0 : Number(d));
+const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
+
+/**
+ * One seller's figure per metric, on the rollup's own basis (`rollup.service.ts`):
+ * revenue is the lines' price × quantity − discount, gross profit that less their
+ * cost, units their quantity, and a sale is counted once however many lines it has —
+ * three phones on one receipt is one sale, which is what "how many sales did you
+ * make" means to a person.
+ */
+const PERSONAL_VALUE: Readonly<Record<GoalMetricKey, string>> = {
+  gross_profit: 'COALESCE(SUM((si.price * si.quantity - si.discount) - (si.cost * si.quantity)), 0)',
+  revenue: 'COALESCE(SUM(si.price * si.quantity - si.discount), 0)',
+  sales_count: 'COUNT(DISTINCT s.id)',
+  units_sold: 'COALESCE(SUM(si.quantity), 0)',
+};
 
 /**
  * Goals (Milestone F).
@@ -272,13 +287,17 @@ export class GoalsService {
   /**
    * What has actually been achieved over the period.
    *
-   * Branch and company scope read `daily_rollups`, which is the authoritative
-   * figure and already deducts returns. There is no per-user rollup, so a
-   * personal goal is computed from the sale lines that person made — attributed
-   * through the immutable `sales.user_id`, with the same return deduction
-   * applied so the two definitions match.
+   * Branch and company scope read `daily_rollups`, the authoritative figure. There
+   * is no per-user rollup, so a personal goal is computed from the sale lines that
+   * person made — attributed through the immutable `sales.user_id` — by the rollup's
+   * own rules, so a personal figure and the branch figure describe the same sales
+   * over the same days.
    *
-   * `goals-reconciliation.spec.ts` asserts they do.
+   * A cancelled sale (0079, units 0080) counts in the period it was sold and comes
+   * off in the period its cancellation was approved — never by rewriting the sale's
+   * own period, which its Daily closing has already shown. Same day: nothing. Sold in
+   * one period, cancelled in the next: the first keeps it, the second loses it.
+   * `cancellation-periods.spec.ts` pins both paths to that rule.
    */
   private async achieved(
     goal: { scope: string; branchId: Buffer | null; targetUserId: Buffer | null },
@@ -286,14 +305,10 @@ export class GoalsService {
     from: string,
     to: string,
   ): Promise<number> {
-    const column = METRIC_COLUMN[metric];
-    // A sale cancelled in the period is not a sale (0079): its revenue, profit and count come off on the day it was cancelled.
-    const cancelled = CANCELLED_ADJUSTMENT[metric];
-
     if (goal.scope !== 'user') {
       const rows = await this.db.$queryRaw<{ total: unknown }[]>(
         Prisma.sql`
-          SELECT COALESCE(SUM(${Prisma.raw(cancelled ? `\`${column}\` - ${cancelled}` : `\`${column}\``)}), 0) AS total
+          SELECT COALESCE(SUM(${Prisma.raw(`\`${METRIC_COLUMN[metric]}\` - ${CANCELLED_ADJUSTMENT[metric]}`)}), 0) AS total
           FROM daily_rollups
           WHERE company_id = ${this.tenant.companyId()}
             AND day >= ${from} AND day <= ${to}
@@ -304,48 +319,30 @@ export class GoalsService {
     }
 
     /**
-     * Per person. Returns are deducted the same way the rollup deducts them, so
-     * a personal figure and a branch figure describe the same money.
+     * Per person: the person's sales on their stored business dates, less the
+     * person's sales whose cancellation was approved on a date of the period — the
+     * rollup's `qty_sold`/`revenue`/… and its `cancelled_*` columns, for one seller.
      */
-    const rows = await this.db.$queryRaw<{ total: unknown }[]>(
+    const companyId = this.tenant.companyId();
+    const value = Prisma.raw(PERSONAL_VALUE[metric]);
+    const person = Prisma.sql`s.company_id = ${companyId} AND s.branch_id = ${goal.branchId} AND s.user_id = ${goal.targetUserId}`;
+    const rows = await this.db.$queryRaw<{ sold: unknown; cancelled: unknown }[]>(
       Prisma.sql`
-        SELECT COALESCE(SUM(v), 0) AS total FROM (
-          SELECT
-            CASE ${metric}
-              WHEN 'gross_profit' THEN (si.price * si.quantity - si.discount) - (si.cost * si.quantity)
-              WHEN 'revenue'      THEN (si.price * si.quantity - si.discount)
-              WHEN 'units_sold'   THEN si.quantity
-              ELSE 0
-            END AS v
-          FROM sale_items si
-          JOIN sales s ON s.id = si.sale_id
-          WHERE si.company_id = ${this.tenant.companyId()}
-            AND s.branch_id = ${goal.branchId}
-            AND s.user_id = ${goal.targetUserId}
-            AND si.voided = 0
-            -- A cancelled sale's lines were never a sale (0079).
-            AND si.released_by_correction_id IS NULL
-            AND DATE(s.sold_at) >= ${from} AND DATE(s.sold_at) <= ${to}
-        ) t
+        SELECT
+          (SELECT ${value}
+             FROM sale_items si
+             JOIN sales s ON s.id = si.sale_id
+            WHERE ${person} AND si.voided = 0
+              AND s.business_date BETWEEN ${from} AND ${to}) AS sold,
+          (SELECT ${value}
+             FROM financial_corrections fc
+             JOIN sales s ON s.id = fc.target_sale_id
+             JOIN sale_items si ON si.sale_id = s.id AND si.voided = 0
+            WHERE fc.company_id = ${companyId} AND ${person}
+              AND fc.target_kind = 'sale' AND fc.status = 'approved'
+              AND fc.correction_date BETWEEN ${from} AND ${to}) AS cancelled
       `,
     );
-
-    if (metric === 'sales_count') {
-      // Counted on the sale, not the line — three phones on one receipt is one
-      // sale, which is what "how many sales did you make" means to a person.
-      const counted = await this.db.sale.count({
-        where: {
-          branchId: goal.branchId as Buffer,
-          userId: goal.targetUserId as Buffer,
-          corrections: { none: { targetKind: 'sale', status: 'approved' } },
-          soldAt: {
-            gte: new Date(`${from}T00:00:00.000Z`),
-            lt: new Date(new Date(`${to}T00:00:00.000Z`).getTime() + 86_400_000),
-          },
-        },
-      });
-      return counted;
-    }
-    return num(rows[0]?.total as number);
+    return round2(num(rows[0]?.sold as number) - num(rows[0]?.cancelled as number));
   }
 }

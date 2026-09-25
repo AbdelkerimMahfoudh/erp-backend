@@ -2562,6 +2562,8 @@ model DailyRollup {
   cancelledRevenue Decimal  @default(0) @map("cancelled_revenue") @db.Decimal(14, 2)
   cancelledCogs    Decimal  @default(0) @map("cancelled_cogs") @db.Decimal(14, 2)
   cancelledCount   Int      @default(0) @map("cancelled_count")
+  /// Their units (0080): the units-sold goal takes them off on this day, as the others do.
+  cancelledQty     Int      @default(0) @map("cancelled_qty")
   /// Confirmed expenses reversed on this day (0079). `expenses` is NET of these;
   /// `expensesCash` stays the cash that left — the reversal's cash returns as a leg.
   expenseReversals Decimal  @default(0) @map("expense_reversals") @db.Decimal(14, 2)

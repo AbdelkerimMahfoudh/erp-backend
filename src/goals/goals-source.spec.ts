@@ -43,15 +43,15 @@ describe('branch and company progress comes from the rollup', () => {
       service.indexOf("if (goal.scope !== 'user')"),
       service.indexOf('Per person'),
     );
-    // A cancelled sale comes off through the rollup's own cancellation columns (0079): still no expression of its own.
-    expect(branchPath).toContain('SUM(${Prisma.raw(cancelled ? `\\`${column}\\` - ${cancelled}` : `\\`${column}\\``)})');
+    // A cancelled sale comes off through the rollup's own cancellation columns (0079, units 0080): still no expression of its own.
+    expect(branchPath).toContain('SUM(${Prisma.raw(`\\`${METRIC_COLUMN[metric]}\\` - ${CANCELLED_ADJUSTMENT[metric]}`)})');
     expect(branchPath).not.toContain('FROM sale_items');
   });
 
-  it('the cancellation adjustment reads only columns the rollup model has (0079)', () => {
+  it('the cancellation adjustment reads only columns the rollup model has (0079, units 0080)', () => {
     const adjustment = progress.slice(progress.indexOf('export const CANCELLED_ADJUSTMENT'), progress.indexOf('export const METRIC_COLUMN'));
     const columns = [...adjustment.matchAll(/`(\w+)`/g)].map((m) => m[1]).filter((c) => c.startsWith('cancelled_'));
-    expect(new Set(columns)).toEqual(new Set(['cancelled_revenue', 'cancelled_cogs', 'cancelled_count']));
+    expect(new Set(columns)).toEqual(new Set(['cancelled_revenue', 'cancelled_cogs', 'cancelled_count', 'cancelled_qty']));
     const model = schema.slice(schema.indexOf('model DailyRollup'));
     const body = model.slice(0, model.indexOf('\n}'));
     for (const column of columns) expect(body).toContain(`@map("${column}")`);
@@ -94,8 +94,7 @@ describe('a personal goal is attributed to whoever made the sale', () => {
      * you make" means to the person being measured, and summing lines would
      * flatter whoever sells in bundles.
      */
-    const block = service.slice(service.indexOf("if (metric === 'sales_count')"));
-    expect(block).toContain('this.db.sale.count');
+    expect(service).toContain("sales_count: 'COUNT(DISTINCT s.id)'");
   });
 });
 

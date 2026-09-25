@@ -62,10 +62,11 @@ describe('what exists now sees the correction', () => {
     expect(ranking).toMatch(/NOT EXISTS \(SELECT 1 FROM financial_corrections fc\s+WHERE fc\.target_sale_id = s\.id AND fc\.status = 'approved'\)/);
   });
 
-  it('a cancelled sale counts toward no goal and moves no stock velocity', () => {
-    expect(goals).toMatch(/AND si\.released_by_correction_id IS NULL/);
-    expect(goals).toMatch(/corrections: \{ none: \{ targetKind: 'sale', status: 'approved' \} \}/);
+  it('a cancelled sale comes off every goal on the day it was cancelled, and moves no stock velocity', () => {
+    // Its own period keeps it, as its Daily closing does (docs/51 §16): no goal filters a released line.
+    expect(goals).not.toMatch(/released_by_correction_id/);
     expect(goals).toMatch(/CANCELLED_ADJUSTMENT\[metric\]/);
+    expect(goals).toMatch(/fc\.target_kind = 'sale' AND fc\.status = 'approved'\s+AND fc\.correction_date BETWEEN \$\{from\} AND \$\{to\}/);
     expect(rollup).toMatch(/AND si\.released_by_correction_id IS NULL\s+GROUP BY product_id/);
   });
 

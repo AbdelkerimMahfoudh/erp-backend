@@ -298,12 +298,14 @@ export class RollupService {
      * never on the sale's day, which recomputes byte-identically and keeps its
      * closing shut; the line itself is never voided (`released_by_correction_id`
      * only frees its phone). Positive magnitudes: net profit subtracts
-     * (revenue − cogs), exactly as a return subtracts its effect.
+     * (revenue − cogs), exactly as a return subtracts its effect; the units-sold
+     * goal subtracts the units (0080).
      */
-    const cancelledRows = await this.prisma.$queryRaw<{ revenue: unknown; cogs: unknown; n: unknown }[]>(Prisma.sql`
+    const cancelledRows = await this.prisma.$queryRaw<{ revenue: unknown; cogs: unknown; n: unknown; qty: unknown }[]>(Prisma.sql`
       SELECT COALESCE(SUM(si.price * si.quantity - si.discount), 0) AS revenue,
              COALESCE(SUM(si.cost * si.quantity), 0)                AS cogs,
-             COUNT(DISTINCT fc.id)                                  AS n
+             COUNT(DISTINCT fc.id)                                  AS n,
+             COALESCE(SUM(si.quantity), 0)                          AS qty
       FROM financial_corrections fc
       JOIN sale_items si ON si.sale_id = fc.target_sale_id AND si.voided = 0
       WHERE fc.company_id = ${companyId}
@@ -315,6 +317,7 @@ export class RollupService {
     const cancelledRevenue = round2(toNum(cancelledRows[0].revenue));
     const cancelledCogs = round2(toNum(cancelledRows[0].cogs));
     const cancelledCount = toNum(cancelledRows[0].n);
+    const cancelledQty = toNum(cancelledRows[0].qty);
 
     /**
      * Confirmed expenses REVERSED on this day (0079). `expenses` below is net of
@@ -389,6 +392,7 @@ export class RollupService {
           cancelledRevenue,
           cancelledCogs,
           cancelledCount,
+          cancelledQty,
           expenseReversals,
           refreshedAt: now,
         },
@@ -418,6 +422,7 @@ export class RollupService {
           cancelledRevenue,
           cancelledCogs,
           cancelledCount,
+          cancelledQty,
           expenseReversals,
           refreshedAt: now,
         },
