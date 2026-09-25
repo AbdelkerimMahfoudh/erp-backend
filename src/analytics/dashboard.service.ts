@@ -15,9 +15,47 @@ import { dayActivity } from '../closing/closing-report.queries';
 import { PartnerRankingService } from '../consignment/partner-ranking.service';
 import { AnalyticsService } from './analytics.service';
 import { barsSumTo, dailyBars, groupedBars, hourlyBars, type Bar } from './home-series';
+import { periodFigures, sellerFigures } from './period-figures';
 
 const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
+
+/** The rollup columns a net figure needs: the sale day's facts and the adjustments approved on the day. */
+const NET_SUM = {
+  revenue: true,
+  cogs: true,
+  grossProfit: true,
+  netProfit: true,
+  salesCount: true,
+  qtySold: true,
+  cancelledRevenue: true,
+  cancelledCogs: true,
+  cancelledCount: true,
+  cancelledQty: true,
+  returnsRevenue: true,
+  returnsAdjustments: true,
+  returnsGrossProfit: true,
+} as const;
+
+type NetSum = { [K in keyof typeof NET_SUM]?: Prisma.Decimal | number | null };
+
+/**
+ * A rollup sum, net (docs/53): revenue less cancellations and returns' net refund due, gross
+ * profit less both profit effects, count and units less cancellations (a return is its own
+ * event). `netProfit` is the rollup's own, already net.
+ */
+function netOf(s: NetSum) {
+  const revenue = num(s.revenue ?? null) - num(s.cancelledRevenue ?? null) - (num(s.returnsRevenue ?? null) - num(s.returnsAdjustments ?? null));
+  const grossProfit =
+    num(s.grossProfit ?? null) - (num(s.cancelledRevenue ?? null) - num(s.cancelledCogs ?? null)) - num(s.returnsGrossProfit ?? null);
+  return {
+    revenue: round2(revenue),
+    grossProfit: round2(grossProfit),
+    netProfit: round2(num(s.netProfit ?? null)),
+    salesCount: num(s.salesCount ?? null) - num(s.cancelledCount ?? null),
+    qtySold: num(s.qtySold ?? null) - num(s.cancelledQty ?? null),
+  };
+}
 
 /**
  * Owner-dashboard aggregates. Reads the rollups built in 2D.1–2D.2 (plus a
@@ -50,9 +88,10 @@ export class DashboardService {
    * — so what is plotted adds up to what is stated.
    *
    * A cancelled sale (0079) stays in the sales value of the day it was sold and
-   * appears again, as a cancellation, on the day the cancellation was approved —
-   * the Daily closing's own rule, and the rollup's that Results reads. Over any
-   * range, sales value − cancelled is what those two take off for it.
+   * appears again, as a cancellation, on the day the cancellation was approved; a
+   * return comes off on its approval day, by its net refund due; an expense
+   * reversal on its correction day (docs/53). The figures come from the one dated
+   * definition the Money screen and the reports read (`period-figures.ts`).
    */
   async home(period: HomePeriod = 'week') {
     const branchId = this.tenant.requireBranchId();
@@ -100,7 +139,7 @@ export class DashboardService {
     const companyId = this.tenant.companyId();
     const saleWhere = { branchId, isReversed: false, businessDate: dateRange };
 
-    const [sales, collected, expenses, phones, cancelled] = await Promise.all([
+    const [sales, collected, dated] = await Promise.all([
       /**
        * The sales themselves — the series is cut from these rows, so the bars
        * and the sales value are one number.
@@ -111,46 +150,23 @@ export class DashboardService {
       // Money actually received on these business dates — including a balance
       // collected today on an older sale.
       this.db.payment.aggregate({ where: { businessDate: dateRange, sale: { branchId } }, _sum: { amount: true } }),
-      // Authorised outflows: confirmed expenses, keyed as the rollup keys them.
-      this.db.$queryRaw<{ total: unknown; count: bigint }[]>(Prisma.sql`
-        SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
-          FROM expenses
-         WHERE company_id = ${companyId} AND branch_id = ${branchId} AND status = 'confirmed'
-           AND IF(expense_class = 'fixed', due_date, confirmation_date) BETWEEN ${range.from} AND ${range.to}`),
-      this.db.saleItem.count({
-        where: { voided: false, unit: { product: { trackingType: 'imei' } }, sale: saleWhere },
-      }),
-      // Sales cancelled on these business dates, whatever day they were sold — as the Daily closing counts them.
-      this.db.$queryRaw<{ n: bigint; value: unknown; phones: unknown }[]>(Prisma.sql`
-        SELECT COUNT(*) AS n, COALESCE(SUM(s.total), 0) AS value,
-               COALESCE(SUM((SELECT COUNT(*)
-                                FROM sale_items si
-                                JOIN units u ON u.id = si.unit_id
-                                JOIN products p ON p.id = u.product_id
-                               WHERE si.sale_id = s.id AND si.voided = 0 AND p.tracking_type = 'imei')), 0) AS phones
-          FROM financial_corrections fc
-          JOIN sales s ON s.id = fc.target_sale_id
-         WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
-           AND fc.target_kind = 'sale' AND fc.status = 'approved'
-           AND fc.correction_date BETWEEN ${range.from} AND ${range.to}`),
+      // Invoices, cancellations, returns and expenses, each on the date that carries it — as the Daily closing counts them.
+      periodFigures(this.db, companyId, branchId, range.from, range.to),
     ]);
 
     let salesValue = 0;
     let stillOwed = 0;
-    let salesCount = 0;
     let bars: Bar[];
     if (period === 'today') {
       const rows = sales as { soldAt: Date; total: Prisma.Decimal; balanceDue: Prisma.Decimal }[];
       salesValue = round2(rows.reduce((n, r) => n + num(r.total), 0));
       stillOwed = round2(rows.reduce((n, r) => n + num(r.balanceDue), 0));
-      salesCount = rows.length;
       bars = hourlyBars(rows.map((r) => ({ soldAt: r.soldAt, total: num(r.total) })), timezone, businessDate);
     } else {
       const groups = sales as { businessDate: Date; _sum: { total: Prisma.Decimal | null; balanceDue: Prisma.Decimal | null }; _count: number }[];
       const days = groups.map((g) => ({ date: dateKey(g.businessDate), value: round2(num(g._sum.total)) }));
       salesValue = round2(days.reduce((n, d) => n + d.value, 0));
       stillOwed = round2(groups.reduce((n, g) => n + num(g._sum.balanceDue), 0));
-      salesCount = groups.reduce((n, g) => n + g._count, 0);
       bars = period === 'week' ? dailyBars(days, range) : groupedBars(days, range);
     }
     if (!barsSumTo(bars, salesValue)) {
@@ -160,18 +176,24 @@ export class DashboardService {
 
     return {
       figures: {
+        /** The invoices of the range, on their sale dates — what the bars cut up. */
         salesValue,
-        salesCount,
-        phonesSold: phones,
+        /** Invoices less whole-sale cancellations (docs/53 R5); returns are counted apart. */
+        salesCount: dated.net.salesCount,
+        /** Phones on the invoices less phones on cancelled invoices (R6); returned phones are `returns.phones`. */
+        phonesSold: dated.net.phones,
         /** Sales cancelled in the range, on the day each cancellation was approved; the sales value above keeps them on their own day. */
-        cancellations: {
-          count: Number(cancelled[0]?.n ?? 0),
-          value: round2(Number(cancelled[0]?.value ?? 0)),
-          phones: Number(cancelled[0]?.phones ?? 0),
-        },
+        cancellations: { count: dated.cancellations.count, value: dated.cancellations.value, phones: dated.cancellations.phones },
+        /** Returns approved in the range, on their approval day, by their net refund due. */
+        returns: { count: dated.returns.count, value: dated.returns.value, phones: dated.returns.phones },
+        /** salesValue − returns − cancellations: the Daily closing's net sales over the range. */
+        netSalesValue: dated.net.salesValue,
         collected: round2(num(collected._sum.amount)),
-        expenses: round2(Number(expenses[0]?.total ?? 0)),
-        expensesCount: Number(expenses[0]?.count ?? 0),
+        /** Confirmed expenses on their own dates, less reversals approved in the range — negative when only a reversal fell here. */
+        expenses: dated.expenses.net,
+        expensesRecorded: dated.expenses.recorded,
+        expensesReversed: dated.expenses.reversed,
+        expensesCount: dated.expenses.recordedCount,
         /** Outstanding today on the sales made in these business dates. */
         stillOwed,
         stillOwedScope: 'these_sales' as const,
@@ -261,30 +283,17 @@ export class DashboardService {
     const monthStart = new Date(`${dayKey(now).slice(0, 8)}01T00:00:00.000Z`);
 
     const [today, month, inventory] = await Promise.all([
-      this.db.dailyRollup.aggregate({
-        where: { day: todayDate, ...(branchId ? { branchId } : {}) },
-        _sum: { revenue: true, grossProfit: true, netProfit: true, salesCount: true, qtySold: true },
-      }),
-      this.db.dailyRollup.aggregate({
-        where: { day: { gte: monthStart, lte: todayDate }, ...(branchId ? { branchId } : {}) },
-        _sum: { revenue: true, grossProfit: true, netProfit: true },
-      }),
+      this.db.dailyRollup.aggregate({ where: { day: todayDate, ...(branchId ? { branchId } : {}) }, _sum: NET_SUM }),
+      this.db.dailyRollup.aggregate({ where: { day: { gte: monthStart, lte: todayDate }, ...(branchId ? { branchId } : {}) }, _sum: NET_SUM }),
       this.analytics.inventoryValue(),
     ]);
+    const t = netOf(today._sum);
+    const m = netOf(month._sum);
 
+    // Net of returns and cancellations on their approval days (docs/53), as Results reads the same rollup.
     return {
-      today: {
-        revenue: round2(num(today._sum.revenue)),
-        grossProfit: round2(num(today._sum.grossProfit)),
-        netProfit: round2(num(today._sum.netProfit)),
-        salesCount: num(today._sum.salesCount),
-        qtySold: num(today._sum.qtySold),
-      },
-      month: {
-        revenue: round2(num(month._sum.revenue)),
-        grossProfit: round2(num(month._sum.grossProfit)),
-        netProfit: round2(num(month._sum.netProfit)),
-      },
+      today: { revenue: t.revenue, grossProfit: t.grossProfit, netProfit: t.netProfit, salesCount: t.salesCount, qtySold: t.qtySold },
+      month: { revenue: m.revenue, grossProfit: m.grossProfit, netProfit: m.netProfit },
       inventory: {
         inventoryValue: inventory.totals.inventoryValue,
         expectedProfit: inventory.totals.expectedProfit,
@@ -360,26 +369,32 @@ export class DashboardService {
     const grouped = await this.db.dailyRollup.groupBy({
       by: ['branchId'],
       where: { day: { gte: from } },
-      _sum: { revenue: true, grossProfit: true, netProfit: true },
+      _sum: NET_SUM,
     });
     const branches = grouped.length
       ? await this.db.branch.findMany({ where: { id: { in: grouped.map((g) => g.branchId) } }, select: { id: true, name: true } })
       : [];
     const nameByHex = new Map(branches.map((b) => [b.id.toString('hex'), b.name]));
     return grouped
-      .map((g) => ({
-        branchId: binToUuid(g.branchId),
-        name: nameByHex.get(g.branchId.toString('hex')) ?? null,
-        revenue: round2(num(g._sum.revenue)),
-        grossProfit: round2(num(g._sum.grossProfit)),
-        netProfit: round2(num(g._sum.netProfit)),
-      }))
+      .map((g) => {
+        // Net of returns and cancellations on their approval days (docs/53), as Results reads the same rollup.
+        const n = netOf(g._sum);
+        return {
+          branchId: binToUuid(g.branchId),
+          name: nameByHex.get(g.branchId.toString('hex')) ?? null,
+          revenue: n.revenue,
+          grossProfit: n.grossProfit,
+          netProfit: n.netProfit,
+        };
+      })
       .sort((a, b) => b.revenue - a.revenue);
   }
 
-  /** Sales/revenue/margin per employee over a window (live over sales). */
   /**
-   * Revenue and margin per seller over a window.
+   * Revenue and margin per seller over a window of business dates (docs/53 D34): the seller's
+   * invoices on their sale dates, less their own sales' cancellations and returns on the dates
+   * those were approved. `salesCount` = invoices − whole-sale cancellations (R5); `returnsCount`
+   * is its own count.
    *
    * `endingDaysAgo` shifts the window back without changing anything else, so
    * "the last thirty days" and "the thirty before that" come from ONE
@@ -387,29 +402,22 @@ export class DashboardService {
    * exactly how two figures that must be comparable stop being comparable.
    */
   async employeePerformance(days: number, endingDaysAgo = 0) {
-    const branchId = this.tenant.branchId();
-    const from = this.windowStart(days + endingDaysAgo);
-    const until = endingDaysAgo > 0 ? this.windowStart(endingDaysAgo) : null;
-    const grouped = await this.db.sale.groupBy({
-      by: ['userId'],
-      where: {
-        soldAt: until ? { gte: from, lt: until } : { gte: from },
-        ...(branchId ? { branchId } : {}),
-      },
-      _sum: { total: true, margin: true },
-      _count: true,
-    });
-    const users = grouped.length
-      ? await this.db.user.findMany({ where: { id: { in: grouped.map((g) => g.userId) } }, select: { id: true, name: true } })
+    const branchId = this.tenant.branchId() ?? null;
+    const from = dayKey(this.windowStart(days + endingDaysAgo));
+    const until = endingDaysAgo > 0 ? dayKey(this.windowStart(endingDaysAgo)) : null;
+    const sellers = await sellerFigures(this.db, this.tenant.companyId(), branchId, from, until);
+    const users = sellers.length
+      ? await this.db.user.findMany({ where: { id: { in: sellers.map((s) => s.userId) } }, select: { id: true, name: true } })
       : [];
     const nameByHex = new Map(users.map((u) => [u.id.toString('hex'), u.name]));
-    return grouped
-      .map((g) => ({
-        userId: binToUuid(g.userId),
-        name: nameByHex.get(g.userId.toString('hex')) ?? null,
-        salesCount: g._count,
-        revenue: round2(num(g._sum.total)),
-        margin: round2(num(g._sum.margin)),
+    return sellers
+      .map((s) => ({
+        userId: binToUuid(s.userId),
+        name: nameByHex.get(s.userId.toString('hex')) ?? null,
+        salesCount: s.salesCount,
+        returnsCount: s.returns,
+        revenue: s.revenue,
+        margin: s.margin,
       }))
       .sort((a, b) => b.revenue - a.revenue);
   }
