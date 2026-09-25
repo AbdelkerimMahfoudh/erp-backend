@@ -17,7 +17,11 @@ import { UnitStatus } from '@prisma/client';
  * reached at transfer **request** and released on cancellation before shipment.
  */
 const TRANSITIONS: Record<UnitStatus, UnitStatus[]> = {
-  in_stock: ['reserved', 'sold', 'in_transit', 'faulty', 'transferred_out', 'consigned_out'],
+  /**
+   * `voided` only by an approved purchase cancellation (0079): the phone never
+   * entered the books.
+   */
+  in_stock: ['reserved', 'sold', 'in_transit', 'faulty', 'transferred_out', 'consigned_out', 'voided'],
   /**
    * **A reserved unit cannot be sold.** It used to list `sold` here, which
    * contradicted `SalesPolicyService.assertSellable` — that requires `in_stock`
@@ -29,7 +33,12 @@ const TRANSITIONS: Record<UnitStatus, UnitStatus[]> = {
    * sellable again. `in_transit` is the shipment step of its own transfer.
    */
   reserved: ['in_stock', 'in_transit'],
-  sold: ['returned'],
+  /**
+   * `in_stock` only by an approved cancellation of the sale (0079): the sale should
+   * not have been recorded, so the phone was never really sold. A customer bringing
+   * a phone back is a return, never this.
+   */
+  sold: ['returned', 'in_stock'],
   returned: ['in_stock', 'faulty'],
   in_transit: ['in_stock', 'transferred_out'],
   faulty: ['in_stock'], // future: add 'scrapped'
@@ -48,6 +57,11 @@ const TRANSITIONS: Record<UnitStatus, UnitStatus[]> = {
    * and pretending otherwise would let two shops believe they hold it.
    */
   consigned_out: ['in_stock', 'sold', 'faulty'],
+  /**
+   * A phone whose purchase was cancelled (0079) comes back only when the same IMEI
+   * is received again: the record is reactivated, so one IMEI stays one record.
+   */
+  voided: ['in_stock'],
 };
 
 export function canTransition(from: UnitStatus, to: UnitStatus): boolean {

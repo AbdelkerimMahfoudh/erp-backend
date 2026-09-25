@@ -3,19 +3,38 @@ import { Transform } from 'class-transformer';
 import { IsEnum, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Length, Min } from 'class-validator';
 import { IsMoney } from '../../common/money/is-money.decorator';
 
+const KINDS = ['refund_payout', 'supplier_settlement', 'sale_payment', 'sale', 'expense', 'supplier_payment', 'purchase'] as const;
+type Kind = (typeof KINDS)[number];
+const PLANNED_KINDS = ['sale_payment', 'sale', 'expense', 'supplier_payment', 'purchase'] as const;
+type PlannedKind = (typeof PLANNED_KINDS)[number];
+const ACTIONS = ['reverse', 'reclassify', 'cancel'] as const;
+
 /**
- * Asking for a confirmed payment to be corrected.
+ * Asking for a confirmed record to be corrected (Milestone B, 0078, 0079).
  *
- * The request carries no amount and no method. Both are copied from the target
- * at approval, so a compensating movement cannot disagree with the payment it
- * reverses — there is no field here through which a wrong figure could enter.
+ * The request never carries the method, the channel a payment was recorded in, a
+ * sale's lines or a purchase's goods: all are read from the record itself, so a
+ * correction cannot disagree with what it corrects. It carries only what the
+ * person knows and the record does not: what was wrong (the action), how much of
+ * it (a part of a payment or an expense), where the money really went (a move)
+ * and why.
  */
 export class RequestCorrectionDto {
-  @ApiProperty({ enum: ['refund_payout', 'supplier_settlement', 'sale_payment'] })
-  @IsEnum(['refund_payout', 'supplier_settlement', 'sale_payment'])
-  targetKind!: 'refund_payout' | 'supplier_settlement' | 'sale_payment';
+  @ApiProperty({ enum: KINDS })
+  @IsEnum(KINDS)
+  targetKind!: Kind;
 
-  @ApiProperty({ description: 'The confirmed refund payout, supplier settlement or sale payment being corrected.' })
+  /**
+   * `reverse` a payment never received or an expense that was wrong; `reclassify` a
+   * payment to its real channel; `cancel` a whole sale or purchase. Optional where a
+   * kind has one action; a sale payment naming a destination is a move (0078).
+   */
+  @ApiPropertyOptional({ enum: ACTIONS })
+  @IsOptional()
+  @IsIn(ACTIONS)
+  action?: (typeof ACTIONS)[number];
+
+  @ApiProperty({ description: 'The confirmed record being corrected.' })
   @IsUUID()
   targetId!: string;
 
@@ -34,8 +53,8 @@ export class RequestCorrectionDto {
   @IsUUID()
   toAccountId?: string;
 
-  /** `sale_payment` only: how much of the payment went elsewhere; the whole payment when omitted. */
-  @ApiPropertyOptional({ description: 'sale_payment only: the part of the payment that went elsewhere' })
+  /** A part of a payment or an expense; the whole of it when omitted. Never for a cancellation. */
+  @ApiPropertyOptional({ description: 'The part of the payment or expense concerned; the whole when omitted' })
   @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @IsMoney({ min: 0.01 })
@@ -60,19 +79,25 @@ export class RequestCorrectionDto {
   clientUuid!: string;
 }
 
-/** What a reclassification would do, before anybody asks for it (0078). */
+/** What a correction would do, before anybody asks for it (0078, 0079). Nothing is written. */
 export class PreviewCorrectionDto {
-  @ApiProperty({ enum: ['sale_payment'] })
-  @IsEnum(['sale_payment'])
-  targetKind!: 'sale_payment';
+  @ApiProperty({ enum: PLANNED_KINDS })
+  @IsEnum(PLANNED_KINDS)
+  targetKind!: PlannedKind;
+
+  @ApiPropertyOptional({ enum: ACTIONS })
+  @IsOptional()
+  @IsIn(ACTIONS)
+  action?: (typeof ACTIONS)[number];
 
   @ApiProperty()
   @IsUUID()
   targetId!: string;
 
-  @ApiProperty({ enum: ['cash', 'account'] })
+  @ApiPropertyOptional({ enum: ['cash', 'account'] })
+  @IsOptional()
   @IsIn(['cash', 'account'])
-  toMethod!: 'cash' | 'account';
+  toMethod?: 'cash' | 'account';
 
   @ApiPropertyOptional({ format: 'uuid' })
   @IsOptional()

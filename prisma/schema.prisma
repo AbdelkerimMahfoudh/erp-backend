@@ -163,6 +163,10 @@ enum UnitStatus {
   /// the phone is still ours, which is exactly why it needs its own state
   /// rather than reusing `transferred_out`.
   consigned_out
+  /// Its purchase was cancelled by an approved correction (0079): the phone never
+  /// entered the books. It is in no stock, value or sale. Receiving the same IMEI
+  /// again reactivates this record — IMEI uniqueness is unchanged.
+  voided
 }
 
 enum PurchaseStatus {
@@ -319,6 +323,7 @@ model Company {
   returns                        Return[]
   refundPayouts                  RefundPayout[]
   financialCorrections           FinancialCorrection[]
+  financialCorrectionLegs        FinancialCorrectionLeg[]
   returnRequests                 ReturnRequest[]
   returnAdjustments              ReturnAdjustment[]
   returnReversals                ReturnReversal[]
@@ -1142,6 +1147,8 @@ model Purchase {
   units       Unit[]
   payments    SupplierPayment[]
   allocations SupplierSettlementAllocation[]
+  /// A cancellation of this purchase, if one was requested or approved (0079).
+  corrections FinancialCorrection[]          @relation("CorrectionOfPurchase")
 
   @@unique([companyId, clientUuid])
   @@index([companyId, branchId, date])
@@ -1191,11 +1198,14 @@ model SupplierPayment {
   businessDate         DateTime      @map("business_date") @db.Date
   createdById          Bytes?        @map("created_by") @db.Binary(16)
 
-  company          Company           @relation(fields: [companyId], references: [id])
-  supplier         Supplier?         @relation(fields: [supplierId], references: [id])
-  purchase         Purchase?         @relation(fields: [purchaseId], references: [id])
-  createdBy        User?             @relation(fields: [createdById], references: [id])
-  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id], map: "fk_supplier_payments_account")
+  company          Company                  @relation(fields: [companyId], references: [id])
+  supplier         Supplier?                @relation(fields: [supplierId], references: [id])
+  purchase         Purchase?                @relation(fields: [purchaseId], references: [id])
+  createdBy        User?                    @relation(fields: [createdById], references: [id])
+  receivingAccount ReceivingAccount?        @relation(fields: [receivingAccountId], references: [id], map: "fk_supplier_payments_account")
+  /// A move of this payment to another channel (0079).
+  corrections      FinancialCorrection[]    @relation("CorrectionOfSupplierPayment")
+  correctionLegs   FinancialCorrectionLeg[]
 
   @@index([companyId, supplierId])
   @@index([purchaseId])
@@ -1303,17 +1313,19 @@ model Sale {
   createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt  DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company                  Company          @relation(fields: [companyId], references: [id])
-  branch                   Branch           @relation(fields: [branchId], references: [id])
-  user                     User             @relation(fields: [userId], references: [id])
-  customer                 Customer?        @relation(fields: [customerId], references: [id])
-  counterparty             Counterparty?    @relation(fields: [counterpartyId], references: [id], onDelete: Restrict, map: "fk_sales_counterparty")
-  returnPolicyOverriddenBy User?            @relation("SaleReturnPolicyOverride", fields: [returnPolicyOverriddenById], references: [id])
+  company                  Company               @relation(fields: [companyId], references: [id])
+  branch                   Branch                @relation(fields: [branchId], references: [id])
+  user                     User                  @relation(fields: [userId], references: [id])
+  customer                 Customer?             @relation(fields: [customerId], references: [id])
+  counterparty             Counterparty?         @relation(fields: [counterpartyId], references: [id], onDelete: Restrict, map: "fk_sales_counterparty")
+  returnPolicyOverriddenBy User?                 @relation("SaleReturnPolicyOverride", fields: [returnPolicyOverriddenById], references: [id])
   items                    SaleItem[]
   payments                 Payment[]
   returnRequests           ReturnRequest[]
   returnReversals          ReturnReversal[]
   returns                  Return[]
+  /// A cancellation of this sale, if one was requested or approved (0079).
+  corrections              FinancialCorrection[] @relation("CorrectionOfSale")
 
   @@unique([branchId, invoiceNo])
   @@unique([companyId, clientUuid])
@@ -1328,27 +1340,32 @@ model Sale {
 }
 
 model SaleItem {
-  id        Bytes   @id @db.Binary(16)
-  companyId Bytes   @map("company_id") @db.Binary(16)
-  saleId    Bytes   @map("sale_id") @db.Binary(16)
-  unitId    Bytes?  @map("unit_id") @db.Binary(16)
-  productId Bytes?  @map("product_id") @db.Binary(16)
-  quantity  Int     @default(1)
-  price     Decimal @db.Decimal(14, 2)
-  cost      Decimal @db.Decimal(14, 2)
-  discount  Decimal @default(0) @db.Decimal(14, 2)
-  taxAmount Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
-  voided    Boolean @default(false)
+  id                     Bytes   @id @db.Binary(16)
+  companyId              Bytes   @map("company_id") @db.Binary(16)
+  saleId                 Bytes   @map("sale_id") @db.Binary(16)
+  unitId                 Bytes?  @map("unit_id") @db.Binary(16)
+  productId              Bytes?  @map("product_id") @db.Binary(16)
+  quantity               Int     @default(1)
+  price                  Decimal @db.Decimal(14, 2)
+  cost                   Decimal @db.Decimal(14, 2)
+  discount               Decimal @default(0) @db.Decimal(14, 2)
+  taxAmount              Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  voided                 Boolean @default(false)
+  /// The approved sale cancellation that released this line's unit from the
+  /// sold-once index (0079). The line itself is never rewritten.
+  releasedByCorrectionId Bytes?  @map("released_by_correction_id") @db.Binary(16)
 
-  company        Company         @relation(fields: [companyId], references: [id])
-  sale           Sale            @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  unit           Unit?           @relation(fields: [unitId], references: [id], onDelete: Restrict)
-  product        Product?        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  company        Company              @relation(fields: [companyId], references: [id])
+  sale           Sale                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  unit           Unit?                @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  product        Product?             @relation(fields: [productId], references: [id], onDelete: Restrict)
   returnRequests ReturnRequest[]
   returnReversal ReturnReversal?
   returns        Return[]
+  releasedBy     FinancialCorrection? @relation("SaleItemReleasedBy", fields: [releasedByCorrectionId], references: [id], map: "fk_sale_items_released")
 
-  // sold-once: generated column `active_unit_id` + UNIQUE + CHECK added in 0002
+  // sold-once: generated column `active_unit_id` + UNIQUE added in 0002; since 0079 a line
+  // released by an approved sale cancellation no longer holds its unit either.
   @@index([saleId])
   @@index([companyId])
   @@index([unitId])
@@ -1406,11 +1423,12 @@ model Payment {
   /// provider beside the label.
   accountProviderSnapshot String? @map("account_provider_snapshot") @db.VarChar(60)
 
-  company          Company           @relation(fields: [companyId], references: [id])
-  sale             Sale              @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
-  recordedBy       User?             @relation("PaymentRecordedBy", fields: [recordedById], references: [id], onDelete: Restrict, map: "fk_payments_recorded_by")
+  company          Company                  @relation(fields: [companyId], references: [id])
+  sale             Sale                     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  receivingAccount ReceivingAccount?        @relation(fields: [receivingAccountId], references: [id])
+  recordedBy       User?                    @relation("PaymentRecordedBy", fields: [recordedById], references: [id], onDelete: Restrict, map: "fk_payments_recorded_by")
   corrections      FinancialCorrection[]
+  correctionLegs   FinancialCorrectionLeg[]
 
   @@unique([companyId, clientUuid], map: "ux_payments_client_uuid")
   @@index([saleId])
@@ -1631,13 +1649,16 @@ model Expense {
   createdAt            DateTime      @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt            DateTime      @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company          Company           @relation(fields: [companyId], references: [id])
-  branch           Branch?           @relation(fields: [branchId], references: [id])
-  template         ExpenseTemplate?  @relation(fields: [templateId], references: [id])
-  createdBy        User?             @relation(fields: [createdById], references: [id])
-  receivingAccount ReceivingAccount? @relation(fields: [receivingAccountId], references: [id])
-  reportedBy       User?             @relation("ExpenseReportedBy", fields: [reportedById], references: [id])
-  confirmedBy      User?             @relation("ExpenseConfirmedBy", fields: [confirmedById], references: [id])
+  company          Company                  @relation(fields: [companyId], references: [id])
+  branch           Branch?                  @relation(fields: [branchId], references: [id])
+  template         ExpenseTemplate?         @relation(fields: [templateId], references: [id])
+  createdBy        User?                    @relation(fields: [createdById], references: [id])
+  receivingAccount ReceivingAccount?        @relation(fields: [receivingAccountId], references: [id])
+  reportedBy       User?                    @relation("ExpenseReportedBy", fields: [reportedById], references: [id])
+  confirmedBy      User?                    @relation("ExpenseConfirmedBy", fields: [confirmedById], references: [id])
+  /// A reversal of this confirmed expense (0079).
+  corrections      FinancialCorrection[]    @relation("CorrectionOfExpense")
+  correctionLegs   FinancialCorrectionLeg[]
 
   @@unique([companyId, clientUuid])
   @@index([companyId, branchId, confirmationDate, status])
@@ -2287,7 +2308,8 @@ model ReceivingAccount {
   loanLedger        LoanLedgerEntry[]
   payments          Payment[]
   channelCounts     ClosingChannelCount[]
-  correctionsTo     FinancialCorrection[] @relation("CorrectionToAccount")
+  correctionsTo     FinancialCorrection[]    @relation("CorrectionToAccount")
+  correctionLegs    FinancialCorrectionLeg[]
 
   id        Bytes             @id @db.Binary(16)
   companyId Bytes             @map("company_id") @db.Binary(16)
@@ -2535,6 +2557,14 @@ model DailyRollup {
   expensesFixed    Decimal  @default(0) @map("expenses_fixed") @db.Decimal(14, 2)
   /// Salaries, separately reportable from other fixed costs.
   expensesSalary   Decimal  @default(0) @map("expenses_salary") @db.Decimal(14, 2)
+  /// Sales cancelled on this day (0079), on the rollup's own revenue basis. Positive
+  /// magnitudes; net profit subtracts (revenue − cogs). The sale's own day keeps it.
+  cancelledRevenue Decimal  @default(0) @map("cancelled_revenue") @db.Decimal(14, 2)
+  cancelledCogs    Decimal  @default(0) @map("cancelled_cogs") @db.Decimal(14, 2)
+  cancelledCount   Int      @default(0) @map("cancelled_count")
+  /// Confirmed expenses reversed on this day (0079). `expenses` is NET of these;
+  /// `expensesCash` stays the cash that left — the reversal's cash returns as a leg.
+  expenseReversals Decimal  @default(0) @map("expense_reversals") @db.Decimal(14, 2)
   /// Corrections approved on this day. No profit component: a correction moves
   /// cash and liability only.
   correctionsTotal Decimal  @default(0) @map("corrections_total") @db.Decimal(14, 2)
@@ -3162,8 +3192,23 @@ model SupplierSettlementAllocation {
 enum FinancialCorrectionKind {
   refund_payout
   supplier_settlement
-  /// A checkout or later payment recorded against the wrong channel (0078).
+  /// A checkout or later payment: moved to its real channel (0078), or reversed as never received (0079).
   sale_payment
+  /// A sale that should not exist as recorded, cancelled whole (0079).
+  sale
+  /// A confirmed expense that was wrong, reversed in whole or part (0079).
+  expense
+  /// A purchase payment moved to its real channel (0079).
+  supplier_payment
+  /// A purchase that should not exist as recorded, cancelled whole (0079).
+  purchase
+}
+
+/// What a correction does to its target (0079).
+enum FinancialCorrectionAction {
+  reverse
+  reclassify
+  cancel
 }
 
 enum FinancialCorrectionStatus {
@@ -3192,13 +3237,18 @@ model FinancialCorrection {
   /// original payment, so a correction cannot post against a different drawer.
   branchId  Bytes @map("branch_id") @db.Binary(16)
 
-  targetKind                 FinancialCorrectionKind @map("target_kind")
+  targetKind                 FinancialCorrectionKind   @map("target_kind")
+  action                     FinancialCorrectionAction @default(reverse)
   /// Exactly one is set, matching `targetKind`. Two nullable columns rather
   /// than one polymorphic id, so both keep a real foreign key.
-  targetRefundPayoutId       Bytes?                  @map("target_refund_payout_id") @db.Binary(16)
-  targetSupplierSettlementId Bytes?                  @map("target_supplier_settlement_id") @db.Binary(16)
+  targetRefundPayoutId       Bytes?                    @map("target_refund_payout_id") @db.Binary(16)
+  targetSupplierSettlementId Bytes?                    @map("target_supplier_settlement_id") @db.Binary(16)
   /// The payment being reclassified (`sale_payment`, 0078). The payment row is never written.
-  targetPaymentId            Bytes?                  @map("target_payment_id") @db.Binary(16)
+  targetPaymentId            Bytes?                    @map("target_payment_id") @db.Binary(16)
+  targetSaleId               Bytes?                    @map("target_sale_id") @db.Binary(16)
+  targetExpenseId            Bytes?                    @map("target_expense_id") @db.Binary(16)
+  targetSupplierPaymentId    Bytes?                    @map("target_supplier_payment_id") @db.Binary(16)
+  targetPurchaseId           Bytes?                    @map("target_purchase_id") @db.Binary(16)
 
   status FinancialCorrectionStatus @default(requested)
 
@@ -3209,9 +3259,10 @@ model FinancialCorrection {
 
   /// Copied from the target, never typed. The compensating movement is exactly
   /// the opposite of what was paid, so it cannot disagree with it.
-  amount               Decimal      @db.Decimal(14, 2)
-  method               RefundMethod
-  accountLabelSnapshot String?      @map("account_label_snapshot") @db.VarChar(80)
+  amount               Decimal       @db.Decimal(14, 2)
+  /// NULL only for a sale or purchase cancellation, whose money may sit in several channels (its legs).
+  method               RefundMethod?
+  accountLabelSnapshot String?       @map("account_label_snapshot") @db.VarChar(80)
 
   /// Where a reclassified payment's money actually went (`sale_payment` only, 0078).
   toMethod               RefundMethod? @map("to_method")
@@ -3235,21 +3286,75 @@ model FinancialCorrection {
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company          Company             @relation(fields: [companyId], references: [id])
-  branch           Branch              @relation(fields: [branchId], references: [id])
-  targetPayout     RefundPayout?       @relation(fields: [targetRefundPayoutId], references: [id])
-  targetSettlement SupplierSettlement? @relation(fields: [targetSupplierSettlementId], references: [id])
-  targetPayment    Payment?            @relation(fields: [targetPaymentId], references: [id])
-  toAccount        ReceivingAccount?   @relation("CorrectionToAccount", fields: [toReceivingAccountId], references: [id])
-  requestedBy      User?               @relation("CorrectionRequestedBy", fields: [requestedById], references: [id])
-  decidedBy        User?               @relation("CorrectionDecidedBy", fields: [decidedById], references: [id])
+  company               Company                  @relation(fields: [companyId], references: [id])
+  branch                Branch                   @relation(fields: [branchId], references: [id])
+  targetPayout          RefundPayout?            @relation(fields: [targetRefundPayoutId], references: [id])
+  targetSettlement      SupplierSettlement?      @relation(fields: [targetSupplierSettlementId], references: [id])
+  targetPayment         Payment?                 @relation(fields: [targetPaymentId], references: [id])
+  targetSale            Sale?                    @relation("CorrectionOfSale", fields: [targetSaleId], references: [id], map: "fk_fc_sale")
+  targetExpense         Expense?                 @relation("CorrectionOfExpense", fields: [targetExpenseId], references: [id], map: "fk_fc_expense")
+  targetSupplierPayment SupplierPayment?         @relation("CorrectionOfSupplierPayment", fields: [targetSupplierPaymentId], references: [id], map: "fk_fc_supplier_payment")
+  targetPurchase        Purchase?                @relation("CorrectionOfPurchase", fields: [targetPurchaseId], references: [id], map: "fk_fc_purchase")
+  legs                  FinancialCorrectionLeg[]
+  releasedLines         SaleItem[]               @relation("SaleItemReleasedBy")
+  toAccount             ReceivingAccount?        @relation("CorrectionToAccount", fields: [toReceivingAccountId], references: [id])
+  requestedBy           User?                    @relation("CorrectionRequestedBy", fields: [requestedById], references: [id])
+  decidedBy             User?                    @relation("CorrectionDecidedBy", fields: [decidedById], references: [id])
 
   supersededPayouts RefundPayout[] @relation("PayoutSupersededBy")
 
   @@unique([companyId, clientUuid])
   @@index([companyId, status])
   @@index([companyId, branchId, correctionDate])
+  @@index([targetSaleId], map: "ix_fc_target_sale")
+  @@index([targetExpenseId], map: "ix_fc_target_expense")
+  @@index([targetSupplierPaymentId], map: "ix_fc_target_supplier_payment")
+  @@index([targetPurchaseId], map: "ix_fc_target_purchase")
   @@map("financial_corrections")
+}
+
+/// Which way a correction leg moves money (0079): "in" reaches the channel, "out" leaves it.
+enum CorrectionLegDirection {
+  incoming @map("in")
+  outgoing @map("out")
+}
+
+/// The money a correction moves, one row per channel and direction (0079).
+///
+/// Written once, at approval, inside the approval's transaction; append-only by
+/// trigger. The closing reads each leg as a `correctionsIn` or `correctionsOut` of
+/// its channel on the correction's day, so every kind of correction reaches the
+/// drawer and the accounts through one path.
+model FinancialCorrectionLeg {
+  id                      Bytes                  @id @db.Binary(16)
+  companyId               Bytes                  @map("company_id") @db.Binary(16)
+  correctionId            Bytes                  @map("correction_id") @db.Binary(16)
+  /// `in`: money reaches the channel; `out`: it leaves.
+  direction               CorrectionLegDirection
+  method                  RefundMethod
+  /// NULL for cash, and for an account payment that never named its account.
+  receivingAccountId      Bytes?                 @map("receiving_account_id") @db.Binary(16)
+  accountLabelSnapshot    String?                @map("account_label_snapshot") @db.VarChar(80)
+  amount                  Decimal                @db.Decimal(14, 2)
+  sourcePaymentId         Bytes?                 @map("source_payment_id") @db.Binary(16)
+  sourceSupplierPaymentId Bytes?                 @map("source_supplier_payment_id") @db.Binary(16)
+  sourceExpenseId         Bytes?                 @map("source_expense_id") @db.Binary(16)
+  createdAt               DateTime               @default(now()) @map("created_at") @db.DateTime(6)
+
+  company               Company             @relation(fields: [companyId], references: [id], map: "fk_fcl_company")
+  correction            FinancialCorrection @relation(fields: [correctionId], references: [id], map: "fk_fcl_correction")
+  receivingAccount      ReceivingAccount?   @relation(fields: [receivingAccountId], references: [id], map: "fk_fcl_account")
+  sourcePayment         Payment?            @relation(fields: [sourcePaymentId], references: [id], map: "fk_fcl_payment")
+  sourceSupplierPayment SupplierPayment?    @relation(fields: [sourceSupplierPaymentId], references: [id], map: "fk_fcl_supplier_payment")
+  sourceExpense         Expense?            @relation(fields: [sourceExpenseId], references: [id], map: "fk_fcl_expense")
+
+  @@index([correctionId], map: "ix_fcl_correction")
+  @@index([companyId], map: "ix_fcl_company")
+  @@index([receivingAccountId], map: "ix_fcl_account")
+  @@index([sourcePaymentId], map: "ix_fcl_payment")
+  @@index([sourceSupplierPaymentId], map: "ix_fcl_supplier_payment")
+  @@index([sourceExpenseId], map: "ix_fcl_expense")
+  @@map("financial_correction_legs")
 }
 
 /// What a goal measures (0047). Each one maps to a figure `daily_rollups`

@@ -199,9 +199,50 @@ describe('the original day stays exactly as it was', () => {
 });
 
 describe('a correction moves cash and liability only', () => {
-  it('creates no sale, expense or return effect', () => {
+  /**
+   * 0079 widened what an approval may write, and these pin exactly how far: the
+   * record being corrected is never created, edited or deleted — a sale, a payment,
+   * an expense, a purchase, a purchase payment, a return. What follows the
+   * correction is written in its own narrow terms, each asserted below.
+   */
+  it('creates no sale, payment, expense, purchase or return', () => {
     const c = code(service);
-    expect(c).not.toMatch(/\.sale\.|saleItem|expense|returnReversal/);
+    expect(c).not.toMatch(/\.(sale|payment|expense|purchase|supplierPayment|returnReversal|refundPayout|saleItem)\.(create|createMany|upsert)\(/);
+  });
+
+  it('never edits the corrected record itself', () => {
+    const c = code(service);
+    expect(c).not.toMatch(/\.(payment|expense|purchase|supplierPayment|returnReversal)\.(update|updateMany|upsert)\(/);
+  });
+
+  it('writes a sale only in its receivable caches — never its lines, totals or payments', () => {
+    const c = code(service);
+    const writes = c.match(/tx\.sale\.update\(\{[\s\S]*?\}\);/g) ?? [];
+    expect(writes).toHaveLength(1);
+    const data = writes[0]!.slice(writes[0]!.indexOf('data:'));
+    expect([...data.matchAll(/(\w+):/g)].map((m) => m[1]).filter((k) => k !== 'data')).toEqual(['amountPaid', 'balanceDue', 'payStatus']);
+  });
+
+  it('writes a sale line only to release its phone from sold-once, once', () => {
+    const c = code(service);
+    const writes = c.match(/tx\.saleItem\.updateMany\(\{[\s\S]*?\}\);/g) ?? [];
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatch(/releasedByCorrectionId: null/);
+    expect(writes[0]).toMatch(/data: \{ releasedByCorrectionId: correctionId \}/);
+  });
+
+  it('moves a phone only between the two states a correction allows, guarded on where it was', () => {
+    const c = code(service);
+    const writes = c.match(/tx\.unit\.updateMany\(\{[\s\S]*?\}\);/g) ?? [];
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatch(/where: \{ id: u\.id, status: u\.from \}/);
+    expect(writes[0]).not.toMatch(/cost|productId|imei|serial|branchId/);
+  });
+
+  it('writes its money only as legs, inside the approval', () => {
+    const c = code(service);
+    expect(c).toMatch(/tx\.financialCorrectionLeg\.createMany/);
+    expect(c).not.toMatch(/this\.db\.financialCorrectionLeg/);
   });
 
   it('the correction rollup component carries no profit figure', () => {
