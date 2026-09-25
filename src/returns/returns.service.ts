@@ -397,11 +397,7 @@ export class ReturnsService {
     assertEditable(request.status);
 
     const { totalAmount } = priceAdjustment(dto);
-    const gross = grossRefundOf({
-      price: num(request.saleItem.price),
-      quantity: request.saleItem.quantity,
-      discount: num(request.saleItem.discount),
-    });
+    const gross = grossRefundOf(request.saleItemId, await this.saleBasis(request.saleId));
 
     // Validated against everything already drafted, so the ceiling holds for
     // the SET of lines rather than for each one in isolation.
@@ -515,13 +511,9 @@ export class ReturnsService {
       exceptionReason: dto.exceptionReason,
     });
 
-    // Money, from the immutable line and the drafted adjustments. Never from
+    // Money, from the immutable sale and the drafted adjustments. Never from
     // the request.
-    const gross = grossRefundOf({
-      price: num(request.saleItem.price),
-      quantity: request.saleItem.quantity,
-      discount: num(request.saleItem.discount),
-    });
+    const gross = grossRefundOf(request.saleItemId, await this.saleBasis(request.saleId));
     const adjustments = await this.db.returnAdjustment.findMany({
       where: { returnRequestId: request.id },
       select: { totalAmount: true },
@@ -1289,7 +1281,6 @@ export class ReturnsService {
         sale: { select: { invoiceNo: true } },
         unit: { select: { imeiPrimary: true, serialNo: true, product: { select: { brand: true, model: true, variant: true } } } },
         requestedBy: { select: { name: true } },
-        saleItem: { select: { price: true, quantity: true, discount: true } },
         adjustments: { select: { totalAmount: true } },
       },
       ...(query.cursor ? { cursor: { id: uuidToBin(query.cursor) }, skip: 1 } : {}),
@@ -1298,13 +1289,10 @@ export class ReturnsService {
     });
 
     const page = rows.slice(0, limit);
+    const bases = await this.saleBases(page.map((r) => r.saleId));
     return {
       rows: page.map((r) => {
-        const gross = grossRefundOf({
-          price: num(r.saleItem.price),
-          quantity: r.saleItem.quantity,
-          discount: num(r.saleItem.discount),
-        });
+        const gross = grossRefundOf(r.saleItemId, bases.get(r.saleId.toString('hex'))!);
         const adjustmentTotal = r.adjustments.reduce((s, a) => s + num(a.totalAmount), 0);
         return {
           id: binToUuid(r.id),
@@ -1334,11 +1322,7 @@ export class ReturnsService {
     const branchId = this.tenant.requireBranchId();
     const r = await this.load(idStr, branchId);
 
-    const gross = grossRefundOf({
-      price: num(r.saleItem.price),
-      quantity: r.saleItem.quantity,
-      discount: num(r.saleItem.discount),
-    });
+    const gross = grossRefundOf(r.saleItemId, await this.saleBasis(r.saleId));
     const adjustments = await this.db.returnAdjustment.findMany({
       where: { returnRequestId: r.id },
       orderBy: { id: 'asc' },
@@ -1503,6 +1487,27 @@ export class ReturnsService {
    * another branch's all answer identically — a different message would confirm
    * that a return exists somewhere else.
    */
+  /**
+   * Each sale's recorded total and every non-voided line — what a returned line's
+   * refund is weighed against (docs/54 D36), keyed by sale id (hex).
+   */
+  private async saleBases(saleIds: Buffer[]) {
+    const unique = [...new Map(saleIds.map((id) => [id.toString('hex'), id])).values()];
+    const sales = unique.length
+      ? await this.db.sale.findMany({
+          where: { id: { in: unique } },
+          select: { id: true, total: true, items: { where: { voided: false }, select: { id: true, price: true, quantity: true, discount: true } } },
+        })
+      : [];
+    return new Map(sales.map((s) => [s.id.toString('hex'), { total: s.total, lines: s.items }]));
+  }
+
+  private async saleBasis(saleId: Buffer) {
+    const basis = (await this.saleBases([saleId])).get(saleId.toString('hex'));
+    if (!basis) throw new NotFoundException('Sale not found');
+    return basis;
+  }
+
   private async load(idStr: string, branchId: Buffer) {
     if (!isUuid(idStr)) throw new NotFoundException('Return not found');
     const r = await this.db.returnRequest.findUnique({

@@ -40,7 +40,7 @@ describe('the money, end to end', () => {
   const cost = 700;
   const withheld = 30;
 
-  const gross = grossRefundOf({ price, quantity: 1, discount: 0 });
+  const gross = grossRefundOf(Buffer.from([1]), { total: price, lines: [{ id: Buffer.from([1]), price, quantity: 1, discount: 0 }] });
   const { adjustmentTotal, netRefundDue } = settleRefund(gross, [{ totalAmount: withheld }]);
 
   it('refunds the customer gross minus what was kept', () => {

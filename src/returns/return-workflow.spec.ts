@@ -23,19 +23,36 @@ import {
 
 describe('what the shop owes back', () => {
   /**
-   * The single most important line in this file. The daily rollup computes
-   * revenue as `price * quantity - discount`. If the refund used any other
-   * expression, reversing a sale would not cancel the revenue it created, and
+   * The single most important line in this file. The daily rollup gives a line
+   * its share of the sale's recorded total as revenue. If the refund used any
+   * other value, reversing a sale would not cancel the revenue it created, and
    * the books would disagree by exactly the discount — silently, forever.
    */
-  it('is the sale line’s own revenue, discount included', () => {
-    expect(grossRefundOf({ price: 1000, quantity: 1, discount: 0 })).toBe(1000);
-    expect(grossRefundOf({ price: 1000, quantity: 1, discount: 150 })).toBe(850);
-    expect(grossRefundOf({ price: 20, quantity: 3, discount: 5 })).toBe(55);
+  const id = (n: number) => Buffer.from([n]);
+  const alone = (price: number, quantity: number, discount: number) => {
+    const line = { id: id(1), price, quantity, discount };
+    return grossRefundOf(line.id, { total: price * quantity - discount, lines: [line] });
+  };
+
+  it('is the sale line’s own revenue, line discount included', () => {
+    expect(alone(1000, 1, 0)).toBe(1000);
+    expect(alone(1000, 1, 150)).toBe(850);
+    expect(alone(20, 3, 5)).toBe(55);
   });
 
   it('rounds to the cent rather than carrying float noise', () => {
-    expect(grossRefundOf({ price: 10.1, quantity: 3, discount: 0 })).toBe(30.3);
+    expect(alone(10.1, 3, 0)).toBe(30.3);
+  });
+
+  it('takes its share of a whole-invoice discount: never more back than was paid for it (docs/54 D36)', () => {
+    // Two phones at 10 000, 1 000 off the invoice: 19 000 paid, 9 500 each.
+    const two = { total: 19000, lines: [{ id: id(1), price: 10000, quantity: 1, discount: 0 }, { id: id(2), price: 10000, quantity: 1, discount: 0 }] };
+    expect(grossRefundOf(id(1), two)).toBe(9500);
+    expect(grossRefundOf(id(2), two)).toBe(9500);
+    // Returning the whole invoice gives back exactly the invoice.
+    const mixed = { total: 10000, lines: [{ id: id(1), price: 10000, quantity: 1, discount: 0 }, { id: id(2), price: 20, quantity: 2, discount: 0 }] };
+    expect(grossRefundOf(id(1), mixed) + grossRefundOf(id(2), mixed)).toBe(10000);
+    expect(() => grossRefundOf(id(9), mixed)).toThrow('That line is not on this sale');
   });
 });
 

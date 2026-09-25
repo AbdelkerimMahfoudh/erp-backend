@@ -85,8 +85,8 @@ describe('the reversal is dated, immutable and singular', () => {
 });
 
 describe('money is the server’s', () => {
-  it('takes gross from the sale line, never from the request', () => {
-    expect(code).toMatch(/grossRefundOf\(\{\s*price: num\(request\.saleItem\.price\)/);
+  it('takes gross from the sale — the line\'s share of its recorded total — never from the request', () => {
+    expect(code).toMatch(/grossRefundOf\(request\.saleItemId, await this\.saleBasis\(request\.saleId\)\)/);
     expect(code).not.toMatch(/dto\.(grossRefund|netRefundDue|refundAmount|adjustmentTotal)/);
   });
 
