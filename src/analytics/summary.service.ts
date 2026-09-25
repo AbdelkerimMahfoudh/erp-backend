@@ -98,9 +98,10 @@ export class SummaryService {
       })(),
     ]);
 
+    // A return takes off what goes back — its net refund due, the adjustments the shop keeps staying revenue (docs/53 D30).
     const p = profit({
       grossSales: current.revenue,
-      returnsRevenue: current.returnsRevenue,
+      returnsRevenue: round2(current.returnsRevenue - current.returnsAdjustments),
       cogs: current.cogs,
       returnsCogs: current.returnsCogs,
       cancelledRevenue: current.cancelledRevenue,
@@ -110,7 +111,7 @@ export class SummaryService {
 
     const previousProfit = profit({
       grossSales: previous.revenue,
-      returnsRevenue: previous.returnsRevenue,
+      returnsRevenue: round2(previous.returnsRevenue - previous.returnsAdjustments),
       cogs: previous.cogs,
       returnsCogs: previous.returnsCogs,
       cancelledRevenue: previous.cancelledRevenue,
@@ -221,6 +222,7 @@ export class SummaryService {
       expensesSalary: sum((r) => r.expensesSalary),
       expensesCount: rows.reduce((a, r) => a + Number(r.expensesCount ?? 0), 0),
       returnsRevenue: sum((r) => r.returnsRevenue),
+      returnsAdjustments: sum((r) => r.returnsAdjustments),
       returnsCogs: sum((r) => r.returnsCogs),
       cancelledRevenue: sum((r) => r.cancelledRevenue),
       cancelledCogs: sum((r) => r.cancelledCogs),

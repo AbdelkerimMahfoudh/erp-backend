@@ -142,7 +142,11 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 
 export interface ProfitInput {
   grossSales: number;
-  /** Revenue reversed by returns APPROVED in the period. */
+  /**
+   * Revenue reversed by returns APPROVED in the period: their NET refund due — the gross refund less
+   * the adjustments the shop keeps, which stay revenue (docs/53 R2; the rollup's own `net_profit` and
+   * the Daily closing count it so).
+   */
   returnsRevenue: number;
   cogs: number;
   /** COGS credited back by those same approved returns. */
