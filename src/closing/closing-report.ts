@@ -234,9 +234,15 @@ export interface ClosingReport {
   window: { startsAt: string; endsAt: string };
   standing: DayStanding;
   sales: {
+    /** Invoices of the date. */
     count: number;
     value: number;
+    /** Units on the invoices of the date. */
     itemsSold: number;
+    /** Sales count as defined (docs/53 R5): invoices − whole-sale cancellations approved on the date; a return is its own count. */
+    salesCount: number;
+    /** Units sold as defined (R6): units on the invoices − units on the cancelled invoices; returned units are the returns' count. */
+    unitsSold: number;
     returns: { count: number; grossRefund: number; adjustments: number; netRefundDue: number };
     /** Sales cancelled on the date (0079): their value comes off here, on this day, never on the day they were sold. */
     cancellations: { count: number; value: number; items: number };
@@ -463,6 +469,8 @@ export function assembleReport(i: ReportInputs): ClosingReport {
       count: i.sales.count,
       value: round2(i.sales.value),
       itemsSold: i.sales.itemsSold,
+      salesCount: i.sales.count - i.cancellations.count,
+      unitsSold: i.sales.itemsSold - i.cancellations.items,
       returns: {
         count: i.returns.count,
         grossRefund: round2(i.returns.grossRefund),
@@ -553,7 +561,8 @@ export function reportInvariants(
  */
 export function reportVersion(r: ClosingReport): string {
   const figures = {
-    s: r.sales,
+    // The defined count and units are derived from fields already here; leaving them out keeps every stored version valid.
+    s: { ...r.sales, salesCount: undefined, unitsSold: undefined },
     m: r.money.channels.map((c) => [c.key, c.in, c.out, c.net]),
     e: [r.expenses.total, r.expenses.lines.map((l) => [l.id, l.amount]), r.expenses.reversals.map((l) => [l.correctionId, l.amount])],
     x: [r.expected.cash.opening.amount, r.expected.cash.expected, r.expected.cash.verification, r.expected.accounts.map((a) => [a.key, a.expectedMovement, a.verification])],
