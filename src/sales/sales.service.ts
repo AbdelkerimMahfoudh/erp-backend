@@ -15,6 +15,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
 import { SpineEventBus } from '../common/events/spine-event-bus';
 import { requestRollupTx } from '../analytics/rollup-queue';
+import { figuresByDay } from '../analytics/period-figures';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { isDateString } from '../common/business-day';
@@ -899,11 +900,13 @@ export class SalesService {
   }
 
   /**
-   * One line per day: the sales made, their full value, the phones among them,
-   * and what is still owed on them now (0074).
+   * One line per business date of the range that carries anything (docs/53): the invoices made that
+   * day (their value, what is still owed on them now), and the cancellations and returns APPROVED that
+   * day, whatever day their sale was — each a negative adjustment on its own date, as the Daily closing
+   * shows it. A day holding only an adjustment has its own line, with a negative net.
    *
-   * The day is the SALE's day. What was collected on a day is a different fact,
-   * dated by when money arrived, and lives on the Money overview.
+   * `sales` and `phones` are the defined count and units: invoices (and their phones) less
+   * whole-sale cancellations; a return is its own count, `returns`.
    */
   async byDay(from: string, to: string) {
     const companyId = this.tenant.companyId();
@@ -911,34 +914,38 @@ export class SalesService {
     const range = parseDateRange(from, to);
     if (!range || !from || !to) throw new BadRequestException('from and to must be YYYY-MM-DD');
 
-    const rows = await this.db.$queryRaw<
-      { day: string; sales: bigint; value: unknown; owed: unknown; phones: unknown }[]
-    >(Prisma.sql`
-      SELECT DATE_FORMAT(s.business_date, '%Y-%m-%d') AS day,
-             COUNT(*)                            AS sales,
-             SUM(s.total)                        AS value,
-             SUM(s.balance_due)                  AS owed,
-             SUM((SELECT COUNT(*) FROM sale_items si
-                    JOIN units u ON u.id = si.unit_id
-                    JOIN products p ON p.id = u.product_id
-                   WHERE si.sale_id = s.id AND si.voided = 0 AND p.tracking_type = 'imei')) AS phones
-      FROM sales s
-      WHERE s.company_id = ${companyId} AND s.branch_id = ${branchId}
-        AND s.is_reversed = 0
-        AND s.business_date BETWEEN ${from} AND ${to}
-      GROUP BY day
-      ORDER BY day DESC`);
+    const [dated, owed] = await Promise.all([
+      figuresByDay(this.db, companyId, branchId, from, to),
+      this.db.$queryRaw<{ day: string; owed: unknown }[]>(Prisma.sql`
+        SELECT DATE_FORMAT(s.business_date, '%Y-%m-%d') AS day, SUM(s.balance_due) AS owed
+          FROM sales s
+         WHERE s.company_id = ${companyId} AND s.branch_id = ${branchId}
+           AND s.is_reversed = 0
+           AND s.business_date BETWEEN ${from} AND ${to}
+         GROUP BY day`),
+    ]);
+    const owedOn = new Map(owed.map((r) => [r.day, Math.round(Number(r.owed ?? 0) * 100) / 100]));
 
     return {
       from,
       to,
-      days: rows.map((r) => ({
-        day: r.day,
-        sales: Number(r.sales),
-        phones: Number(r.phones ?? 0),
-        value: Math.round(Number(r.value ?? 0) * 100) / 100,
-        outstanding: Math.round(Number(r.owed ?? 0) * 100) / 100,
-      })),
+      days: [...dated.entries()]
+        // A day with only an expense is not a sales day.
+        .filter(([, f]) => f.invoices.count + f.cancellations.count + f.returns.count > 0)
+        .sort(([a], [b]) => (a < b ? 1 : -1))
+        .map(([day, f]) => ({
+          day,
+          sales: f.net.salesCount,
+          phones: f.net.phones,
+          units: f.net.units,
+          value: f.invoices.value,
+          cancelled: f.cancellations.value,
+          returned: f.returns.value,
+          returns: f.returns.count,
+          adjusted: Math.round((f.cancellations.value + f.returns.value) * 100) / 100,
+          net: f.net.salesValue,
+          outstanding: owedOn.get(day) ?? 0,
+        })),
     };
   }
 

@@ -16,6 +16,8 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RollupService } from '../analytics/rollup.service';
+import { periodFigures } from '../analytics/period-figures';
+import { expensesTodayOf } from './expenses-today';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayWindow, isDateString, localParts, localTimeOf, shiftDate } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
@@ -1693,28 +1695,31 @@ export class ClosingService {
     const range = { gte: dateValue(from), lte: dateValue(to) };
     const openingToday = await this.openingCash(companyId, branchId, today);
 
-    const [todayChannels, periodChannels, sales, phones, owedAll, expenses] = await Promise.all([
+    const todayDate = dateValue(today);
+    const [todayChannels, periodChannels, sales, dated, owedAll, expenses, reversals] = await Promise.all([
       this.expectedChannels(companyId, branchId, today, today, openingToday),
       this.expectedChannels(companyId, branchId, from, to),
       this.db.sale.aggregate({
         where: { branchId, isReversed: false, businessDate: range },
-        _sum: { total: true, balanceDue: true },
-        _count: true,
+        _sum: { balanceDue: true },
       }),
-      this.db.saleItem.count({
-        where: {
-          voided: false,
-          unit: { product: { trackingType: 'imei' } },
-          sale: { branchId, isReversed: false, businessDate: range },
-        },
-      }),
+      // Invoices, cancellations and returns, each on the date that carries it (docs/53 D29).
+      periodFigures(this.db, companyId, branchId, from, to),
       this.db.sale.aggregate({
         where: { branchId, isReversed: false, balanceDue: { gt: 0 } },
         _sum: { balanceDue: true },
         _count: true,
       }),
+      // Today's expenses by the Daily closing's rule: a variable one on its confirmation date, a fixed one on its due date.
       this.db.expense.findMany({
-        where: { branchId, status: 'confirmed', confirmationDate: dateValue(today) },
+        where: {
+          branchId,
+          status: 'confirmed',
+          OR: [
+            { expenseClass: 'variable', confirmationDate: todayDate },
+            { expenseClass: 'fixed', dueDate: todayDate },
+          ],
+        },
         select: {
           id: true,
           category: true,
@@ -1726,6 +1731,19 @@ export class ClosingService {
           confirmedAt: true,
         },
         orderBy: { confirmedAt: 'desc' },
+      }),
+      // And each reversal approved today, as its own negative row.
+      this.db.financialCorrection.findMany({
+        where: { branchId, targetKind: 'expense', status: 'approved', correctionDate: todayDate },
+        select: {
+          id: true,
+          amount: true,
+          method: true,
+          accountLabelSnapshot: true,
+          decidedAt: true,
+          targetExpense: { select: { id: true, category: true } },
+        },
+        orderBy: { decidedAt: 'desc' },
       }),
     ]);
 
@@ -1750,27 +1768,28 @@ export class ClosingService {
           net: c.expected,
         })),
       period: {
-        phonesSold: phones,
-        salesCount: sales._count,
-        salesValue: round2(num(sales._sum.total)),
+        /** Phones on the invoices less phones on cancelled invoices (docs/53 R6); returned phones are `returns.phones`. */
+        phonesSold: dated.net.phones,
+        /** Every item on the invoices less items on cancelled invoices (R6) — what "Items sold" shows; returned items are `returns.count`. */
+        unitsSold: dated.net.units,
+        /** Invoices less whole-sale cancellations (R5); returns are counted apart. */
+        salesCount: dated.net.salesCount,
+        /** The invoices of the period, on their sale dates. */
+        salesValue: dated.invoices.value,
+        /** Cancellations and returns approved in the period, on their own dates — negative adjustments to the value above. */
+        cancellations: { count: dated.cancellations.count, value: dated.cancellations.value, phones: dated.cancellations.phones },
+        returns: { count: dated.returns.count, value: dated.returns.value, phones: dated.returns.phones },
+        /** cancellations + returns: what comes off the value above — given, so the phone adds nothing up. */
+        adjusted: Math.round((dated.cancellations.value + dated.returns.value) * 100) / 100,
+        /** value − returns − cancellations: the Daily closing's net sales over the period. */
+        netSalesValue: dated.net.salesValue,
         collected: round2(collected),
         outstanding: round2(num(sales._sum.balanceDue)),
+        /** Refunds CONFIRMED in the period — money leaving on the confirmation date, no profit effect. */
         refunds: round2(refunds),
       },
       outstandingAll: { amount: round2(num(owedAll._sum.balanceDue)), sales: owedAll._count },
-      expensesToday: {
-        total: round2(expenses.reduce((n, e) => n + num(e.amount), 0)),
-        rows: expenses.map((e) => ({
-          id: binToUuid(e.id),
-          description: e.category,
-          amount: num(e.amount),
-          method: e.method,
-          accountLabel: e.accountLabelSnapshot,
-          reference: e.reference,
-          hasReceipt: e.receiptKey !== null,
-          paidAt: e.confirmedAt,
-        })),
-      },
+      expensesToday: expensesTodayOf(expenses, reversals),
     };
   }
 
