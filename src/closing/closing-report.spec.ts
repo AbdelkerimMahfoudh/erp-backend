@@ -82,7 +82,7 @@ function inputs(over: Partial<ReportInputs> = {}): ReportInputs {
     standing: 'counting',
     sales: { count: 3, value: 45_500, itemsSold: 7, cost: 36_250, missingCostLines: 0 },
     returns: { count: 1, grossRefund: 9_000, adjustments: 500, netRefundDue: 8_500, costCredited: 7_000, missingCostLines: 0 },
-    cancellations: { count: 0, value: 0, cost: 0, missingCostLines: 0, ofTheseSales: 0 },
+    cancellations: { count: 0, value: 0, items: 0, cost: 0, missingCostLines: 0, ofTheseSales: 0 },
     collected: { atCheckout: 25_500, laterSameDay: 7_000, corrections: 0 },
     channels,
     splits,
@@ -355,7 +355,7 @@ describe('a day with corrections posted on it (0079)', () => {
   const report = assembleReport(
     inputs({
       channels,
-      cancellations: { count: 2, value: 12_500, cost: 7_250, missingCostLines: 0, ofTheseSales: 2_500 },
+      cancellations: { count: 2, value: 12_500, items: 3, cost: 7_250, missingCostLines: 0, ofTheseSales: 2_500 },
       collected: { atCheckout: 25_500, laterSameDay: 7_000, corrections: -2_500 },
       expenseReversals: [
         { correctionId: 'c1', expenseId: 'e2', category: 'Transport', expenseClass: 'variable', isSalary: false, amount: 300, method: 'cash', accountLabel: null },
@@ -368,7 +368,7 @@ describe('a day with corrections posted on it (0079)', () => {
   });
 
   it('sales: cancellations on their own line; net sales, collected and owed as recomputed', () => {
-    expect(report.sales.cancellations).toEqual({ count: 2, value: 12_500 });
+    expect(report.sales.cancellations).toEqual({ count: 2, value: 12_500, items: 3 });
     expect(report.sales.netSalesValue).toBe(24_500);
     expect(report.sales.collected).toEqual({ atCheckout: 25_500, laterSameDay: 7_000, corrections: -2_500, total: 30_000 });
     expect(report.sales.owed).toBe(13_000);
@@ -402,7 +402,7 @@ describe('a day with corrections posted on it (0079)', () => {
   });
 
   it('a cancelled sale with no recorded cost makes the result incalculable on the day it is cancelled too', () => {
-    const r = assembleReport(inputs({ cancellations: { count: 1, value: 2_500, cost: 0, missingCostLines: 1, ofTheseSales: 0 } }));
+    const r = assembleReport(inputs({ cancellations: { count: 1, value: 2_500, items: 1, cost: 0, missingCostLines: 1, ofTheseSales: 0 } }));
     expect(r.result).toMatchObject({ status: 'cannot_calculate', reason: 'cost_missing', costOfUnitsSold: null, grossProfit: null });
   });
 

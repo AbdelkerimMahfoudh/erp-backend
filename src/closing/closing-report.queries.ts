@@ -119,8 +119,9 @@ export async function cancellationFigures(db: RawRunner, companyId: Buffer, bran
       JOIN sales s ON s.id = fc.target_sale_id
      WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
        AND fc.target_kind = 'sale' AND fc.status = 'approved' AND fc.correction_date = ${date}`);
-  const [lines] = await db.$queryRaw<{ missing: unknown }[]>(Prisma.sql`
-    SELECT COALESCE(SUM(si.cost <= ${MISSING_COST_EPSILON}), 0) AS missing
+  const [lines] = await db.$queryRaw<{ items: unknown; missing: unknown }[]>(Prisma.sql`
+    SELECT COALESCE(SUM(si.quantity), 0) AS items,
+           COALESCE(SUM(si.cost <= ${MISSING_COST_EPSILON}), 0) AS missing
       FROM financial_corrections fc
       JOIN sale_items si ON si.sale_id = fc.target_sale_id AND si.voided = 0
      WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
@@ -129,6 +130,7 @@ export async function cancellationFigures(db: RawRunner, companyId: Buffer, bran
     count: Number(head?.n ?? 0),
     value: round2(num(head?.value)),
     cost: round2(num(head?.cost)),
+    items: Number(num(lines?.items)),
     missingCostLines: Number(num(lines?.missing)),
     ofTheseSales: round2(num(head?.own)),
   };

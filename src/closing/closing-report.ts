@@ -15,7 +15,8 @@ import { closeVerification } from './closing-lifecycle';
  *
  *   Sales     value   = Σ sales.total                         (sales.business_date = D)
  *             returns = Σ return_reversals.net_refund_due      (approval_date = D)
- *             cancelled = Σ sales.total of sales cancelled on D (correction_date = D, any sale date — 0079)
+ *             cancelled = Σ sales.total of sales cancelled on D (correction_date = D, any sale date — 0079),
+ *                         with their items (Σ quantity of their lines — 0080)
  *             collected for these sales = Σ payments on D's sales with payments.business_date ≤ D
  *                                         + Σ legs of those payments posted by corrections ≤ D (in − out)
  *             still owed on these sales = value − collected − D's own sales cancelled by the end of D
@@ -74,6 +75,8 @@ export interface CollectedForSales {
 export interface CancellationFigures {
   count: number;
   value: number;
+  /** Their items (Σ quantity of their lines), taken off the units sold on this day (0080). */
+  items: number;
   /** Their recorded cost, credited back. */
   cost: number;
   missingCostLines: number;
@@ -236,7 +239,7 @@ export interface ClosingReport {
     itemsSold: number;
     returns: { count: number; grossRefund: number; adjustments: number; netRefundDue: number };
     /** Sales cancelled on the date (0079): their value comes off here, on this day, never on the day they were sold. */
-    cancellations: { count: number; value: number };
+    cancellations: { count: number; value: number; items: number };
     netSalesValue: number;
     collected: { atCheckout: number; laterSameDay: number; corrections: number; total: number };
     owed: number;
@@ -466,7 +469,7 @@ export function assembleReport(i: ReportInputs): ClosingReport {
         adjustments: round2(i.returns.adjustments),
         netRefundDue: round2(i.returns.netRefundDue),
       },
-      cancellations: { count: i.cancellations.count, value: round2(i.cancellations.value) },
+      cancellations: { count: i.cancellations.count, value: round2(i.cancellations.value), items: i.cancellations.items },
       netSalesValue,
       collected: {
         atCheckout: round2(i.collected.atCheckout),

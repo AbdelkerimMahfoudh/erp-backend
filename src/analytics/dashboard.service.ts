@@ -48,6 +48,11 @@ export class DashboardService {
    * Every figure keys on STORED business dates (0076), the ranges are the
    * server's, and the bars are the sales value cut up — never a second query
    * — so what is plotted adds up to what is stated.
+   *
+   * A cancelled sale (0079) stays in the sales value of the day it was sold and
+   * appears again, as a cancellation, on the day the cancellation was approved —
+   * the Daily closing's own rule, and the rollup's that Results reads. Over any
+   * range, sales value − cancelled is what those two take off for it.
    */
   async home(period: HomePeriod = 'week') {
     const branchId = this.tenant.requireBranchId();
@@ -95,7 +100,7 @@ export class DashboardService {
     const companyId = this.tenant.companyId();
     const saleWhere = { branchId, isReversed: false, businessDate: dateRange };
 
-    const [sales, collected, expenses, phones] = await Promise.all([
+    const [sales, collected, expenses, phones, cancelled] = await Promise.all([
       /**
        * The sales themselves — the series is cut from these rows, so the bars
        * and the sales value are one number.
@@ -115,6 +120,19 @@ export class DashboardService {
       this.db.saleItem.count({
         where: { voided: false, unit: { product: { trackingType: 'imei' } }, sale: saleWhere },
       }),
+      // Sales cancelled on these business dates, whatever day they were sold — as the Daily closing counts them.
+      this.db.$queryRaw<{ n: bigint; value: unknown; phones: unknown }[]>(Prisma.sql`
+        SELECT COUNT(*) AS n, COALESCE(SUM(s.total), 0) AS value,
+               COALESCE(SUM((SELECT COUNT(*)
+                                FROM sale_items si
+                                JOIN units u ON u.id = si.unit_id
+                                JOIN products p ON p.id = u.product_id
+                               WHERE si.sale_id = s.id AND si.voided = 0 AND p.tracking_type = 'imei')), 0) AS phones
+          FROM financial_corrections fc
+          JOIN sales s ON s.id = fc.target_sale_id
+         WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
+           AND fc.target_kind = 'sale' AND fc.status = 'approved'
+           AND fc.correction_date BETWEEN ${range.from} AND ${range.to}`),
     ]);
 
     let salesValue = 0;
@@ -145,6 +163,12 @@ export class DashboardService {
         salesValue,
         salesCount,
         phonesSold: phones,
+        /** Sales cancelled in the range, on the day each cancellation was approved; the sales value above keeps them on their own day. */
+        cancellations: {
+          count: Number(cancelled[0]?.n ?? 0),
+          value: round2(Number(cancelled[0]?.value ?? 0)),
+          phones: Number(cancelled[0]?.phones ?? 0),
+        },
         collected: round2(num(collected._sum.amount)),
         expenses: round2(Number(expenses[0]?.total ?? 0)),
         expensesCount: Number(expenses[0]?.count ?? 0),
