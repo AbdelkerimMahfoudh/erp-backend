@@ -170,7 +170,8 @@ export class DashboardService {
    */
   private async arrivals(branchId: Buffer) {
     const units = await this.db.unit.findMany({
-      where: { branchId, product: { trackingType: 'imei' } },
+      // A phone whose purchase was cancelled never arrived (0079).
+      where: { branchId, product: { trackingType: 'imei' }, status: { not: 'voided' } },
       orderBy: { id: 'desc' },
       take: 3,
       select: {

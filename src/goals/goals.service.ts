@@ -7,7 +7,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { AccessService } from '../rbac/access.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
-import { computeProgress, isMoneyMetric, METRIC_COLUMN, type GoalMetricKey } from './goal-progress';
+import { CANCELLED_ADJUSTMENT, computeProgress, isMoneyMetric, METRIC_COLUMN, type GoalMetricKey } from './goal-progress';
 import { CreateGoalDto } from './dto/create-goal.dto';
 import { ArchiveGoalDto } from './dto/archive-goal.dto';
 
@@ -287,11 +287,13 @@ export class GoalsService {
     to: string,
   ): Promise<number> {
     const column = METRIC_COLUMN[metric];
+    // A sale cancelled in the period is not a sale (0079): its revenue, profit and count come off on the day it was cancelled.
+    const cancelled = CANCELLED_ADJUSTMENT[metric];
 
     if (goal.scope !== 'user') {
       const rows = await this.db.$queryRaw<{ total: unknown }[]>(
         Prisma.sql`
-          SELECT COALESCE(SUM(${Prisma.raw(`\`${column}\``)}), 0) AS total
+          SELECT COALESCE(SUM(${Prisma.raw(cancelled ? `\`${column}\` - ${cancelled}` : `\`${column}\``)}), 0) AS total
           FROM daily_rollups
           WHERE company_id = ${this.tenant.companyId()}
             AND day >= ${from} AND day <= ${to}
@@ -321,6 +323,8 @@ export class GoalsService {
             AND s.branch_id = ${goal.branchId}
             AND s.user_id = ${goal.targetUserId}
             AND si.voided = 0
+            -- A cancelled sale's lines were never a sale (0079).
+            AND si.released_by_correction_id IS NULL
             AND DATE(s.sold_at) >= ${from} AND DATE(s.sold_at) <= ${to}
         ) t
       `,
@@ -333,6 +337,7 @@ export class GoalsService {
         where: {
           branchId: goal.branchId as Buffer,
           userId: goal.targetUserId as Buffer,
+          corrections: { none: { targetKind: 'sale', status: 'approved' } },
           soldAt: {
             gte: new Date(`${from}T00:00:00.000Z`),
             lt: new Date(new Date(`${to}T00:00:00.000Z`).getTime() + 86_400_000),

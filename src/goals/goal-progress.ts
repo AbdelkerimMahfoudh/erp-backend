@@ -127,6 +127,18 @@ export function computeProgress(input: ProgressInput): Progress {
 }
 
 /**
+ * What a sale cancelled in the period takes off each branch metric (0079), from the
+ * rollup's own cancellation columns. Units sold has no such column: a branch's
+ * units-sold goal still counts a cancelled sale's items (a personal one does not).
+ */
+export const CANCELLED_ADJUSTMENT: Readonly<Record<GoalMetricKey, string | null>> = {
+  gross_profit: '(`cancelled_revenue` - `cancelled_cogs`)',
+  revenue: '`cancelled_revenue`',
+  sales_count: '`cancelled_count`',
+  units_sold: null,
+};
+
+/**
  * Which rollup column each metric reads.
  *
  * The single mapping, in one place. `daily_rollups` already accounts for

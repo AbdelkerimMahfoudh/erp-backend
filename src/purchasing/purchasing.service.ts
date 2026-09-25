@@ -89,6 +89,10 @@ interface RejectedLine {
 
 interface PreparedUnit {
   productId: Buffer;
+  /** The product's tracking type, so a voided record is only brought back as the same kind of item. */
+  trackingType: string;
+  /** A phone of this company whose purchase was cancelled (0079): received again, its record comes back. */
+  reactivate?: Buffer;
   identifier: string;
   imeiPrimary: string | null;
   imeiSecondary: string | null;
@@ -240,6 +244,7 @@ export class PurchasingService {
             if (secondary) seen.add(secondary);
             preparedUnits.push({
               productId: product.id,
+              trackingType: product.trackingType,
               identifier: normalized,
               ...this.identifierColumns(product, normalized),
               imeiSecondary: secondary,
@@ -267,11 +272,30 @@ export class PurchasingService {
 
     // 2. Same-company duplicate pre-check (global unique index is the backstop).
     // Both IMEIs are looked up, across all three identifier columns.
+    /*
+     * A phone of this company whose purchase was cancelled (0079) never entered the
+     * books. Receiving it again is how that correction is completed: its record comes
+     * back into stock under this purchase instead of a second record being created, so
+     * one IMEI stays one record and IMEI uniqueness is enforced exactly as before.
+     */
     const existing = await this.inventory.findExistingIdentifiers(
+      preparedUnits.flatMap((u) => (u.imeiSecondary ? [u.identifier, u.imeiSecondary] : [u.identifier])),
+      { includeVoided: false },
+    );
+    const voided = await this.inventory.findVoidedUnits(
       preparedUnits.flatMap((u) => (u.imeiSecondary ? [u.identifier, u.imeiSecondary] : [u.identifier])),
     );
     const committableUnits = preparedUnits.filter((u) => {
-      if (existing.has(u.identifier) || (u.imeiSecondary && existing.has(u.imeiSecondary))) {
+      const previous = voided.get(u.identifier);
+      const secondaryVoided = u.imeiSecondary ? voided.get(u.imeiSecondary) : undefined;
+      // The IMEI 2 is free, or it is this same voided phone's own.
+      const secondaryFree =
+        !u.imeiSecondary || (!existing.has(u.imeiSecondary) && (!secondaryVoided || (!!previous && secondaryVoided.id.equals(previous.id))));
+      if (previous?.asPrimary && previous.trackingType === u.trackingType && secondaryFree) {
+        u.reactivate = previous.id;
+        return true;
+      }
+      if (previous || secondaryVoided || existing.has(u.identifier) || (u.imeiSecondary && existing.has(u.imeiSecondary))) {
         rejected.push({
           identifier: u.identifier,
           reason: 'already registered',
@@ -356,16 +380,26 @@ export class PurchasingService {
           await tx.purchaseItem.create({
             data: { id: newUuidV7Bin(), companyId, purchaseId: pid, productId: u.productId, quantity: 1, unitCost: u.cost, taxAmount: 0 },
           });
-          await this.inventory.createUnit(tx, {
-            productId: u.productId,
-            branchId,
-            imeiPrimary: u.imeiPrimary,
-            imeiSecondary: u.imeiSecondary,
-            serialNo: u.serialNo,
-            cost: u.cost,
-            supplierId: null,
-            purchaseId: pid,
-          });
+          if (u.reactivate) {
+            await this.inventory.reactivateUnit(tx, u.reactivate, {
+              productId: u.productId,
+              branchId,
+              cost: u.cost,
+              purchaseId: pid,
+              imeiSecondary: u.imeiSecondary,
+            });
+          } else {
+            await this.inventory.createUnit(tx, {
+              productId: u.productId,
+              branchId,
+              imeiPrimary: u.imeiPrimary,
+              imeiSecondary: u.imeiSecondary,
+              serialNo: u.serialNo,
+              cost: u.cost,
+              supplierId: null,
+              purchaseId: pid,
+            });
+          }
         }
 
         for (const l of preparedStock) {

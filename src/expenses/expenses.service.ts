@@ -341,6 +341,12 @@ export class ExpensesService {
     return {
       reportedBy: { select: { name: true } },
       confirmedBy: { select: { name: true } },
+      // A reversal asked for or approved (0079). The expense itself is never edited.
+      corrections: {
+        where: { status: { in: ['requested', 'approved'] as ('requested' | 'approved')[] } },
+        orderBy: { requestedAt: 'desc' as const },
+        select: { status: true, amount: true, reason: true, correctionDate: true, requestedBy: { select: { name: true } }, decidedBy: { select: { name: true } } },
+      },
     } as const;
   }
 
@@ -433,7 +439,9 @@ export class ExpensesService {
     version: number;
     reportedBy?: { name: string } | null;
     confirmedBy?: { name: string } | null;
+    corrections?: { status: string; amount: Prisma.Decimal; reason: string; correctionDate: Date | null; requestedBy: { name: string } | null; decidedBy: { name: string } | null }[];
   }) {
+    const reversal = r.corrections?.find((c) => c.status === 'approved') ?? r.corrections?.find((c) => c.status === 'requested') ?? null;
     return {
       id: binToUuid(r.id),
       category: r.category,
@@ -456,6 +464,20 @@ export class ExpensesService {
       confirmedAt: r.confirmedAt?.toISOString() ?? null,
       /** The business day the money is counted against. */
       confirmationDate: r.confirmationDate ? dayKey(r.confirmationDate) : null,
+      /**
+       * A reversal of this confirmed expense (0079): asked for, or approved and posted to
+       * its own day. The amount above stays what was recorded.
+       */
+      reversal: reversal
+        ? {
+            status: reversal.status,
+            amount: num(reversal.amount),
+            reason: reversal.reason,
+            correctionDate: reversal.correctionDate ? dayKey(reversal.correctionDate) : null,
+            requestedBy: reversal.requestedBy?.name ?? null,
+            decidedBy: reversal.decidedBy?.name ?? null,
+          }
+        : null,
       version: r.version,
     };
   }

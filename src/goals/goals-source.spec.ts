@@ -43,7 +43,18 @@ describe('branch and company progress comes from the rollup', () => {
       service.indexOf("if (goal.scope !== 'user')"),
       service.indexOf('Per person'),
     );
-    expect(branchPath).toMatch(/SUM\(\$\{Prisma\.raw\(`\\`\$\{column\}\\``\)\}\)/);
+    // A cancelled sale comes off through the rollup's own cancellation columns (0079): still no expression of its own.
+    expect(branchPath).toContain('SUM(${Prisma.raw(cancelled ? `\\`${column}\\` - ${cancelled}` : `\\`${column}\\``)})');
+    expect(branchPath).not.toContain('FROM sale_items');
+  });
+
+  it('the cancellation adjustment reads only columns the rollup model has (0079)', () => {
+    const adjustment = progress.slice(progress.indexOf('export const CANCELLED_ADJUSTMENT'), progress.indexOf('export const METRIC_COLUMN'));
+    const columns = [...adjustment.matchAll(/`(\w+)`/g)].map((m) => m[1]).filter((c) => c.startsWith('cancelled_'));
+    expect(new Set(columns)).toEqual(new Set(['cancelled_revenue', 'cancelled_cogs', 'cancelled_count']));
+    const model = schema.slice(schema.indexOf('model DailyRollup'));
+    const body = model.slice(0, model.indexOf('\n}'));
+    for (const column of columns) expect(body).toContain(`@map("${column}")`);
   });
 
   it('every metric maps to a column the rollup model actually has', () => {

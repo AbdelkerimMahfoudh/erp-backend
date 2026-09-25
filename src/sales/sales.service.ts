@@ -15,6 +15,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { InvoiceNumberService } from '../common/numbering/invoice-number.service';
 import { SpineEventBus } from '../common/events/spine-event-bus';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { dayKey } from '../common/utils/date.util';
 import { isDateString } from '../common/business-day';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { ClosingService, type AutoReopenResult } from '../closing/closing.service';
@@ -957,11 +958,13 @@ export class SalesService {
         customer: { select: { name: true } },
         counterparty: { select: { name: true } },
         payments: { select: { method: true, accountLabelSnapshot: true } },
+        corrections: { where: { status: { in: ['requested', 'approved'] } }, select: { status: true } },
         items: {
           select: {
             unitId: true,
             quantity: true,
             voided: true,
+            releasedByCorrectionId: true,
             // What was sold, as a row can say it without a second request.
             unit: { select: { product: { select: { brand: true, model: true, variant: true, trackingType: true } } } },
             product: { select: { brand: true, model: true, variant: true, trackingType: true } },
@@ -985,7 +988,8 @@ export class SalesService {
     const now = new Date();
     return {
       rows: page.map((s) => {
-        const live = s.items.filter((i) => !i.voided);
+        const live = s.items.filter((i) => !i.voided && !i.releasedByCorrectionId);
+        const cancelled = s.corrections.some((c) => c.status === 'approved');
         return {
           id: binToUuid(s.id),
           invoiceNo: s.invoiceNo,
@@ -997,12 +1001,15 @@ export class SalesService {
           balanceDue: Number(s.balanceDue),
           payStatus: s.payStatus,
           isReversed: s.isReversed,
+          /** Cancelled by an approved correction (0079): shown as Cancelled, never by its pay status. */
+          cancelled,
+          cancellationRequested: !cancelled && s.corrections.some((c) => c.status === 'requested'),
           // Rows and things are different numbers: "10 chargers" is one line
           // and ten items, and a list that says "1 item" misleads whoever is
           // trying to match it against what left the shop.
-          lineCount: live.length,
-          itemCount: live.reduce((n, i) => n + i.quantity, 0),
-          serializedCount: live.filter((i) => i.unitId !== null).length,
+          lineCount: (cancelled ? s.items.filter((i) => !i.voided) : live).length,
+          itemCount: (cancelled ? s.items.filter((i) => !i.voided) : live).reduce((n, i) => n + i.quantity, 0),
+          serializedCount: (cancelled ? s.items.filter((i) => !i.voided) : live).filter((i) => i.unitId !== null).length,
           soldBy: s.user?.name ?? null,
           customer: s.customer?.name ?? null,
           /** Who owes the balance, whichever kind (0074). Null when nothing is owed to anyone named. */
@@ -1012,7 +1019,7 @@ export class SalesService {
               ? { kind: 'store' as const, name: s.counterparty.name }
               : null,
           /** The first item, which is the whole sale in the common one-phone case. */
-          product: live[0] ? describeProduct(live[0].unit?.product ?? live[0].product) : null,
+          product: s.items.find((i) => !i.voided) ? describeProduct(s.items.find((i) => !i.voided)!.unit?.product ?? s.items.find((i) => !i.voided)!.product) : null,
           // De-duplicated: a split payment of cash+cash is one method twice.
           paymentMethods: [...new Set(s.payments.map((p) => p.method))],
           /** The accounts money landed in, by the label frozen at the time. */
@@ -1126,6 +1133,20 @@ export class SalesService {
         payments: { orderBy: { paidAt: 'asc' }, select: paymentSelect },
         returns: { select: { id: true } },
         returnPolicyOverriddenBy: { select: { name: true } },
+        corrections: {
+          where: { status: { in: ['requested', 'approved'] } },
+          orderBy: { requestedAt: 'desc' },
+          select: {
+            status: true,
+            reason: true,
+            requestedAt: true,
+            decidedAt: true,
+            correctionDate: true,
+            requestedBy: { select: { name: true } },
+            decidedBy: { select: { name: true } },
+            legs: { select: { method: true, accountLabelSnapshot: true, amount: true } },
+          },
+        },
         items: {
           include: {
             unit: {
@@ -1144,11 +1165,31 @@ export class SalesService {
     });
     if (!sale || !sale.branchId.equals(branchId)) throw new NotFoundException('Sale not found');
 
-    const live = sale.items.filter((i) => !i.voided);
+    // A cancelled sale's lines are released: nothing on it can be returned (0079).
+    const live = sale.items.filter((i) => !i.voided && !i.releasedByCorrectionId);
+    const approvedCancel = sale.corrections.find((c) => c.status === 'approved') ?? null;
+    const requestedCancel = sale.corrections.find((c) => c.status === 'requested') ?? null;
     return {
       id: binToUuid(sale.id),
       invoiceNo: sale.invoiceNo,
       soldAt: sale.soldAt,
+      /**
+       * An approved cancellation (0079): who asked, who approved, when, why, the day
+       * it posted to and the money it gave back. The sale itself is never rewritten.
+       */
+      cancellation: approvedCancel
+        ? {
+            status: 'approved' as const,
+            reason: approvedCancel.reason,
+            requestedBy: approvedCancel.requestedBy?.name ?? null,
+            decidedBy: approvedCancel.decidedBy?.name ?? null,
+            decidedAt: approvedCancel.decidedAt,
+            correctionDate: approvedCancel.correctionDate ? dayKey(approvedCancel.correctionDate) : null,
+            moneyBack: approvedCancel.legs.map((l) => ({ method: l.method, accountLabel: l.accountLabelSnapshot, amount: Number(l.amount) })),
+          }
+        : requestedCancel
+          ? { status: 'requested' as const, reason: requestedCancel.reason, requestedBy: requestedCancel.requestedBy?.name ?? null, requestedAt: requestedCancel.requestedAt }
+          : null,
       branch: { id: binToUuid(sale.branch.id), name: sale.branch.name },
       soldBy: sale.user?.name ?? null,
       customer: sale.customer

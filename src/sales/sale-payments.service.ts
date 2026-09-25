@@ -122,6 +122,11 @@ export class SalePaymentsService {
         if (Number(sale.is_reversed) === 1) {
           throw new ConflictException({ code: 'sale_reversed', message: 'This sale was reversed; nothing is owed on it' });
         }
+        // A cancelled sale should never have been recorded (0079): nothing is owed on it.
+        const cancelled = await tx.financialCorrection.findFirst({ where: { targetSaleId: saleId, status: 'approved' }, select: { id: true } });
+        if (cancelled) {
+          throw new ConflictException({ code: 'sale_cancelled', message: 'This sale was cancelled; nothing is owed on it' });
+        }
 
         const balance = { total: num(sale.total), received: num(sale.amount_paid) };
         assertCollectable(balance, dto.amount);

@@ -93,8 +93,10 @@ function saleRow(over: Record<string, any> = {}) {
     user: { name: 'Amina' },
     customer: null,
     payments: [{ method: 'cash' }],
-    items: [{ unitId: newUuidV7Bin(), quantity: 1, voided: false }],
+    items: [{ unitId: newUuidV7Bin(), quantity: 1, voided: false, releasedByCorrectionId: null }],
     returns: [],
+    // No cancellation asked for or approved (0079).
+    corrections: [],
     ...over,
   };
 }
@@ -342,6 +344,7 @@ describe('the detail read fails closed, and identically', () => {
     items: [],
     payments: [],
     returns: [],
+    corrections: [],
     ...over,
   });
 

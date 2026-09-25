@@ -146,6 +146,10 @@ export class ReturnsService {
       );
     }
     if (line.voided) throw new ConflictException('That sale line was removed from the sale.');
+    // A cancelled sale should never have been recorded (0079): its phone is back in stock, not with a customer.
+    if (line.releasedByCorrectionId) {
+      throw new ConflictException({ code: 'sale_cancelled', message: 'This sale was cancelled, so nothing on it can be returned.' });
+    }
 
     /**
      * The identifier must match the phone ON THIS LINE. Matching it against the

@@ -51,6 +51,8 @@ function harness(account: { isActive: boolean } | null = { isActive: true }, fai
   };
   const inventory: any = {
     findExistingIdentifiers: jest.fn(async () => new Set()),
+    // No phone of the company was voided by a cancelled purchase (0079).
+    findVoidedUnits: jest.fn(async () => new Map()),
     createUnit: jest.fn(async (_tx: unknown, data: any) => {
       if (failUnit) throw new Error('unit insert failed');
       writes.units.push(data);

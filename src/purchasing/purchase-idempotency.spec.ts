@@ -99,6 +99,8 @@ function makeService(companyId: Buffer = COMPANY) {
     { record: jest.fn(), recordTx: jest.fn() } as never,
     {
       findExistingIdentifiers: jest.fn(async () => new Set()),
+      // No phone of the company was voided by a cancelled purchase (0079).
+      findVoidedUnits: jest.fn(async () => new Map()),
       createUnit: jest.fn(async () => ({ id: uuidToBin(PRODUCT) })),
       addStock: jest.fn(async () => ({})),
     } as never,

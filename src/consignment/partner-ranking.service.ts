@@ -63,6 +63,9 @@ export class PartnerRankingService {
         FROM sales s
        WHERE s.company_id = ${companyId} AND s.branch_id = ${branchId}
          AND s.counterparty_id IS NOT NULL AND s.is_reversed = 0 AND s.balance_due = 0
+         -- A cancelled sale is not a trade (0079): its balance is cleared, never paid.
+         AND NOT EXISTS (SELECT 1 FROM financial_corrections fc
+                          WHERE fc.target_sale_id = s.id AND fc.status = 'approved')
       UNION ALL
       SELECT c.counterparty_id,
              COALESCE((SELECT SUM(l.amount) FROM consignment_ledger l

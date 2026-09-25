@@ -314,8 +314,14 @@ export class InventoryService {
     return this.cls.get('permissions')?.has(permission) ?? false;
   }
 
-  /** Same-company identifier pre-check (the global unique index is the backstop). */
-  async findExistingIdentifiers(identifiers: string[]): Promise<Set<string>> {
+  /**
+   * Same-company identifier pre-check (the global unique index is the backstop).
+   *
+   * `includeVoided: false` leaves out a phone whose purchase was cancelled (0079):
+   * receiving asks for those separately, because receiving one again reactivates its
+   * record. Every other caller keeps treating them as taken.
+   */
+  async findExistingIdentifiers(identifiers: string[], opts: { includeVoided?: boolean } = {}): Promise<Set<string>> {
     if (identifiers.length === 0) return new Set();
     const found = await this.db.unit.findMany({
       where: {
@@ -324,6 +330,7 @@ export class InventoryService {
           { imeiSecondary: { in: identifiers } },
           { serialNo: { in: identifiers } },
         ],
+        ...(opts.includeVoided === false ? { status: { not: 'voided' as const } } : {}),
       },
       select: { imeiPrimary: true, imeiSecondary: true, serialNo: true },
     });
@@ -334,6 +341,71 @@ export class InventoryService {
       if (u.serialNo) set.add(u.serialNo);
     }
     return set;
+  }
+
+  /**
+   * This company's phones whose purchase was cancelled (0079), by every identifier they
+   * carry. Receiving one again under its own IMEI or serial (`asPrimary`) brings that
+   * record back rather than creating a second: one IMEI stays one record. A number that
+   * is a voided phone's IMEI 2 is still that phone's, so it cannot start a new one.
+   */
+  async findVoidedUnits(identifiers: string[]): Promise<Map<string, { id: Buffer; trackingType: string; asPrimary: boolean }>> {
+    const found = identifiers.length
+      ? await this.db.unit.findMany({
+          where: {
+            status: 'voided',
+            OR: [{ imeiPrimary: { in: identifiers } }, { imeiSecondary: { in: identifiers } }, { serialNo: { in: identifiers } }],
+          },
+          select: { id: true, imeiPrimary: true, imeiSecondary: true, serialNo: true, product: { select: { trackingType: true } } },
+        })
+      : [];
+    const byIdentifier = new Map<string, { id: Buffer; trackingType: string; asPrimary: boolean }>();
+    for (const u of found) {
+      const own = u.imeiPrimary ?? u.serialNo;
+      if (own) byIdentifier.set(own, { id: u.id, trackingType: u.product.trackingType, asPrimary: true });
+      if (u.imeiSecondary) byIdentifier.set(u.imeiSecondary, { id: u.id, trackingType: u.product.trackingType, asPrimary: false });
+    }
+    return byIdentifier;
+  }
+
+  /**
+   * Bring back a phone whose earlier purchase was cancelled, as the goods of a new
+   * purchase (0079): the same record, now in stock at this branch at this purchase's
+   * cost. Guarded on `voided`, so a record something else already brought back is
+   * never taken twice. The phone's history keeps both purchases.
+   */
+  async reactivateUnit(
+    tx: UnitTxClient,
+    unitId: Buffer,
+    data: { productId: Buffer; branchId: Buffer; cost: number; purchaseId: Buffer; imeiSecondary: string | null },
+  ): Promise<void> {
+    const moved = await tx.unit.updateMany({
+      where: { id: unitId, status: 'voided' },
+      data: {
+        status: 'in_stock',
+        productId: data.productId,
+        branchId: data.branchId,
+        cost: data.cost,
+        purchaseId: data.purchaseId,
+        supplierId: null,
+        imeiSecondary: data.imeiSecondary,
+        dateIn: new Date(),
+        dateSold: null,
+        updatedById: this.tenant.userId() ?? null,
+      },
+    });
+    if (moved.count !== 1) {
+      throw new ConflictException('A duplicate identifier was detected during commit — please retry');
+    }
+    await this.audit.recordTx(tx, {
+      entityType: 'Unit',
+      entityId: unitId,
+      action: 'status_change',
+      reason: 'Received again after its purchase was cancelled',
+      before: { status: 'voided' },
+      after: { status: 'in_stock', purchaseId: binToUuid(data.purchaseId) },
+      branchId: data.branchId,
+    });
   }
 
   /**
@@ -400,6 +472,13 @@ export class InventoryService {
      * a winner, and the pair being scanned is then attached to whichever the
      * query happened to return first.
      */
+    /*
+     * A phone whose purchase was cancelled (0079) never entered the books: receiving
+     * it again is the correction, and it brings that same record back. It is no
+     * conflict — and it must not fall through to the company-wide count below,
+     * which would still find it.
+     */
+    if (ours.length > 0 && ours.every((u) => u.status === 'voided')) return NO_CONFLICT;
     const distinct = new Set(ours.map((u) => u.id.toString('hex')));
     if (distinct.size > 1) {
       return { ...NO_CONFLICT, alreadyInInventory: true, conflictingUnits: true };
@@ -966,7 +1045,8 @@ export class InventoryService {
 
     const unitWhere = {
       ...(branchId ? { branchId } : {}),
-      ...(filter.status ? { status: filter.status } : {}),
+      // A phone whose purchase was cancelled is in no list unless asked for by its status (0079).
+      status: filter.status ?? { not: 'voided' as const },
       ...(productId ? { productId } : {}),
       ...(filter.trackingType ? { product: { trackingType: filter.trackingType } } : {}),
       ...(search ? { OR: unitSearchClauses(search) } : {}),
