@@ -65,6 +65,7 @@ function rollupRow(sc: Scenario, day: string): Record<string, number> {
     returns_revenue: 0,
     returns_adjustments: 0,
     returns_gross_profit: 0,
+    returns_count: 0,
   };
 }
 
@@ -253,15 +254,18 @@ describe('the keys the SQL uses (source pins)', () => {
   const migration = readFileSync(join(SRC, '..', 'prisma', 'migrations', '0080_cancelled_units', 'migration.sql'), 'utf8');
 
   it('the rollup writes the cancelled units on the correction day, from the lines it reads for the cancelled revenue', () => {
-    const cancelled = rollup.slice(rollup.indexOf('const cancelledRows'), rollup.indexOf('const cancelledQty'));
-    expect(cancelled).toMatch(/COALESCE\(SUM\(si\.quantity\), 0\)\s+AS qty/);
-    expect(cancelled).toMatch(/JOIN sale_items si ON si\.sale_id = fc\.target_sale_id AND si\.voided = 0/);
+    const cancelled = rollup.slice(rollup.indexOf('const cancelledLines'), rollup.indexOf('const cancelledQty'));
+    expect(cancelled).toMatch(/JOIN sales s ON s\.id = fc\.target_sale_id\s+JOIN sale_items si ON si\.sale_id = s\.id AND si\.voided = 0/);
     expect(cancelled).toMatch(/fc\.correction_date = \$\{day\}/);
+    // Units and revenue from the same lines, the revenue at their shares of the invoice (docs/54 D36).
+    expect(cancelled).toMatch(/const cancelled = lineTotals\(cancelledLines, sharesBySale\(shareLines\(cancelledLines\)\)\);/);
+    expect(rollup).toMatch(/const cancelledQty = cancelled\.qty;/);
     expect(rollup.match(/cancelledQty,/g)).toHaveLength(2);
   });
 
   it('the sale\'s own day is never filtered: its rollup, Home\'s sales value and its report keep it', () => {
-    const sold = rollup.slice(rollup.indexOf('AS revenue,'), rollup.indexOf('const expRows'));
+    const sold = rollup.slice(rollup.indexOf('const dayLines'), rollup.indexOf('const expRows'));
+    expect(sold).toMatch(/s\.business_date = \$\{day\}/);
     expect(sold).not.toMatch(/released_by_correction_id|financial_corrections/);
     expect(dashboard).toMatch(/const saleWhere = \{ branchId, isReversed: false, businessDate: dateRange \};/);
   });

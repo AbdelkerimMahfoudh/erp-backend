@@ -21,6 +21,7 @@ import { expensesTodayOf } from './expenses-today';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayWindow, isDateString, localParts, localTimeOf, shiftDate } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
+import { fromCents, sharesBySale } from '../sales/sale-shares';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
@@ -2425,14 +2426,16 @@ export class ClosingService {
       include: {
         unit: { select: { imeiPrimary: true, serialNo: true, product: { select: { brand: true, model: true, variant: true } } } },
         product: { select: { brand: true, model: true, variant: true } },
-        sale: { select: { userId: true, soldAt: true } },
+        sale: { select: { userId: true, soldAt: true, total: true } },
       },
     });
     const label = (p?: { brand: string; model: string; variant: string | null } | null) =>
       p ? `${p.brand} ${p.model}${p.variant ? ` ${p.variant}` : ''}` : null;
+    // Each line at its share of its invoice's recorded total, as the rollup values it (docs/54 D36).
+    const shares = sharesBySale(items.map((it) => ({ id: it.id, saleId: it.saleId, price: it.price, quantity: it.quantity, discount: it.discount, saleTotal: it.sale.total })));
 
     return items.map((it) => {
-      const salePrice = round2(num(it.price) * it.quantity - num(it.discount));
+      const salePrice = fromCents(shares.get(it.id.toString('hex')) ?? 0n);
       const purchaseCost = round2(num(it.cost) * it.quantity);
       return {
         identifier: it.unit ? it.unit.imeiPrimary ?? it.unit.serialNo : null,

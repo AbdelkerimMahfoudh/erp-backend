@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { fromCents, sharesBySale, toCents } from '../sales/sale-shares';
 
 /**
  * The dated accounting rules, in one place (docs/53 D29). Home, Money, the sales-by-day list,
@@ -237,12 +238,15 @@ function withNet(f: Omit<PeriodFigures, 'net'>): PeriodFigures {
   };
 }
 
-/** One product's cancellations and returns approved from a date on (docs/53 D34), on the product report's own basis — the lines. */
+/**
+ * One product's cancellations and returns approved from a date on (docs/53 D34), on the product
+ * report's own basis — each line at its share of its invoice's recorded total (docs/54 D36).
+ */
 export interface ProductAdjustment {
   productId: Buffer;
   categoryId: Buffer | null;
   cancelledUnits: number;
-  /** Σ price × quantity − line discount of the cancelled lines. */
+  /** Σ the cancelled lines' shares of their invoices' totals — what their sale put on. */
   cancelledRevenue: number;
   cancelledCogs: number;
   returnedUnits: number;
@@ -255,16 +259,17 @@ export interface ProductAdjustment {
 export async function productAdjustments(db: RawRunner, companyId: Buffer, branchId: Buffer | null, from: string): Promise<ProductAdjustment[]> {
   const branch = (col: string) => (branchId ? Prisma.sql`AND ${Prisma.raw(col)} = ${branchId}` : Prisma.empty);
   const [cancelled, returned] = await Promise.all([
-    db.$queryRaw<{ product_id: Buffer; category_id: Buffer | null; qty: unknown; revenue: unknown; cogs: unknown }[]>(Prisma.sql`
-      SELECT COALESCE(si.product_id, u.product_id) AS product_id, p.category_id AS category_id,
-             SUM(si.quantity) AS qty, SUM(si.price * si.quantity - si.discount) AS revenue, SUM(si.cost * si.quantity) AS cogs
+    // Every line of each cancelled sale, with its sale's total: a share is weighed against its siblings.
+    db.$queryRaw<{ id: Buffer; sale_id: Buffer; price: unknown; quantity: unknown; discount: unknown; cost: unknown; sale_total: unknown; product_id: Buffer | null; category_id: Buffer | null }[]>(Prisma.sql`
+      SELECT si.id, si.sale_id, si.price, si.quantity, si.discount, si.cost, s.total AS sale_total,
+             p.id AS product_id, p.category_id AS category_id
         FROM financial_corrections fc
-        JOIN sale_items si ON si.sale_id = fc.target_sale_id AND si.voided = 0
+        JOIN sales s ON s.id = fc.target_sale_id
+        JOIN sale_items si ON si.sale_id = s.id AND si.voided = 0
         LEFT JOIN units u ON u.id = si.unit_id
-        JOIN products p ON p.id = COALESCE(si.product_id, u.product_id)
+        LEFT JOIN products p ON p.id = COALESCE(si.product_id, u.product_id)
        WHERE fc.company_id = ${companyId} ${branch('fc.branch_id')}
-         AND fc.target_kind = 'sale' AND fc.status = 'approved' AND fc.correction_date >= ${from}
-       GROUP BY product_id, p.category_id`),
+         AND fc.target_kind = 'sale' AND fc.status = 'approved' AND fc.correction_date >= ${from}`),
     db.$queryRaw<{ product_id: Buffer; category_id: Buffer | null; n: bigint; revenue: unknown; cost: unknown }[]>(Prisma.sql`
       SELECT u.product_id AS product_id, p.category_id AS category_id,
              COUNT(*) AS n, SUM(rr.net_refund_due) AS revenue, SUM(rr.line_cost) AS cost
@@ -283,11 +288,15 @@ export async function productAdjustments(db: RawRunner, companyId: Buffer, branc
     byProduct.set(key, fresh);
     return fresh;
   };
-  for (const r of cancelled) {
-    const e = entry(r.product_id, r.category_id);
-    e.cancelledUnits += num(r.qty);
-    e.cancelledRevenue = round2(e.cancelledRevenue + num(r.revenue));
-    e.cancelledCogs = round2(e.cancelledCogs + num(r.cogs));
+  const shares = sharesBySale(
+    cancelled.map((l) => ({ id: l.id, saleId: l.sale_id, price: String(l.price), quantity: Number(l.quantity), discount: String(l.discount), saleTotal: String(l.sale_total) })),
+  );
+  for (const l of cancelled) {
+    if (!l.product_id) continue;
+    const e = entry(l.product_id, l.category_id);
+    e.cancelledUnits += Number(l.quantity);
+    e.cancelledRevenue = round2(e.cancelledRevenue + fromCents(shares.get(l.id.toString('hex')) ?? 0n));
+    e.cancelledCogs = round2(e.cancelledCogs + fromCents(toCents(String(l.cost)) * BigInt(Number(l.quantity))));
   }
   for (const r of returned) {
     const e = entry(r.product_id, r.category_id);

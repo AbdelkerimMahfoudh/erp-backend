@@ -3,6 +3,7 @@ import { Prisma, TrackingType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
 import { heldValueRows } from './held-value';
+import { fromCents, sharesBySale, toCents } from '../sales/sale-shares';
 
 /** Coerce a raw SQL aggregate (Decimal string | bigint | null) to a number. */
 function toNum(v: unknown): number {
@@ -29,20 +30,38 @@ interface ReturnTotalsRow {
   returns_count: unknown;
 }
 
-interface StoreTotalsRow {
-  revenue: unknown;
-  cogs: unknown;
-  qty_sold: unknown;
-  sales_count: unknown;
+/** One non-voided sale line with what its share needs: its sale's total, and every sibling (docs/54 D36). */
+interface SaleLineRow {
+  id: Buffer;
+  sale_id: Buffer;
+  price: unknown;
+  quantity: unknown;
+  discount: unknown;
+  cost: unknown;
+  sale_total: unknown;
 }
 
-interface ProductRollupRow {
-  product_id: Buffer;
+interface DayLineRow extends SaleLineRow {
+  product_id: Buffer | null;
   category_id: Buffer | null;
-  tracking_type: TrackingType;
-  qty_sold: unknown;
-  revenue: unknown;
-  cogs: unknown;
+  tracking_type: TrackingType | null;
+}
+
+/** The lines as `sharesBySale` reads them. */
+const shareLines = (rows: readonly SaleLineRow[]) =>
+  rows.map((r) => ({ id: r.id, saleId: r.sale_id, price: String(r.price), quantity: Number(r.quantity), discount: String(r.discount), saleTotal: String(r.sale_total) }));
+
+/** Σ share, Σ cost, Σ units of some lines, the shares taken from the invoice totals. */
+function lineTotals(rows: readonly SaleLineRow[], shares: Map<string, bigint>) {
+  let revenue = 0n;
+  let cogs = 0n;
+  let qty = 0;
+  for (const r of rows) {
+    revenue += shares.get(r.id.toString('hex')) ?? 0n;
+    cogs += toCents(String(r.cost)) * BigInt(Number(r.quantity));
+    qty += Number(r.quantity);
+  }
+  return { revenue: fromCents(revenue), cogs: fromCents(cogs), qty };
 }
 
 interface VelocityRow {
@@ -78,7 +97,9 @@ interface ValuationAcc {
  * later; every query is filtered by an explicit company_id.
  *
  * TRACKING-TYPE INDEPENDENT: all figures derive from `sale_items`
- * (price/cost/discount/quantity). The product for a line is resolved as
+ * (price/cost/discount/quantity), each line valued at its share of the
+ * recorded invoice total — a whole-invoice discount included (docs/54 D36,
+ * `sale-shares.ts`). The product for a line is resolved as
  * COALESCE(sale_item.product_id, unit.product_id), so IMEI, serial, and
  * quantity lines flow through identical math — no identifier is ever read.
  */
@@ -118,19 +139,28 @@ export class RollupService {
     const dayDate = new Date(`${day}T00:00:00.000Z`);
     const now = new Date();
 
-    // 1. Store totals for the branch-day (voided lines excluded).
-    const totals = await this.prisma.$queryRaw<StoreTotalsRow[]>(Prisma.sql`
-      SELECT COALESCE(SUM(si.price * si.quantity - si.discount), 0) AS revenue,
-             COALESCE(SUM(si.cost * si.quantity), 0)                AS cogs,
-             COALESCE(SUM(si.quantity), 0)                          AS qty_sold,
-             COUNT(DISTINCT s.id)                                   AS sales_count
+    /**
+     * 1. The branch-day's sale lines (voided lines excluded), each valued at its
+     * share of its invoice's recorded total. Revenue is therefore Σ `sales.total` —
+     * what the Daily closing, Home and Money read — whole-invoice discount and all;
+     * it used to be Σ(price × quantity − line discount), which left that discount
+     * out of Results, goals, branches and the product report (docs/54 D36).
+     */
+    const dayLines = await this.prisma.$queryRaw<DayLineRow[]>(Prisma.sql`
+      SELECT si.id, si.sale_id, si.price, si.quantity, si.discount, si.cost, s.total AS sale_total,
+             p.id AS product_id, p.category_id AS category_id, p.tracking_type AS tracking_type
       FROM sale_items si
       JOIN sales s ON s.id = si.sale_id
+      LEFT JOIN units u ON u.id = si.unit_id
+      LEFT JOIN products p ON p.id = COALESCE(si.product_id, u.product_id)
       WHERE si.company_id = ${companyId}
         AND s.branch_id = ${branchId}
         AND si.voided = 0
         AND s.business_date = ${day}
     `);
+    const dayShares = sharesBySale(shareLines(dayLines));
+    const totals = lineTotals(dayLines, dayShares);
+    const salesCount = new Set(dayLines.map((l) => l.sale_id.toString('hex'))).size;
     /**
      * Expenses for this day (Milestone D). Three things changed here, and each
      * was a defect:
@@ -294,30 +324,30 @@ export class RollupService {
 
     /**
      * Sales CANCELLED on this day (0079), on the rollup's own revenue basis — the
-     * cancelled sale's lines as they were recorded. Keyed on the correction day,
+     * cancelled sale's lines at their shares of its recorded total, so a cancellation
+     * takes off exactly what its sale put on (docs/54 D36). Keyed on the correction day,
      * never on the sale's day, which recomputes byte-identically and keeps its
      * closing shut; the line itself is never voided (`released_by_correction_id`
      * only frees its phone). Positive magnitudes: net profit subtracts
      * (revenue − cogs), exactly as a return subtracts its effect; the units-sold
      * goal subtracts the units (0080).
      */
-    const cancelledRows = await this.prisma.$queryRaw<{ revenue: unknown; cogs: unknown; n: unknown; qty: unknown }[]>(Prisma.sql`
-      SELECT COALESCE(SUM(si.price * si.quantity - si.discount), 0) AS revenue,
-             COALESCE(SUM(si.cost * si.quantity), 0)                AS cogs,
-             COUNT(DISTINCT fc.id)                                  AS n,
-             COALESCE(SUM(si.quantity), 0)                          AS qty
+    const cancelledLines = await this.prisma.$queryRaw<(SaleLineRow & { correction_id: Buffer })[]>(Prisma.sql`
+      SELECT si.id, si.sale_id, si.price, si.quantity, si.discount, si.cost, s.total AS sale_total, fc.id AS correction_id
       FROM financial_corrections fc
-      JOIN sale_items si ON si.sale_id = fc.target_sale_id AND si.voided = 0
+      JOIN sales s ON s.id = fc.target_sale_id
+      JOIN sale_items si ON si.sale_id = s.id AND si.voided = 0
       WHERE fc.company_id = ${companyId}
         AND fc.branch_id = ${branchId}
         AND fc.target_kind = 'sale'
         AND fc.status = 'approved'
         AND fc.correction_date = ${day}
     `);
-    const cancelledRevenue = round2(toNum(cancelledRows[0].revenue));
-    const cancelledCogs = round2(toNum(cancelledRows[0].cogs));
-    const cancelledCount = toNum(cancelledRows[0].n);
-    const cancelledQty = toNum(cancelledRows[0].qty);
+    const cancelled = lineTotals(cancelledLines, sharesBySale(shareLines(cancelledLines)));
+    const cancelledRevenue = cancelled.revenue;
+    const cancelledCogs = cancelled.cogs;
+    const cancelledCount = new Set(cancelledLines.map((l) => l.correction_id.toString('hex'))).size;
+    const cancelledQty = cancelled.qty;
 
     /**
      * Confirmed expenses REVERSED on this day (0079). `expenses` below is net of
@@ -343,8 +373,8 @@ export class RollupService {
     const expensesFixed = round2(toNum(expRows[0].expenses_fixed) - toNum(reversalRows[0].fixed));
     const expensesSalary = round2(toNum(expRows[0].expenses_salary) - toNum(reversalRows[0].salary));
 
-    const revenue = round2(toNum(totals[0].revenue));
-    const cogs = round2(toNum(totals[0].cogs));
+    const revenue = totals.revenue;
+    const cogs = totals.cogs;
     const grossProfit = round2(revenue - cogs);
     const expenses = round2(toNum(expRows[0].expenses) - expenseReversals);
     // Positive magnitudes, subtracted explicitly. A negative stored revenue
@@ -370,8 +400,8 @@ export class RollupService {
           revenue,
           cogs,
           grossProfit,
-          salesCount: toNum(totals[0].sales_count),
-          qtySold: toNum(totals[0].qty_sold),
+          salesCount,
+          qtySold: totals.qty,
           expenses,
           netProfit,
           returnsRevenue,
@@ -400,8 +430,8 @@ export class RollupService {
           revenue,
           cogs,
           grossProfit,
-          salesCount: toNum(totals[0].sales_count),
-          qtySold: toNum(totals[0].qty_sold),
+          salesCount,
+          qtySold: totals.qty,
           expenses,
           netProfit,
           returnsRevenue,
@@ -434,48 +464,37 @@ export class RollupService {
       await write();
     }
 
-    // 2. Per-product fact — product resolved via COALESCE so serialized units
-    //    (product_id NULL, unit_id set) and quantity lines aggregate the same.
-    const rows = await this.prisma.$queryRaw<ProductRollupRow[]>(Prisma.sql`
-      SELECT COALESCE(si.product_id, u.product_id) AS product_id,
-             p.category_id                         AS category_id,
-             p.tracking_type                       AS tracking_type,
-             SUM(si.quantity)                      AS qty_sold,
-             SUM(si.price * si.quantity - si.discount) AS revenue,
-             SUM(si.cost * si.quantity)            AS cogs
-      FROM sale_items si
-      JOIN sales s ON s.id = si.sale_id
-      LEFT JOIN units u ON u.id = si.unit_id
-      JOIN products p ON p.id = COALESCE(si.product_id, u.product_id)
-      WHERE si.company_id = ${companyId}
-        AND s.branch_id = ${branchId}
-        AND si.voided = 0
-        AND s.business_date = ${day}
-      GROUP BY product_id, p.category_id, p.tracking_type
-    `);
+    // 2. Per-product fact — the same lines, the product resolved via COALESCE so serialized
+    //    units (product_id NULL, unit_id set) and quantity lines aggregate the same, each at
+    //    its share: the products of a day add up to the day's revenue.
+    const byProduct = new Map<string, { productId: Buffer; categoryId: Buffer | null; trackingType: TrackingType; lines: DayLineRow[] }>();
+    for (const l of dayLines) {
+      if (!l.product_id || !l.tracking_type) continue;
+      const key = l.product_id.toString('hex');
+      const found = byProduct.get(key);
+      if (found) found.lines.push(l);
+      else byProduct.set(key, { productId: l.product_id, categoryId: l.category_id, trackingType: l.tracking_type, lines: [l] });
+    }
+    const rows = [...byProduct.values()].map((p) => ({ ...p, ...lineTotals(p.lines, dayShares) }));
 
     // Rebuild the branch-day product facts (delete + insert = current truth).
     await this.prisma.productDailyRollup.deleteMany({ where: { branchId, day: dayDate } });
     if (rows.length > 0) {
       await this.prisma.productDailyRollup.createMany({
-        data: rows.map((r) => {
-          const rev = round2(toNum(r.revenue));
-          const c = round2(toNum(r.cogs));
-          return {
-            id: newUuidV7Bin(),
-            companyId,
-            branchId,
-            day: dayDate,
-            productId: r.product_id,
-            categoryId: r.category_id ?? null,
-            trackingType: r.tracking_type,
-            qtySold: toNum(r.qty_sold),
-            revenue: rev,
-            cogs: c,
-            grossProfit: round2(rev - c),
-            refreshedAt: now,
-          };
-        }),
+        data: rows.map((r) => ({
+          id: newUuidV7Bin(),
+          companyId,
+          branchId,
+          day: dayDate,
+          productId: r.productId,
+          categoryId: r.categoryId ?? null,
+          trackingType: r.trackingType,
+          qtySold: r.qty,
+          revenue: r.revenue,
+          cogs: r.cogs,
+          grossProfit: round2(r.revenue - r.cogs),
+          refreshedAt: now,
+        })),
       });
     }
   }
