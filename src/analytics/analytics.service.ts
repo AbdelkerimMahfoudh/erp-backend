@@ -7,6 +7,7 @@ import { binToUuid } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { inTransitValue, summarizeInTransit } from './in-transit-value';
 import { faultyHeldValue, heldValueRows, toNum } from './held-value';
+import { productAdjustments } from './period-figures';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -170,17 +171,42 @@ export class AnalyticsService {
     };
   }
 
-  /** Per-product performance over a window, with movement + labels. */
+  /**
+   * Per-product performance over a window, with movement + labels (docs/53 D34).
+   *
+   * The product facts of the window's sale days, less the cancellations and returns APPROVED in
+   * the window, each product carrying its own lines: units sold = units invoiced − units of
+   * cancelled invoices (a return is `unitsReturned`, its own measure); revenue loses a cancelled
+   * line's revenue and a return's net refund due; cost loses what each gives back. A product whose
+   * only movement in the window is an adjustment appears, with negative figures.
+   */
   async productPerformance(days = 30) {
-    const branchId = this.tenant.branchId();
+    const branchId = this.tenant.branchId() ?? null;
     const from = this.windowStart(days);
-    const grouped = await this.db.productDailyRollup.groupBy({
-      by: ['productId'],
-      where: { day: { gte: from }, ...(branchId ? { branchId } : {}) },
-      _sum: { qtySold: true, revenue: true, cogs: true, grossProfit: true },
-    });
+    const [grouped, adjustments] = await Promise.all([
+      this.db.productDailyRollup.groupBy({
+        by: ['productId'],
+        where: { day: { gte: from }, ...(branchId ? { branchId } : {}) },
+        _sum: { qtySold: true, revenue: true, cogs: true },
+      }),
+      productAdjustments(this.db, this.tenant.companyId(), branchId, dayKey(from)),
+    ]);
 
-    const productIds = grouped.map((g) => g.productId);
+    const rows = new Map<string, { productId: Buffer; qty: number; returned: number; revenue: number; cogs: number }>();
+    for (const g of grouped) {
+      rows.set(g.productId.toString('hex'), { productId: g.productId, qty: num(g._sum.qtySold), returned: 0, revenue: num(g._sum.revenue), cogs: num(g._sum.cogs) });
+    }
+    for (const a of adjustments) {
+      const key = a.productId.toString('hex');
+      const r = rows.get(key) ?? { productId: a.productId, qty: 0, returned: 0, revenue: 0, cogs: 0 };
+      r.qty -= a.cancelledUnits;
+      r.returned += a.returnedUnits;
+      r.revenue -= a.cancelledRevenue + a.returnedRevenue;
+      r.cogs -= a.cancelledCogs + a.returnedCostCredited;
+      rows.set(key, r);
+    }
+
+    const productIds = [...rows.values()].map((r) => r.productId);
     const products = productIds.length
       ? await this.db.product.findMany({
           where: { id: { in: productIds } },
@@ -195,19 +221,21 @@ export class AnalyticsService {
 
     return {
       windowDays: days,
-      products: grouped
-        .map((g) => {
-          const hex = g.productId.toString('hex');
+      products: [...rows.entries()]
+        .map(([hex, r]) => {
           const p = productByHex.get(hex);
           const v = velByHex.get(hex);
           return {
-            productId: binToUuid(g.productId),
+            productId: binToUuid(r.productId),
             label: p ? `${p.brand} ${p.model}${p.variant ? ` ${p.variant}` : ''}` : null,
             trackingType: p?.trackingType ?? null,
-            qtySold: num(g._sum.qtySold),
-            revenue: round2(num(g._sum.revenue)),
-            cogs: round2(num(g._sum.cogs)),
-            grossProfit: round2(num(g._sum.grossProfit)),
+            /** Units invoiced less units of cancelled invoices (R6). */
+            qtySold: r.qty,
+            /** Units returned in the window — their own measure (R6). */
+            unitsReturned: r.returned,
+            revenue: round2(r.revenue),
+            cogs: round2(r.cogs),
+            grossProfit: round2(r.revenue - r.cogs),
             sold30d: v?.sold30d ?? 0,
             lastSoldAt: v?.lastSoldAt ?? null,
           };
@@ -216,27 +244,45 @@ export class AnalyticsService {
     };
   }
 
-  /** Per-category performance over a window. */
+  /** Per-category performance over a window — the product report's figures, by category (docs/53 D34). */
   async categoryPerformance(days = 30) {
-    const branchId = this.tenant.branchId();
+    const branchId = this.tenant.branchId() ?? null;
     const from = this.windowStart(days);
-    const grouped = await this.db.productDailyRollup.groupBy({
-      by: ['categoryId'],
-      where: { day: { gte: from }, ...(branchId ? { branchId } : {}) },
-      _sum: { qtySold: true, revenue: true, cogs: true, grossProfit: true },
-    });
+    const [grouped, adjustments] = await Promise.all([
+      this.db.productDailyRollup.groupBy({
+        by: ['categoryId'],
+        where: { day: { gte: from }, ...(branchId ? { branchId } : {}) },
+        _sum: { qtySold: true, revenue: true, cogs: true },
+      }),
+      productAdjustments(this.db, this.tenant.companyId(), branchId, dayKey(from)),
+    ]);
 
-    const names = await this.categoryNames(grouped.map((g) => g.categoryId));
+    const rows = new Map<string, { categoryId: Buffer | null; qty: number; returned: number; revenue: number; cogs: number }>();
+    for (const g of grouped) {
+      rows.set(g.categoryId ? g.categoryId.toString('hex') : 'none', { categoryId: g.categoryId, qty: num(g._sum.qtySold), returned: 0, revenue: num(g._sum.revenue), cogs: num(g._sum.cogs) });
+    }
+    for (const a of adjustments) {
+      const key = a.categoryId ? a.categoryId.toString('hex') : 'none';
+      const r = rows.get(key) ?? { categoryId: a.categoryId, qty: 0, returned: 0, revenue: 0, cogs: 0 };
+      r.qty -= a.cancelledUnits;
+      r.returned += a.returnedUnits;
+      r.revenue -= a.cancelledRevenue + a.returnedRevenue;
+      r.cogs -= a.cancelledCogs + a.returnedCostCredited;
+      rows.set(key, r);
+    }
+
+    const names = await this.categoryNames([...rows.values()].map((r) => r.categoryId));
     return {
       windowDays: days,
-      categories: grouped
-        .map((g) => ({
-          categoryId: g.categoryId ? binToUuid(g.categoryId) : null,
-          name: g.categoryId ? names.get(g.categoryId.toString('hex')) ?? null : 'Uncategorized',
-          qtySold: num(g._sum.qtySold),
-          revenue: round2(num(g._sum.revenue)),
-          cogs: round2(num(g._sum.cogs)),
-          grossProfit: round2(num(g._sum.grossProfit)),
+      categories: [...rows.values()]
+        .map((r) => ({
+          categoryId: r.categoryId ? binToUuid(r.categoryId) : null,
+          name: r.categoryId ? names.get(r.categoryId.toString('hex')) ?? null : 'Uncategorized',
+          qtySold: r.qty,
+          unitsReturned: r.returned,
+          revenue: round2(r.revenue),
+          cogs: round2(r.cogs),
+          grossProfit: round2(r.revenue - r.cogs),
         }))
         .sort((a, b) => b.grossProfit - a.grossProfit),
     };
