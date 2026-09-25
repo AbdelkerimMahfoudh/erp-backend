@@ -7,7 +7,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { AccessService } from '../rbac/access.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
-import { CANCELLED_ADJUSTMENT, computeProgress, isMoneyMetric, METRIC_COLUMN, type GoalMetricKey } from './goal-progress';
+import { ADJUSTMENT, computeProgress, isMoneyMetric, METRIC_COLUMN, type GoalMetricKey } from './goal-progress';
 import { CreateGoalDto } from './dto/create-goal.dto';
 import { ArchiveGoalDto } from './dto/archive-goal.dto';
 
@@ -26,6 +26,18 @@ const PERSONAL_VALUE: Readonly<Record<GoalMetricKey, string>> = {
   revenue: 'COALESCE(SUM(si.price * si.quantity - si.discount), 0)',
   sales_count: 'COUNT(DISTINCT s.id)',
   units_sold: 'COALESCE(SUM(si.quantity), 0)',
+};
+
+/**
+ * What one seller's returns approved in the period take off, as the rollup takes them off the
+ * branch (docs/53 R2): revenue by the net refund due, profit by gross − adjustments − cost
+ * credited. A return changes neither the count nor the units sold (R5, R6).
+ */
+const PERSONAL_RETURN: Readonly<Record<GoalMetricKey, string>> = {
+  gross_profit: 'COALESCE(SUM(rr.gross_refund - rr.adjustment_total - rr.line_cost), 0)',
+  revenue: 'COALESCE(SUM(rr.net_refund_due), 0)',
+  sales_count: '0',
+  units_sold: '0',
 };
 
 /**
@@ -131,9 +143,12 @@ export class GoalsService {
     const userId = this.tenant.userId();
     const canManage = await this.canManage();
 
+    // A profit goal is a profit figure: nobody who may not see cost is shown one (docs/53 D35).
+    const seesCost = await this.seesCost();
     const rows = await this.db.goal.findMany({
       where: {
         ...(includeArchived ? {} : { status: 'active' }),
+        ...(seesCost ? {} : { metric: { not: 'gross_profit' as const } }),
         OR: [
           { scope: 'company' },
           { scope: 'branch', branchId },
@@ -159,6 +174,7 @@ export class GoalsService {
       include: { targetUser: { select: { id: true, name: true } } },
     });
     if (!goal) throw new NotFoundException('No such goal');
+    if (goal.metric === 'gross_profit' && !(await this.seesCost())) throw new NotFoundException('No such goal');
 
     const canManage = await this.canManage();
     const userId = this.tenant.userId();
@@ -230,6 +246,13 @@ export class GoalsService {
    * role name, and a second definition of "may manage goals" would drift from
    * the first.
    */
+  private async seesCost(): Promise<boolean> {
+    const userId = this.tenant.userId();
+    if (!userId) return false;
+    const keys = await this.access.getEffectivePermissions(userId, this.tenant.branchId());
+    return keys.has('cost.view');
+  }
+
   private async canManage(): Promise<boolean> {
     const userId = this.tenant.userId();
     if (!userId) return false;
@@ -308,7 +331,7 @@ export class GoalsService {
     if (goal.scope !== 'user') {
       const rows = await this.db.$queryRaw<{ total: unknown }[]>(
         Prisma.sql`
-          SELECT COALESCE(SUM(${Prisma.raw(`\`${METRIC_COLUMN[metric]}\` - ${CANCELLED_ADJUSTMENT[metric]}`)}), 0) AS total
+          SELECT COALESCE(SUM(${Prisma.raw(`\`${METRIC_COLUMN[metric]}\` - (${ADJUSTMENT[metric]})`)}), 0) AS total
           FROM daily_rollups
           WHERE company_id = ${this.tenant.companyId()}
             AND day >= ${from} AND day <= ${to}
@@ -320,13 +343,14 @@ export class GoalsService {
 
     /**
      * Per person: the person's sales on their stored business dates, less the
-     * person's sales whose cancellation was approved on a date of the period — the
-     * rollup's `qty_sold`/`revenue`/… and its `cancelled_*` columns, for one seller.
+     * person's sales whose cancellation was approved on a date of the period, less
+     * the returns of the person's sales approved on a date of the period — the
+     * rollup's `qty_sold`/`revenue`/…, `cancelled_*` and `returns_*` columns, for one seller.
      */
     const companyId = this.tenant.companyId();
     const value = Prisma.raw(PERSONAL_VALUE[metric]);
     const person = Prisma.sql`s.company_id = ${companyId} AND s.branch_id = ${goal.branchId} AND s.user_id = ${goal.targetUserId}`;
-    const rows = await this.db.$queryRaw<{ sold: unknown; cancelled: unknown }[]>(
+    const rows = await this.db.$queryRaw<{ sold: unknown; cancelled: unknown; returned: unknown }[]>(
       Prisma.sql`
         SELECT
           (SELECT ${value}
@@ -340,9 +364,14 @@ export class GoalsService {
              JOIN sale_items si ON si.sale_id = s.id AND si.voided = 0
             WHERE fc.company_id = ${companyId} AND ${person}
               AND fc.target_kind = 'sale' AND fc.status = 'approved'
-              AND fc.correction_date BETWEEN ${from} AND ${to}) AS cancelled
+              AND fc.correction_date BETWEEN ${from} AND ${to}) AS cancelled,
+          (SELECT ${Prisma.raw(PERSONAL_RETURN[metric])}
+             FROM return_reversals rr
+             JOIN sales s ON s.id = rr.sale_id
+            WHERE rr.company_id = ${companyId} AND ${person}
+              AND rr.approval_date BETWEEN ${from} AND ${to}) AS returned
       `,
     );
-    return round2(num(rows[0]?.sold as number) - num(rows[0]?.cancelled as number));
+    return round2(num(rows[0]?.sold as number) - num(rows[0]?.cancelled as number) - num(rows[0]?.returned as number));
   }
 }

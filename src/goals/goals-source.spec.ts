@@ -43,15 +43,17 @@ describe('branch and company progress comes from the rollup', () => {
       service.indexOf("if (goal.scope !== 'user')"),
       service.indexOf('Per person'),
     );
-    // A cancelled sale comes off through the rollup's own cancellation columns (0079, units 0080): still no expression of its own.
-    expect(branchPath).toContain('SUM(${Prisma.raw(`\\`${METRIC_COLUMN[metric]}\\` - ${CANCELLED_ADJUSTMENT[metric]}`)})');
+    // Cancellations and returns come off through the rollup's own columns (0079, 0080, docs/53): still no expression of its own.
+    expect(branchPath).toContain('SUM(${Prisma.raw(`\\`${METRIC_COLUMN[metric]}\\` - (${ADJUSTMENT[metric]})`)})');
     expect(branchPath).not.toContain('FROM sale_items');
   });
 
-  it('the cancellation adjustment reads only columns the rollup model has (0079, units 0080)', () => {
-    const adjustment = progress.slice(progress.indexOf('export const CANCELLED_ADJUSTMENT'), progress.indexOf('export const METRIC_COLUMN'));
-    const columns = [...adjustment.matchAll(/`(\w+)`/g)].map((m) => m[1]).filter((c) => c.startsWith('cancelled_'));
-    expect(new Set(columns)).toEqual(new Set(['cancelled_revenue', 'cancelled_cogs', 'cancelled_count', 'cancelled_qty']));
+  it('the adjustment reads only columns the rollup model has — cancellations and returns (0079, 0080, docs/53)', () => {
+    const adjustment = progress.slice(progress.indexOf('export const ADJUSTMENT'), progress.indexOf('export const METRIC_COLUMN'));
+    const columns = [...adjustment.matchAll(/`(\w+)`/g)].map((m) => m[1]).filter((c) => c.startsWith('cancelled_') || c.startsWith('returns_'));
+    expect(new Set(columns)).toEqual(
+      new Set(['cancelled_revenue', 'cancelled_cogs', 'cancelled_count', 'cancelled_qty', 'returns_revenue', 'returns_adjustments', 'returns_gross_profit']),
+    );
     const model = schema.slice(schema.indexOf('model DailyRollup'));
     const body = model.slice(0, model.indexOf('\n}'));
     for (const column of columns) expect(body).toContain(`@map("${column}")`);

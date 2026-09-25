@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildChannels, type MovementRow } from '../closing/channels';
 import { assembleReport, reportInvariants, type ReportInputs } from '../closing/closing-report';
-import { CANCELLED_ADJUSTMENT, METRIC_COLUMN, type GoalMetricKey } from '../goals/goal-progress';
+import { ADJUSTMENT, METRIC_COLUMN, type GoalMetricKey } from '../goals/goal-progress';
 import { profit } from './accounting-rules';
 
 /**
@@ -21,7 +21,7 @@ import { profit } from './accounting-rules';
  *
  * Each reader's rows are derived below from those records by that reader's documented
  * rule; the figures then come from the production code: the goal's own SQL
- * expression (`METRIC_COLUMN` − `CANCELLED_ADJUSTMENT`), Results' `profit()` and the
+ * expression (`METRIC_COLUMN` − `ADJUSTMENT`), Results' `profit()` and the
  * Daily closing's `assembleReport()`. The SQL that fills the rows is proved on a real
  * database by the lifecycle recorded in docs/21; the source pins at the end hold the
  * keys it uses.
@@ -61,12 +61,16 @@ function rollupRow(sc: Scenario, day: string): Record<string, number> {
     cancelled_cogs: sumOf(gone, cost),
     cancelled_count: gone.length,
     cancelled_qty: sumOf(gone, units),
+    // No return in these two scenarios (docs/53 covers returns).
+    returns_revenue: 0,
+    returns_adjustments: 0,
+    returns_gross_profit: 0,
   };
 }
 
 /** A branch goal over some days: the production expression, evaluated on each day's row, summed (goals.service.ts). */
 function goal(sc: Scenario, metric: GoalMetricKey, days: string[]): number {
-  const expression = `\`${METRIC_COLUMN[metric]}\` - ${CANCELLED_ADJUSTMENT[metric]}`.replace(/`(\w+)`/g, 'row.$1');
+  const expression = `\`${METRIC_COLUMN[metric]}\` - (${ADJUSTMENT[metric]})`.replace(/`(\w+)`/g, 'row.$1');
   const evaluate = new Function('row', `return ${expression};`) as (row: Record<string, number>) => number;
   return days.reduce((n, d) => n + evaluate(rollupRow(sc, d)), 0);
 }
@@ -265,12 +269,14 @@ describe('the keys the SQL uses (source pins)', () => {
   it('a personal goal keys the sale on its business date and the cancellation on its approval date', () => {
     expect(goals).toMatch(/s\.business_date BETWEEN \$\{from\} AND \$\{to\}\) AS sold/);
     expect(goals).toMatch(/fc\.correction_date BETWEEN \$\{from\} AND \$\{to\}\) AS cancelled/);
-    expect(goals).toMatch(/return round2\(num\(rows\[0\]\?\.sold as number\) - num\(rows\[0\]\?\.cancelled as number\)\);/);
+    expect(goals).toMatch(/return round2\(num\(rows\[0\]\?\.sold as number\) - num\(rows\[0\]\?\.cancelled as number\) - num\(rows\[0\]\?\.returned as number\)\);/);
     expect(goals).not.toMatch(/DATE\(s\.sold_at\)/);
   });
 
   it('Home and the Daily closing count a cancellation on the day it was approved', () => {
-    expect(dashboard).toMatch(/fc\.target_kind = 'sale' AND fc\.status = 'approved'\s+AND fc\.correction_date BETWEEN \$\{range\.from\} AND \$\{range\.to\}/);
+    // Home reads the one dated definition (docs/53 D29), which keys a cancellation on its approval date.
+    expect(dashboard).toMatch(/periodFigures\(this\.db, companyId, branchId, range\.from, range\.to\)/);
+    expect(code('analytics', 'period-figures.ts')).toMatch(/fc\.target_kind = 'sale' AND fc\.status = 'approved'\s+AND fc\.correction_date BETWEEN \$\{from\} AND \$\{to\}/);
     const figures = queries.slice(queries.indexOf('export async function cancellationFigures'), queries.indexOf('export async function expenseReversalLines'));
     expect(figures).toMatch(/COALESCE\(SUM\(si\.quantity\), 0\) AS items/);
     expect(figures).toMatch(/fc\.correction_date = \$\{date\}/);
