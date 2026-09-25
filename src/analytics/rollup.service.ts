@@ -64,13 +64,6 @@ function lineTotals(rows: readonly SaleLineRow[], shares: Map<string, bigint>) {
   return { revenue: fromCents(revenue), cogs: fromCents(cogs), qty };
 }
 
-interface VelocityRow {
-  product_id: Buffer;
-  sold_7d: unknown;
-  sold_30d: unknown;
-  last_sold_at: Date | null;
-}
-
 interface ValuationSourceRow {
   kind: 'unit' | 'stock';
   product_id: Buffer;
@@ -500,47 +493,6 @@ export class RollupService {
   }
 
   /**
-   * Movement signal per product at a branch: units sold in the last 7 / 30 days
-   * and the last sale time. Tracking-type independent (COALESCE resolves the
-   * product for serialized lines). Products never sold have no row.
-   */
-  async recomputeVelocity(companyId: Buffer, branchId: Buffer): Promise<void> {
-    const now = new Date();
-    const d7 = new Date(now.getTime() - 7 * 86_400_000);
-    const d30 = new Date(now.getTime() - 30 * 86_400_000);
-
-    const rows = await this.prisma.$queryRaw<VelocityRow[]>(Prisma.sql`
-      SELECT COALESCE(si.product_id, u.product_id) AS product_id,
-             SUM(CASE WHEN s.sold_at >= ${d7}  THEN si.quantity ELSE 0 END) AS sold_7d,
-             SUM(CASE WHEN s.sold_at >= ${d30} THEN si.quantity ELSE 0 END) AS sold_30d,
-             MAX(s.sold_at) AS last_sold_at
-      FROM sale_items si
-      JOIN sales s ON s.id = si.sale_id
-      LEFT JOIN units u ON u.id = si.unit_id
-      WHERE si.company_id = ${companyId} AND s.branch_id = ${branchId} AND si.voided = 0
-        -- A cancelled sale's goods never left (0079).
-        AND si.released_by_correction_id IS NULL
-      GROUP BY product_id
-    `);
-
-    await this.prisma.productVelocity.deleteMany({ where: { companyId, branchId } });
-    if (rows.length > 0) {
-      await this.prisma.productVelocity.createMany({
-        data: rows.map((r) => ({
-          id: newUuidV7Bin(),
-          companyId,
-          branchId,
-          productId: r.product_id,
-          sold7d: toNum(r.sold_7d),
-          sold30d: toNum(r.sold_30d),
-          lastSoldAt: r.last_sold_at ? new Date(r.last_sold_at) : null,
-          refreshedAt: now,
-        })),
-      });
-    }
-  }
-
-  /**
    * Current $ invested + expected profit per product at a branch, combining
    * BOTH storage shapes: in-stock individual units (units.cost, expected at
    * products.default_price) and quantity stock (stock_items.qty × cost, expected
@@ -603,9 +555,12 @@ export class RollupService {
     }
   }
 
-  /** Refresh both branch snapshots (valuation + velocity). */
+  /**
+   * Refresh the branch's stock snapshot (valuation). How products are moving is no
+   * longer a snapshot: `movement.ts` reads it from the sales that stand whenever it is
+   * asked, so "the last 30 days" always ends today (docs/54 D39).
+   */
   async refreshBranch(companyId: Buffer, branchId: Buffer): Promise<void> {
     await this.recomputeInventoryValuation(companyId, branchId);
-    await this.recomputeVelocity(companyId, branchId);
   }
 }

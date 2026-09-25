@@ -16,6 +16,7 @@ import { PartnerRankingService } from '../consignment/partner-ranking.service';
 import { AnalyticsService } from './analytics.service';
 import { barsSumTo, dailyBars, groupedBars, hourlyBars, type Bar } from './home-series';
 import { periodFigures, sellerFigures } from './period-figures';
+import { productMovement } from './movement';
 
 const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -304,10 +305,11 @@ export class DashboardService {
 
   /** Full dashboard: snapshot + rankings + dead stock + comparisons. */
   async dashboard() {
-    const [home, performance, deadStock, branchComparison, employeePerformance] = await Promise.all([
+    const [home, performance, deadStock, deadStockDays, branchComparison, employeePerformance] = await Promise.all([
       this.snapshot(),
       this.analytics.productPerformance(30),
       this.deadStock(10),
+      this.deadStockDays(),
       this.branchComparison(30),
       this.employeePerformance(30),
     ]);
@@ -319,6 +321,8 @@ export class DashboardService {
       mostProfitable: products.slice(0, 5), // productPerformance is profit-desc
       worstPerforming: [...products].sort((a, b) => a.grossProfit - b.grossProfit).slice(0, 5),
       deadStock,
+      /** How long without a sale that stands makes stock "not moving" — the screen states it (docs/54 D39). */
+      deadStockDays,
       branchComparison,
       employeePerformance,
     };
@@ -338,11 +342,12 @@ export class DashboardService {
     const days = await this.numberSetting('dead_stock_days', 60);
     const cutoff = new Date(Date.now() - days * 86_400_000);
 
-    const [valuations, velocity] = await Promise.all([
+    // Last sold: the latest sale that stands — a cancelled sale is not movement (docs/54 D39).
+    const [valuations, movement] = await Promise.all([
       this.db.inventoryValuation.findMany({ where: branchId ? { branchId } : {} }),
-      this.db.productVelocity.findMany({ where: branchId ? { branchId } : {} }),
+      productMovement(this.db, this.tenant.companyId(), branchId ?? null, dayKey(this.windowStart(30))),
     ]);
-    const lastSoldByHex = new Map(velocity.map((v) => [v.productId.toString('hex'), v.lastSoldAt]));
+    const lastSoldByHex = new Map([...movement.entries()].map(([hex, m]) => [hex, m.lastSoldAt]));
 
     const dead = valuations.filter((r) => {
       const last = lastSoldByHex.get(r.productId.toString('hex'));

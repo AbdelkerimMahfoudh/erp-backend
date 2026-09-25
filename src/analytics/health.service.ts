@@ -5,6 +5,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { dayKey } from '../common/utils/date.util';
 import { combineHealth, ComponentScore, HealthResult } from './health-score.util';
+import { productMovement } from './movement';
 
 const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ? 0 : Number(d));
 const clamp01 = (n: number): number => (n < 0 ? 0 : n > 1 ? 1 : n);
@@ -39,13 +40,14 @@ export class HealthService {
     const todayDate = new Date(`${dayKey(now)}T00:00:00.000Z`);
     const deadDays = await this.numberSetting('dead_stock_days', 60);
 
-    // Shared inventory snapshots — fetched once, feed three components.
-    const [valuations, velocity, activeProducts] = await Promise.all([
+    // The stock snapshot and how products are moving (sales that stand, read now — docs/54 D39), fetched once.
+    const [valuations, movement, activeProducts] = await Promise.all([
       this.db.inventoryValuation.findMany({ where: branchWhere }),
-      this.db.productVelocity.findMany({ where: branchWhere }),
+      productMovement(this.db, this.tenant.companyId(), branchId ?? null, dayKey(new Date(now.getTime() - 29 * 86_400_000))),
       this.db.product.count({ where: { deletedAt: null } }),
     ]);
-    const lastSoldByHex = new Map(velocity.map((v) => [v.productId.toString('hex'), v.lastSoldAt]));
+    const velocity = [...movement.values()];
+    const lastSoldByHex = new Map([...movement.entries()].map(([hex, m]) => [hex, m.lastSoldAt]));
 
     const components: ComponentScore[] = [
       await this.profitTrend(branchWhere, todayDate),

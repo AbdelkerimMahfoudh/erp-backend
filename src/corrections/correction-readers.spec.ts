@@ -31,6 +31,7 @@ const collections = code(read('sales', 'sale-payments.service.ts'));
 const returns = code(read('returns', 'returns.service.ts'));
 const inventory = code(read('inventory', 'inventory.service.ts'));
 const dashboard = code(read('analytics', 'dashboard.service.ts'));
+const movement = code(read('analytics', 'movement.ts'));
 
 describe('the corrected record\'s own day stays exactly as it was', () => {
   it('the rollup\'s revenue and the report\'s sales never filter a cancelled sale\'s lines', () => {
@@ -67,7 +68,8 @@ describe('what exists now sees the correction', () => {
     expect(goals).not.toMatch(/released_by_correction_id/);
     expect(goals).toMatch(/ADJUSTMENT\[metric\]/);
     expect(goals).toMatch(/fc\.target_kind = 'sale' AND fc\.status = 'approved'\s+AND fc\.correction_date BETWEEN \$\{from\} AND \$\{to\}/);
-    expect(rollup).toMatch(/AND si\.released_by_correction_id IS NULL\s+GROUP BY product_id/);
+    // Movement (sold in 30 days, last sold, not moving) leaves a cancelled sale out wherever it falls (docs/54 D39).
+    expect(movement).toMatch(/AND NOT EXISTS \(SELECT 1 FROM financial_corrections fc\s+WHERE fc\.target_sale_id = s\.id AND fc\.target_kind = 'sale' AND fc\.status = 'approved'\)/);
   });
 
   it('a cancelled sale takes no payment and no return', () => {

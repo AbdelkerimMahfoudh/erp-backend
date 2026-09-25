@@ -8,6 +8,7 @@ import { dayKey } from '../common/utils/date.util';
 import { inTransitValue, summarizeInTransit } from './in-transit-value';
 import { faultyHeldValue, heldValueRows, toNum } from './held-value';
 import { productAdjustments } from './period-figures';
+import { productMovement, type ProductMovement } from './movement';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -214,10 +215,10 @@ export class AnalyticsService {
         })
       : [];
     const productByHex = new Map(products.map((p) => [p.id.toString('hex'), p]));
-    const velocity = productIds.length
-      ? await this.db.productVelocity.findMany({ where: { productId: { in: productIds }, ...(branchId ? { branchId } : {}) } })
-      : [];
-    const velByHex = new Map(velocity.map((v) => [v.productId.toString('hex'), v]));
+    // Sold in the last 30 days and last sold: from the sales that stand, read now (docs/54 D39).
+    const velByHex = productIds.length
+      ? await productMovement(this.db, this.tenant.companyId(), branchId, dayKey(this.windowStart(30)))
+      : new Map<string, ProductMovement>();
 
     return {
       windowDays: days,
