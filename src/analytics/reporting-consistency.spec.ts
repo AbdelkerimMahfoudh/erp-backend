@@ -71,11 +71,11 @@ describe('the shared definitions (period-figures)', () => {
 /** The rollup row of each day, as `rollup.service.ts` writes it for the scenario. */
 const ROLLUP: Record<string, Record<string, number>> = {
   D1: { revenue: 30_000, cogs: 18_000, gross_profit: 12_000, sales_count: 2, qty_sold: 3, expenses: 800 },
-  D2: { returns_revenue: 10_000, returns_adjustments: 500, returns_cogs: 6_000, returns_gross_profit: 3_500 },
+  D2: { returns_revenue: 10_000, returns_adjustments: 500, returns_cogs: 6_000, returns_gross_profit: 3_500, returns_count: 1 },
   D3: { cancelled_revenue: 10_000, cancelled_cogs: 6_000, cancelled_count: 1, cancelled_qty: 1, expenses: -300 },
   D4: {},
 };
-const COLUMNS = ['revenue', 'cogs', 'gross_profit', 'sales_count', 'qty_sold', 'expenses', 'returns_revenue', 'returns_adjustments', 'returns_cogs', 'returns_gross_profit', 'cancelled_revenue', 'cancelled_cogs', 'cancelled_count', 'cancelled_qty'];
+const COLUMNS = ['revenue', 'cogs', 'gross_profit', 'sales_count', 'qty_sold', 'expenses', 'returns_revenue', 'returns_adjustments', 'returns_cogs', 'returns_gross_profit', 'returns_count', 'cancelled_revenue', 'cancelled_cogs', 'cancelled_count', 'cancelled_qty'];
 const row = (d: string) => Object.fromEntries(COLUMNS.map((c) => [c, ROLLUP[d][c] ?? 0]));
 /** A branch goal: the production expression, evaluated per day and summed (goals.service.ts). */
 const goal = (metric: GoalMetricKey, days: string[]) => {
@@ -90,9 +90,10 @@ describe('branch goals take returns off on their approval day, by the net refund
     expect(goal('revenue', ['D1', 'D2', 'D3', 'D4'])).toBe(sumFigures([D1, D2, D3, D4]).net.salesValue);
     // Profit: the return takes gross − adjustments − cost credited (3 500); the cancellation its margin (4 000).
     expect([goal('gross_profit', ['D1']), goal('gross_profit', ['D2']), goal('gross_profit', ['D3'])]).toEqual([12_000, -3_500, -4_000]);
-    // Count and units: the cancellation only — the return is its own event (R5, R6).
-    expect([goal('sales_count', ['D1', 'D2', 'D3']), goal('units_sold', ['D1', 'D2', 'D3'])]).toEqual([1, 2]);
-    expect([goal('sales_count', ['D2']), goal('units_sold', ['D2'])]).toEqual([0, 0]);
+    // Count: the cancellation only — a returned item is not a cancelled invoice (R5). Units: the
+    // cancelled sale's unit and the returned unit, each on its approval day (docs/54 D37).
+    expect([goal('sales_count', ['D1', 'D2', 'D3']), goal('units_sold', ['D1', 'D2', 'D3'])]).toEqual([1, 1]);
+    expect([goal('sales_count', ['D2']), goal('units_sold', ['D2'])]).toEqual([0, -1]);
   });
 });
 

@@ -52,7 +52,7 @@ describe('branch and company progress comes from the rollup', () => {
     const adjustment = progress.slice(progress.indexOf('export const ADJUSTMENT'), progress.indexOf('export const METRIC_COLUMN'));
     const columns = [...adjustment.matchAll(/`(\w+)`/g)].map((m) => m[1]).filter((c) => c.startsWith('cancelled_') || c.startsWith('returns_'));
     expect(new Set(columns)).toEqual(
-      new Set(['cancelled_revenue', 'cancelled_cogs', 'cancelled_count', 'cancelled_qty', 'returns_revenue', 'returns_adjustments', 'returns_gross_profit']),
+      new Set(['cancelled_revenue', 'cancelled_cogs', 'cancelled_count', 'cancelled_qty', 'returns_revenue', 'returns_adjustments', 'returns_gross_profit', 'returns_count']),
     );
     const model = schema.slice(schema.indexOf('model DailyRollup'));
     const body = model.slice(0, model.indexOf('\n}'));
@@ -96,7 +96,10 @@ describe('a personal goal is attributed to whoever made the sale', () => {
      * you make" means to the person being measured, and summing lines would
      * flatter whoever sells in bundles.
      */
-    expect(service).toContain("sales_count: 'COUNT(DISTINCT s.id)'");
+    expect(service).toContain("sales_count: 'COUNT(*)'");
+    // Read over the sales themselves, never joined to their lines — so a sale is counted once.
+    expect(service).toMatch(/\(SELECT \$\{value\}\s+FROM sales s\s+WHERE \$\{person\}/);
+    expect(service).toMatch(/\(SELECT \$\{value\}\s+FROM financial_corrections fc\s+JOIN sales s ON s\.id = fc\.target_sale_id\s+WHERE/);
   });
 });
 

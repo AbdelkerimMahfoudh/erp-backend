@@ -15,29 +15,31 @@ const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ?
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
 /**
- * One seller's figure per metric, on the rollup's own basis (`rollup.service.ts`):
- * revenue is the lines' price × quantity − discount, gross profit that less their
- * cost, units their quantity, and a sale is counted once however many lines it has —
- * three phones on one receipt is one sale, which is what "how many sales did you
- * make" means to a person.
+ * One seller's figure per metric, over their sales (`s`), on the rollup's own basis
+ * (`rollup.service.ts`): revenue is the recorded invoice total — a whole-invoice
+ * discount included, as the rollup now reads it (docs/54 D36) — gross profit that
+ * less the cost of its lines, units their quantity, and a sale is counted once
+ * however many lines it has: three phones on one receipt is one sale, which is what
+ * "how many sales did you make" means to a person.
  */
 const PERSONAL_VALUE: Readonly<Record<GoalMetricKey, string>> = {
-  gross_profit: 'COALESCE(SUM((si.price * si.quantity - si.discount) - (si.cost * si.quantity)), 0)',
-  revenue: 'COALESCE(SUM(si.price * si.quantity - si.discount), 0)',
-  sales_count: 'COUNT(DISTINCT s.id)',
-  units_sold: 'COALESCE(SUM(si.quantity), 0)',
+  gross_profit: 'COALESCE(SUM(s.total - s.total_cost), 0)',
+  revenue: 'COALESCE(SUM(s.total), 0)',
+  sales_count: 'COUNT(*)',
+  units_sold: 'COALESCE(SUM((SELECT COALESCE(SUM(si.quantity), 0) FROM sale_items si WHERE si.sale_id = s.id AND si.voided = 0)), 0)',
 };
 
 /**
  * What one seller's returns approved in the period take off, as the rollup takes them off the
  * branch (docs/53 R2): revenue by the net refund due, profit by gross − adjustments − cost
- * credited. A return changes neither the count nor the units sold (R5, R6).
+ * credited, and one unit each (docs/54 D37 — a return is one identified unit). A returned item
+ * is not a cancelled invoice: the sales count keeps it (R5).
  */
 const PERSONAL_RETURN: Readonly<Record<GoalMetricKey, string>> = {
   gross_profit: 'COALESCE(SUM(rr.gross_refund - rr.adjustment_total - rr.line_cost), 0)',
   revenue: 'COALESCE(SUM(rr.net_refund_due), 0)',
   sales_count: '0',
-  units_sold: '0',
+  units_sold: 'COUNT(*)',
 };
 
 /**
@@ -354,14 +356,12 @@ export class GoalsService {
       Prisma.sql`
         SELECT
           (SELECT ${value}
-             FROM sale_items si
-             JOIN sales s ON s.id = si.sale_id
-            WHERE ${person} AND si.voided = 0
+             FROM sales s
+            WHERE ${person}
               AND s.business_date BETWEEN ${from} AND ${to}) AS sold,
           (SELECT ${value}
              FROM financial_corrections fc
              JOIN sales s ON s.id = fc.target_sale_id
-             JOIN sale_items si ON si.sale_id = s.id AND si.voided = 0
             WHERE fc.company_id = ${companyId} AND ${person}
               AND fc.target_kind = 'sale' AND fc.status = 'approved'
               AND fc.correction_date BETWEEN ${from} AND ${to}) AS cancelled,

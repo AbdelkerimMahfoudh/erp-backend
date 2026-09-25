@@ -132,15 +132,17 @@ export function computeProgress(input: ProgressInput): Progress {
  *
  *   a cancelled sale (0079; units 0080) — its revenue, its profit, one sale, its units;
  *   a returned item (docs/53 R2) — revenue by its net refund due (gross − adjustments kept),
- *   profit by gross − adjustments − cost credited (`returns_gross_profit`, the rollup's own).
+ *   profit by gross − adjustments − cost credited (`returns_gross_profit`, the rollup's own),
+ *   and its unit (docs/54 D37): a return is one identified unit, so `returns_count` is the
+ *   units returned.
  *
- * Sales count and units take cancellations only: a return is its own event (R5, R6).
+ * The sales count takes cancellations only: a returned item is not a cancelled invoice (R5).
  */
 export const ADJUSTMENT: Readonly<Record<GoalMetricKey, string>> = {
   gross_profit: '(`cancelled_revenue` - `cancelled_cogs`) + `returns_gross_profit`',
   revenue: '`cancelled_revenue` + (`returns_revenue` - `returns_adjustments`)',
   sales_count: '`cancelled_count`',
-  units_sold: '`cancelled_qty`',
+  units_sold: '`cancelled_qty` + `returns_count`',
 };
 
 /**
