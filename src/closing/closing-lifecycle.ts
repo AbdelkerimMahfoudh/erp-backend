@@ -164,6 +164,16 @@ export function reopenChoices(beforeDayStart: boolean, mayStartEarly: boolean): 
   return beforeDayStart && mayStartEarly ? ['continue', 'start_new'] : ['continue'];
 }
 
+/**
+ * The choices "Open the boutique" offers — the same two, under the same rule:
+ * before 06:00 the business date is still yesterday's, so the Owner is asked
+ * whether to continue it or start today early BEFORE the opening is recorded.
+ * Anybody else opens the previous business day, and is told so.
+ */
+export function openChoices(beforeDayStart: boolean, mayStartEarly: boolean): ReopenMode[] {
+  return reopenChoices(beforeDayStart, mayStartEarly);
+}
+
 export interface ExistingDiscrepancy {
   status: 'pending_investigation' | 'resolved';
   amount: number;

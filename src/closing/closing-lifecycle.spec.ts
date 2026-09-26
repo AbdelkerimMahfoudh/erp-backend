@@ -7,6 +7,7 @@ import {
   previousDayNeedsReview,
   reconcileDiscrepancy,
   reopenChoices,
+  openChoices,
   standingOf,
   canOpen,
   doorState,
@@ -135,6 +136,15 @@ describe('the door (0077)', () => {
     expect(canOpen({ status: 'locked', businessDate: day }, 'closed', day, day)).toEqual({ ok: false, why: 'day_closed' });
     expect(canOpen(null, 'never_opened', '2026-09-23', day)).toEqual({ ok: false, why: 'past_day' });
     expect(canOpen(null, 'never_opened', '2026-09-25', day)).toEqual({ ok: false, why: 'future_day' });
+  });
+});
+
+describe('openChoices (docs/56)', () => {
+  it('offers the early start to the Owner before 06:00, and only then — the same rule as a reopen', () => {
+    expect(openChoices(true, true)).toEqual(['continue', 'start_new']);
+    expect(openChoices(true, false)).toEqual(['continue']);
+    expect(openChoices(false, true)).toEqual(['continue']);
+    expect(openChoices(false, false)).toEqual(['continue']);
   });
 });
 
