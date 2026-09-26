@@ -17,6 +17,7 @@ import { AnalyticsService } from './analytics.service';
 import { barsSumTo, dailyBars, groupedBars, hourlyBars, type Bar } from './home-series';
 import { periodFigures, sellerFigures } from './period-figures';
 import { productMovement } from './movement';
+import { compare, precedingPeriod } from './accounting-rules';
 
 const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -141,8 +142,10 @@ export class DashboardService {
   ) {
     const companyId = this.tenant.companyId();
     const saleWhere = { branchId, isReversed: false, businessDate: dateRange };
+    /** The window of equal length just before this one — what the sales value is compared with (docs/56). */
+    const preceding = precedingPeriod(range.from, range.to);
 
-    const [sales, collected, dated] = await Promise.all([
+    const [sales, collected, dated, before] = await Promise.all([
       /**
        * The sales themselves — the series is cut from these rows, so the bars
        * and the sales value are one number.
@@ -155,6 +158,11 @@ export class DashboardService {
       this.db.payment.aggregate({ where: { businessDate: dateRange, sale: { branchId } }, _sum: { amount: true } }),
       // Invoices, cancellations, returns and expenses, each on the date that carries it — as the Daily closing counts them.
       periodFigures(this.db, companyId, branchId, range.from, range.to),
+      // The same invoiced value over the preceding window, so the comparison is like against like.
+      this.db.sale.aggregate({
+        where: { branchId, isReversed: false, businessDate: { gte: dateValue(preceding.from), lte: dateValue(preceding.to) } },
+        _sum: { total: true },
+      }),
     ]);
 
     let salesValue = 0;
@@ -200,6 +208,12 @@ export class DashboardService {
         /** Outstanding today on the sales made in these business dates. */
         stillOwed,
         stillOwedScope: 'these_sales' as const,
+        /**
+         * The sales value against the window of equal length just before this one (docs/56):
+         * a percentage only when that window sold something — a zero base is no comparison,
+         * never "up 100 %" — and the phone prints nothing when there is none.
+         */
+        comparison: { period: preceding, salesValue: compare(salesValue, round2(num(before._sum.total))) },
       },
       series: {
         unit: period === 'today' ? ('hour' as const) : period === 'week' ? ('day' as const) : ('week' as const),
