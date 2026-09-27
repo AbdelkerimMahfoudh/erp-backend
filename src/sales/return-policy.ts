@@ -70,8 +70,8 @@ export interface OverrideRequest {
  *    for anything else is refused rather than silently ignored. An employee who
  *    thinks they set a different policy must not be told the sale succeeded
  *    under it.
- *  - A change needs a reason. "Why is this sale different?" is the question an
- *    Owner will ask in three months, and the answer has to be recorded now.
+ *  - No reason is asked (2026-09-27, `docs/59` D82): the change is kept with
+ *    who made it and the window it set; a reason an older client sends is kept.
  *  - **A positive default may not be shortened to another positive value.**
  *    Trimming 48 hours to 2 is quietly selling a worse promise under the same
  *    banner. Removing the window entirely (`0`) stays allowed, because that is
@@ -96,10 +96,9 @@ export function resolveWindowForSale(input: {
     throw new ForbiddenException('Only a manager or the owner may change the return policy for a sale');
   }
 
-  const reason = requested.reason?.trim();
-  if (!reason) {
-    throw new BadRequestException('Say why this sale has a different return policy');
-  }
+  // No reason is asked any more (docs/21, 2026-09-27): the change is kept with who made it and the window it set, and
+  // a reason an older client still sends is kept with it.
+  const reason = requested.reason?.trim() || null;
 
   if (
     !Number.isInteger(requested.windowHours) ||

@@ -168,10 +168,10 @@ export class CreateSaleDto {
    *
    * Omitted, or equal to the shop's default, means the ordinary policy — the
    * Sell screen echoes what it displayed, and that must not count as an
-   * override or every sale would need a reason. Anything else requires
-   * `return.policy.override` and `returnPolicyReason`, and is refused rather
-   * than quietly downgraded: an employee must never be told a sale succeeded
-   * under a policy it does not have.
+   * override. Anything else requires `return.policy.override` (no reason is
+   * asked since `docs/59` D82), and is refused rather than quietly downgraded:
+   * an employee must never be told a sale succeeded under a policy it does not
+   * have.
    */
   @ApiPropertyOptional({
     minimum: RETURN_WINDOW_NONE,

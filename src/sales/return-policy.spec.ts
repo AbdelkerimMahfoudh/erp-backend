@@ -123,12 +123,21 @@ describe('who may change the policy at sale time', () => {
     ).toBe(24);
   });
 
-  it('demands a reason for any real change', () => {
+  it('asks no reason for a real change, and keeps one an older client still sends', () => {
     for (const reason of [undefined, '', '   ']) {
-      expect(() =>
-        resolveWindowForSale({ companyDefaultHours: 24, canOverride: true, requested: { windowHours: 0, reason } }),
-      ).toThrow(/Say why/);
+      expect(resolveWindowForSale({ companyDefaultHours: 24, canOverride: true, requested: { windowHours: 0, reason } })).toEqual({
+        windowHours: 0,
+        overrideReason: null,
+        overridden: true,
+      });
     }
+    expect(
+      resolveWindowForSale({ companyDefaultHours: 24, canOverride: true, requested: { windowHours: 72, reason: '  regular customer ' } }).overrideReason,
+    ).toBe('regular customer');
+  });
+
+  it('still refuses a change from someone without the authority, reason or not', () => {
+    expect(() => resolveWindowForSale({ companyDefaultHours: 24, canOverride: false, requested: { windowHours: 72 } })).toThrow(/manager or the owner/);
   });
 
   it('rejects an out-of-range override even from an owner', () => {
