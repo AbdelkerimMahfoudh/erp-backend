@@ -12,7 +12,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
-import { ClosingService, type AutoReopenResult } from '../closing/closing.service';
+import { ClosingService } from '../closing/closing.service';
 import { assertDayOpen } from '../expenses/expense-rules';
 import { RecordSalePaymentDto } from './dto/record-payment.dto';
 import { afterPayment, assertCollectable, collectionFingerprint, resolvePaidAt } from './sale-payment-rules';
@@ -61,8 +61,6 @@ export class SalePaymentsService {
     if (!isUuid(saleIdStr)) throw new NotFoundException('No such sale');
     const companyId = this.tenant.companyId();
     const branchId = this.tenant.requireBranchId();
-    let reopen: AutoReopenResult = { reopened: false, closingId: null, reopenCount: 0, at: null };
-    let reopenDay = '';
     const userId = this.tenant.userId();
     if (!userId) throw new BadRequestException('No authenticated user');
 
@@ -81,6 +79,15 @@ export class SalePaymentsService {
     // A retry of something already recorded answers with what it recorded.
     const replay = await this.replay(companyId, clientUuid, hash);
     if (replay) return replay;
+
+    /**
+     * Open first (docs/61): while the current business day is closed, a
+     * payment on a debt waits like a sale or a receipt — refused with
+     * `store_closed`, nothing written, nothing reopened. A refused request
+     * leaves no trace under its key, so the same key after the store is opened
+     * records the payment for real rather than replaying a success that never was.
+     */
+    await this.closing.assertCounterOpen(branchId, 'payment');
 
     const accountBin = dto.method === 'cash' || !dto.receivingAccountId ? null : uuidToBin(dto.receivingAccountId);
     if (dto.method !== 'cash' && !accountBin) {
@@ -146,14 +153,13 @@ export class SalePaymentsService {
         });
         if (day === today) {
           /**
-           * Money arriving on the CURRENT business day after a counted close
-           * reopens the day (0076) — the only movement that does: a sale or a
-           * receipt is refused with `store_closed` until the store is opened. A
-           * payment back-dated into an earlier locked day is still refused: that
-           * day is behind the boundary and is corrected through Milestone B.
+           * Money arriving on the CURRENT business day while it is closed is
+           * refused, decided on the locked row itself so a close committed
+           * meanwhile is seen (docs/61) — no movement reopens a day any more.
+           * A payment back-dated into an earlier locked day is refused too:
+           * that day is behind the boundary and is corrected through Milestone B.
            */
-          reopen = await this.closing.autoReopenTx(tx, { branchId, businessDate: day, cause: { kind: 'payment', id: saleId } });
-          reopenDay = day;
+          await this.closing.assertCounterOpenTx(tx, { branchId, businessDate: day, operation: 'payment' });
         } else {
           assertDayOpen(closing, day);
         }
@@ -236,7 +242,6 @@ export class SalePaymentsService {
       throw e;
     }
 
-    if (reopen.reopened) void this.closing.afterReopenCommitted(branchId, reopenDay, reopen);
     return this.state(saleId);
   }
 

@@ -90,23 +90,20 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 /** The row key the counting screen and the lifecycle rules share. */
 const keyOf = (c: { channel: string; accountId: string | null }) => `${c.channel}:${c.accountId ?? 'NONE'}`;
 
-/** What a later payment's auto-reopen inside its own transaction reports back. */
-export interface AutoReopenResult {
-  reopened: boolean;
-  closingId: Buffer | null;
-  reopenCount: number;
-  at: Date | null;
-}
+/** What moves money through the counter, and so waits while the day is closed. */
+type CounterOperation = 'sale' | 'receipt' | 'payment';
 
-/** What the counter does that a closed day refuses. */
-type CounterOperation = 'sale' | 'receipt';
-
-/** The refusal a sale or a receipt meets while the current business day is closed: nothing was written. */
+/**
+ * The refusal a sale, a receipt or a later payment on a debt meets while the
+ * current business day is closed: nothing was written, nothing reopens — the
+ * store is opened first, deliberately (docs/61).
+ */
 function storeClosed(day: string, operation: CounterOperation): ConflictException {
-  const nothing = operation === 'sale' ? 'Nothing was sold' : 'Nothing was received';
+  const nothing = operation === 'sale' ? 'Nothing was sold' : operation === 'receipt' ? 'Nothing was received' : 'Nothing was recorded';
   return new ConflictException({
     code: 'store_closed',
     message: `The store is closed for business day ${day}. ${nothing}: the Owner or a named delegate must open the store first.`,
+    businessDate: day,
   });
 }
 
@@ -1590,67 +1587,6 @@ export class ClosingService {
   }
 
   /**
-   * A later payment on a sale, received on the current business day after the
-   * close, reopens the day by itself inside the payment's own transaction
-   * (docs/50 §3.2). A sale or a receipt never does: they are refused while the
-   * day is closed. The notice goes out after the caller commits, through
-   * `afterReopenCommitted`.
-   */
-  async autoReopenTx(
-    tx: Pick<TenantPrisma, 'auditLog' | 'dailyClosing' | 'closingEvent' | '$queryRaw'>,
-    args: { branchId: Buffer; businessDate: string; cause: { kind: 'payment'; id: Buffer } },
-  ): Promise<AutoReopenResult> {
-    const companyId = this.tenant.companyId();
-    const dayDate = dateValue(args.businessDate);
-    /**
-     * The same row lock the close takes (docs/51 §12.6). A close holding it makes
-     * this wait, then see the day locked and reopen it; this holding it makes the
-     * close wait, then see the movement and refuse with the fresh report. Either
-     * way the money is in exactly one snapshot or in the reopened day — never lost
-     * in a day that locked without it. The row is read by the locking statement
-     * itself: a later plain read could see the snapshot from before the close.
-     */
-    const [row] = await tx.$queryRaw<{ id: Buffer; status: string; reopen_count: number; reopened_at: Date | null }[]>(Prisma.sql`
-      SELECT id, status, reopen_count, reopened_at FROM daily_closings
-       WHERE company_id = ${companyId} AND branch_id = ${args.branchId} AND closing_date = ${args.businessDate}
-       FOR UPDATE`);
-    if (!row) return { reopened: false, closingId: null, reopenCount: 0, at: null };
-    const closingId = Buffer.from(row.id);
-    const reopenCount = Number(row.reopen_count);
-    if (row.status !== 'locked') return { reopened: false, closingId, reopenCount, at: row.reopened_at };
-    const now = new Date();
-    const n = reopenCount + 1;
-    const userId = this.tenant.userId() ?? null;
-    await tx.dailyClosing.update({
-      where: { id: closingId },
-      data: { status: 'reopened', isLocked: false, reopenedAt: now, reopenedById: userId, reopenCount: n, version: { increment: 1 } },
-    });
-    await tx.closingEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        branchId: args.branchId,
-        businessDate: dayDate,
-        closingId,
-        kind: 'auto_reopened',
-        at: now,
-        actorId: userId,
-        dedupeKey: `closing:${closingId.toString('hex')}:reopened:${n}`,
-        payload: { mode: 'continue', automatic: true, cause: args.cause.kind, causeId: binToUuid(args.cause.id), reopenCount: n } as Prisma.InputJsonValue,
-      },
-    });
-    await this.audit.recordTx(tx, {
-      entityType: 'DailyClosing',
-      entityId: closingId,
-      action: 'status_change',
-      reason: `auto_reopened_by_${args.cause.kind}`,
-      after: { day: args.businessDate, reopenCount: n, cause: args.cause.kind, causeId: binToUuid(args.cause.id) },
-      branchId: args.branchId,
-    });
-    return { reopened: true, closingId, reopenCount: n, at: now };
-  }
-
-  /**
    * The Owner's notice for a sale made on a day that was closed and has been
    * reopened since. Fire-and-forget; never throws.
    */
@@ -1701,16 +1637,6 @@ export class ClosingService {
     } catch (e) {
       this.logger.warn(`Post-sale closing notices skipped for ${binToUuid(saleId)}: ${(e as Error).message}`);
     }
-  }
-
-  /** A later payment that reopened the day: the Owner is told about the reopen alone. Never throws. */
-  async afterReopenCommitted(branchId: Buffer, businessDate: string, reopen: AutoReopenResult): Promise<void> {
-    if (!reopen.reopened || !reopen.closingId) return;
-    const companyId = this.tenant.companyId();
-    const closingIdHex = reopen.closingId.toString('hex');
-    await this.tellOwner(companyId, branchId, businessDate, null, (ctx) =>
-      reopenedNotice(ctx, { closingIdHex, reopenCount: reopen.reopenCount, at: reopen.at ?? new Date(), mode: 'continue', automatic: true }),
-    );
   }
 
   /** Build a notice in the Owner's language and deliver it; record the outcome on the event when there is one. */
@@ -2229,8 +2155,8 @@ export class ClosingService {
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
     });
     /**
-     * A locked day is signed off. Reopening it is an explicit act (0076) or a
-     * later payment's; a count does neither, so it is refused until then.
+     * A locked day is signed off. Reopening it is an explicit act (0076), never
+     * a side effect (docs/61); a count is no exception, so it is refused until then.
      */
     if (existing?.status === 'locked') {
       throw new ConflictException(`Day ${day} is already closed for this branch`);

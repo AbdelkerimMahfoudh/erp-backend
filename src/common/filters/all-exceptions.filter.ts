@@ -31,6 +31,7 @@ interface ErrorBody {
   unitId?: unknown;
   identifier?: unknown;
   acknowledgement?: unknown;
+  businessDate?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -71,6 +72,8 @@ const DETAIL_KEYS = [
    * word is free text on half the mutations in this app, and allowlisting it
    * would pass whatever any of them happened to attach. */
   'acknowledgement',
+  /* `store_closed`: which business day is closed, so a screen can name it and offer to open it without reading the sentence. */
+  'businessDate',
 ] as const;
 
 /**

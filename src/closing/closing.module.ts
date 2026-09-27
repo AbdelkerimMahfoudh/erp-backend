@@ -12,7 +12,7 @@ import { MoneyAnchorsService } from './money-anchors.service';
   imports: [AnalyticsModule, NotificationsModule], // RollupService (authoritative totals) + notifications
   controllers: [ClosingController, MoneyAnchorsController],
   providers: [ClosingService, DiscrepanciesService, ClosingNoticeService, MoneyAnchorsService],
-  // Sales and receipts are refused while the day is closed; a later payment reopens today's from inside its own transaction (0076).
+  // Sales, receipts and later payments are refused while the day is closed (store_closed); nothing reopens a day by itself (docs/61).
   exports: [ClosingService],
 })
 export class ClosingModule {}

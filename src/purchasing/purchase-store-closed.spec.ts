@@ -137,6 +137,7 @@ describe('a receipt while the business day is closed', () => {
     expect(e.getStatus()).toBe(409);
     expect(e.getResponse()).toEqual({
       code: 'store_closed',
+      businessDate: '2026-09-27',
       message: 'The store is closed for business day 2026-09-27. Nothing was received: the Owner or a named delegate must open the store first.',
     });
     expect(db.receivingAccount.findFirst).not.toHaveBeenCalled();

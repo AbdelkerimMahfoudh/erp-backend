@@ -145,6 +145,7 @@ describe('a sale while the business day is closed', () => {
     expect(e.getStatus()).toBe(409);
     expect(e.getResponse()).toEqual({
       code: 'store_closed',
+      businessDate: '2026-09-27',
       message: 'The store is closed for business day 2026-09-27. Nothing was sold: the Owner or a named delegate must open the store first.',
     });
     expect(db.$transaction).not.toHaveBeenCalled();
@@ -217,36 +218,6 @@ describe('a retry of a sale made before the close', () => {
   });
 });
 
-describe('a later payment on a sale, unlike a sale, still reopens today’s closed day', () => {
-  const CLOSING = Buffer.alloc(16, 7);
-  const reopen = (status: Status) => {
-    const tx: any = {
-      $queryRaw: jest.fn(async () => [{ id: CLOSING, status, reopen_count: 1, reopened_at: null }]),
-      dailyClosing: { findUnique: jest.fn(), update: jest.fn(async () => ({})) },
-      closingEvent: { create: jest.fn(async () => ({})) },
-    };
-    const tenant: any = { companyId: () => COMPANY, userId: () => USER };
-    const closing = new ClosingService({} as never, tenant, { recordTx: async () => ({}) } as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never);
-    const result = closing.autoReopenTx(tx, { branchId: BRANCH, businessDate: DAY, cause: { kind: 'payment', id: SALE } });
-    return { tx, result };
-  };
-
-  it('reopens on the row the locking statement returned, whatever an earlier plain read saw', async () => {
-    const { tx, result } = reopen('locked');
-    expect(await result).toMatchObject({ reopened: true, closingId: CLOSING, reopenCount: 2 });
-    expect(tx.dailyClosing.findUnique).not.toHaveBeenCalled();
-    expect(tx.dailyClosing.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: CLOSING }, data: expect.objectContaining({ status: 'reopened', reopenCount: 2 }) }));
-    expect(tx.closingEvent.create.mock.calls[0][0].data).toMatchObject({ kind: 'auto_reopened', payload: { cause: 'payment', reopenCount: 2 } });
-  });
-
-  it('changes nothing on a day that is not closed', async () => {
-    const { tx, result } = reopen('reopened');
-    expect(await result).toEqual({ reopened: false, closingId: CLOSING, reopenCount: 1, at: null });
-    expect(tx.dailyClosing.update).not.toHaveBeenCalled();
-    expect(tx.closingEvent.create).not.toHaveBeenCalled();
-  });
-});
-
 /** Source without comments, so a pin never rests on prose. */
 const code = (file: string) =>
   readFileSync(join(__dirname, file), 'utf8')
@@ -270,16 +241,13 @@ describe('the open-first rule in the source', () => {
 
   it('reads the day’s status in the locking statement itself', () => {
     const start = closing.indexOf('async assertCounterOpenTx(');
-    const body = closing.slice(start, closing.indexOf('async autoReopenTx(', start));
+    const body = closing.slice(start, closing.indexOf('async afterSaleCommitted(', start));
     expect(body).toMatch(/SELECT status FROM daily_closings\s+WHERE company_id = \$\{companyId\} AND branch_id = \$\{args\.branchId\} AND closing_date = \$\{args\.businessDate\}\s+FOR UPDATE/);
     expect(body).not.toMatch(/dailyClosing\.find/);
   });
 
-  it('a later payment’s reopen also decides on the locked row, not on a later plain read', () => {
-    const start = closing.indexOf('async autoReopenTx(');
-    const body = closing.slice(start, closing.indexOf('async afterSaleCommitted(', start));
-    expect(body).toMatch(/SELECT id, status, reopen_count, reopened_at FROM daily_closings[\s\S]*?FOR UPDATE/);
-    expect(body).not.toMatch(/dailyClosing\.find/);
-    expect(body).toMatch(/cause: \{ kind: 'payment'; id: Buffer \}/);
+  it('no movement reopens a closed day any more: the automatic reopen is gone (docs/61)', () => {
+    expect(closing).not.toMatch(/autoReopenTx|afterReopenCommitted|AutoReopenResult/);
+    expect(code('sale-payments.service.ts')).not.toMatch(/autoReopenTx|afterReopenCommitted/);
   });
 });
