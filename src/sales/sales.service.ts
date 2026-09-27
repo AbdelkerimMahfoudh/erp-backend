@@ -20,7 +20,7 @@ import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid
 import { dayKey } from '../common/utils/date.util';
 import { isDateString } from '../common/business-day';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
-import { ClosingService, type AutoReopenResult } from '../closing/closing.service';
+import { ClosingService } from '../closing/closing.service';
 import { canTransition } from '../inventory/unit-state-machine';
 import { PricingService } from '../pricing/pricing.service';
 import { SalesPolicyService } from './sales-policy.service';
@@ -126,6 +126,14 @@ export class SalesService {
       }
     }
 
+    /**
+     * Open first: while the current business day is closed nothing is sold, and
+     * a sale never reopens the day by itself. Refused here, before a warning is
+     * raised, an approval spent or an invoice number taken; the transaction asks
+     * again under the day's lock.
+     */
+    await this.closing.assertCounterOpen(branchId, 'sale');
+
     let result: {
       saleId: Buffer;
       invoiceNo: string;
@@ -135,7 +143,6 @@ export class SalesService {
       payStatus: Sale['payStatus'];
       soldAt: Date;
       businessDate: string;
-      reopen: AutoReopenResult;
       returnWindowHours: number;
       returnDeadlineAt: Date | null;
     };
@@ -629,15 +636,11 @@ export class SalesService {
         }
 
         /**
-         * A sale after a counted close reopens the day, inside this very
-         * transaction (0076). A close is a counted snapshot and a history
-         * event; it never refuses a sale. The Owner is told after commit.
+         * The day this sale belongs to must still be open, decided on the row a
+         * close locks: a close that committed after the check above makes this
+         * refuse, and the whole sale rolls back.
          */
-        const reopen = await this.closing.autoReopenTx(tx, {
-          branchId,
-          businessDate,
-          cause: { kind: 'sale', id: saleId },
-        });
+        await this.closing.assertCounterOpenTx(tx, { branchId, businessDate, operation: 'sale' });
 
         // In-app notification, atomic with the sale.
         await tx.notification.create({
@@ -672,7 +675,6 @@ export class SalesService {
           payStatus,
           soldAt,
           businessDate,
-          reopen,
           returnWindowHours: policySnapshot.windowHours,
           returnDeadlineAt: policySnapshot.deadlineAt,
         };
@@ -700,7 +702,7 @@ export class SalesService {
       margin: result.margin,
     });
     // After commit, never inside it: a notice that fails must not undo a sale.
-    void this.closing.afterSaleCommitted(result.saleId, result.reopen);
+    void this.closing.afterSaleCommitted(result.saleId);
 
     return {
       id: binToUuid(result.saleId),

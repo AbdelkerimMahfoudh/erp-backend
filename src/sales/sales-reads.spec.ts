@@ -70,7 +70,7 @@ function makeService(opts: {
     // A1: references and the acknowledgement gate. Reads raise no warnings.
     {} as never,
     {} as never,
-    { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never, { autoReopenTx: async () => ({ reopened: false, closingId: null, reopenCount: 0, at: null }), afterSaleCommitted: async () => undefined, afterReopenCommitted: async () => undefined } as never,
+    { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never, { assertCounterOpen: async () => undefined, assertCounterOpenTx: async () => undefined, afterSaleCommitted: async () => undefined } as never,
   );
   return { service, recorded };
 }

@@ -10,6 +10,7 @@ import {
   openChoices,
   standingOf,
   canOpen,
+  counterRefusal,
   doorState,
   openingOf,
   closeVerification,
@@ -138,6 +139,23 @@ describe('the door (0077)', () => {
     expect(canOpen({ status: 'locked', businessDate: day }, 'closed', day, day)).toEqual({ ok: false, why: 'day_closed' });
     expect(canOpen(null, 'never_opened', '2026-09-23', day)).toEqual({ ok: false, why: 'past_day' });
     expect(canOpen(null, 'never_opened', '2026-09-25', day)).toEqual({ ok: false, why: 'future_day' });
+  });
+});
+
+describe('counterRefusal — open first', () => {
+  it('refuses a sale or a receipt only while the current business day is closed', () => {
+    expect(counterRefusal('locked')).toBe('store_closed');
+  });
+
+  it('lets the counter work on a day being counted, counted or reopened', () => {
+    expect(counterRefusal('counting')).toBeNull();
+    expect(counterRefusal('counted')).toBeNull();
+    expect(counterRefusal('reopened')).toBeNull();
+  });
+
+  it('never refuses a day with no closing row — nobody has to record an opening to sell (rule 25a)', () => {
+    expect(counterRefusal(null)).toBeNull();
+    expect(counterRefusal(undefined)).toBeNull();
   });
 });
 

@@ -114,6 +114,16 @@ export function canOpen(
   return { ok: true };
 }
 
+/**
+ * Whether the counter refuses a new sale or receipt: only while the current
+ * business day is closed. Opening the store again is the reopen, with the
+ * closing authority — never the side effect of a sale. A day nobody opened is
+ * not refused: the opening is recorded, never required (rule 25a).
+ */
+export function counterRefusal(status: string | null | undefined): 'store_closed' | null {
+  return status === 'locked' ? 'store_closed' : null;
+}
+
 export type CloseKind = 'first' | 'reclose';
 
 export function closeKindOf(row: { status: ClosingStatus } | null): CloseKind | 'already_locked' {

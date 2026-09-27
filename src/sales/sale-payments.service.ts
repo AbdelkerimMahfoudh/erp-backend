@@ -147,9 +147,10 @@ export class SalePaymentsService {
         if (day === today) {
           /**
            * Money arriving on the CURRENT business day after a counted close
-           * reopens the day (0076), exactly as a sale does. A payment back-dated
-           * into an earlier locked day is still refused: that day is behind the
-           * boundary and is corrected through Milestone B.
+           * reopens the day (0076) — the only movement that does: a sale or a
+           * receipt is refused with `store_closed` until the store is opened. A
+           * payment back-dated into an earlier locked day is still refused: that
+           * day is behind the boundary and is corrected through Milestone B.
            */
           reopen = await this.closing.autoReopenTx(tx, { branchId, businessDate: day, cause: { kind: 'payment', id: saleId } });
           reopenDay = day;

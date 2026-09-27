@@ -124,8 +124,8 @@ function makeService(companyId: Buffer = COMPANY) {
     } as never,
     { processNow: jest.fn(async () => undefined) } as never,
     { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
-    // The day is never closed here: a purchase reopens nothing (D10 is proven on the live copy).
-    { autoReopenTx: async () => ({ reopened: false, closingId: null, reopenCount: 0, at: null }), afterReopenCommitted: async () => undefined } as never,
+    // The day is always open here: a closed day refuses the receipt (purchase-store-closed.spec.ts).
+    { assertCounterOpen: async () => undefined, assertCounterOpenTx: async () => undefined } as never,
   );
 
   return { service, purchases, learn: () => learnCalls };

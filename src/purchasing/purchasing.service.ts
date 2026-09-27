@@ -19,7 +19,7 @@ import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
 import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-queue';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
-import { ClosingService, type AutoReopenResult } from '../closing/closing.service';
+import { ClosingService } from '../closing/closing.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
 
@@ -155,6 +155,13 @@ export class PurchasingService {
      */
     const replay = await this.findReplay(dto, companyId);
     if (replay) return replay;
+
+    /**
+     * Open first: while the current business day is closed nothing is received,
+     * and a receipt never reopens the day by itself. Refused before anything is
+     * looked up; the transaction asks again under the day's lock.
+     */
+    await this.closing.assertCounterOpen(branchId, 'receipt');
 
     /**
      * First release: an ordinary purchase is anonymous. Nobody is asked who sold
@@ -344,8 +351,6 @@ export class PurchasingService {
     preparedStock.sort((a, b) => Buffer.compare(a.productId, b.productId));
 
     let purchaseId: Buffer;
-    let reopen: AutoReopenResult | null = null;
-    let paidDay: string | null = null;
     try {
       /**
        * Retried only if InnoDB rolled the whole transaction back for a lock
@@ -449,14 +454,12 @@ export class PurchasingService {
           },
         });
         /**
-         * Money left the drawer or an account on this business day. If the day was
-         * already closed, it reopens — as a sale does — so the payment is in the
-         * next close's figures instead of silently outside every close (D10).
+         * The day the money left on must still be open, decided on the row a close
+         * locks: a close that committed after the check above makes this refuse,
+         * and the whole receipt rolls back — never a payment outside every close.
+         * The refusal is not a lock conflict, so it is not retried.
          */
-        paidDay = payDay;
-        reopen = amountPaid > 0
-          ? await this.closing.autoReopenTx(tx as never, { branchId, businessDate: payDay, cause: { kind: 'purchase', id: pid } })
-          : null;
+        await this.closing.assertCounterOpenTx(tx, { branchId, businessDate: payDay, operation: 'receipt' });
 
         await this.audit.recordTx(tx, {
           entityType: 'Purchase',
@@ -513,9 +516,6 @@ export class PurchasingService {
       }
       throw e;
     }
-
-    const reopened = reopen as AutoReopenResult | null;
-    if (reopened?.reopened && paidDay) void this.closing.afterReopenCommitted(branchId, paidDay, reopened);
 
     // 5. Post-commit side effects: notifications + recognition learning.
     // Receiving is the STRONGEST learning signal, and only fires on a confirmed
