@@ -89,6 +89,8 @@ export const PUBLISHED_AFTER_CATALOGUE: ReadonlyMap<string, string> = new Map([
   ['customer.manage', '0068_customer_manage_permission'],
   // 0076: the Owner's early start of the next business day.
   ['closing.start_early', '0076_business_day_and_reopen'],
+  // 0082: the Owner recording what a receiving account holds.
+  ['money.anchor.record', '0082_money_anchors'],
 ]);
 
 function committedSql(): string {

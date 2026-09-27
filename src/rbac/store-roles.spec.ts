@@ -70,7 +70,8 @@ describe('store-facing roles', () => {
     // accident, and it moving LATE means a phase shipped a drift.
     // 61 → 62 in 4a — `customer.manage`.
     // 62 → 63 in 0076 — `closing.start_early`.
-    expect(ROLE_PERMISSIONS.owner.length).toBe(63);
+    // 63 → 64 in 0082 — `money.anchor.record`.
+    expect(ROLE_PERMISSIONS.owner.length).toBe(64);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);

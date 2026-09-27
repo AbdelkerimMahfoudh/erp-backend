@@ -58,6 +58,7 @@ import {
 } from './closing-lifecycle';
 import { reclosedNotice, reopenedNotice, saleNotice, type Notice } from './closing-notices';
 import { ClosingNoticeService, type NoticeOutcome } from './closing-notice.service';
+import { MoneyAnchorsService } from './money-anchors.service';
 import {
   assembleReport,
   gateReport,
@@ -155,6 +156,7 @@ export class ClosingService {
     private readonly businessDay: BusinessDayService,
     private readonly notices: ClosingNoticeService,
     private readonly cls: ClsService<AppClsStore>,
+    private readonly moneyAnchors: MoneyAnchorsService,
   ) {}
 
   // ── The business day itself ─────────────────────────────────────────────
@@ -1775,8 +1777,8 @@ export class ClosingService {
    * The Money screen in one read (0074): cash in the drawer now (the closing's
    * own expected figure for the current business day, opening balance
    * included), what moved through each account today, the period's sales by
-   * their business date, collected by the date the money arrived, and today's
-   * expenses.
+   * their business date, collected by the date the money arrived, today's
+   * expenses, and the money each method holds as the app tracks it.
    */
   async overview(from: string, to: string) {
     const companyId = this.tenant.companyId();
@@ -1786,7 +1788,8 @@ export class ClosingService {
     }
     const today = await this.businessDay.today(branchId);
     const range = { gte: dateValue(from), lte: dateValue(to) };
-    const openingToday = await this.openingCash(companyId, branchId, today);
+    const opening = await this.openingCashDetail(companyId, branchId, today);
+    const openingToday = opening.amount;
 
     const todayDate = dateValue(today);
     const [todayChannels, periodChannels, sales, dated, owedAll, expenses, reversals] = await Promise.all([
@@ -1843,6 +1846,10 @@ export class ClosingService {
     const cash = todayChannels.find((c) => c.channel === 'cash');
     const collected = periodChannels.reduce((n, c) => n + c.salesIn, 0);
     const refunds = periodChannels.reduce((n, c) => n + c.refundsOut, 0);
+    // The drawer's position is this same expected figure, anchored on the same counted close.
+    // The accounts' positions are the company's, so only someone who may record them (the Owner) reads them.
+    const accountsVisible = this.cls.get('permissions')?.has('money.anchor.record') ?? false;
+    const trackedMoney = await this.moneyAnchors.trackedMoney(branchId, today, { opening, expected: cash?.expected ?? 0 }, accountsVisible);
 
     return {
       from,
@@ -1890,6 +1897,12 @@ export class ClosingService {
       },
       outstandingAll: { amount: round2(num(owedAll._sum.balanceDue)), sales: owedAll._count },
       expensesToday: expensesTodayOf(expenses, reversals),
+      /**
+       * Money's top card (docs/60): what each method holds as the app tracks it — an anchor plus the movement
+       * recorded after it, carried across midnight. Unknown is null, never 0, and then there is no total.
+       * `moneyToday` stays the day's movement; the two are never added together.
+       */
+      trackedMoney,
     };
   }
 

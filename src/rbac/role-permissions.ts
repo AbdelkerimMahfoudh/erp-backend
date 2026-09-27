@@ -103,6 +103,11 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    */
   { key: 'closing.start_early', label: 'Start the next business day before 06:00' },
   /**
+   * 0082: saying what an account holds anchors every figure Money tracks for it
+   * afterwards. The Owner's alone — never the administrator's, never delegated.
+   */
+  { key: 'money.anchor.record', label: 'Record the amount an account holds' },
+  /**
    * Deliberately NOT folded into `closing.perform`, which a delegate holds.
    * Deciding that a named person owes the business money, or writing that debt
    * off, is the Owner's call and nobody else's.
@@ -206,6 +211,8 @@ const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
     k !== 'import.run' &&
     // 0076: starting a shop's day early is the Owner's call alone.
     k !== 'closing.start_early' &&
+    // 0082: so is recording what an account holds.
+    k !== 'money.anchor.record' &&
     // 0078: closing authority is the Owner and at most two named delegates —
     // never a role that happens to exist (docs/51 §12.5).
     k !== 'closing.perform',

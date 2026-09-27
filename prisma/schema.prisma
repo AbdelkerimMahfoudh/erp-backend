@@ -324,6 +324,7 @@ model Company {
   refundPayouts                  RefundPayout[]
   financialCorrections           FinancialCorrection[]
   financialCorrectionLegs        FinancialCorrectionLeg[]
+  moneyAnchors                   MoneyAnchor[]
   returnRequests                 ReturnRequest[]
   returnAdjustments              ReturnAdjustment[]
   returnReversals                ReturnReversal[]
@@ -426,6 +427,7 @@ model Branch {
   loans                Loan[]
   closingDiscrepancies ClosingDiscrepancy[]
   closingEvents        ClosingEvent[]
+  moneyAnchorsRecorded MoneyAnchor[]
   employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests         DailyDigest[]
   notifications        Notification[]
@@ -540,6 +542,7 @@ model User {
   closingsFirstClosed   DailyClosing[]         @relation("ClosingFirstClosedBy")
   closingsReopened      DailyClosing[]         @relation("ClosingReopenedBy")
   closingEvents         ClosingEvent[]         @relation("ClosingEventActor")
+  moneyAnchorsRecorded  MoneyAnchor[]          @relation("MoneyAnchorRecordedBy")
   branchPricesSet       BranchVariantPrice[]   @relation("BranchPriceSetBy")
   unitPricesSet         UnitPriceOverride[]    @relation("UnitPriceSetBy")
   priceChanges          PriceChangeEvent[]     @relation("PriceChangeActor")
@@ -2360,6 +2363,7 @@ model ReceivingAccount {
   channelCounts     ClosingChannelCount[]
   correctionsTo     FinancialCorrection[]    @relation("CorrectionToAccount")
   correctionLegs    FinancialCorrectionLeg[]
+  moneyAnchors      MoneyAnchor[]
 
   id        Bytes             @id @db.Binary(16)
   companyId Bytes             @map("company_id") @db.Binary(16)
@@ -3407,6 +3411,45 @@ model FinancialCorrectionLeg {
   @@index([sourceSupplierPaymentId], map: "ix_fcl_supplier_payment")
   @@index([sourceExpenseId], map: "ix_fcl_expense")
   @@map("financial_correction_legs")
+}
+
+/// The amount a receiving account held at one moment, as the Owner read it in the provider's app
+/// (0082, docs/60). An account's tracked position is its latest anchor plus every movement recorded in
+/// this app after that moment; with no anchor the position is unknown. Append-only: a new anchor
+/// supersedes an older one, and the older one stays. `trackedBefore` / `difference` keep what the app
+/// had tracked just before, so drift (fees, transfers, money moved outside the app) stays visible.
+model MoneyAnchor {
+  id                 Bytes    @id @db.Binary(16)
+  companyId          Bytes    @map("company_id") @db.Binary(16)
+  receivingAccountId Bytes    @map("receiving_account_id") @db.Binary(16)
+  labelSnapshot      String   @map("label_snapshot") @db.VarChar(80)
+  amount             Decimal  @db.Decimal(14, 2)
+  /// When the amount was true: the server clock at recording, never typed.
+  at                 DateTime @db.DateTime(6)
+  /// The recording branch's business date at `at`, for display only; positions window by `at`.
+  businessDate       DateTime @map("business_date") @db.Date
+  /// The position the app tracked just before this anchor; NULL when it was unknown.
+  trackedBefore      Decimal? @map("tracked_before") @db.Decimal(14, 2)
+  /// `amount - trackedBefore`; NULL when `trackedBefore` is.
+  difference         Decimal? @db.Decimal(14, 2)
+  note               String?  @db.VarChar(255)
+  recordedById       Bytes    @map("recorded_by_id") @db.Binary(16)
+  recordedAtBranchId Bytes    @map("recorded_at_branch_id") @db.Binary(16)
+  clientUuid         Bytes    @map("client_uuid") @db.Binary(16)
+  clientRequestHash  String   @map("client_request_hash") @db.Char(64)
+  createdAt          DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  company          Company          @relation(fields: [companyId], references: [id], map: "fk_money_anchors_company")
+  receivingAccount ReceivingAccount @relation(fields: [receivingAccountId], references: [id], map: "fk_money_anchors_account")
+  recordedBy       User             @relation("MoneyAnchorRecordedBy", fields: [recordedById], references: [id], map: "fk_money_anchors_recorded_by")
+  recordedAtBranch Branch           @relation(fields: [recordedAtBranchId], references: [id], map: "fk_money_anchors_branch")
+
+  @@unique([companyId, clientUuid], map: "ux_money_anchors_client_uuid")
+  @@index([companyId, receivingAccountId, at], map: "ix_money_anchors_account_at")
+  @@index([receivingAccountId], map: "ix_money_anchors_account")
+  @@index([recordedById], map: "ix_money_anchors_recorded_by")
+  @@index([recordedAtBranchId], map: "ix_money_anchors_branch")
+  @@map("money_anchors")
 }
 
 /// What a goal measures (0047). Each one maps to a figure `daily_rollups`

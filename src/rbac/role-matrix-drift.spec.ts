@@ -389,3 +389,39 @@ describe('price.edit — migration and seed must agree', () => {
     expect(applied).not.toContain('INSERT INTO `role_permissions`');
   });
 });
+
+/**
+ * `money.anchor.record` arrives with its own grant (0082). Recording what an
+ * account holds anchors every figure Money tracks for it afterwards, so a
+ * deployed database and the matrix must agree that the Owner holds it and
+ * nobody else does.
+ */
+describe('money.anchor.record — migration and matrix must agree (0082)', () => {
+  const migration = sqlOf('0082_money_anchors');
+  const executable = migration.replace(/^\s*--.*$/gm, '');
+
+  it('publishes the key with the catalogue’s label, guarded so a rerun adds nothing', () => {
+    const catalogued = PERMISSIONS.find((p) => p.key === 'money.anchor.record');
+    expect(catalogued).toBeDefined();
+    expect(executable).toContain(`'money.anchor.record', '${catalogued!.label}'`);
+    for (const insert of executable.split('INSERT INTO').slice(1)) {
+      expect(insert).toMatch(/NOT EXISTS/);
+    }
+  });
+
+  it('grants it to the Owner role and to nobody else', () => {
+    const grants = executable.split('INSERT INTO `role_permissions`').slice(1).join('\n');
+    expect([...grants.matchAll(/r\.`key` = '(\w+)'/g)].map((m) => m[1])).toEqual(['owner']);
+    expect(grantedInKeyedSql(migration, 'owner')).toEqual(['money.anchor.record']);
+    expect(ROLE_PERMISSIONS.owner).toContain('money.anchor.record');
+    for (const role of ['store_manager', 'store_employee', 'administrator', 'branch_manager'] as const) {
+      expect(grantedInKeyedSql(migration, role)).toEqual([]);
+      expect(ROLE_PERMISSIONS[role]).not.toContain('money.anchor.record');
+    }
+  });
+
+  it('revokes nothing', () => {
+    // Its only DELETE is the append-only trigger's; the reverse SQL is a comment.
+    expect(executable).not.toMatch(/DELETE\s+\w*\s*FROM/i);
+  });
+});

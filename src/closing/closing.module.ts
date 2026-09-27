@@ -5,11 +5,13 @@ import { ClosingController } from './closing.controller';
 import { ClosingService } from './closing.service';
 import { DiscrepanciesService } from './discrepancies.service';
 import { ClosingNoticeService } from './closing-notice.service';
+import { MoneyAnchorsController } from './money-anchors.controller';
+import { MoneyAnchorsService } from './money-anchors.service';
 
 @Module({
   imports: [AnalyticsModule, NotificationsModule], // RollupService (authoritative totals) + notifications
-  controllers: [ClosingController],
-  providers: [ClosingService, DiscrepanciesService, ClosingNoticeService],
+  controllers: [ClosingController, MoneyAnchorsController],
+  providers: [ClosingService, DiscrepanciesService, ClosingNoticeService, MoneyAnchorsService],
   // Sales reopen a closed day from inside their own transaction (0076).
   exports: [ClosingService],
 })
