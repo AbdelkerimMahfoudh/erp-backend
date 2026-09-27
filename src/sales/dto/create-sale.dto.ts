@@ -117,7 +117,9 @@ export class CreateSaleDto {
   /**
    * The money received NOW. May be empty (0074): a phone handed over with
    * nothing paid is a real sale, and the whole total is then owed by the
-   * debtor named below. Each entry must still be a positive amount.
+   * debtor named below. Each entry must still be a positive amount. At most
+   * four entries, each to a different place, and a split (two or more)
+   * adding up to the total — `assertPaymentParts`.
    */
   @ApiProperty({ type: [PaymentInputDto], description: 'Money received now. Empty when nothing was paid at the counter.' })
   @IsArray()

@@ -27,7 +27,7 @@ import { SalesPolicyService } from './sales-policy.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
 import { evaluateEligibility, NO_RETURNS, resolveWindowForSale, snapshotPolicy } from './return-policy';
-import { assertDebtorForBalance, chooseDebtor, type DebtorChoice, STORE_KINDS } from './sale-payment-rules';
+import { assertDebtorForBalance, assertPaymentParts, chooseDebtor, type DebtorChoice, STORE_KINDS } from './sale-payment-rules';
 import { assertMayStartDealing } from '../consignment/dealing-authorization';
 import { paymentSelect, toPaymentView } from './sale-payments.service';
 import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
@@ -327,6 +327,7 @@ export class SalesService {
             },
           });
         }
+        assertPaymentParts(dto.payments, total);
         const { amountPaid, balanceDue, payStatus } = this.policy.reconcilePayments(dto.payments, total);
         /**
          * Who owes what was not paid (0074): one customer — chosen, or typed at

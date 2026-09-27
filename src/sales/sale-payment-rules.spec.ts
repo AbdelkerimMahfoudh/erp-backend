@@ -5,8 +5,10 @@ import {
   afterPayment,
   assertCollectable,
   assertDebtorForBalance,
+  assertPaymentParts,
   chooseDebtor,
   collectionFingerprint,
+  MAX_PAYMENT_METHODS,
   payStatusOf,
   resolvePaidAt,
 } from './sale-payment-rules';
@@ -213,5 +215,52 @@ describe('a later collection is a movement of money, not a second sale', () => {
   it('never exposes the key or its hash in a payment view', () => {
     const view = service.slice(service.indexOf('export const paymentSelect'));
     expect(view).not.toMatch(/clientUuid|clientRequestHash/);
+  });
+});
+
+describe('the parts of the money received now (2026-09-27)', () => {
+  const cash = (amount: number) => ({ method: 'cash', amount });
+  const acct = (id: string, amount: number, method = 'mobile') => ({ method, amount, receivingAccountId: id });
+  const code = (fn: () => void) => {
+    try {
+      fn();
+      return null;
+    } catch (e) {
+      return (e as { getResponse?: () => { code?: string } }).getResponse?.().code ?? 'other';
+    }
+  };
+
+  it('one method may pay part of the sale, as before — the rest is owed by the named debtor', () => {
+    expect(code(() => assertPaymentParts([cash(3000)], 7000))).toBeNull();
+    expect(code(() => assertPaymentParts([], 7000))).toBeNull();
+  });
+
+  it('four places, the drawer counting as one, pay the whole amount due', () => {
+    expect(code(() => assertPaymentParts([cash(3400), acct('b', 2000), acct('m', 1000), acct('s', 600)], 7000))).toBeNull();
+    expect(code(() => assertPaymentParts([acct('a', 1000), acct('b', 2000), acct('c', 3000), acct('d', 1000)], 7000))).toBeNull();
+  });
+
+  it('refuses a fifth method', () => {
+    expect(code(() => assertPaymentParts([cash(3000), acct('a', 1000), acct('b', 1000), acct('c', 1000), acct('d', 1000)], 7000))).toBe('too_many_payment_methods');
+    expect(MAX_PAYMENT_METHODS).toBe(4);
+  });
+
+  it('refuses the same place twice: two cash parts, or one account under two methods', () => {
+    expect(code(() => assertPaymentParts([cash(3000), cash(4000)], 7000))).toBe('duplicate_payment_destination');
+    expect(code(() => assertPaymentParts([acct('b', 3000, 'mobile'), acct('b', 4000, 'bank')], 7000))).toBe('duplicate_payment_destination');
+    expect(code(() => assertPaymentParts([acct('ab12', 3000), acct('AB12', 4000)], 7000))).toBe('duplicate_payment_destination');
+  });
+
+  it('refuses a split that does not add up to the amount due, short or over', () => {
+    expect(code(() => assertPaymentParts([cash(3000), acct('b', 2000)], 7000))).toBe('split_must_equal_total');
+    expect(code(() => assertPaymentParts([cash(5000), acct('b', 2500)], 7000))).toBe('split_must_equal_total');
+    expect(code(() => assertPaymentParts([cash(3400.004), acct('b', 3599.996)], 7000))).toBeNull();
+  });
+});
+
+describe('the sale service applies the parts rule before anything is reconciled or written', () => {
+  it('checks the parts, then reconciles them', () => {
+    const svc = readFileSync(join(__dirname, 'sales.service.ts'), 'utf8');
+    expect(svc).toMatch(/assertPaymentParts\(dto\.payments, total\);\s*const \{ amountPaid, balanceDue, payStatus \} = this\.policy\.reconcilePayments\(dto\.payments, total\);/);
   });
 });

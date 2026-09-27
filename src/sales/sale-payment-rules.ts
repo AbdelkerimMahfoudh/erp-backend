@@ -113,6 +113,48 @@ export function assertDebtorForBalance(balanceDue: number, debtor: DebtorChoice)
   }
 }
 
+/**
+ * A split sale's money arrives in at most four places (docs/21, 2026-09-27): the
+ * drawer, when cash is used, is one of them, each receiving account one more.
+ */
+export const MAX_PAYMENT_METHODS = 4;
+
+/**
+ * The parts of the money received now, checked before anything is written:
+ * at most four places, each place once (cash is one place; an account is one
+ * place whatever method names it), and — when the money is split — parts that
+ * add up to the amount due exactly. A sale paid only in part takes one method
+ * and names who owes the rest (0074); a split pays the whole sale.
+ */
+export function assertPaymentParts(payments: { method: string; amount: number; receivingAccountId?: string | null }[], total: number): void {
+  if (payments.length > MAX_PAYMENT_METHODS) {
+    throw new BadRequestException({
+      code: 'too_many_payment_methods',
+      message: `A sale can be split across at most ${MAX_PAYMENT_METHODS} payment methods`,
+      max: MAX_PAYMENT_METHODS,
+    });
+  }
+  const seen = new Set<string>();
+  for (const p of payments) {
+    // An account id is compared without its letter case: the same account written two ways is still one place.
+    const place = p.method === 'cash' ? 'cash' : p.receivingAccountId ? `account:${p.receivingAccountId.toLowerCase()}` : null;
+    if (place === null) continue; // an account-less non-cash part is refused by the payment loop with its own message
+    if (seen.has(place)) {
+      throw new BadRequestException({ code: 'duplicate_payment_destination', message: 'Each payment method can take one part of a sale' });
+    }
+    seen.add(place);
+  }
+  if (payments.length >= 2) {
+    const sum = Math.round(payments.reduce((s, p) => s + p.amount, 0) * 100) / 100;
+    if (Math.abs(sum - Math.round(total * 100) / 100) > EPSILON) {
+      throw new BadRequestException({
+        code: 'split_must_equal_total',
+        message: `A split payment must add up to the amount due (${total}); its parts add up to ${sum}`,
+      });
+    }
+  }
+}
+
 /** Only a store may owe a store balance: never a person or an employee. */
 export const STORE_KINDS = ['connected_store', 'manual_store'] as const;
 
