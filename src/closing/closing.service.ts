@@ -30,6 +30,7 @@ import {
   buildChannels,
   countingComplete,
   isCountable,
+  moneyByMethod,
   type Channel,
   type ChannelRow,
   type Component,
@@ -1849,6 +1850,13 @@ export class ClosingService {
       today,
       cashNow: round2(cash?.expected ?? 0),
       cashOpening: round2(cash?.openingBalance ?? 0),
+      /**
+       * The Money tab's card (2026-09-27): every configured method — the drawer and each account — on one basis, money
+       * in less money out recorded on the current business day, no opening for any of them, and the total of exactly
+       * these rows. Recorded movement: not a drawer count, not a provider balance. `cashNow` stays for the expense
+       * screens' drawer estimate; it is never added to these.
+       */
+      moneyToday: moneyByMethod(todayChannels),
       accountsToday: todayChannels
         .filter((c) => c.channel !== 'cash')
         .map((c) => ({

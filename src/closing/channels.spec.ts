@@ -2,6 +2,7 @@ import {
   buildChannels,
   countingComplete,
   isCountable,
+  moneyByMethod,
   CASH_LABEL,
   COMPONENT_SIGN,
   UNATTRIBUTED_LABEL,
@@ -203,5 +204,39 @@ describe('counting is finished only when nothing is outstanding', () => {
         { isUnattributed: true, counted: null, isSkipped: false },
       ]),
     ).toBe(true);
+  });
+});
+
+describe('money by method — the Money tab card (2026-09-27)', () => {
+  const accounts = [account('b', 'Bankily – Main Counter', { sortOrder: 1 }), account('m', 'Masrvi', { sortOrder: 0 }), account('z', 'Sedad', { sortOrder: 2 })];
+  const moves = [
+    move('cash', null, 'salesIn', 3900),
+    move('cash', null, 'expensesOut', 500),
+    move('account', 'b', 'salesIn', 2000),
+    move('account', 'm', 'salesIn', 1600),
+  ];
+
+  it('lists every configured method — cash and each active account, one without movement at 0 — with in, out and net', () => {
+    const { channels } = moneyByMethod(buildChannels(moves, accounts));
+    expect(channels.map((c) => [c.label, c.moneyIn, c.moneyOut, c.net])).toEqual([
+      [CASH_LABEL, 3900, 500, 3400],
+      ['Masrvi', 1600, 0, 1600],
+      ['Bankily – Main Counter', 2000, 0, 2000],
+      ['Sedad', 0, 0, 0],
+    ]);
+  });
+
+  it('totals exactly the rows it returns: 3 400 + 1 600 + 2 000 + 0 = 7 000', () => {
+    const { channels, total } = moneyByMethod(buildChannels(moves, accounts));
+    expect(total).toEqual({ moneyIn: 7500, moneyOut: 500, net: 7000 });
+    expect(total.net).toBe(channels.reduce((s, c) => s + c.net, 0));
+  });
+
+  it('never mixes in the drawer’s opening: the basis is the same recorded movement for cash and every account', () => {
+    const withOpening = buildChannels(moves, accounts, 12_000);
+    expect(withOpening[0].expected).toBe(15_400);
+    const { channels, total } = moneyByMethod(withOpening);
+    expect(channels[0].net).toBe(3400);
+    expect(total.net).toBe(7000);
   });
 });

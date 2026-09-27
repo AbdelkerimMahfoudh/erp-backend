@@ -223,3 +223,37 @@ export function countingComplete(
 ): boolean {
   return rows.filter(isCountable).every((r) => r.counted !== null || r.isSkipped);
 }
+
+/** One method's money for a stretch of business days: what was recorded into it and out of it, and the difference. */
+export interface MethodMoney {
+  channel: Channel;
+  accountId: string | null;
+  label: string;
+  isUnattributed: boolean;
+  moneyIn: number;
+  moneyOut: number;
+  net: number;
+}
+
+/**
+ * The money of every configured method on one basis (2026-09-27): money in less
+ * money out as recorded in this app over the channels' days — no opening for the
+ * drawer or for any account — and a total that is exactly the sum of the rows
+ * returned, each already rounded. It is recorded movement: not a drawer count,
+ * and never a provider's balance (rule 26a).
+ */
+export function moneyByMethod(channels: ChannelRow[]): { channels: MethodMoney[]; total: { moneyIn: number; moneyOut: number; net: number } } {
+  const rows = channels.map((c) => {
+    const moneyIn = round2(c.salesIn + c.correctionsIn);
+    const moneyOut = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut);
+    return { channel: c.channel, accountId: c.accountId, label: c.labelSnapshot, isUnattributed: c.isUnattributed, moneyIn, moneyOut, net: round2(moneyIn - moneyOut) };
+  });
+  return {
+    channels: rows,
+    total: {
+      moneyIn: round2(rows.reduce((s, r) => s + r.moneyIn, 0)),
+      moneyOut: round2(rows.reduce((s, r) => s + r.moneyOut, 0)),
+      net: round2(rows.reduce((s, r) => s + r.net, 0)),
+    },
+  };
+}
