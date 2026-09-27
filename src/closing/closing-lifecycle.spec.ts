@@ -14,6 +14,8 @@ import {
   openingOf,
   closeVerification,
   NOT_VERIFIED_AT_CLOSE,
+  ATTESTED_AT_CLOSE,
+  isMachineSkipReason,
   verificationOf,
 } from './closing-lifecycle';
 
@@ -205,9 +207,22 @@ describe('physical verification at a close (docs/51 D2)', () => {
     expect(verificationOf({ counted: 1000, isSkipped: false, skipReason: null, countedAt: before }, null)).toBe('counted');
     expect(verificationOf({ counted: null, isSkipped: true, skipReason: 'Balance not readable', countedAt: before }, null)).toBe('skipped');
     expect(verificationOf({ counted: null, isSkipped: true, skipReason: NOT_VERIFIED_AT_CLOSE, countedAt: before }, null)).toBe('not_verified');
+    // Attested (docs/58 D71): the person's word, no amount — and never counted; stale like any other once the day is reopened.
+    expect(verificationOf({ counted: null, isSkipped: true, skipReason: ATTESTED_AT_CLOSE, countedAt: before }, null)).toBe('attested');
+    expect(verificationOf({ counted: null, isSkipped: true, skipReason: ATTESTED_AT_CLOSE, countedAt: before }, reopenedAt)).toBe('stale');
     expect(verificationOf({ counted: 1000, isSkipped: false, skipReason: null, countedAt: before }, reopenedAt)).toBe('stale');
     expect(verificationOf({ counted: 1000, isSkipped: false, skipReason: null, countedAt: after }, reopenedAt)).toBe('counted');
     expect(verificationOf({ counted: null, isSkipped: false, skipReason: null, countedAt: null }, null)).toBe('not_counted');
+  });
+
+  it('an attested channel asks for nothing again, and is never listed as verified (docs/58 D71)', () => {
+    const v = closeVerification([
+      { key: 'cash:NONE', countable: true, verification: 'counted' },
+      { key: 'account:A', countable: true, verification: 'attested' },
+      { key: 'account:B', countable: true, verification: 'not_counted' },
+    ]);
+    expect(v).toEqual({ verified: ['cash:NONE'], attested: ['account:A'], unverified: ['account:B'], requiresAcknowledgement: true });
+    expect(closeVerification([{ key: 'account:A', countable: true, verification: 'attested' }]).requiresAcknowledgement).toBe(false);
   });
 
   it('a close with any unchecked channel needs an acknowledgement; a fully counted one does not', () => {
@@ -215,13 +230,29 @@ describe('physical verification at a close (docs/51 D2)', () => {
       { key: 'cash:NONE', countable: true, verification: 'counted' },
       { key: 'account:A', countable: true, verification: 'counted' },
       { key: 'account:NONE', countable: false, verification: 'not_counted' },
-    ])).toEqual({ verified: ['cash:NONE', 'account:A'], unverified: [], requiresAcknowledgement: false });
+    ])).toEqual({ verified: ['cash:NONE', 'account:A'], unverified: [], attested: [], requiresAcknowledgement: false });
     expect(closeVerification([
       { key: 'cash:NONE', countable: true, verification: 'counted' },
       { key: 'account:A', countable: true, verification: 'skipped' },
       { key: 'account:B', countable: true, verification: 'stale' },
       { key: 'account:C', countable: true, verification: 'not_counted' },
-    ])).toEqual({ verified: ['cash:NONE'], unverified: ['account:A', 'account:B', 'account:C'], requiresAcknowledgement: true });
+    ])).toEqual({ verified: ['cash:NONE'], unverified: ['account:A', 'account:B', 'account:C'], attested: [], requiresAcknowledgement: true });
+  });
+});
+
+describe('the machine keys only a close writes (docs/58 D71)', () => {
+  it('refuses both keys as a person’s skip reason, whatever the case or spacing', () => {
+    expect(isMachineSkipReason(ATTESTED_AT_CLOSE)).toBe(true);
+    expect(isMachineSkipReason(NOT_VERIFIED_AT_CLOSE)).toBe(true);
+    expect(isMachineSkipReason('  attested_at_close ')).toBe(true);
+    expect(isMachineSkipReason('Not_Verified_At_Close')).toBe(true);
+  });
+  it('lets any real reason through, and treats no reason as none', () => {
+    expect(isMachineSkipReason('Bankily app down')).toBe(false);
+    expect(isMachineSkipReason('attested at close')).toBe(false);
+    expect(isMachineSkipReason('')).toBe(false);
+    expect(isMachineSkipReason(null)).toBe(false);
+    expect(isMachineSkipReason(undefined)).toBe(false);
   });
 });
 

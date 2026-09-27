@@ -173,6 +173,7 @@ export function sectionsFor(p: ReportPermissions): { sales: boolean; expenses: b
 
 export type WarningCode =
   | 'channels_not_verified'
+  | 'channels_attested'
   | 'channels_stale'
   | 'account_movement_not_balance'
   | 'unattributed_money'
@@ -304,6 +305,8 @@ export interface ClosingReport {
     requiresAcknowledgement: boolean;
     unverified: string[];
     verified: string[];
+    /** Closed on the person's word that they checked, with no amount recorded (docs/58 D71). */
+    attested: string[];
   };
 }
 
@@ -433,6 +436,10 @@ export function assembleReport(i: ReportInputs): ClosingReport {
   if (unverifiedCountable.length > 0) {
     warnings.push({ code: 'channels_not_verified', severity: 'warning', section: 'money', params: { count: unverifiedCountable.length } });
   }
+  // Said, never hidden: the person checked these, and recorded no amount for them.
+  if (verdict.attested.length > 0) {
+    warnings.push({ code: 'channels_attested', severity: 'info', section: 'money', params: { count: verdict.attested.length } });
+  }
   if (stale.length > 0) warnings.push({ code: 'channels_stale', severity: 'warning', section: 'money', params: { count: stale.length } });
   if (channels.some((c) => c.channel === 'account' && c.countable && (c.in.total !== 0 || c.out.total !== 0))) {
     warnings.push({ code: 'account_movement_not_balance', severity: 'info', section: 'money' });
@@ -504,7 +511,7 @@ export function assembleReport(i: ReportInputs): ClosingReport {
       accounts,
     },
     warnings,
-    close: { kind: i.closeKind, requiresAcknowledgement: verdict.requiresAcknowledgement, unverified: verdict.unverified, verified: verdict.verified },
+    close: { kind: i.closeKind, requiresAcknowledgement: verdict.requiresAcknowledgement, unverified: verdict.unverified, verified: verdict.verified, attested: verdict.attested },
   };
 }
 

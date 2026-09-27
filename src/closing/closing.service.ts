@@ -43,6 +43,8 @@ import {
   doorState,
   freshCounts,
   NOT_VERIFIED_AT_CLOSE,
+  ATTESTED_AT_CLOSE,
+  isMachineSkipReason,
   openingOf,
   verificationOf,
   type Verification,
@@ -117,6 +119,7 @@ interface TimelineClosing {
     labelSnapshot: string;
     counted: Prisma.Decimal | null;
     isSkipped: boolean;
+    skipReason: string | null;
     countedAt: Date | null;
     countedBy: { name: string } | null;
   }[];
@@ -212,6 +215,13 @@ export class ClosingService {
     const now = new Date();
     const userId = this.tenant.userId() ?? null;
     const perms = this.permissions();
+    // "I checked" and "I did not check, because…" cannot both be true of the same close (docs/58 D71).
+    if (dto.attestChecked === true && dto.acknowledgeUnverified === true) {
+      throw new BadRequestException({
+        code: 'conflicting_statements',
+        message: 'A close either says the balances were checked or acknowledges they were not — not both.',
+      });
+    }
 
     /**
      * A double tap, or a retry after a network failure whose first attempt did
@@ -385,7 +395,14 @@ export class ClosingService {
         oneStepCash = round2(dto.countedCash);
       }
     }
-    const unverified = built.report.close.unverified.filter((key) => !(key === 'cash:NONE' && oneStepCash !== null));
+    const unchecked = built.report.close.unverified.filter((key) => !(key === 'cash:NONE' && oneStepCash !== null));
+    /*
+      Two honest ways to close a channel nobody counted (docs/58 D71): the person attests they
+      checked it — it is closed as ATTESTED, with their name and the time and no amount — or they
+      acknowledge it was not checked and say why. Neither invents a figure or reads as matched.
+    */
+    const attested = dto.attestChecked === true ? unchecked : [];
+    const unverified = dto.attestChecked === true ? [] : unchecked;
     const reason = dto.reason?.trim() ?? '';
     if (unverified.length > 0 && (dto.acknowledgeUnverified !== true || reason.length === 0)) {
       throw new BadRequestException({
@@ -404,21 +421,33 @@ export class ClosingService {
     const verification = {
       verified: built.report.close.verified.concat(oneStepCash !== null ? ['cash:NONE'] : []),
       unverified,
+      attested,
       acknowledged: unverified.length > 0,
       reason: unverified.length > 0 ? reason : null,
     };
     /**
      * The report as this close records it. A balance nobody checked is stored as the
-     * close leaves it — NOT verified — not as the "not counted yet" it read a moment
-     * before: the stored report and the day read back afterwards must agree, or every
-     * closed day with an unchecked account would claim its figures changed since.
+     * close leaves it — NOT verified, or ATTESTED — not as the "not counted yet" it read
+     * a moment before: the stored report and the day read back afterwards must agree, or
+     * every closed day with an unchecked account would claim its figures changed since.
      */
+    // A person's own skip, acknowledged, stays their skip on the row — so it stays "skipped" here too.
+    const closedAs = (key: string): Verification | null =>
+      attested.includes(key) ? 'attested' : unverified.includes(key) ? (verificationOfKey(key) === 'skipped' ? 'skipped' : 'not_verified') : null;
     const asClosed = (r: ClosingReport): ClosingReport => ({
       ...r,
       expected: {
-        cash: unverified.includes('cash:NONE') ? { ...r.expected.cash, verification: 'not_verified' } : r.expected.cash,
-        accounts: r.expected.accounts.map((a) => (unverified.includes(a.key) ? { ...a, verification: 'not_verified' as const } : a)),
+        cash: closedAs('cash:NONE') ? { ...r.expected.cash, verification: closedAs('cash:NONE')! } : r.expected.cash,
+        accounts: r.expected.accounts.map((a) => (closedAs(a.key) ? { ...a, verification: closedAs(a.key)! } : a)),
       },
+      close: { ...r.close, unverified, attested, requiresAcknowledgement: unverified.length > 0 },
+      // The verification warnings say what the close recorded, not what the live report read a moment before:
+      // a stale channel is closed as attested or not verified, so none is stale any more.
+      warnings: [
+        ...r.warnings.filter((w) => w.code !== 'channels_not_verified' && w.code !== 'channels_attested' && w.code !== 'channels_stale'),
+        ...(unverified.length > 0 ? [{ code: 'channels_not_verified' as const, severity: 'warning' as const, section: 'money' as const, params: { count: unverified.length } }] : []),
+        ...(attested.length > 0 ? [{ code: 'channels_attested' as const, severity: 'info' as const, section: 'money' as const, params: { count: attested.length } }] : []),
+      ],
     });
     const frozenReport: ClosingReport = asClosed(
       oneStepCash === null
@@ -514,12 +543,14 @@ export class ClosingService {
               countedById = userId;
               countedAt = now;
             }
-          } else if (v === 'skipped') {
+          } else if (v === 'skipped' && !attested.includes(key)) {
+            // The person's own skip, acknowledged: their reason, their name, their time.
             isSkipped = true;
             skipReason = saved?.skipReason ?? NOT_VERIFIED_AT_CLOSE;
           } else if (countable) {
+            // Attested or not verified: the person and the time are kept either way; no amount ever is.
             isSkipped = true;
-            skipReason = NOT_VERIFIED_AT_CLOSE;
+            skipReason = attested.includes(key) ? ATTESTED_AT_CLOSE : NOT_VERIFIED_AT_CLOSE;
             countedById = userId;
             countedAt = now;
           }
@@ -638,8 +669,9 @@ export class ClosingService {
               countedCash,
               difference,
               openingCash,
-              verified: unverified.length === 0,
+              verified: unverified.length === 0 && attested.length === 0,
               unverifiedCount: unverified.length,
+              attestedCount: attested.length,
               verification,
               clientUuid: dto.clientUuid ?? null,
               reportVersion: frozenVersion,
@@ -653,8 +685,15 @@ export class ClosingService {
           entityType: 'DailyClosing',
           entityId: closingId,
           action: kind === 'first' ? 'create' : 'status_change',
-          reason: unverified.length > 0 ? `closed_not_verified: ${reason}`.slice(0, 255) : kind === 'first' ? undefined : 'reclosed',
-          after: { day, kind, expectedCash, countedCash, difference, verified: verification.verified, unverified, reportVersion: frozenVersion },
+          reason:
+            unverified.length > 0
+              ? `closed_not_verified: ${reason}`.slice(0, 255)
+              : attested.length > 0
+                ? 'closed_attested'
+                : kind === 'first'
+                  ? undefined
+                  : 'reclosed',
+          after: { day, kind, expectedCash, countedCash, difference, verified: verification.verified, unverified, attested, reportVersion: frozenVersion },
           branchId,
         });
         return { eventId, reopenCount };
@@ -677,7 +716,12 @@ export class ClosingService {
       await this.notifications.emit({
         type: 'closing.completed',
         title: `Day ${day} closed`,
-        body: unverified.length > 0 ? 'Closed without a physical check of every balance' : 'Closed with every balance counted',
+        body:
+          unverified.length > 0
+            ? 'Closed without a physical check of every balance'
+            : attested.length > 0
+              ? 'Closed on the closer’s word that the balances were checked; amounts not recorded'
+              : 'Closed with every balance counted',
         branchId,
       });
     } else {
@@ -1964,8 +2008,10 @@ export class ClosingService {
    * The day's timeline (docs/50 §6): every event, the first sale as "First
    * activity", and — after the first close — each sale made since, in time
    * order, each with its store-local date and time. A day closed before the
-   * timeline existed has no events, so its closing row and channel counts are
-   * read back as the events they were; nothing recorded is ever dropped.
+   * timeline existed has no events, so its closing row and the counts people
+   * saved are read back as the events they were. Rows a close froze itself
+   * (attested or not verified) are not saved counts and are not listed as
+   * such: the close event carries their numbers.
    */
   private async timeline(branchId: Buffer, dayDate: Date, timezone: string, closing: TimelineClosing | null) {
     const events = await this.db.closingEvent.findMany({
@@ -2044,7 +2090,8 @@ export class ClosingService {
     }
     if (closing && !events.some((e) => e.kind === 'count_saved')) {
       for (const c of closing.channelCounts) {
-        if (!c.countedAt) continue;
+        // Rows the close itself froze — attested or not verified — are not saved counts: the close event carries them.
+        if (!c.countedAt || c.skipReason === ATTESTED_AT_CLOSE || c.skipReason === NOT_VERIFIED_AT_CLOSE) continue;
         rows.push({
           kind: 'count_saved',
           at: c.countedAt,
@@ -2106,6 +2153,9 @@ export class ClosingService {
       }
       if (!dto.skipReason?.trim()) {
         throw new BadRequestException('Skipping a channel requires a reason');
+      }
+      if (isMachineSkipReason(dto.skipReason)) {
+        throw new BadRequestException({ code: 'reserved_reason', message: 'That reason is reserved for the close itself' });
       }
     } else if (dto.counted == null) {
       throw new BadRequestException('Provide a counted amount, or skip the channel with a reason');
@@ -2241,6 +2291,8 @@ export class ClosingService {
           expected: target.expected,
           difference,
           skipped: dto.skip ?? false,
+          // Kept here as well as on the row: a later count, or a close on the person's word, replaces the row's.
+          skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
         } as Prisma.InputJsonValue,
       },
     });
@@ -2257,6 +2309,7 @@ export class ClosingService {
         expected: target.expected,
         difference,
         skipped: dto.skip ?? false,
+        skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
       },
       branchId,
     });
@@ -2529,8 +2582,8 @@ export class ClosingService {
  */
 const TIMELINE_FIELDS: Record<string, readonly string[]> = {
   count_saved: ['channel', 'accountId', 'label', 'counted', 'expected', 'difference', 'skipped', 'fromRow'],
-  closed: ['expectedCash', 'countedCash', 'difference', 'verified', 'unverifiedCount', 'fromRow'],
-  reclosed: ['expectedCash', 'countedCash', 'difference', 'verified', 'unverifiedCount'],
+  closed: ['expectedCash', 'countedCash', 'difference', 'verified', 'unverifiedCount', 'attestedCount', 'fromRow'],
+  reclosed: ['expectedCash', 'countedCash', 'difference', 'verified', 'unverifiedCount', 'attestedCount'],
   reopened: ['mode', 'automatic', 'reopenCount'],
   auto_reopened: ['mode', 'automatic', 'cause', 'reopenCount'],
   day_started_early: ['previousDate', 'startedAt'],
@@ -2549,18 +2602,22 @@ export function timelinePayload(kind: string, payload: unknown): Record<string, 
 function snapshotReport(payload: unknown): {
   report: ClosingReport;
   version: string;
-  verification: { verified: string[]; unverified: string[]; acknowledged: boolean; reason: string | null };
+  verification: { verified: string[]; unverified: string[]; attested: string[]; acknowledged: boolean; reason: string | null };
 } | null {
   if (!payload || typeof payload !== 'object') return null;
   const p = payload as Record<string, unknown>;
   if (!p.report || typeof p.report !== 'object' || typeof p.reportVersion !== 'string') return null;
   const v = (p.verification ?? {}) as Record<string, unknown>;
+  const report = p.report as ClosingReport;
   return {
-    report: p.report as ClosingReport,
+    // A close stored before the attestation existed has no `close.attested`.
+    report: report.close && !Array.isArray(report.close.attested) ? { ...report, close: { ...report.close, attested: [] } } : report,
     version: p.reportVersion,
     verification: {
       verified: Array.isArray(v.verified) ? (v.verified as string[]) : [],
       unverified: Array.isArray(v.unverified) ? (v.unverified as string[]) : [],
+      // A close stored before the attestation existed carries none.
+      attested: Array.isArray(v.attested) ? (v.attested as string[]) : [],
       acknowledged: v.acknowledged === true,
       reason: typeof v.reason === 'string' ? v.reason : null,
     },

@@ -224,18 +224,37 @@ export function reconcileDiscrepancy(existing: ExistingDiscrepancy[] | null, dif
 export const NOT_VERIFIED_AT_CLOSE = 'NOT_VERIFIED_AT_CLOSE';
 
 /**
+ * The person closing said they had checked the channel but recorded no amount
+ * (docs/58 D71). Who and when are kept on the row; no figure is invented, nothing
+ * reads as matched, no difference is shown.
+ */
+export const ATTESTED_AT_CLOSE = 'ATTESTED_AT_CLOSE';
+
+/**
+ * Whether a skip reason is one of the keys only a close writes. A person's skip
+ * may never carry one: stored through a count, ATTESTED_AT_CLOSE would lift the
+ * close's acknowledgement without anyone attesting. Case and spacing do not
+ * matter — the stored reason is trimmed, and a near-copy is still not a reason.
+ */
+export function isMachineSkipReason(reason: string | null | undefined): boolean {
+  const r = (reason ?? '').trim().toUpperCase();
+  return r === NOT_VERIFIED_AT_CLOSE || r === ATTESTED_AT_CLOSE;
+}
+
+/**
  * How one channel stands against its expected figure:
  *
  * - `counted` — a person counted it, after any reopen;
  * - `skipped` — a person recorded that it could not be counted, with their reason;
  * - `not_verified` — closed without anybody checking it (acknowledged at the close);
+ * - `attested` — closed on the person's word that they checked it, with no amount recorded;
  * - `stale` — counted before the day was reopened, so it describes a drawer that has
  *   since changed and proves nothing about it now;
  * - `not_counted` — nothing recorded yet.
  *
  * Only `counted` is a physical verification. The others are never shown as matched.
  */
-export type Verification = 'counted' | 'skipped' | 'not_verified' | 'stale' | 'not_counted';
+export type Verification = 'counted' | 'skipped' | 'not_verified' | 'attested' | 'stale' | 'not_counted';
 
 export function verificationOf(
   row: { counted: number | null; isSkipped: boolean; skipReason: string | null; countedAt: Date | null } | null,
@@ -244,28 +263,36 @@ export function verificationOf(
   if (!row) return 'not_counted';
   if (reopenedAt && row.countedAt && row.countedAt.getTime() < reopenedAt.getTime()) return 'stale';
   if (reopenedAt && !row.countedAt && (row.counted !== null || row.isSkipped)) return 'stale';
-  if (row.isSkipped) return row.skipReason === NOT_VERIFIED_AT_CLOSE ? 'not_verified' : 'skipped';
+  if (row.isSkipped) {
+    if (row.skipReason === NOT_VERIFIED_AT_CLOSE) return 'not_verified';
+    if (row.skipReason === ATTESTED_AT_CLOSE) return 'attested';
+    return 'skipped';
+  }
   return row.counted === null ? 'not_counted' : 'counted';
 }
 
 /**
  * What a close needs from the person confirming it. Every countable channel that
  * is not freshly counted is closed as NOT VERIFIED — which requires an explicit
- * acknowledgement and a reason. A day on which every channel was counted needs
- * neither: the counts are the verification.
+ * acknowledgement and a reason, or the person's attestation that they checked
+ * (docs/58 D71). A day on which every channel was counted needs neither: the
+ * counts are the verification. A channel already attested at an earlier close
+ * (read back on a locked day) asks for nothing again.
  */
 export function closeVerification(channels: { key: string; countable: boolean; verification: Verification }[]): {
   verified: string[];
   unverified: string[];
+  attested: string[];
   requiresAcknowledgement: boolean;
 } {
   const verified: string[] = [];
   const unverified: string[] = [];
+  const attested: string[] = [];
   for (const c of channels) {
     if (!c.countable) continue;
-    (c.verification === 'counted' ? verified : unverified).push(c.key);
+    (c.verification === 'counted' ? verified : c.verification === 'attested' ? attested : unverified).push(c.key);
   }
-  return { verified, unverified, requiresAcknowledgement: unverified.length > 0 };
+  return { verified, unverified, attested, requiresAcknowledgement: unverified.length > 0 };
 }
 
 /** The Owner plus at most this many named delegates per branch (docs/50 §3.3). */

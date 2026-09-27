@@ -53,4 +53,15 @@ export class CreateClosingDto {
   @IsString()
   @MaxLength(255)
   reason?: string;
+
+  /**
+   * "I've checked today's cash and account movements." Every countable channel without a
+   * count is closed as ATTESTED — the person and the time are kept, no amount is invented,
+   * nothing reads as matched (docs/58 D71). Needs no reason; `acknowledgeUnverified` with a
+   * reason remains the other way to close without amounts.
+   */
+  @ApiPropertyOptional({ description: 'The person attests they checked the movements, without recording amounts' })
+  @IsOptional()
+  @IsBoolean()
+  attestChecked?: boolean;
 }

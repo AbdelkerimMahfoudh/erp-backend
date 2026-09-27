@@ -1,5 +1,5 @@
 import { buildChannels, type MovementRow } from './channels';
-import { NOT_VERIFIED_AT_CLOSE } from './closing-lifecycle';
+import { ATTESTED_AT_CLOSE, NOT_VERIFIED_AT_CLOSE } from './closing-lifecycle';
 import {
   assembleReport,
   gateReport,
@@ -245,6 +245,22 @@ describe('closing without a physical check (docs/51 D2)', () => {
     );
     expect(r.expected.cash).toMatchObject({ counted: null, difference: null, verification: 'not_verified' });
     expect(r.expected.cash.expected).toBe(28_800);
+  });
+
+  it('a channel closed on the closer’s word reads "attested" — no amount, no difference, never matched; it is said, and asks for nothing again (docs/58 D71)', () => {
+    const r = assembleReport(
+      inputs({
+        counts: new Map<string, ChannelCountState>([
+          ['cash:NONE', { verification: 'attested', counted: null, countedAt: new Date(), skipReason: ATTESTED_AT_CLOSE }],
+        ]),
+      }),
+    );
+    expect(r.expected.cash).toMatchObject({ counted: null, difference: null, verification: 'attested' });
+    expect(r.close.attested).toEqual(['cash:NONE']);
+    expect(r.close.verified).not.toContain('cash:NONE');
+    expect(r.close.unverified).not.toContain('cash:NONE');
+    expect(r.warnings.map((w) => w.code)).toContain('channels_attested');
+    expect(r.warnings.find((w) => w.code === 'channels_attested')).toMatchObject({ severity: 'info', params: { count: 1 } });
   });
 
   it('a count taken before the day was reopened is stale: it proves nothing about the drawer now', () => {

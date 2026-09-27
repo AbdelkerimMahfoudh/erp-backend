@@ -98,9 +98,13 @@ describe('what exists now sees the correction', () => {
 });
 
 describe('a closed day reads back as it was closed', () => {
-  it('the stored report records an unchecked balance as the close left it — not verified — so nothing reads as changed', () => {
+  it('the stored report records an unchecked balance as the close left it — not verified, a person’s skip, or attested — so nothing reads as changed', () => {
     expect(closing).toMatch(/const asClosed = \(r: ClosingReport\): ClosingReport =>/);
-    expect(closing).toMatch(/unverified\.includes\('cash:NONE'\) \? \{ \.\.\.r\.expected\.cash, verification: 'not_verified' \}/);
+    expect(closing).toMatch(/attested\.includes\(key\) \? 'attested' : unverified\.includes\(key\) \? \(verificationOfKey\(key\) === 'skipped' \? 'skipped' : 'not_verified'\) : null/);
+    expect(closing).toMatch(/cash: closedAs\('cash:NONE'\) \? \{ \.\.\.r\.expected\.cash, verification: closedAs\('cash:NONE'\)! \}/);
+    // The row keeps a person's acknowledged skip; an attestation replaces it (the reason stays in the count's event).
+    expect(closing).toMatch(/\} else if \(v === 'skipped' && !attested\.includes\(key\)\) \{/);
+    expect(closing).toMatch(/w\.code !== 'channels_attested' && w\.code !== 'channels_stale'/);
     expect(closing).toMatch(/const frozenReport: ClosingReport = asClosed\(/);
   });
 });
