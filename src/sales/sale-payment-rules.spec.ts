@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   afterPayment,
@@ -231,36 +231,58 @@ describe('the parts of the money received now (2026-09-27)', () => {
   };
 
   it('one method may pay part of the sale, as before — the rest is owed by the named debtor', () => {
-    expect(code(() => assertPaymentParts([cash(3000)], 7000))).toBeNull();
-    expect(code(() => assertPaymentParts([], 7000))).toBeNull();
+    expect(code(() => assertPaymentParts([cash(3000)]))).toBeNull();
+    expect(code(() => assertPaymentParts([]))).toBeNull();
   });
 
-  it('four places, the drawer counting as one, pay the whole amount due', () => {
-    expect(code(() => assertPaymentParts([cash(3400), acct('b', 2000), acct('m', 1000), acct('s', 600)], 7000))).toBeNull();
-    expect(code(() => assertPaymentParts([acct('a', 1000), acct('b', 2000), acct('c', 3000), acct('d', 1000)], 7000))).toBeNull();
+  it('four places, the drawer counting as one, may pay the whole amount due', () => {
+    expect(code(() => assertPaymentParts([cash(3400), acct('b', 2000), acct('m', 1000), acct('s', 600)]))).toBeNull();
+    expect(code(() => assertPaymentParts([acct('a', 1000), acct('b', 2000), acct('c', 3000), acct('d', 1000)]))).toBeNull();
+  });
+
+  it('a split may pay part of the sale', () => {
+    // 5 000 of a 7 000 sale: the 2 000 left is the named debtor's (assertDebtorForBalance), not a refusal here.
+    expect(code(() => assertPaymentParts([cash(3000), acct('b', 2000)]))).toBeNull();
+    expect(code(() => assertPaymentParts([cash(1000), acct('a', 1000), acct('b', 1000), acct('c', 1000)]))).toBeNull();
   });
 
   it('refuses a fifth method', () => {
-    expect(code(() => assertPaymentParts([cash(3000), acct('a', 1000), acct('b', 1000), acct('c', 1000), acct('d', 1000)], 7000))).toBe('too_many_payment_methods');
+    expect(code(() => assertPaymentParts([cash(3000), acct('a', 1000), acct('b', 1000), acct('c', 1000), acct('d', 1000)]))).toBe('too_many_payment_methods');
     expect(MAX_PAYMENT_METHODS).toBe(4);
   });
 
   it('refuses the same place twice: two cash parts, or one account under two methods', () => {
-    expect(code(() => assertPaymentParts([cash(3000), cash(4000)], 7000))).toBe('duplicate_payment_destination');
-    expect(code(() => assertPaymentParts([acct('b', 3000, 'mobile'), acct('b', 4000, 'bank')], 7000))).toBe('duplicate_payment_destination');
-    expect(code(() => assertPaymentParts([acct('ab12', 3000), acct('AB12', 4000)], 7000))).toBe('duplicate_payment_destination');
-  });
-
-  it('refuses a split that does not add up to the amount due, short or over', () => {
-    expect(code(() => assertPaymentParts([cash(3000), acct('b', 2000)], 7000))).toBe('split_must_equal_total');
-    expect(code(() => assertPaymentParts([cash(5000), acct('b', 2500)], 7000))).toBe('split_must_equal_total');
-    expect(code(() => assertPaymentParts([cash(3400.004), acct('b', 3599.996)], 7000))).toBeNull();
+    expect(code(() => assertPaymentParts([cash(3000), cash(4000)]))).toBe('duplicate_payment_destination');
+    expect(code(() => assertPaymentParts([acct('b', 3000, 'mobile'), acct('b', 4000, 'bank')]))).toBe('duplicate_payment_destination');
+    expect(code(() => assertPaymentParts([acct('ab12', 3000), acct('AB12', 4000)]))).toBe('duplicate_payment_destination');
   });
 });
 
 describe('the sale service applies the parts rule before anything is reconciled or written', () => {
-  it('checks the parts, then reconciles them', () => {
-    const svc = readFileSync(join(__dirname, 'sales.service.ts'), 'utf8');
-    expect(svc).toMatch(/assertPaymentParts\(dto\.payments, total\);\s*const \{ amountPaid, balanceDue, payStatus \} = this\.policy\.reconcilePayments\(dto\.payments, total\);/);
+  const svc = code(readFileSync(join(__dirname, 'sales.service.ts'), 'utf8'));
+
+  it('checks the parts, then reconciles them against the total', () => {
+    expect(svc).toMatch(/assertPaymentParts\(dto\.payments\);\s*const \{ amountPaid, balanceDue, payStatus \} = this\.policy\.reconcilePayments\(dto\.payments, total\);/);
+  });
+
+  it('asks who owes the rest after the reconcile, and before any payment row is written', () => {
+    const reconcile = svc.indexOf('this.policy.reconcilePayments(dto.payments, total)');
+    const debtor = svc.indexOf('assertDebtorForBalance(balanceDue, debtorChoice)');
+    expect(reconcile).toBeGreaterThan(-1);
+    expect(debtor).toBeGreaterThan(reconcile);
+    expect(svc.indexOf('this.resolveDebtor(', debtor)).toBeGreaterThan(debtor);
+    expect(svc.indexOf('tx.payment.create', debtor)).toBeGreaterThan(debtor);
+  });
+
+  it('no longer requires a split to add up to the total, anywhere in sales', () => {
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : [],
+      );
+    // This file names the retired code only to look for it.
+    const offenders = walk(__dirname)
+      .filter((f) => f !== __filename)
+      .filter((f) => readFileSync(f, 'utf8').includes('split_must_equal_total'));
+    expect(offenders).toEqual([]);
   });
 });

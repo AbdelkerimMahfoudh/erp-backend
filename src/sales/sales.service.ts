@@ -334,7 +334,7 @@ export class SalesService {
             },
           });
         }
-        assertPaymentParts(dto.payments, total);
+        assertPaymentParts(dto.payments);
         const { amountPaid, balanceDue, payStatus } = this.policy.reconcilePayments(dto.payments, total);
         /**
          * Who owes what was not paid (0074): one customer — chosen, or typed at

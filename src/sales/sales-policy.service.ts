@@ -46,11 +46,20 @@ export class SalesPolicyService {
     throw new BadRequestException('A price is required (no default price on the product)');
   }
 
-  /** Payments must not exceed the total; the remainder becomes a receivable. */
+  /**
+   * The money received now against the amount due. Its parts — at most four
+   * places, each once (`assertPaymentParts`) — pay all or part of the total,
+   * never more; what they leave unpaid is a balance that needs a named debtor
+   * (0074). Paid plus owed is always the total.
+   */
   reconcilePayments(payments: { amount: number }[], total: number): PaymentReconciliation {
     const amountPaid = this.round(payments.reduce((s, p) => s + p.amount, 0));
     if (amountPaid > total + EPSILON) {
-      throw new BadRequestException(`Payments (${amountPaid}) exceed the total (${total})`);
+      // The same code a later collection gives, so the phone reads one refusal for one mistake.
+      throw new BadRequestException({
+        code: 'overpayment',
+        message: `The payments add up to ${amountPaid}, more than the ${total} due.`,
+      });
     }
     const balanceDue = this.round(total - amountPaid);
     // One status rule for the whole app: a sale and a later collection must

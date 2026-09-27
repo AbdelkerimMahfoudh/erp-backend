@@ -1,6 +1,19 @@
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { Unit } from '@prisma/client';
+import { assertDebtorForBalance } from './sale-payment-rules';
 import { SalesPolicyService } from './sales-policy.service';
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/** The refusal's code, or null when nothing was refused. */
+const refusal = (fn: () => unknown) => {
+  try {
+    fn();
+    return null;
+  } catch (e) {
+    return (e as { getResponse?: () => { code?: string } }).getResponse?.().code ?? 'other';
+  }
+};
 
 describe('SalesPolicyService', () => {
   const policy = new SalesPolicyService();
@@ -26,6 +39,52 @@ describe('SalesPolicyService', () => {
     });
     it('rejects overpayment', () => {
       expect(() => policy.reconcilePayments([{ amount: 150 }], 100)).toThrow(BadRequestException);
+      expect(refusal(() => policy.reconcilePayments([{ amount: 150 }], 100))).toBe('overpayment');
+    });
+
+    describe('a split across several places (2026-09-27)', () => {
+      const parts = (...amounts: number[]) => amounts.map((amount) => ({ amount }));
+
+      it('may pay part of the sale: the rest is the balance owed', () => {
+        expect(policy.reconcilePayments(parts(3000, 2000), 7000)).toEqual({
+          amountPaid: 5000,
+          balanceDue: 2000,
+          payStatus: 'partial',
+        });
+      });
+
+      it('may pay all of it, across four places', () => {
+        expect(policy.reconcilePayments(parts(3400, 2000, 1000, 600), 7000)).toEqual({
+          amountPaid: 7000,
+          balanceDue: 0,
+          payStatus: 'paid',
+        });
+      });
+
+      it('never more than the total', () => {
+        expect(refusal(() => policy.reconcilePayments(parts(5000, 2500), 7000))).toBe('overpayment');
+      });
+
+      it('paid plus owed is the total to the cent, and nothing is ever owed below zero', () => {
+        const cases: [number[], number][] = [
+          [[1000.1, 2000.2], 5000],
+          [[0.1, 0.2], 0.3],
+          [[3333.33, 3333.33], 9999.99],
+        ];
+        for (const [amounts, total] of cases) {
+          const { amountPaid, balanceDue } = policy.reconcilePayments(parts(...amounts), total);
+          expect(round2(amountPaid + balanceDue)).toBe(total);
+          expect(balanceDue).toBeGreaterThanOrEqual(0);
+        }
+      });
+
+      it('a remainder left by a split needs a debtor, as one left by a single method does', () => {
+        const { balanceDue } = policy.reconcilePayments(parts(3000, 2000), 7000);
+        expect(refusal(() => assertDebtorForBalance(balanceDue, { kind: 'none' }))).toBe('debtor_required');
+        expect(refusal(() => assertDebtorForBalance(balanceDue, { kind: 'customer_existing', customerId: 'c-1' }))).toBeNull();
+        expect(refusal(() => assertDebtorForBalance(balanceDue, { kind: 'customer_new', name: 'Mariam', phone: null }))).toBeNull();
+        expect(refusal(() => assertDebtorForBalance(balanceDue, { kind: 'store', counterpartyId: 's-1' }))).toBeNull();
+      });
     });
   });
 

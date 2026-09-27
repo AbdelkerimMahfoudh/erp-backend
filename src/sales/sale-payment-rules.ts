@@ -122,11 +122,11 @@ export const MAX_PAYMENT_METHODS = 4;
 /**
  * The parts of the money received now, checked before anything is written:
  * at most four places, each place once (cash is one place; an account is one
- * place whatever method names it), and — when the money is split — parts that
- * add up to the amount due exactly. A sale paid only in part takes one method
- * and names who owes the rest (0074); a split pays the whole sale.
+ * place whatever method names it). Together they pay all or part of the total,
+ * never more — `reconcilePayments` refuses an overpayment — and whatever they
+ * leave unpaid needs a named debtor (0074), split or not.
  */
-export function assertPaymentParts(payments: { method: string; amount: number; receivingAccountId?: string | null }[], total: number): void {
+export function assertPaymentParts(payments: { method: string; receivingAccountId?: string | null }[]): void {
   if (payments.length > MAX_PAYMENT_METHODS) {
     throw new BadRequestException({
       code: 'too_many_payment_methods',
@@ -143,15 +143,6 @@ export function assertPaymentParts(payments: { method: string; amount: number; r
       throw new BadRequestException({ code: 'duplicate_payment_destination', message: 'Each payment method can take one part of a sale' });
     }
     seen.add(place);
-  }
-  if (payments.length >= 2) {
-    const sum = Math.round(payments.reduce((s, p) => s + p.amount, 0) * 100) / 100;
-    if (Math.abs(sum - Math.round(total * 100) / 100) > EPSILON) {
-      throw new BadRequestException({
-        code: 'split_must_equal_total',
-        message: `A split payment must add up to the amount due (${total}); its parts add up to ${sum}`,
-      });
-    }
   }
 }
 
