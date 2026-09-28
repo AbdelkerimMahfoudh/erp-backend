@@ -156,6 +156,14 @@ describe('per-item detail survives the filter', () => {
     expect(body).not.toHaveProperty('reason');
   });
 
+  it('says why the store is closed — a closed day, or one nobody opened yet (docs/63)', () => {
+    // The unit specs assert the exception; only the filter decides what the phone receives.
+    const body = runFilter(
+      new ConflictException({ code: 'store_closed', closedReason: 'not_opened', message: 'no', businessDate: '2026-10-01' }),
+    );
+    expect(body).toMatchObject({ code: 'store_closed', closedReason: 'not_opened', businessDate: '2026-10-01' });
+  });
+
   it('still reveals nothing about an unexpected error', () => {
     const body = runFilter(new Error('connect ECONNREFUSED 127.0.0.1:3306'));
     expect(body.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);

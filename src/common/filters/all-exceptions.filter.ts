@@ -32,6 +32,7 @@ interface ErrorBody {
   identifier?: unknown;
   acknowledgement?: unknown;
   businessDate?: unknown;
+  closedReason?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -74,6 +75,9 @@ const DETAIL_KEYS = [
   'acknowledgement',
   /* `store_closed`: which business day is closed, so a screen can name it and offer to open it without reading the sentence. */
   'businessDate',
+  /* `store_closed`: a closed day (`closed`) or one nobody opened yet (`not_opened`, docs/63) — the screen offers the
+   * reopen or the opening. Its own name, not `reason`, for the reason given above. */
+  'closedReason',
 ] as const;
 
 /**
