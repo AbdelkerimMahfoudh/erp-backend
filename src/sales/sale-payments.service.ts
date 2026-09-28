@@ -225,7 +225,15 @@ export class SalePaymentsService {
           entityId: saleId,
           action: 'update',
           reason: 'payment_collected',
-          after: { amount: dto.amount, method: dto.method, paidAt, remaining: next.remaining, payStatus: next.payStatus },
+          after: {
+            amount: dto.amount,
+            method: dto.method,
+            paidAt,
+            // The minute the person chose, when the payment was lifted to its sale's instant within it (docs/61 §9).
+            ...(dto.paidAt && new Date(dto.paidAt).getTime() !== paidAt.getTime() ? { paidAtRequested: dto.paidAt } : {}),
+            remaining: next.remaining,
+            payStatus: next.payStatus,
+          },
           branchId,
         });
       });

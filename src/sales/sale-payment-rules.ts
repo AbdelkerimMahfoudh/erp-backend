@@ -151,12 +151,24 @@ export const STORE_KINDS = ['connected_store', 'manual_store'] as const;
 
 // ── when the money arrived ──────────────────────────────────────────────────
 
+const MINUTE = 60_000;
+
+/** The same clock minute. Every store offset is whole minutes, so this is the same displayed minute in any time zone. */
+export const sameMinute = (a: Date, b: Date): boolean => Math.floor(a.getTime() / MINUTE) === Math.floor(b.getTime() / MINUTE);
+
 /**
  * The instant a later payment is recorded against.
  *
  * Defaults to now. It may be earlier — a shop often records the evening's
  * collections at closing — but never in the future, and never before the sale
  * it pays for.
+ *
+ * The phone names a minute (10:15); the sale is an instant inside one
+ * (10:15:47). A payment in the **same minute** as its sale is not earlier than
+ * it (docs/61 §9): it is recorded at the sale's own instant, so it never sorts
+ * before the sale, still reads 10:15, and stays in the sale's minute — and so
+ * in its business day, whose boundaries fall on whole minutes. An earlier
+ * minute is refused as before.
  */
 export function resolvePaidAt(requested: string | undefined, soldAt: Date, now: Date = new Date()): Date {
   if (!requested) return now;
@@ -165,10 +177,11 @@ export function resolvePaidAt(requested: string | undefined, soldAt: Date, now: 
     throw new BadRequestException({ code: 'paid_at_invalid', message: 'That payment date is not a date' });
   }
   // A minute of grace for a phone whose clock is slightly ahead.
-  if (at.getTime() > now.getTime() + 60_000) {
+  if (at.getTime() > now.getTime() + MINUTE) {
     throw new BadRequestException({ code: 'paid_at_future', message: 'A payment cannot be recorded in the future' });
   }
   if (at.getTime() < soldAt.getTime()) {
+    if (sameMinute(at, soldAt)) return new Date(soldAt.getTime());
     throw new BadRequestException({
       code: 'paid_at_before_sale',
       message: 'A payment cannot be earlier than the sale it pays for',
