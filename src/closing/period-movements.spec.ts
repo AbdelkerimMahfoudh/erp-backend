@@ -49,10 +49,11 @@ describe('period movements', () => {
 
   it('the closing still asks for exactly one day, with the drawer’s opening balance', () => {
     expect(service).not.toMatch(/expectedChannels\(companyId, branchId, day, dayDate\)/);
-    // The count and the live view ask with the opening; the report (which the close is built on) asks with
-    // the opening it reports, anchored on a counted close only (0078, D4).
-    expect((service.match(/expectedChannels\(companyId, branchId, day, day, openingCash\)/g) ?? []).length).toBe(2);
-    expect(service).toMatch(/expectedChannels\(companyId, branchId, day, day, opening\.amount\)/);
+    // One place asks for a day's channels, with its opening and the amount set when the shop opened (docs/63):
+    // the count, the live view, the report (which the close is built on) and Money all read the day through it.
+    expect((service.match(/expectedChannels\(companyId, branchId, day, day, chain\.opening\.amount, adjustment\)/g) ?? []).length).toBe(1);
+    expect((service.match(/await this\.dayChannels\(companyId, branchId, (day|today)\)/g) ?? []).length).toBeGreaterThanOrEqual(5);
+    expect(service).not.toMatch(/expectedChannels\(companyId, branchId, day, day, openingCash\)/);
     // Money's period view never carries an opening balance: a period's net is what moved.
     expect(service).toMatch(/expectedChannels\(companyId, branchId, from, to\)/);
   });

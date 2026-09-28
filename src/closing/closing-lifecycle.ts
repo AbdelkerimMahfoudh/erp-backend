@@ -114,14 +114,19 @@ export function canOpen(
   return { ok: true };
 }
 
+/** Why the counter waits: the day was closed, or nobody has opened it yet. */
+export type CounterRefusal = 'closed' | 'not_opened';
+
 /**
- * Whether the counter refuses a new sale or receipt: only while the current
- * business day is closed. Opening the store again is the reopen, with the
- * closing authority — never the side effect of a sale. A day nobody opened is
- * not refused: the opening is recorded, never required (rule 25a).
+ * Whether the counter refuses a new sale, receipt or later payment on the
+ * current business day: while it is closed, and — since the opening carries the
+ * money the day starts with (docs/63; supersedes rule 25a's "never required") —
+ * until somebody has opened it. Opening is deliberate, never the side effect of
+ * a sale: a closed day is reopened, a new one opened, with their own authority.
  */
-export function counterRefusal(status: string | null | undefined): 'store_closed' | null {
-  return status === 'locked' ? 'store_closed' : null;
+export function counterRefusal(status: string | null | undefined, opened: boolean): CounterRefusal | null {
+  if (status === 'locked') return 'closed';
+  return opened ? null : 'not_opened';
 }
 
 export type CloseKind = 'first' | 'reclose';

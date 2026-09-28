@@ -34,7 +34,13 @@ const delivery = (over: Record<string, unknown> = {}) =>
  * calls, as a close would change them.
  */
 function harness(day = DAY) {
-  const state = { closings: {} as Record<string, Status>, locked: null as Record<string, Status> | null };
+  const state = {
+    closings: {} as Record<string, Status>,
+    locked: null as Record<string, Status> | null,
+    /** Dates nobody opened (docs/63) as the plain read sees them, and as the read inside the transaction does. */
+    unopened: [] as string[],
+    unopenedInside: null as string[] | null,
+  };
   const stored: any[] = [];
   const lockReads: { sql: string; values: unknown[] }[] = [];
   const writes = { purchases: [] as any[], payments: [] as any[], units: [] as any[] };
@@ -46,12 +52,19 @@ function harness(day = DAY) {
     dailyClosing: { update: jest.fn(), updateMany: jest.fn() },
     closingEvent: { create: jest.fn() },
     $queryRaw: jest.fn(async (query: { sql: string; values: unknown[] }) => {
+      const date = query.values.find((v) => typeof v === 'string') as string;
+      if (/FROM closing_events/.test(query.sql)) return (state.unopenedInside ?? state.unopened).includes(date) ? [] : [{ one: 1 }];
       lockReads.push(query);
-      const status = (state.locked ?? state.closings)[query.values.find((v) => typeof v === 'string') as string];
+      const status = (state.locked ?? state.closings)[date];
       return status ? [{ status }] : [];
     }),
   };
   const db: any = {
+    closingEvent: {
+      findFirst: jest.fn(async ({ where }: any) =>
+        state.unopened.includes((where.businessDate as Date).toISOString().slice(0, 10)) ? null : { id: Buffer.alloc(16, 7) },
+      ),
+    },
     purchase: {
       findFirst: jest.fn(async ({ where }: any) => stored.find((p) => p.clientUuid.equals(where.clientUuid)) ?? null),
     },
@@ -137,6 +150,7 @@ describe('a receipt while the business day is closed', () => {
     expect(e.getStatus()).toBe(409);
     expect(e.getResponse()).toEqual({
       code: 'store_closed',
+      closedReason: 'closed',
       businessDate: '2026-09-27',
       message: 'The store is closed for business day 2026-09-27. Nothing was received: the Owner or a named delegate must open the store first.',
     });
@@ -174,9 +188,32 @@ describe('a receipt while the business day is closed', () => {
   });
 });
 
+describe('a receipt on a day nobody has opened (docs/63)', () => {
+  it('is refused as not opened before any account, product or identifier is looked up', async () => {
+    const { service, state, db, writes } = harness();
+    state.unopened = [DAY];
+    const e = await refusal(() => service.createPurchase(delivery()));
+    expect(e.getResponse()).toMatchObject({ code: 'store_closed', closedReason: 'not_opened', businessDate: DAY });
+    expect(db.receivingAccount.findFirst).not.toHaveBeenCalled();
+    expect(db.product.findMany).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(writes.purchases).toHaveLength(0);
+  });
+
+  it('is refused inside the transaction when the day reads unopened there: rolled back, nothing written', async () => {
+    const { service, state, writes } = harness();
+    state.unopenedInside = [DAY];
+    const e = await refusal(() => service.createPurchase(delivery()));
+    expect(e.getResponse()).toMatchObject({ code: 'store_closed', closedReason: 'not_opened' });
+    expect(writes.purchases).toHaveLength(0);
+    expect(writes.payments).toHaveLength(0);
+    expect(writes.units).toHaveLength(0);
+  });
+});
+
 describe('a receipt on a day the counter may use', () => {
   it.each([
-    ['nobody has opened or counted yet', {}],
+    ['was opened and nobody has counted yet', {}],
     ['is being counted', { [DAY]: 'counting' as const }],
     ['was counted but not closed', { [DAY]: 'counted' as const }],
     ['was closed and has been reopened', { [DAY]: 'reopened' as const }],

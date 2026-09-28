@@ -11,6 +11,7 @@ import { join } from 'node:path';
  *   J1  supplier payments in cash     — a day the shop paid a supplier looked short
  *   B   corrections returned in cash  — money came back and nothing said so
  *   D   expenses paid in cash         — a day the shop bought electricity looked short
+ *   0083 the Owner's set amount       — a day whose drawer the Owner set could not be closed
  *
  * That history is the reason this file exists. Each addition was individually
  * correct and nobody was ever looking at the whole equation, so the next
@@ -18,9 +19,10 @@ import { join } from 'node:path';
  *
  * This pins the WHOLE equation in one place:
  *
- *   expected = cash taken in
+ *   expected = opening balance + cash taken in
  *            − refunds(cash) − supplier(cash) − expenses(cash)
  *            + corrections(cash)
+ *            + the set amount's adjustment (docs/63)
  *
  * Two properties are asserted, and both matter:
  *
@@ -60,6 +62,11 @@ const TERMS = [
   { name: 'supplierPaid.cash', sign: '-', why: 'paid for stock in cash: settlements (J1) and purchases paid at receipt' },
   { name: 'expensesCash', sign: '-', why: 'expenses paid in cash (D)' },
   { name: 'correctedCash', sign: '+', why: 'corrections returned in cash (B)' },
+  {
+    name: 'setCash',
+    sign: '+',
+    why: 'the Owner’s amount set during the day (docs/63): the amount − the day’s net at that instant − the opening balance, so the drawer starts from it',
+  },
 ] as const;
 
 describe('the reconciliation equation', () => {
@@ -82,7 +89,7 @@ describe('the reconciliation equation', () => {
     });
   }
 
-  it('contains NOTHING but those six terms', () => {
+  it('contains NOTHING but those terms', () => {
     /**
      * The assertion that actually catches a sixth movement being bolted on
      * without being reasoned about. If a term is genuinely needed, it is added
@@ -200,11 +207,21 @@ describe('the per-channel path is the same equation, not a second one', () => {
   it('the signs live in exactly one table', () => {
     expect(channels).toMatch(/COMPONENT_SIGN: Record<Component, 1 \| -1>/);
     // The opening balance (0076) is a starting balance, not a movement: it has
-    // no sign of its own. The cash equation's `correctedCash` is the cash
+    // no sign of its own, and neither has the set amount's adjustment (docs/63),
+    // which moves that start. The cash equation's `correctedCash` is the cash
     // channel's NET correction — money coming back in minus a payment
     // reclassified out (0078) — so the channel table signs one more component
     // than the equation has movement terms.
-    expect(channels.match(/COMPONENT_SIGN\.\w+/g) ?? []).toHaveLength(TERMS.filter((t) => t.name !== 'openingCash').length + 1);
+    const movements = TERMS.filter((t) => t.name !== 'openingCash' && t.name !== 'setCash');
+    expect(channels.match(/COMPONENT_SIGN\.\w+/g) ?? []).toHaveLength(movements.length + 1);
+  });
+
+  it('the set amount moves the same start on both paths (docs/63)', () => {
+    // The drawer figure the close checks and the channel figure the report shows add the same adjustment, from the same
+    // record: a day whose drawer the Owner set could not be closed while only one of them did.
+    expect(channels).toMatch(/const expected = round2\(\s*openingBalance \+\s*setAdjustment \+/);
+    expect(closing).toMatch(/const setCash = built\.cashAdjustment;/);
+    expect(closing).toMatch(/cashAdjustment: drawer\.adjustment/);
   });
 
   it('every cash term has a per-channel counterpart', () => {

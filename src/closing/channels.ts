@@ -88,6 +88,11 @@ export interface ChannelRow {
    * accounts and for a shop that has never closed a day.
    */
   openingBalance: number;
+  /**
+   * Cash only (0083, docs/63): what an amount the Owner set when the shop opened adds to the day, so the drawer
+   * holds that amount plus what the day recorded after it — never income, never an expense. Zero otherwise.
+   */
+  setAdjustment: number;
   expected: number;
 }
 
@@ -113,7 +118,7 @@ const empty = () => ({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0
  *   nothing is expected; listing it would be asking for a count nobody needs.
  * - **The unattributed bucket appears only when it has movement.**
  */
-export function buildChannels(movements: MovementRow[], accounts: AccountRow[], cashOpening = 0): ChannelRow[] {
+export function buildChannels(movements: MovementRow[], accounts: AccountRow[], cashOpening = 0, cashSetAdjustment = 0): ChannelRow[] {
   const totals = new Map<string, ReturnType<typeof empty>>();
   const keyOf = (channel: Channel, accountId: string | null) => `${channel}:${accountId ?? 'NONE'}`;
 
@@ -153,8 +158,10 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
     const isUnattributed = channel === 'account' && accountId === null;
 
     const openingBalance = channel === 'cash' ? round2(cashOpening) : 0;
+    const setAdjustment = channel === 'cash' ? round2(cashSetAdjustment) : 0;
     const expected = round2(
       openingBalance +
+        setAdjustment +
         COMPONENT_SIGN.salesIn * sums.salesIn +
         COMPONENT_SIGN.refundsOut * sums.refundsOut +
         COMPONENT_SIGN.supplierOut * sums.supplierOut +
@@ -187,6 +194,7 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
       correctionsIn: round2(sums.correctionsIn),
       correctionsOut: round2(sums.correctionsOut),
       openingBalance,
+      setAdjustment,
       expected,
     });
   }

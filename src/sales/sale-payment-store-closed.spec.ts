@@ -22,9 +22,13 @@ type Status = 'counting' | 'counted' | 'locked' | 'reopened';
 const dto = () => ({ clientUuid: '0190a8c0-0000-7000-8000-0000000000aa', amount: 500, method: 'cash' as const });
 
 /** The real ClosingService refusal checks over a stubbed database: the early read, then the locked row. */
-function closingWith(early: Status | null, locked: Status | null) {
+function closingWith(early: Status | null, locked: Status | null, opened = true) {
   const tenant: any = { companyId: () => COMPANY, requireBranchId: () => BRANCH, userId: () => USER };
-  const db: any = { dailyClosing: { findUnique: jest.fn(async () => (early ? { status: early } : null)) } };
+  const db: any = {
+    dailyClosing: { findUnique: jest.fn(async () => (early ? { status: early } : null)) },
+    // Whether anybody opened the day (docs/63), as the plain read sees it.
+    closingEvent: { findFirst: jest.fn(async () => (opened ? { id: Buffer.alloc(16, 7) } : null)) },
+  };
   const businessDay: any = { today: jest.fn(async () => DAY) };
   const closing = new ClosingService(db, tenant, {} as never, {} as never, {} as never, businessDay, {} as never, {} as never, {} as never);
   const tx: any = {
@@ -35,8 +39,8 @@ function closingWith(early: Status | null, locked: Status | null) {
   return { closing, tx };
 }
 
-function harness(opts: { early?: Status | null; locked?: Status | null; replayed?: boolean } = {}) {
-  const { closing, tx: closingTx } = closingWith(opts.early ?? null, opts.locked ?? null);
+function harness(opts: { early?: Status | null; locked?: Status | null; replayed?: boolean; unopened?: boolean; unopenedInside?: boolean } = {}) {
+  const { closing, tx: closingTx } = closingWith(opts.early ?? null, opts.locked ?? null, !opts.unopened);
   const written = { payments: 0, sales: 0 };
   // Past the day check the transaction stops here: what matters is that it was, or was not, reached.
   const reached = new Error('reached the recording');
@@ -45,6 +49,7 @@ function harness(opts: { early?: Status | null; locked?: Status | null; replayed
     $queryRaw: jest.fn(async (sql: { strings?: string[] }) => {
       const text = (sql.strings ?? []).join('?');
       if (/FROM daily_closings/.test(text)) return closingTx.$queryRaw();
+      if (/FROM closing_events/.test(text)) return (opts.unopenedInside ?? opts.unopened) ? [] : [{ one: 1 }];
       return [{ id: Buffer.alloc(16, 9), total: 1500, amount_paid: 500, balance_due: 1000, sold_at: new Date('2026-09-20T10:00:00Z'), is_reversed: 0, customer_id: null, branch_id: BRANCH }];
     }),
     financialCorrection: { findFirst: jest.fn(async () => null) },
@@ -102,7 +107,22 @@ describe('a later payment on a debt while the business day is closed', () => {
     expect(open.written.payments).toBe(1);
   });
 
-  it('a day never closed, or still being counted, is open', async () => {
+  it('a day nobody opened is refused as not opened before the transaction: nothing written (docs/63)', async () => {
+    const h = harness({ unopened: true });
+    const e = await h.service.record(SALE, dto()).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ConflictException);
+    expect((e as ConflictException).getResponse()).toMatchObject({ code: 'store_closed', closedReason: 'not_opened', businessDate: DAY });
+    expect(h.written.payments).toBe(0);
+  });
+
+  it('and inside the transaction when the day reads unopened there', async () => {
+    const h = harness({ unopenedInside: true });
+    const e = await h.service.record(SALE, dto()).catch((x: unknown) => x);
+    expect((e as ConflictException).getResponse()).toMatchObject({ code: 'store_closed', closedReason: 'not_opened' });
+    expect(h.written.payments).toBe(0);
+  });
+
+  it('a day never closed, or still being counted, is open once opened', async () => {
     for (const status of [null, 'counting', 'counted'] as const) {
       const h = harness({ early: status, locked: status });
       await expect(h.service.record(SALE, dto())).rejects.toBe(h.reached);

@@ -18,7 +18,9 @@ import { COMPONENT_SIGN, type AccountRow, type MovementRow } from './channels';
  * unknown — `position` null, never 0 — and then there is no grand total.
  *
  * - **Cash** is the branch's drawer, anchored by the Daily closing's own counted
- *   close, so Money and the closing cannot disagree about it.
+ *   close, or by the amount a shop opened with (docs/63) when that came later —
+ *   either way through the closing's own expected figure, so Money and the
+ *   closing cannot disagree about it.
  * - **An account** belongs to the company, anchored by the latest amount the
  *   Owner recorded for it (`money_anchors`), plus its movements at every branch.
  *
@@ -30,12 +32,27 @@ export type TrackedChannel = 'cash' | 'account';
 export type UnknownReason = 'no_counted_close' | 'no_anchor';
 
 export interface TrackedAnchor {
-  source: 'counted_close' | 'declared';
+  source: 'counted_close' | 'declared' | 'opening';
   amount: number;
   /** ISO instant; null only for a counted close that recorded neither a count time nor a close time. */
   at: string | null;
   businessDate: string;
   byName: string | null;
+  /** An opening's decision (docs/63): kept or set by the Owner, or carried by somebody else who opened. */
+  decision?: 'keep' | 'set' | 'carried';
+  /** A carried amount the Owner has not reviewed: shown as awaiting the Owner, never as checked. */
+  awaitingOwnerReview?: boolean;
+}
+
+/** The amount a shop opened with, as it anchors the drawer (0083, docs/63). */
+export interface OpenedAnchor {
+  amount: number;
+  at: Date;
+  businessDate: string;
+  byName: string | null;
+  decision: 'keep' | 'set' | 'carried';
+  /** For a carried opening: whether the Owner has reviewed it. */
+  reviewed: boolean;
 }
 
 export interface TrackedMethod {
@@ -86,6 +103,11 @@ export interface DrawerInputs {
   countedToday: CountedClose | null;
   /** The close the day's opening is carried from (`openingCashDetail`), or null when no drawer was ever counted. */
   openingAnchor: CountedClose | null;
+  /**
+   * The latest amount a shop opened with, when it came after that close (docs/63): today's own, or the one the
+   * day is carried from. It anchors the drawer; the position is still the closing's expected figure.
+   */
+  opened?: OpenedAnchor | null;
   /** The drawer's expected figure for the current business day — the overview's `cashNow`. */
   expected: number;
 }
@@ -122,6 +144,20 @@ export function cashMethod(input: DrawerInputs): TrackedMethod {
   if (input.countedToday) {
     const anchor = countedAnchor(input.countedToday);
     return { ...base, known: true, position: anchor.amount, unknownReason: null, anchor, sinceAnchorNet: 0 };
+  }
+  if (input.opened) {
+    const o = input.opened;
+    const position = round2(input.expected);
+    const anchor: TrackedAnchor = {
+      source: 'opening',
+      amount: round2(o.amount),
+      at: o.at.toISOString(),
+      businessDate: o.businessDate,
+      byName: o.byName,
+      decision: o.decision,
+      awaitingOwnerReview: o.decision === 'carried' && !o.reviewed,
+    };
+    return { ...base, known: true, position, unknownReason: null, anchor, sinceAnchorNet: round2(position - anchor.amount) };
   }
   if (!input.openingAnchor) {
     return { ...base, known: false, position: null, unknownReason: 'no_counted_close', anchor: null, sinceAnchorNet: null };

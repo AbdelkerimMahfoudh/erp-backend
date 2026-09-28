@@ -122,12 +122,17 @@ function shop() {
     assign: jest.fn(async (_b: Buffer, instant: Date) => businessDateOf(instant, 'UTC')),
     today: jest.fn(async () => '2026-09-27'),
   };
-  const closingDb: any = { dailyClosing: { findUnique: jest.fn(async () => (state.closed ? { status: 'locked' } : { status: 'reopened' })) } };
+  const closingDb: any = {
+    dailyClosing: { findUnique: jest.fn(async () => (state.closed ? { status: 'locked' } : { status: 'reopened' })) },
+    // Opened (docs/63): a reopened day always was.
+    closingEvent: { findFirst: jest.fn(async () => ({ id: Buffer.alloc(16, 7) })) },
+  };
   const closing = new ClosingService(closingDb, tenant, {} as never, {} as never, {} as never, businessDay, {} as never, {} as never, {} as never);
   const tx: any = {
     $queryRaw: jest.fn(async (sql: { strings?: string[] }) => {
       const text = (sql.strings ?? []).join('?');
       if (/FROM daily_closings/.test(text)) return [{ status: state.closed ? 'locked' : 'reopened' }];
+      if (/FROM closing_events/.test(text)) return [{ one: 1 }];
       return [{ id: SALE_BIN, total: 1500, amount_paid: state.paid, balance_due: 1500 - state.paid, sold_at: SOLD_AT, is_reversed: 0, customer_id: null, branch_id: BRANCH }];
     }),
     financialCorrection: { findFirst: jest.fn(async () => null) },

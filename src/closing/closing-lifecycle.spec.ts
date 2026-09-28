@@ -143,19 +143,22 @@ describe('the door (0077)', () => {
 });
 
 describe('counterRefusal — open first', () => {
-  it('refuses a sale or a receipt only while the current business day is closed', () => {
-    expect(counterRefusal('locked')).toBe('store_closed');
+  it('refuses a sale or a receipt while the current business day is closed, opened or not', () => {
+    expect(counterRefusal('locked', true)).toBe('closed');
+    expect(counterRefusal('locked', false)).toBe('closed');
   });
 
-  it('lets the counter work on a day being counted, counted or reopened', () => {
-    expect(counterRefusal('counting')).toBeNull();
-    expect(counterRefusal('counted')).toBeNull();
-    expect(counterRefusal('reopened')).toBeNull();
+  it('lets the counter work on an opened day being counted, counted or reopened', () => {
+    expect(counterRefusal('counting', true)).toBeNull();
+    expect(counterRefusal('counted', true)).toBeNull();
+    expect(counterRefusal('reopened', true)).toBeNull();
+    expect(counterRefusal(null, true)).toBeNull();
   });
 
-  it('never refuses a day with no closing row — nobody has to record an opening to sell (rule 25a)', () => {
-    expect(counterRefusal(null)).toBeNull();
-    expect(counterRefusal(undefined)).toBeNull();
+  it('refuses a day nobody opened — the opening carries the money it starts with (docs/63; supersedes rule 25a)', () => {
+    expect(counterRefusal(null, false)).toBe('not_opened');
+    expect(counterRefusal(undefined, false)).toBe('not_opened');
+    expect(counterRefusal('counting', false)).toBe('not_opened');
   });
 });
 

@@ -1,5 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsDateString, IsIn, IsOptional } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsDateString, IsIn, IsOptional, ValidateNested } from 'class-validator';
+import { OpeningMoneyDto } from './opening-money.dto';
 
 export class OpenDayDto {
   @ApiPropertyOptional({
@@ -21,4 +23,11 @@ export class OpenDayDto {
   @IsOptional()
   @IsIn(['continue', 'start_new'])
   mode?: 'continue' | 'start_new';
+
+  /** The money the shop opens with (docs/63): required from the Owner, never from anybody else. */
+  @ApiPropertyOptional({ type: OpeningMoneyDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => OpeningMoneyDto)
+  openingMoney?: OpeningMoneyDto;
 }

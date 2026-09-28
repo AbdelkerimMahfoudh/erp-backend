@@ -456,3 +456,53 @@ describe('recording an account’s amount', () => {
     expect(anchorFingerprint({ accountId: BANKILY, amount: 1500, note: '   ' })).toBe(anchorFingerprint({ accountId: BANKILY, amount: 1500 }));
   });
 });
+
+describe('the drawer anchored by the money a shop opened with (docs/63)', () => {
+  const opened = {
+    amount: 3000,
+    at: new Date('2026-09-27T08:05:00Z'),
+    businessDate: '2026-09-27',
+    byName: 'Owner',
+    decision: 'set' as const,
+    reviewed: false,
+  };
+
+  it('is known from the opening, even when no drawer was ever counted — the closing’s figure, from that amount', () => {
+    const cash = cashMethod({ countedToday: null, openingAnchor: null, opened, expected: 3500 });
+    expect(cash).toMatchObject({
+      known: true,
+      position: 3500,
+      anchor: { source: 'opening', amount: 3000, at: '2026-09-27T08:05:00.000Z', decision: 'set', awaitingOwnerReview: false, byName: 'Owner' },
+      sinceAnchorNet: 500,
+    });
+  });
+
+  it('a carried opening awaits the Owner’s review — never presented as checked — until the Owner reviews it', () => {
+    const carried = cashMethod({ countedToday: null, openingAnchor: day1Close, opened: { ...opened, decision: 'carried' }, expected: 3400 });
+    expect(carried.anchor).toMatchObject({ source: 'opening', decision: 'carried', awaitingOwnerReview: true });
+    const reviewed = cashMethod({ countedToday: null, openingAnchor: day1Close, opened: { ...opened, decision: 'carried', reviewed: true }, expected: 3400 });
+    expect(reviewed.anchor).toMatchObject({ awaitingOwnerReview: false });
+  });
+
+  it('a day closed with its drawer counted still holds its count', () => {
+    const today: CountedClose = { closingDate: '2026-09-27', countedCash: 3480, at: new Date('2026-09-27T21:00:00Z'), byName: 'Aicha' };
+    expect(cashMethod({ countedToday: today, openingAnchor: day1Close, opened, expected: 3500 })).toMatchObject({
+      position: 3480,
+      anchor: { source: 'counted_close' },
+    });
+  });
+
+  it('with no anchor at all the drawer stays unknown — an opening never invents one', () => {
+    expect(cashMethod({ countedToday: null, openingAnchor: null, opened: null, expected: 0 })).toMatchObject({ known: false, position: null });
+  });
+
+  it('3 400 kept at the opening + 2 000 + 1 600 = 7 000, the next morning included', () => {
+    const c = card({ drawer: { openingAnchor: null, opened: { ...opened, amount: 3400, decision: 'keep' }, expected: 3400 } });
+    expect(positions(c)).toEqual([
+      ['cash', 3400],
+      [`account:${BANKILY}`, 2000],
+      [`account:${MASRVI}`, 1600],
+    ]);
+    expect(c.total).toBe(7000);
+  });
+});

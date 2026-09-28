@@ -584,6 +584,8 @@ describe('the overview carries trackedMoney beside its existing fields, unchange
     const svc = Object.create(ClosingService.prototype) as ClosingService & Record<string, unknown>;
     const moneyAnchors = { trackedMoney: jest.fn(async () => tracked) };
     const expectedChannels = jest.fn(async (_c: Buffer, _b: Buffer, _from: string, _to: string, cashOpening = 0) => buildChannels([], accounts, cashOpening));
+    // The day as the closing reads it (docs/63): its opening, no amount set today.
+    const dayChannels = jest.fn(async () => ({ opening, carriedFrom: null, declaredToday: null, adjustment: 0, channels: buildChannels([], accounts, opening.amount) }));
     Object.assign(svc, {
       db: {
         sale: { aggregate: jest.fn(async () => ({ _sum: { balanceDue: new Prisma.Decimal(0) }, _count: 0 })) },
@@ -592,16 +594,16 @@ describe('the overview carries trackedMoney beside its existing fields, unchange
       },
       tenant: { companyId: () => COMPANY, requireBranchId: () => BRANCH },
       businessDay: { today: jest.fn(async () => '2026-09-27') },
-      openingCashDetail: jest.fn(async () => opening),
+      dayChannels,
       expectedChannels,
       moneyAnchors,
       cls: { get: (key: string) => (key === 'permissions' && permissions ? new Set(permissions) : undefined) },
     });
-    return { svc, moneyAnchors, expectedChannels, opening };
+    return { svc, moneyAnchors, expectedChannels, dayChannels, opening };
   }
 
   it('adds trackedMoney and leaves every other field as it was', async () => {
-    const { svc, moneyAnchors, expectedChannels, opening } = overviewOf(['report.view', 'money.anchor.record']);
+    const { svc, moneyAnchors, dayChannels, opening } = overviewOf(['report.view', 'money.anchor.record']);
     const view = await svc.overview('2026-09-27', '2026-09-27');
     expect(Object.keys(view)).toEqual([
       'from', 'to', 'today', 'cashNow', 'cashOpening', 'moneyToday', 'accountsToday', 'period', 'outstandingAll', 'expensesToday', 'trackedMoney',
@@ -612,9 +614,9 @@ describe('the overview carries trackedMoney beside its existing fields, unchange
     expect(view.cashOpening).toBe(3400);
     expect(view.moneyToday.total).toEqual({ moneyIn: 0, moneyOut: 0, net: 0 });
     expect(view.accountsToday).toEqual([{ accountId: BANKILY, label: 'Bankily', isUnattributed: false, moneyIn: 0, moneyOut: 0, net: 0 }]);
-    expect(expectedChannels).toHaveBeenCalledWith(COMPANY, BRANCH, '2026-09-27', '2026-09-27', 3400);
-    // The drawer's position is built on the same opening and the same expected figure.
-    expect(moneyAnchors.trackedMoney).toHaveBeenCalledWith(BRANCH, '2026-09-27', { opening, expected: 3400 }, true);
+    expect(dayChannels).toHaveBeenCalledWith(COMPANY, BRANCH, '2026-09-27');
+    // The drawer's position is built on the same opening, the same expected figure and the decision anchoring it.
+    expect(moneyAnchors.trackedMoney).toHaveBeenCalledWith(BRANCH, '2026-09-27', { opening, expected: 3400, opened: null }, true);
   });
 
   it('the accounts are read only for a caller who may record them', async () => {
@@ -626,7 +628,7 @@ describe('the overview carries trackedMoney beside its existing fields, unchange
     for (const [permissions, visible] of cases) {
       const { svc, moneyAnchors, opening } = overviewOf(permissions);
       await svc.overview('2026-09-27', '2026-09-27');
-      expect(moneyAnchors.trackedMoney).toHaveBeenCalledWith(BRANCH, '2026-09-27', { opening, expected: 3400 }, visible);
+      expect(moneyAnchors.trackedMoney).toHaveBeenCalledWith(BRANCH, '2026-09-27', { opening, expected: 3400, opened: null }, visible);
     }
   });
 
@@ -638,10 +640,11 @@ describe('the overview carries trackedMoney beside its existing fields, unchange
     expect(block).toMatch(/moneyToday: moneyByMethod\(todayChannels\),/);
     expect(block).toMatch(/moneyIn: round2\(c\.salesIn \+ c\.correctionsIn\),/);
     expect(block).toMatch(/moneyOut: round2\(c\.refundsOut \+ c\.supplierOut \+ c\.expensesOut \+ c\.correctionsOut\),/);
-    expect(block).toMatch(/const openingToday = opening\.amount;/);
-    expect(block).toMatch(/this\.expectedChannels\(companyId, branchId, today, today, openingToday\)/);
+    // Today through the one place a day is read (docs/63): its opening, and an amount set when the shop opened.
+    expect(block).toMatch(/const drawer = await this\.dayChannels\(companyId, branchId, today\);/);
+    expect(block).toMatch(/Promise\.resolve\(drawer\.channels\),/);
     // Whether the accounts are listed is the caller's own permission, read from the request.
     expect(block).toMatch(/const accountsVisible = this\.cls\.get\('permissions'\)\?\.has\('money\.anchor\.record'\) \?\? false;/);
-    expect(block).toMatch(/this\.moneyAnchors\.trackedMoney\(branchId, today, \{ opening, expected: cash\?\.expected \?\? 0 \}, accountsVisible\)/);
+    expect(block).toMatch(/\{ opening, expected: cash\?\.expected \?\? 0, opened: openedAnchorOf\(drawer\.declaredToday \?\? drawer\.carriedFrom\) \},\s*accountsVisible,/);
   });
 });

@@ -17,6 +17,7 @@ import {
   trackedMoney,
   type CountedClose,
   type DeclaredAnchor,
+  type OpenedAnchor,
   type TrackedMethod,
   type TrackedMoney,
 } from './money-positions';
@@ -72,14 +73,15 @@ export class MoneyAnchorsService {
   async trackedMoney(
     branchId: Buffer,
     businessDate: string,
-    drawer: { opening: OpeningCash; expected: number },
+    drawer: { opening: OpeningCash; expected: number; opened?: OpenedAnchor | null },
     accountsVisible: boolean,
   ): Promise<TrackedMoney> {
     const companyId = this.tenant.companyId();
     const asOf = new Date();
     const [countedToday, openingAnchor, accounts, branchCount] = await Promise.all([
       this.countedClose(branchId, businessDate),
-      drawer.opening.anchorDate ? this.countedClose(branchId, drawer.opening.anchorDate) : null,
+      // A chain carried from an opening's amount has no counted close at its start (docs/63).
+      drawer.opening.anchorDate && drawer.opening.anchorKind !== 'opening_set' ? this.countedClose(branchId, drawer.opening.anchorDate) : null,
       accountsVisible ? this.db.receivingAccount.findMany({ select: { id: true, label: true, isActive: true, sortOrder: true } }) : [],
       // Accounts are the company's; the phone says so when there is more than one shop.
       this.db.branch.count({ where: { type: 'store', isActive: true, deletedAt: null } }),
@@ -96,7 +98,7 @@ export class MoneyAnchorsService {
       asOf,
       businessDate,
       branchCount,
-      drawer: { countedToday, openingAnchor, expected: drawer.expected },
+      drawer: { countedToday, openingAnchor, opened: drawer.opened ?? null, expected: drawer.expected },
       accounts: rows,
       anchors,
       movements,

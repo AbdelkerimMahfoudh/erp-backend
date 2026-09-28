@@ -432,3 +432,38 @@ describe('a day with corrections posted on it (0079)', () => {
     expect(reportVersion(report)).not.toBe(reportVersion(assembleReport(inputs())));
   });
 });
+
+describe('an amount the Owner set for the drawer on the day (docs/63)', () => {
+  const set = {
+    kind: 'opening' as const,
+    decision: 'set' as const,
+    awaitingOwnerReview: false,
+    amount: 19_000,
+    at: '2026-09-24T08:05:00.000Z',
+    localTime: '08:05',
+    byName: 'Owner',
+    tracked: 20_000,
+    adjustment: -1_000,
+  };
+
+  it('the drawer’s figure is the opening, the day’s in and out, and the amount’s term — and says so', () => {
+    const plain = assembleReport(inputs());
+    const withSet = assembleReport(inputs({ cashSet: set }));
+    expect(withSet.expected.cash.set).toEqual(set);
+    expect(withSet.expected.cash.expected).toBe(plain.expected.cash.expected - 1_000);
+    expect(withSet.expected.cash.difference).toBe(plain.expected.cash.difference! + 1_000);
+    expect(plain.expected.cash.set).toBeNull();
+  });
+
+  it('reconciles: expected = opening + in − out + the amount’s term', () => {
+    const report = assembleReport(inputs({ cashSet: set }));
+    const channels = buildChannels(movements, accounts, OPENING, -1_000);
+    expect(reportInvariants(report, channels, splits, 0)).toEqual([]);
+  });
+
+  it('a drawer set today no longer warns about how its opening was carried', () => {
+    const unanchored = inputs({ opening: { amount: 0, anchorDate: null, anchorVerified: false, carriedDays: 0 } });
+    expect(assembleReport(unanchored).warnings.map((w) => w.code)).toContain('no_counted_opening');
+    expect(assembleReport({ ...unanchored, cashSet: set }).warnings.map((w) => w.code)).not.toContain('no_counted_opening');
+  });
+});

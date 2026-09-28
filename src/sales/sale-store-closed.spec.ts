@@ -37,9 +37,13 @@ interface Setup {
   closings?: Record<string, Status>;
   /** Each date's closing status as the locking read sees it; the plain read's when not given. */
   locked?: Record<string, Status>;
+  /** Dates nobody opened (docs/63), as the plain read sees them; every other date was opened. */
+  unopened?: string[];
+  /** The same, as the read inside the sale's transaction sees them; the plain read's when not given. */
+  unopenedInside?: string[];
 }
 
-function harness({ existing = null, day = DAY, closings = {}, locked = closings }: Setup = {}) {
+function harness({ existing = null, day = DAY, closings = {}, locked = closings, unopened = [], unopenedInside = unopened }: Setup = {}) {
   const lockReads: { sql: string; values: unknown[] }[] = [];
   const tx: any = {
     unit: {
@@ -64,12 +68,19 @@ function harness({ existing = null, day = DAY, closings = {}, locked = closings 
     dailyClosing: { update: jest.fn(), updateMany: jest.fn() },
     closingEvent: { create: jest.fn() },
     $queryRaw: jest.fn(async (query: { sql: string; values: unknown[] }) => {
+      const date = query.values.find((v) => typeof v === 'string') as string;
+      if (/FROM closing_events/.test(query.sql)) return unopenedInside.includes(date) ? [] : [{ one: 1 }];
       lockReads.push(query);
-      const status = locked[query.values.find((v) => typeof v === 'string') as string];
+      const status = locked[date];
       return status ? [{ status }] : [];
     }),
   };
   const db: any = {
+    closingEvent: {
+      findFirst: jest.fn(async ({ where }: any) =>
+        unopened.includes((where.businessDate as Date).toISOString().slice(0, 10)) ? null : { id: Buffer.alloc(16, 7) },
+      ),
+    },
     sale: { findFirst: jest.fn(async () => existing), findUnique: async () => null },
     saleItem: { findMany: async () => [{ unitId: UNIT, productId: null, quantity: 1, price: 899 }] },
     payment: { findMany: async () => [{ method: 'cash', amount: 899 }] },
@@ -145,6 +156,7 @@ describe('a sale while the business day is closed', () => {
     expect(e.getStatus()).toBe(409);
     expect(e.getResponse()).toEqual({
       code: 'store_closed',
+      closedReason: 'closed',
       businessDate: '2026-09-27',
       message: 'The store is closed for business day 2026-09-27. Nothing was sold: the Owner or a named delegate must open the store first.',
     });
@@ -173,9 +185,37 @@ describe('a sale while the business day is closed', () => {
   });
 });
 
+describe('a sale on a day nobody has opened (docs/63)', () => {
+  it('is refused as not opened before anything is spent — the boutique is opened first, with its money', async () => {
+    const { service, db, tx, spent, events } = harness({ unopened: [DAY] });
+    const e = await refusal(() => service.createSale(dto as never));
+    expect(e.getResponse()).toMatchObject({ code: 'store_closed', closedReason: 'not_opened', businessDate: DAY });
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(spent.invoiceNumbers.next).not.toHaveBeenCalled();
+    expect(spent.approvals.consume).not.toHaveBeenCalled();
+    expect(tx.closingEvent.create).not.toHaveBeenCalled();
+    expect(events.emit).not.toHaveBeenCalled();
+  });
+
+  it('is refused inside the transaction when the day reads unopened there, and nothing is announced', async () => {
+    const { service, db, tx, events } = harness({ unopenedInside: [DAY] });
+    const e = await refusal(() => service.createSale(dto as never));
+    expect(e.getResponse()).toMatchObject({ code: 'store_closed', closedReason: 'not_opened' });
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+    expect(tx.closingEvent.create).not.toHaveBeenCalled();
+    expect(events.emit).not.toHaveBeenCalled();
+  });
+
+  it('a closed day is still refused as closed — the reopen, not the opening', async () => {
+    const { service } = harness({ closings: { [DAY]: 'locked' }, unopened: [DAY] });
+    const e = await refusal(() => service.createSale(dto as never));
+    expect(e.getResponse()).toMatchObject({ code: 'store_closed', closedReason: 'closed' });
+  });
+});
+
 describe('a sale on a day the counter may use', () => {
   it.each([
-    ['nobody has opened or counted yet', {}],
+    ['was opened and nobody has counted yet', {}],
     ['is being counted', { [DAY]: 'counting' as const }],
     ['was counted but not closed', { [DAY]: 'counted' as const }],
     ['was closed and has been reopened', { [DAY]: 'reopened' as const }],

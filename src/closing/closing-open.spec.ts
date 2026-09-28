@@ -1,4 +1,5 @@
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { ClosingService } from './closing.service';
 import { dateValue } from '../common/business-day/business-day.service';
 
@@ -22,26 +23,69 @@ const startedEarly = { ...before6, businessDate: '2026-09-26', canStartEarly: fa
 /** 09:00 on the 26th: nothing to choose. */
 const after6 = { businessDate: '2026-09-26', localDate: '2026-09-26', timezone: 'UTC', canStartEarly: false, startedEarly: false };
 
-function build(descriptions: object[], opts: { mayStartEarly?: boolean; events?: { kind: string }[]; row?: { id: Buffer; status: string } | null } = {}) {
+interface BuildOptions {
+  mayStartEarly?: boolean;
+  /** Holds `money.anchor.record`: decides the money a shop opens with (docs/63). */
+  owner?: boolean;
+  events?: { kind: string }[];
+  row?: { id: Buffer; status: string } | null;
+  /** The drawer as Money shows it now; null when unknown. */
+  previous?: number | null;
+  /** An earlier decision under the request's key. */
+  prior?: { businessDate: Date; clientRequestHash: string } | null;
+  /** The event's insert loses a race (P2002). */
+  race?: boolean;
+}
+
+function build(descriptions: object[], opts: BuildOptions = {}) {
   const describe = jest.fn();
   for (const d of descriptions) describe.mockResolvedValueOnce(d);
+  const previous = opts.previous === undefined ? 3400 : opts.previous;
   const db = {
     dailyClosing: { findUnique: jest.fn().mockResolvedValue(opts.row ?? null) },
-    closingEvent: { findMany: jest.fn().mockResolvedValue(opts.events ?? []), create: jest.fn().mockResolvedValue({}) },
+    closingEvent: {
+      findMany: jest.fn().mockResolvedValue(opts.events ?? []),
+      create: jest.fn(async (_args: { data: Record<string, any> }) => {
+        if (opts.race) throw new Prisma.PrismaClientKnownRequestError('duplicate', { code: 'P2002', clientVersion: 'test' });
+        return {};
+      }),
+    },
+    openingDecision: { findFirst: jest.fn().mockResolvedValue(opts.prior ?? null), create: jest.fn().mockResolvedValue({}) },
+    $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>): Promise<unknown> => fn(db)),
   };
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
-  const permissions = new Set(['closing.count', ...(opts.mayStartEarly ? ['closing.start_early'] : [])]);
+  const record = jest.fn().mockResolvedValue(undefined);
+  // Inside the transaction, in the same order: one list of what was audited.
+  const audit = { record, recordTx: jest.fn(async (_tx: unknown, entry: unknown) => record(entry)) };
+  const permissions = new Set([
+    'closing.count',
+    ...(opts.mayStartEarly ? ['closing.start_early'] : []),
+    ...(opts.owner ? ['money.anchor.record'] : []),
+  ]);
   const svc = Object.create(ClosingService.prototype) as ClosingService & Record<string, unknown>;
   Object.assign(svc, {
     db,
     audit,
-    tenant: { companyId: () => companyId, requireBranchId: () => branchId, userId: () => userId },
+    tenant: { companyId: () => companyId, requireBranchId: () => branchId, userId: () => userId, requireUserId: () => userId },
     cls: { get: (key: string) => (key === 'permissions' ? permissions : undefined) },
     businessDay: { describe },
     openView: jest.fn(async (day: string) => ({ view: day })),
+    // The drawer as the opening decides it; its own figures are tested with the closing's.
+    drawerNow: jest.fn(async () => ({
+      tracked: 3400,
+      dayNet: 0,
+      previous,
+      known: previous !== null,
+      methods: [
+        { key: 'cash', channel: 'cash', accountId: null, label: '', scope: 'branch', position: previous },
+        { key: 'account:a1', channel: 'account', accountId: 'a1', label: 'Bankily', scope: 'company', position: 2000 },
+        { key: 'account:a2', channel: 'account', accountId: 'a2', label: 'Masrvi', scope: 'company', position: 1600 },
+      ],
+    })),
   });
   return { svc, db, audit, describe };
 }
+
+const decided = (db: ReturnType<typeof build>['db']) => db.openingDecision.create.mock.calls.map((c) => c[0].data);
 
 const created = (db: ReturnType<typeof build>['db']) => db.closingEvent.create.mock.calls.map((c) => c[0].data);
 
@@ -69,8 +113,8 @@ describe('Open the boutique before 06:00 (docs/56)', () => {
     expect(early.payload).toMatchObject({ previousDate: '2026-09-25' });
     expect(opened).toMatchObject({ kind: 'opened', businessDate: dateValue('2026-09-26'), actorId: userId });
     expect(opened.payload).toMatchObject({ nth: 1, choice: 'start_new', calendarDate: '2026-09-26', localTime: expect.stringMatching(/^\d\d:\d\d$/) });
-    expect(audit.record.mock.calls.map((c) => c[0].reason)).toEqual(['day_started_early', 'opened']);
-    expect(audit.record.mock.calls[1][0].after).toMatchObject({ businessDate: '2026-09-26', choice: 'start_new' });
+    expect(audit.record.mock.calls.map((c) => c[0].reason)).toEqual(['day_started_early', 'opening_money', 'opened']);
+    expect(audit.record.mock.calls.find((c) => c[0].reason === 'opened')![0].after).toMatchObject({ businessDate: '2026-09-26', choice: 'start_new' });
     // The business day was described again after the start, and the new day is what is opened and returned.
     expect(describe).toHaveBeenCalledTimes(2);
     expect(view).toEqual({ view: '2026-09-26' });
@@ -83,7 +127,8 @@ describe('Open the boutique before 06:00 (docs/56)', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ kind: 'opened', businessDate: dateValue('2026-09-25') });
     expect(events[0].payload).toMatchObject({ nth: 1, choice: 'continue', calendarDate: '2026-09-26' });
-    expect(audit.record).toHaveBeenCalledTimes(1);
+    // The opening and its money, audited in the one transaction.
+    expect(audit.record.mock.calls.map((c) => c[0].reason)).toEqual(['opening_money', 'opened']);
     expect(view).toEqual({ view: '2026-09-25' });
   });
 
@@ -125,5 +170,102 @@ describe('Open the boutique before 06:00 (docs/56)', () => {
     const refusal = await svc.open({ mode: 'continue' }).catch((e: unknown) => e);
     expect((refusal as ConflictException).getResponse()).toMatchObject({ code: 'open_day_closed' });
     expect(db.closingEvent.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('the money a shop opens with (docs/63)', () => {
+  const KEY = '0190a8c0-0000-7000-8000-0000000000aa';
+
+  it('the Owner must decide: no decision is refused before anything is written', async () => {
+    const { svc, db } = build([after6], { owner: true });
+    const refusal = await svc.open({}).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(BadRequestException);
+    expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'opening_amounts_required' });
+    expect(db.closingEvent.create).not.toHaveBeenCalled();
+    expect(db.openingDecision.create).not.toHaveBeenCalled();
+  });
+
+  it('keep: the opening and its decision in one transaction — the drawer as shown, the accounts carried', async () => {
+    const { svc, db } = build([after6], { owner: true });
+    await svc.open({ openingMoney: { clientUuid: KEY, decision: 'keep' } });
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+    const [d] = decided(db);
+    expect(d).toMatchObject({ kind: 'opening', decision: 'keep', cashAmount: 3400, cashTracked: 3400, cashDayNet: 0, cashKnown: true, total: 7000 });
+    expect(d.methods).toEqual([
+      expect.objectContaining({ key: 'cash', previous: 3400, amount: 3400, set: false }),
+      expect.objectContaining({ key: 'account:a1', scope: 'company', previous: 2000, amount: 2000, set: false }),
+      expect.objectContaining({ key: 'account:a2', scope: 'company', previous: 1600, amount: 1600, set: false }),
+    ]);
+    expect(created(db)[0].payload).toMatchObject({ opening: { decision: 'keep', cash: 3400 } });
+  });
+
+  it('set: the Owner’s amount for the cash only, true from now; 0 is a value when chosen', async () => {
+    const { svc, db } = build([after6], { owner: true });
+    await svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 0 } });
+    const [d] = decided(db);
+    expect(d).toMatchObject({ decision: 'set', cashAmount: 0, cashTracked: 3400, total: 3600 });
+    expect(d.methods[0]).toMatchObject({ key: 'cash', previous: 3400, amount: 0, set: true });
+    expect(d.methods.slice(1).every((m: { set: boolean }) => !m.set)).toBe(true);
+  });
+
+  it('keep leaves an unknown drawer unknown: no amount, no total', async () => {
+    const { svc, db } = build([after6], { owner: true, previous: null });
+    await svc.open({ openingMoney: { clientUuid: KEY, decision: 'keep' } });
+    expect(decided(db)[0]).toMatchObject({ decision: 'keep', cashAmount: null, cashKnown: false, total: null });
+  });
+
+  it.each([[-1], [1.234], [Number.NaN]])('an invalid amount (%s) is refused by name, nothing written', async (amount) => {
+    const { svc, db } = build([after6], { owner: true });
+    const refusal = await svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: amount } }).catch((e: unknown) => e);
+    expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'amount_invalid' });
+    expect(db.closingEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('keep takes no amount', async () => {
+    const { svc } = build([after6], { owner: true });
+    const refusal = await svc.open({ openingMoney: { decision: 'keep', cashAmount: 100 } }).catch((e: unknown) => e);
+    expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'amount_not_expected' });
+  });
+
+  it('somebody else opens with the tracked amounts — carried, awaiting the Owner — and may not set any', async () => {
+    const carried = build([after6]);
+    await carried.svc.open({});
+    expect(decided(carried.db)[0]).toMatchObject({ kind: 'opening', decision: 'carried', cashAmount: 3400 });
+    const setting = build([after6]);
+    const refusal = await setting.svc.open({ openingMoney: { decision: 'set', cashAmount: 100 } }).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(ForbiddenException);
+    expect((refusal as ForbiddenException).getResponse()).toMatchObject({ code: 'opening_amounts_owner_only' });
+    expect(setting.db.closingEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('a retry under the same key answers with the day it opened, writing nothing — even once the day is open', async () => {
+    const first = build([after6], { owner: true });
+    await first.svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 2500 } });
+    const hash = decided(first.db)[0].clientRequestHash;
+    const retry = build([after6], { owner: true, events: [{ kind: 'opened' }], prior: { businessDate: dateValue('2026-09-26'), clientRequestHash: hash } });
+    const view = await retry.svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 2500 } });
+    expect(view).toEqual({ view: '2026-09-26' });
+    expect(retry.db.closingEvent.create).not.toHaveBeenCalled();
+    expect(retry.db.openingDecision.create).not.toHaveBeenCalled();
+  });
+
+  it('the same key with another amount is refused as a conflict', async () => {
+    const { svc, db } = build([after6], { owner: true, prior: { businessDate: dateValue('2026-09-26'), clientRequestHash: 'another' } });
+    const refusal = await svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 2600 } }).catch((e: unknown) => e);
+    expect((refusal as ConflictException).getResponse()).toMatchObject({ code: 'idempotency_conflict' });
+    expect(db.closingEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('losing the race to somebody else’s opening never drops the Owner’s amount silently', async () => {
+    const { svc } = build([after6], { owner: true, race: true });
+    const refusal = await svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 2500 } }).catch((e: unknown) => e);
+    expect((refusal as ConflictException).getResponse()).toMatchObject({ code: 'open_already_open' });
+  });
+
+  it('before 06:00 the day is chosen first, and the money goes with the day chosen', async () => {
+    const { svc, db } = build([before6, startedEarly], { owner: true, mayStartEarly: true });
+    await svc.open({ mode: 'start_new', openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 1000 } });
+    expect(created(db).map((e) => e.kind)).toEqual(['day_started_early', 'opened']);
+    expect(decided(db)[0]).toMatchObject({ businessDate: dateValue('2026-09-26'), decision: 'set', cashAmount: 1000 });
   });
 });

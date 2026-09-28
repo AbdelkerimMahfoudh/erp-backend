@@ -6,6 +6,7 @@ import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
 import { OpenDayDto } from './dto/open-day.dto';
+import { ReviewOpeningDto } from './dto/review-opening.dto';
 import { ResolveDiscrepancyDto } from './dto/resolve-discrepancy.dto';
 import { CreateDebtEntryDto } from './dto/create-debt-entry.dto';
 import { DiscrepanciesService } from './discrepancies.service';
@@ -120,6 +121,17 @@ export class ClosingController {
   @ApiOperation({ summary: 'Record that the boutique opened for the current business day' })
   open(@Body() dto: OpenDayDto) {
     return this.closing.open(dto);
+  }
+
+  /**
+   * The Owner's review of an opening somebody else made with the tracked amounts (docs/63): keep them, or set the
+   * drawer to what is in it now. The Owner's alone, like every money position.
+   */
+  @Post('closings/opening/review')
+  @RequirePermissions('money.anchor.record')
+  @ApiOperation({ summary: 'Review the money a shop opened with (Owner)' })
+  reviewOpening(@Body() dto: ReviewOpeningDto) {
+    return this.closing.reviewOpening(dto);
   }
 
   /**

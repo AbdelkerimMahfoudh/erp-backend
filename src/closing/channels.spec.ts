@@ -240,3 +240,22 @@ describe('money by method — the Money tab card (2026-09-27)', () => {
     expect(total.net).toBe(7000);
   });
 });
+
+describe('an amount set when the shop opened (docs/63)', () => {
+  it('moves the drawer’s expected figure by its own term, kept apart from the opening and from the movement', () => {
+    const rows = buildChannels([{ channel: 'cash', accountId: null, component: 'salesIn', amount: 500 }], [], 3400, -400);
+    const cash = rows.find((r) => r.channel === 'cash')!;
+    expect(cash).toMatchObject({ openingBalance: 3400, setAdjustment: -400, salesIn: 500, expected: 3500 });
+  });
+
+  it('is cash only: an account never carries one, and no term means nothing changes', () => {
+    const rows = buildChannels([], [{ id: 'a1', label: 'Bankily', isActive: true, sortOrder: 1 }], 3400);
+    expect(rows.map((r) => r.setAdjustment)).toEqual([0, 0]);
+    expect(rows.find((r) => r.channel === 'cash')!.expected).toBe(3400);
+  });
+
+  it('never reaches the day’s money in and out: movement stays movement', () => {
+    const rows = buildChannels([{ channel: 'cash', accountId: null, component: 'salesIn', amount: 500 }], [], 3400, -400);
+    expect(moneyByMethod(rows).total).toEqual({ moneyIn: 500, moneyOut: 0, net: 500 });
+  });
+});

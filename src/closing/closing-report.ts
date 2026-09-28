@@ -127,6 +127,30 @@ export interface OpeningCash {
   anchorVerified: boolean;
   /** Days between the anchor and this date carried forward by their recorded movement. */
   carriedDays: number;
+  /**
+   * What the chain starts from (0083): a counted close, or an amount the Owner set when a shop opened
+   * (docs/63) — the latest of the two. Absent on figures built before either existed.
+   */
+  anchorKind?: 'counted_close' | 'opening_set' | null;
+}
+
+/**
+ * An amount the Owner set for the drawer on this very day, at an opening or at the Owner's review of one
+ * (0083, docs/63). From its instant the drawer holds it plus what the day recorded after: `adjustment`
+ * is what that adds to the day's equation, and `tracked` what the app expected just before.
+ */
+export interface ReportCashSet {
+  kind: 'opening' | 'owner_review';
+  /** keep / set by the Owner, or carried by somebody else who opened. */
+  decision: 'keep' | 'set' | 'carried';
+  /** A carried amount the Owner has not reviewed yet: never presented as checked. */
+  awaitingOwnerReview: boolean;
+  amount: number;
+  at: string;
+  localTime: string;
+  byName: string | null;
+  tracked: number;
+  adjustment: number;
 }
 
 export interface ReportInputs {
@@ -145,6 +169,8 @@ export interface ReportInputs {
   expenseReversals: ExpenseReversalLine[];
   counts: Map<string, ChannelCountState>;
   opening: OpeningCash;
+  /** The latest amount the Owner set for the drawer on this day, or null (docs/63). */
+  cashSet?: ReportCashSet | null;
   pending: { refundReports: { count: number; amount: number }; expenseReports: { count: number; amount: number } } | null;
   openDiscrepancies: number;
   previousDay: { businessDate: string; standing: DayStanding; needsReview: boolean } | null;
@@ -279,6 +305,8 @@ export interface ClosingReport {
       opening: OpeningCash;
       in: number;
       out: number;
+      /** The day's amount set by the Owner (docs/63); `expected` = opening + in − out + its adjustment. */
+      set: ReportCashSet | null;
       expected: number;
       counted: number | null;
       difference: number | null;
@@ -401,7 +429,8 @@ export function assembleReport(i: ReportInputs): ClosingReport {
   // ── Expected balances ──
   const cashRow = channels.find((c) => c.channel === 'cash')!;
   const cashCount = i.counts.get('cash:NONE') ?? null;
-  const cashExpected = round2(i.opening.amount + cashRow.net);
+  const cashSet = i.cashSet ?? null;
+  const cashExpected = round2(i.opening.amount + cashRow.net + (cashSet?.adjustment ?? 0));
   const cashVerification = cashCount?.verification ?? 'not_counted';
   const cashCounted = cashVerification === 'counted' ? cashCount!.counted : null;
   const accounts = channels
@@ -453,8 +482,11 @@ export function assembleReport(i: ReportInputs): ClosingReport {
     warnings.push({ code: 'pending_expense_reports', severity: 'info', section: 'expenses', params: { count: i.pending.expenseReports.count, amount: i.pending.expenseReports.amount } });
   }
   if (!calculable) warnings.push({ code: 'cost_missing', severity: 'warning', section: 'result', params: { count: missingCostLines } });
-  if (i.opening.anchorDate === null) warnings.push({ code: 'no_counted_opening', severity: 'info', section: 'money' });
-  else if (i.opening.carriedDays > 0) warnings.push({ code: 'opening_not_verified', severity: 'info', section: 'money', params: { anchorDate: i.opening.anchorDate, days: i.opening.carriedDays } });
+  // A drawer the Owner set today is anchored by that amount: how the opening was carried no longer decides it.
+  if (!cashSet) {
+    if (i.opening.anchorDate === null) warnings.push({ code: 'no_counted_opening', severity: 'info', section: 'money' });
+    else if (i.opening.carriedDays > 0) warnings.push({ code: 'opening_not_verified', severity: 'info', section: 'money', params: { anchorDate: i.opening.anchorDate, days: i.opening.carriedDays } });
+  }
   // An account's movement may be negative (more paid out than received); the drawer cannot hold less than nothing.
   if (cashExpected < 0) {
     warnings.push({ code: 'negative_expected', severity: 'warning', section: 'money', params: { amount: cashExpected } });
@@ -502,6 +534,7 @@ export function assembleReport(i: ReportInputs): ClosingReport {
         opening: i.opening,
         in: cashRow.in.total,
         out: cashRow.out.total,
+        set: cashSet,
         expected: cashExpected,
         counted: cashCounted,
         difference: cashCounted === null ? null : round2(cashCounted - cashExpected),
@@ -551,7 +584,9 @@ export function reportInvariants(
   if (!eq(r.expenses.recorded, r.expenses.cash + r.expenses.account)) fail.push('expenses: cash + account = recorded');
   if (!eq(r.expenses.reversed, r.expenses.reversals.reduce((n, l) => n + l.amount, 0))) fail.push('expenses.reversed = Σ reversals');
   if (!eq(r.expenses.total, r.expenses.recorded - r.expenses.reversed)) fail.push('expenses.total = recorded − reversed');
-  if (!eq(r.expected.cash.expected, r.expected.cash.opening.amount + r.expected.cash.in - r.expected.cash.out)) fail.push('cash: expected = opening + in − out');
+  if (!eq(r.expected.cash.expected, r.expected.cash.opening.amount + r.expected.cash.in - r.expected.cash.out + (r.expected.cash.set?.adjustment ?? 0))) {
+    fail.push('cash: expected = opening + in − out (+ the amount set)');
+  }
   if (r.result.status === 'ok') {
     if (!eq(r.result.grossProfit!, r.sales.netSalesValue - r.result.costOfUnitsSold!)) fail.push('gross profit = net sales − cost');
     if (!eq(r.result.resultAfterExpenses!, r.result.grossProfit! - r.expenses.total)) fail.push('result = gross profit − expenses');

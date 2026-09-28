@@ -7,7 +7,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, type ClosingEventKind } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
@@ -26,6 +26,21 @@ import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
 import { OpenDayDto } from './dto/open-day.dto';
+import { ReviewOpeningDto } from './dto/review-opening.dto';
+import {
+  openingDecisionFor,
+  openingFingerprint,
+  openingFromSet,
+  openingMethods,
+  openingStateOf,
+  reviewDecisionFor,
+  setAdjustment,
+  type CashSet,
+  type OpeningDecisionValue,
+  type OpeningMoneyInput,
+  type OpeningState,
+  type OpeningVerdict,
+} from './opening-money';
 import {
   buildChannels,
   countingComplete,
@@ -42,6 +57,7 @@ import {
   canReopen,
   closeKindOf,
   counterRefusal,
+  DOOR_OPENS,
   doorState,
   freshCounts,
   NOT_VERIFIED_AT_CLOSE,
@@ -55,11 +71,13 @@ import {
   reopenChoices,
   openChoices,
   standingOf,
+  type CounterRefusal,
   type DayStanding,
 } from './closing-lifecycle';
 import { reclosedNotice, reopenedNotice, saleNotice, type Notice } from './closing-notices';
 import { ClosingNoticeService, type NoticeOutcome } from './closing-notice.service';
 import { MoneyAnchorsService } from './money-anchors.service';
+import type { OpenedAnchor } from './money-positions';
 import {
   assembleReport,
   gateReport,
@@ -68,6 +86,7 @@ import {
   type ChannelCountState,
   type ClosingReport,
   type OpeningCash,
+  type ReportCashSet,
   type ReportPermissions,
 } from './closing-report';
 import {
@@ -84,6 +103,9 @@ import {
   salesFigures,
 } from './closing-report.queries';
 
+/** The client inside one of this service's transactions: the tenant-scoped one. */
+type TenantTx = Parameters<Parameters<TenantPrisma['$transaction']>[0]>[0];
+
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -95,14 +117,19 @@ type CounterOperation = 'sale' | 'receipt' | 'payment';
 
 /**
  * The refusal a sale, a receipt or a later payment on a debt meets while the
- * current business day is closed: nothing was written, nothing reopens — the
- * store is opened first, deliberately (docs/61).
+ * current business day is closed, or not opened yet (docs/63): nothing was
+ * written, nothing opens by itself — the store is opened first, deliberately
+ * (docs/61). `reason` says which, so a phone offers the reopen or the opening.
  */
-function storeClosed(day: string, operation: CounterOperation): ConflictException {
+function storeClosed(day: string, operation: CounterOperation, reason: CounterRefusal): ConflictException {
   const nothing = operation === 'sale' ? 'Nothing was sold' : operation === 'receipt' ? 'Nothing was received' : 'Nothing was recorded';
   return new ConflictException({
     code: 'store_closed',
-    message: `The store is closed for business day ${day}. ${nothing}: the Owner or a named delegate must open the store first.`,
+    closedReason: reason,
+    message:
+      reason === 'not_opened'
+        ? `The boutique has not been opened for business day ${day}. ${nothing}: it must be opened first.`
+        : `The store is closed for business day ${day}. ${nothing}: the Owner or a named delegate must open the store first.`,
     businessDate: day,
   });
 }
@@ -117,6 +144,76 @@ interface RecordedCount {
   countedById: Buffer | null;
   countedAt: Date | null;
   expected: Prisma.Decimal;
+}
+
+/**
+ * A decision that anchors the drawer (0083, docs/63): the amount a shop opened with — kept, set or carried —
+ * true from its instant. `dayNetAt` is its day's recorded cash movement at that instant.
+ */
+interface DrawerDecision extends CashSet {
+  id: Buffer;
+  kind: 'opening' | 'owner_review';
+  decision: OpeningDecisionValue;
+  at: Date;
+  businessDate: string;
+  /** The Daily closing's expected cash at the instant. */
+  tracked: number;
+  byName: string | null;
+  /** For a carried opening: whether the Owner has reviewed it. */
+  reviewed: boolean;
+}
+
+const drawerDecisionSelect = {
+  id: true,
+  kind: true,
+  decision: true,
+  at: true,
+  businessDate: true,
+  cashAmount: true,
+  cashDayNet: true,
+  cashTracked: true,
+  recordedBy: { select: { name: true } },
+  review: { select: { id: true } },
+} satisfies Prisma.OpeningDecisionSelect;
+
+function drawerDecisionOf(row: Prisma.OpeningDecisionGetPayload<{ select: typeof drawerDecisionSelect }>): DrawerDecision {
+  return {
+    id: row.id,
+    kind: row.kind,
+    decision: row.decision,
+    at: row.at,
+    businessDate: dateKey(row.businessDate),
+    amount: round2(num(row.cashAmount)),
+    dayNetAt: round2(num(row.cashDayNet)),
+    tracked: round2(num(row.cashTracked)),
+    byName: row.recordedBy.name,
+    reviewed: row.review !== null,
+  };
+}
+
+/** The cash a decision records: the Owner's amount, or the drawer as it was shown — null when that was unknown. */
+function decidedCash(verdict: { decision: OpeningDecisionValue; cashAmount: number | null }, position: { previous: number | null }): number | null {
+  return verdict.decision === 'set' ? verdict.cashAmount : position.previous;
+}
+
+/** The decision anchoring the drawer, as Money's position reads it. */
+function openedAnchorOf(d: DrawerDecision | null): OpenedAnchor | null {
+  return d ? { amount: d.amount, at: d.at, businessDate: d.businessDate, byName: d.byName, decision: d.decision, reviewed: d.reviewed } : null;
+}
+
+/** The day's own decision as the Daily closing shows it: what was set, by whom and when, and what it adds. */
+function cashSetOf(d: DrawerDecision, adjustment: number, timezone: string): ReportCashSet {
+  return {
+    kind: d.kind,
+    decision: d.decision,
+    awaitingOwnerReview: d.decision === 'carried' && !d.reviewed,
+    amount: d.amount,
+    at: d.at.toISOString(),
+    localTime: localTimeOf(d.at, timezone),
+    byName: d.byName,
+    tracked: d.tracked,
+    adjustment,
+  };
 }
 
 /** What the timeline needs from a closing row: its status, its close and its counts, with the people. */
@@ -176,7 +273,7 @@ export class ClosingService {
     const branchId = this.tenant.requireBranchId();
     const described = await this.businessDay.describe(branchId);
     const previousDate = shiftDate(described.businessDate, -1);
-    const [current, previous] = await Promise.all([
+    const [current, previous, events, opening] = await Promise.all([
       this.db.dailyClosing.findUnique({
         where: { branchId_closingDate: { branchId, closingDate: dateValue(described.businessDate) } },
         select: { status: true },
@@ -185,12 +282,25 @@ export class ClosingService {
         where: { branchId_closingDate: { branchId, closingDate: dateValue(previousDate) } },
         select: { status: true },
       }),
+      this.db.closingEvent.findMany({
+        where: { branchId, businessDate: dateValue(described.businessDate) },
+        orderBy: { at: 'asc' },
+        select: { kind: true },
+      }),
+      this.openingStateFor(branchId, described.businessDate),
     ]);
     const previousActive = previous ? true : await dayActivity(this.db, this.tenant.companyId(), branchId, previousDate);
     const previousRow = previous ? { status: previous.status, businessDate: previousDate } : null;
     return {
       ...described,
       standing: standingOf(current ? { status: current.status, businessDate: described.businessDate } : null, described.businessDate),
+      /**
+       * Whether the boutique is open for the current business day (docs/63): a day is opened before the counter takes
+       * money, so `never_opened` holds Sell and Receive as a closed day does.
+       */
+      door: doorState(events),
+      /** Where today's opening stands: its money decided by the Owner, or carried and awaiting the Owner's review. */
+      opening,
       previousDay: {
         businessDate: previousDate,
         standing: standingOf(previousRow, described.businessDate, previousActive, previousDate),
@@ -350,6 +460,8 @@ export class ClosingService {
      * A balance carried forward, never income — it appears in no profit figure.
      */
     const openingCash = built.opening.amount;
+    /** The Owner's amount set during the day (docs/63): what it adds to the day's equation, from its own record. */
+    const setCash = built.cashAdjustment;
 
     /**
      * **The reconciliation equation.** Every movement appears exactly once:
@@ -360,11 +472,13 @@ export class ClosingService {
      *            − supplier payments in cash
      *            − expenses paid in cash
      *            + corrections returned in cash (net of payments reclassified out)
+     *            + the set amount's adjustment, when the Owner set the drawer today
+     *              (the amount − the day's net at that instant − the opening balance)
      *
      * Pending reports appear nowhere — only confirmed movements are here.
      */
     const expectedCash = round2(
-      openingCash + num(cash._sum.amount) - refundedCash - supplierPaid.cash - expensesCash + correctedCash,
+      openingCash + num(cash._sum.amount) - refundedCash - supplierPaid.cash - expensesCash + correctedCash + setCash,
     );
     if (Math.abs(expectedCash - built.report.expected.cash.expected) >= 0.005) {
       throw new ConflictException({
@@ -1250,9 +1364,10 @@ export class ClosingService {
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
       include: { channelCounts: true },
     });
-    const opening = await this.openingCashDetail(companyId, branchId, day);
+    const drawer = await this.dayChannels(companyId, branchId, day);
+    const opening = drawer.opening;
     const [channels, splits, sales, returns, cancellations, collected, expenses, expenseReversals, pending, discrepancies, active] = await Promise.all([
-      this.expectedChannels(companyId, branchId, day, day, opening.amount),
+      Promise.resolve(drawer.channels),
       channelSplits(this.db, companyId, branchId, day),
       salesFigures(this.db, companyId, branchId, day),
       returnFigures(this.db, companyId, branchId, day),
@@ -1305,6 +1420,7 @@ export class ClosingService {
       expenseReversals,
       counts,
       opening,
+      cashSet: drawer.declaredToday ? cashSetOf(drawer.declaredToday, drawer.adjustment, timezone) : null,
       pending,
       openDiscrepancies: discrepancies,
       previousDay,
@@ -1314,7 +1430,7 @@ export class ClosingService {
     if (invariantFailures.length > 0) {
       this.logger.error(`Daily closing report for ${day} does not reconcile: ${invariantFailures.join('; ')}`);
     }
-    return { report, version: reportVersion(report), invariantFailures, channels, closing, opening };
+    return { report, version: reportVersion(report), invariantFailures, channels, closing, opening, cashAdjustment: drawer.adjustment };
   }
 
   // ── Reopening ───────────────────────────────────────────────────────────
@@ -1326,35 +1442,40 @@ export class ClosingService {
   async reopen(dto: ReopenClosingDto) {
     const companyId = this.tenant.companyId();
     const branchId = this.tenant.requireBranchId();
-    const userId = this.tenant.userId() ?? null;
+    const userId = this.tenant.requireUserId();
     const now = new Date();
+    const verdict = this.openingVerdictFor(dto.openingMoney, this.isOwner());
+    const request = this.openingRequest(dto.date ?? null, dto.mode ?? 'continue', dto.openingMoney, verdict);
+    // A retry of a reopen already recorded answers with the day as it stands.
+    const replay = await this.openingReplay(request);
+    if (replay) return this.openView(replay);
+
     const described = await this.businessDay.describe(branchId, now);
     const day = this.requireDate(dto.date, described.businessDate);
     const mode = dto.mode ?? 'continue';
 
     if (mode === 'start_new') {
-      this.requireEarlyStartAuthority();
-      // Already started early: a retry or a second tap changes nothing.
-      if (described.startedEarly) return this.businessDayView();
-      if (day !== described.businessDate) {
-        throw new BadRequestException('Only the current business day can be ended early');
-      }
-      this.assertBeforeDayStart(described.canStartEarly);
-      await this.startNextDayEarly({ companyId, branchId, userId, now, day });
-      return this.businessDayView();
+      // Starting the next day early opens it too (docs/63): its counter waits for an opening, and the Owner's
+      // amounts go with it — the same path as "Open the boutique" choosing to start today.
+      return this.open({ ...(dto.date ? { date: dto.date } : {}), mode: 'start_new', ...(dto.openingMoney ? { openingMoney: dto.openingMoney } : {}) });
     }
 
     const row = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId, closingDate: dateValue(day) } },
     });
-    const verdict = canReopen(row ? { status: row.status, businessDate: day } : null, described.businessDate);
-    if (!verdict.ok) {
+    // A current day nobody closed and nobody opened: an older phone's "Open store now" meets the new rule that a day
+    // is opened before it takes money (docs/63), and is answered as that opening.
+    if (row?.status !== 'locked' && day === described.businessDate && !(await this.isOpened(branchId, day))) {
+      return this.open({ ...(dto.date ? { date: dto.date } : {}), mode: 'continue', ...(dto.openingMoney ? { openingMoney: dto.openingMoney } : {}) });
+    }
+    const reopenVerdict = canReopen(row ? { status: row.status, businessDate: day } : null, described.businessDate);
+    if (!reopenVerdict.ok) {
       throw new ConflictException({
-        code: `reopen_${verdict.why}`,
+        code: `reopen_${reopenVerdict.why}`,
         message:
-          verdict.why === 'not_closed'
+          reopenVerdict.why === 'not_closed'
             ? `Day ${day} is not closed`
-            : verdict.why === 'past_day'
+            : reopenVerdict.why === 'past_day'
               ? `Day ${day} is behind the business day boundary; correct it through a financial correction`
               : `Day ${day} has not begun`,
       });
@@ -1362,47 +1483,286 @@ export class ClosingService {
     const closing = row!;
     const n = closing.reopenCount + 1;
     const eventId = newUuidV7Bin();
-    await this.db.$transaction(async (tx) => {
-      const won = await tx.dailyClosing.updateMany({
-        where: { id: closing.id, status: 'locked', version: closing.version },
-        data: {
-          status: 'reopened',
-          isLocked: false,
-          reopenedAt: now,
-          reopenedById: userId,
-          reopenCount: n,
-          version: { increment: 1 },
-        },
-      });
-      if (won.count === 0) throw new ConflictException('refresh_required: this day changed while you were reopening it');
-      await tx.closingEvent.create({
-        data: {
-          id: eventId,
-          companyId,
+    // Read before the transaction: the day is locked, so nothing moves the drawer in between.
+    const position = await this.drawerNow(companyId, branchId, day);
+    const cashAmount = decidedCash(verdict, position);
+    try {
+      await this.db.$transaction(async (tx) => {
+        const won = await tx.dailyClosing.updateMany({
+          where: { id: closing.id, status: 'locked', version: closing.version },
+          data: {
+            status: 'reopened',
+            isLocked: false,
+            reopenedAt: now,
+            reopenedById: userId,
+            reopenCount: n,
+            version: { increment: 1 },
+          },
+        });
+        if (won.count === 0) throw new ConflictException('refresh_required: this day changed while you were reopening it');
+        await tx.closingEvent.create({
+          data: {
+            id: eventId,
+            companyId,
+            branchId,
+            businessDate: dateValue(day),
+            closingId: closing.id,
+            kind: 'reopened',
+            at: now,
+            actorId: userId,
+            dedupeKey: `closing:${closing.id.toString('hex')}:reopened:${n}`,
+            payload: { mode: 'continue', automatic: false, reopenCount: n, opening: { decision: verdict.decision, cash: cashAmount } } as Prisma.InputJsonValue,
+          },
+        });
+        await this.recordDecisionTx(tx, { companyId, branchId, userId, day, now, kind: 'opening', eventId, reviewOfId: null, verdict, request, position });
+        await this.audit.recordTx(tx, {
+          entityType: 'DailyClosing',
+          entityId: closing.id,
+          action: 'status_change',
+          reason: 'reopened',
+          after: { day, reopenCount: n, firstClosedAt: closing.firstClosedAt?.toISOString() ?? null },
           branchId,
-          businessDate: dateValue(day),
-          closingId: closing.id,
-          kind: 'reopened',
-          at: now,
-          actorId: userId,
-          dedupeKey: `closing:${closing.id.toString('hex')}:reopened:${n}`,
-          payload: { mode: 'continue', automatic: false, reopenCount: n } as Prisma.InputJsonValue,
-        },
+        });
       });
-      await this.audit.recordTx(tx, {
-        entityType: 'DailyClosing',
-        entityId: closing.id,
-        action: 'status_change',
-        reason: 'reopened',
-        after: { day, reopenCount: n, firstClosedAt: closing.firstClosedAt?.toISOString() ?? null },
-        branchId,
-      });
-    });
+    } catch (e) {
+      // The same attempt twice at once: the first reopened the day; this one answers with it.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        const winner = await this.openingReplay(request);
+        if (winner) return this.openView(winner);
+      }
+      throw e;
+    }
 
     void this.tellOwner(companyId, branchId, day, eventId, (ctx) =>
       reopenedNotice(ctx, { closingIdHex: closing.id.toString('hex'), reopenCount: n, at: now, mode: 'continue', automatic: false }),
     );
     return this.openView(day);
+  }
+
+  /**
+   * The Owner reviews an opening somebody else made with the tracked amounts (docs/63): keep them, or set the drawer
+   * to what is in it now — true from this review's own instant, never backdated to the opening. Until then the day
+   * reads "awaiting the Owner's review" and its amounts are never presented as checked.
+   */
+  async reviewOpening(dto: ReviewOpeningDto) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const userId = this.tenant.requireUserId();
+    const now = new Date();
+    if (!this.isOwner()) throw new ForbiddenException({ code: 'opening_amounts_owner_only', message: 'Only the Owner reviews the money a shop opened with' });
+    const verdict = this.openingVerdictFor(dto, true);
+    const request = {
+      clientUuid: uuidToBin(dto.clientUuid),
+      keyed: true,
+      hash: openingFingerprint({ op: 'review', date: null, mode: null, decision: verdict.decision, cashAmount: verdict.cashAmount }),
+    };
+    const replay = await this.openingReplay(request);
+    if (replay) return this.openView(replay);
+
+    const day = await this.businessDay.today(branchId);
+    const opening = await this.db.openingDecision.findFirst({
+      where: { branchId, businessDate: dateValue(day), kind: 'opening' },
+      orderBy: [{ at: 'desc' }, { createdAt: 'desc' }],
+      select: { id: true, decision: true, review: { select: { id: true } } },
+    });
+    const nothingToReview = () =>
+      new ConflictException({ code: 'no_opening_to_review', message: 'Today’s opening is not awaiting the Owner’s review' });
+    if (!opening || opening.decision !== 'carried' || opening.review) throw nothingToReview();
+    const position = await this.drawerNow(companyId, branchId, day);
+    try {
+      await this.db.$transaction(async (tx) => {
+        await this.recordDecisionTx(tx, { companyId, branchId, userId, day, now, kind: 'owner_review', eventId: null, reviewOfId: opening.id, verdict, request, position });
+      });
+    } catch (e) {
+      // One review per opening: a retry answers with itself; a different review that came first stands.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        const winner = await this.openingReplay(request);
+        if (winner) return this.openView(winner);
+        throw nothingToReview();
+      }
+      throw e;
+    }
+    return this.openView(day);
+  }
+
+  /** The Owner — who may record money positions — decides what a shop opens with. */
+  private isOwner(): boolean {
+    return this.cls.get('permissions')?.has('money.anchor.record') ?? false;
+  }
+
+  /** The opening decision for this person, or the refusal the phone acts on (docs/63). */
+  private openingVerdictFor(input: OpeningMoneyInput | undefined, isOwner: boolean): Extract<OpeningVerdict, { ok: true }> {
+    const verdict = openingDecisionFor(input, isOwner);
+    if (verdict.ok) return verdict;
+    const message = {
+      opening_amounts_required: 'Choose the money the shop opens with: keep the tracked amounts, or set the cash in the drawer.',
+      opening_amounts_owner_only: 'Only the Owner sets the money a shop opens with; open with the tracked amounts.',
+      amount_invalid: 'Enter the cash in the drawer: zero or more, with at most two decimals.',
+      amount_not_expected: 'Keeping the tracked amounts takes no amount.',
+    }[verdict.code];
+    throw verdict.status === 403
+      ? new ForbiddenException({ code: verdict.code, message })
+      : new BadRequestException({ code: verdict.code, message });
+  }
+
+  /** The key an opening request is bound to — the phone's, or one of the server's for an older phone that sent none. */
+  private openingRequest(date: string | null, mode: string, input: OpeningMoneyInput | undefined, verdict: Extract<OpeningVerdict, { ok: true }>) {
+    const keyed = Boolean(input?.clientUuid);
+    return {
+      clientUuid: keyed ? uuidToBin(input!.clientUuid!) : newUuidV7Bin(),
+      keyed,
+      hash: openingFingerprint({ op: 'opening', date, mode, decision: verdict.decision, cashAmount: verdict.cashAmount }),
+    };
+  }
+
+  /** The business day an earlier request with this key decided, or null; the same key with another request is refused. */
+  private async openingReplay(request: { clientUuid: Buffer; keyed: boolean; hash: string }): Promise<string | null> {
+    if (!request.keyed) return null;
+    const prior = await this.db.openingDecision.findFirst({
+      where: { clientUuid: request.clientUuid },
+      select: { businessDate: true, clientRequestHash: true },
+    });
+    if (!prior) return null;
+    if (prior.clientRequestHash !== request.hash) {
+      throw new ConflictException({ code: 'idempotency_conflict', message: 'That request id was already used for a different opening.' });
+    }
+    return dateKey(prior.businessDate);
+  }
+
+  /**
+   * The drawer as an opening decides it (docs/63): what Money shows for it right now — the count of a day closed with
+   * its drawer counted, else the closing's expected figure whenever anything anchors it, else unknown — the closing's
+   * expected figure a set amount is compared with, the day's net movement at this instant, and every method for the
+   * record.
+   */
+  private async drawerNow(companyId: Buffer, branchId: Buffer, day: string) {
+    const drawer = await this.dayChannels(companyId, branchId, day);
+    const cash = drawer.channels.find((c) => c.channel === 'cash');
+    const tracked = round2(cash?.expected ?? 0);
+    const dayNet = round2(tracked - (cash?.openingBalance ?? 0) - (cash?.setAdjustment ?? 0));
+    const money = await this.moneyAnchors.trackedMoney(
+      branchId,
+      day,
+      { opening: drawer.opening, expected: tracked, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom) },
+      true,
+    );
+    const cashMethod = money.methods.find((m) => m.channel === 'cash');
+    return { tracked, dayNet, previous: cashMethod?.position ?? null, known: cashMethod?.known ?? false, methods: money.methods };
+  }
+
+  /**
+   * The opening decision, in the caller's transaction (docs/63). Keep and carried record the drawer as it was shown —
+   * an unknown one stays unknown and anchors nothing; set records the Owner's amount. Either way a known amount
+   * anchors the drawer from this instant, so what the day recorded before it is never counted again.
+   */
+  private async recordDecisionTx(
+    tx: TenantTx,
+    a: {
+      companyId: Buffer;
+      branchId: Buffer;
+      userId: Buffer;
+      day: string;
+      now: Date;
+      kind: 'opening' | 'owner_review';
+      eventId: Buffer | null;
+      reviewOfId: Buffer | null;
+      verdict: Extract<OpeningVerdict, { ok: true }>;
+      request: { clientUuid: Buffer; hash: string };
+      position: Awaited<ReturnType<ClosingService['drawerNow']>>;
+    },
+  ): Promise<Buffer> {
+    const cashAmount = decidedCash(a.verdict, a.position);
+    const { methods, total } = openingMethods(a.position.methods, { decision: a.verdict.decision, amount: cashAmount });
+    const id = newUuidV7Bin();
+    await tx.openingDecision.create({
+      data: {
+        id,
+        companyId: a.companyId,
+        branchId: a.branchId,
+        businessDate: dateValue(a.day),
+        kind: a.kind,
+        decision: a.verdict.decision,
+        closingEventId: a.eventId,
+        reviewOfId: a.reviewOfId,
+        at: a.now,
+        cashKnown: a.position.known,
+        cashTracked: a.position.tracked,
+        cashAmount,
+        cashDayNet: a.position.dayNet,
+        methods: methods as unknown as Prisma.InputJsonValue,
+        total,
+        recordedById: a.userId,
+        clientUuid: a.request.clientUuid,
+        clientRequestHash: a.request.hash,
+      },
+    });
+    await this.audit.recordTx(tx, {
+      entityType: 'OpeningDecision',
+      entityId: id,
+      action: 'create',
+      reason: a.kind === 'owner_review' ? 'opening_reviewed' : 'opening_money',
+      after: { businessDate: a.day, kind: a.kind, decision: a.verdict.decision, cash: cashAmount, tracked: a.position.tracked, known: a.position.known, total },
+      branchId: a.branchId,
+    });
+    return id;
+  }
+
+  /**
+   * Where the day's opening stands (docs/63): recorded with its money or not, the Owner's decision, or a carried
+   * amount awaiting the Owner's review — and the review once made.
+   */
+  private async openingStateFor(branchId: Buffer, day: string) {
+    const latest = await this.db.openingDecision.findFirst({
+      where: { branchId, businessDate: dateValue(day), kind: 'opening' },
+      orderBy: [{ at: 'desc' }, { createdAt: 'desc' }],
+      select: {
+        decision: true,
+        at: true,
+        cashAmount: true,
+        recordedBy: { select: { name: true } },
+        review: { select: { decision: true, at: true, cashAmount: true, recordedBy: { select: { name: true } } } },
+      },
+    });
+    const state: OpeningState = openingStateOf(latest ? { decision: latest.decision, reviewed: latest.review !== null } : null);
+    const part = (d: { decision: OpeningDecisionValue; at: Date; cashAmount: Prisma.Decimal | null; recordedBy: { name: string } }) => ({
+      decision: d.decision,
+      at: d.at.toISOString(),
+      byName: d.recordedBy.name,
+      cash: d.cashAmount == null ? null : round2(num(d.cashAmount)),
+    });
+    return { state, opening: latest ? part(latest) : null, review: latest?.review ? part(latest.review) : null };
+  }
+
+  /**
+   * What the opening step shows (docs/63): each method as Money has it now — the shop's cash, and for the Owner the
+   * company's accounts, which carry forward and are never set here — whether this person decides the amounts, and
+   * where the day's opening stands.
+   */
+  private async openingStep(branchId: Buffer, day: string, drawer: Awaited<ReturnType<ClosingService['dayChannels']>>) {
+    const isOwner = this.isOwner();
+    const cash = drawer.channels.find((c) => c.channel === 'cash');
+    const money = await this.moneyAnchors.trackedMoney(
+      branchId,
+      day,
+      { opening: drawer.opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom) },
+      isOwner,
+    );
+    return {
+      mayDecide: isOwner,
+      branchCount: money.branchCount,
+      methods: money.methods.map((m) => ({
+        key: m.key,
+        channel: m.channel,
+        accountId: m.accountId,
+        label: m.label,
+        scope: m.scope,
+        known: m.known,
+        previous: m.position,
+        anchor: m.anchor,
+      })),
+      total: money.total,
+      ...(await this.openingStateFor(branchId, day)),
+    };
   }
 
   private requireEarlyStartAuthority(): void {
@@ -1473,8 +1833,15 @@ export class ClosingService {
   async open(dto: OpenDayDto) {
     const companyId = this.tenant.companyId();
     const branchId = this.tenant.requireBranchId();
-    const userId = this.tenant.userId() ?? null;
+    const userId = this.tenant.requireUserId();
     const now = new Date();
+    // The money the shop opens with (docs/63): the Owner decides it; anybody else opens with the tracked amounts.
+    const verdict = this.openingVerdictFor(dto.openingMoney, this.isOwner());
+    const request = this.openingRequest(dto.date ?? null, dto.mode ?? 'continue', dto.openingMoney, verdict);
+    // A retry of an opening already recorded answers with the day as it stands.
+    const replay = await this.openingReplay(request);
+    if (replay) return this.openView(replay);
+
     let described = await this.businessDay.describe(branchId, now);
     const mode = dto.mode ?? 'continue';
     /** The store's calendar date has moved on but its business date has not: the moment a choice exists. */
@@ -1501,52 +1868,67 @@ export class ClosingService {
       }),
       this.db.closingEvent.findMany({ where: { branchId, businessDate: dayDate }, orderBy: { at: 'asc' }, select: { kind: true } }),
     ]);
-    const verdict = canOpen(row ? { status: row.status, businessDate: day } : null, doorState(events), day, described.businessDate);
-    if (!verdict.ok) {
+    const openVerdict = canOpen(row ? { status: row.status, businessDate: day } : null, doorState(events), day, described.businessDate);
+    if (!openVerdict.ok) {
       throw new ConflictException({
-        code: `open_${verdict.why}`,
+        code: `open_${openVerdict.why}`,
         message:
-          verdict.why === 'already_open'
+          openVerdict.why === 'already_open'
             ? `Day ${day} is already open`
-            : verdict.why === 'day_closed'
+            : openVerdict.why === 'day_closed'
               ? `Day ${day} is closed — reopening it needs the closing authority`
-              : verdict.why === 'past_day'
+              : openVerdict.why === 'past_day'
                 ? `Day ${day} is behind the business day boundary; only the current day can be opened`
                 : `Day ${day} has not begun`,
       });
     }
     const n = events.filter((e) => e.kind === 'opened').length + 1;
+    const eventId = newUuidV7Bin();
+    // Read before the transaction: until the day is opened the counter takes no money.
+    const position = await this.drawerNow(companyId, branchId, day);
+    const cashAmount = decidedCash(verdict, position);
     try {
-      await this.db.closingEvent.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId,
+      await this.db.$transaction(async (tx) => {
+        await tx.closingEvent.create({
+          data: {
+            id: eventId,
+            companyId,
+            branchId,
+            businessDate: dayDate,
+            closingId: row?.id ?? null,
+            kind: 'opened',
+            at: now,
+            actorId: userId,
+            dedupeKey: `closing:open:${branchId.toString('hex')}:${day}:${n}`,
+            payload: {
+              openedAt: now.toISOString(),
+              localTime: localTimeOf(now, described.timezone),
+              nth: n,
+              ...(choice ? { choice, calendarDate: described.localDate } : {}),
+              opening: { decision: verdict.decision, cash: cashAmount },
+            } as Prisma.InputJsonValue,
+          },
+        });
+        await this.recordDecisionTx(tx, { companyId, branchId, userId, day, now, kind: 'opening', eventId, reviewOfId: null, verdict, request, position });
+        await this.audit.recordTx(tx, {
+          entityType: 'BusinessDay',
+          entityId: branchId,
+          action: 'create',
+          reason: 'opened',
+          after: { businessDate: day, at: now.toISOString(), nth: n, ...(choice ? { choice, calendarDate: described.localDate } : {}) },
           branchId,
-          businessDate: dayDate,
-          closingId: row?.id ?? null,
-          kind: 'opened',
-          at: now,
-          actorId: userId,
-          dedupeKey: `closing:open:${branchId.toString('hex')}:${day}:${n}`,
-          payload: {
-            openedAt: now.toISOString(),
-            localTime: localTimeOf(now, described.timezone),
-            nth: n,
-            ...(choice ? { choice, calendarDate: described.localDate } : {}),
-          } as Prisma.InputJsonValue,
-        },
-      });
-      await this.audit.record({
-        entityType: 'BusinessDay',
-        entityId: branchId,
-        action: 'create',
-        reason: 'opened',
-        after: { businessDate: day, at: now.toISOString(), nth: n, ...(choice ? { choice, calendarDate: described.localDate } : {}) },
-        branchId,
+        });
       });
     } catch (e) {
-      // Two taps at once: the first opened the boutique; the second changes nothing.
       if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+      // The same attempt twice at once: the first opened the boutique; this one answers with it.
+      const winner = await this.openingReplay(request);
+      if (winner) return this.openView(winner);
+      // Somebody else opened the day at this very moment. The Owner's amounts are not dropped silently: the day now
+      // reads as opened, and a carried opening is the Owner's to review.
+      if (request.keyed && verdict.decision !== 'carried') {
+        throw new ConflictException({ code: 'open_already_open', message: `Day ${day} was just opened` });
+      }
     }
     return this.openView(day);
   }
@@ -1560,11 +1942,15 @@ export class ClosingService {
    */
   async assertCounterOpen(branchId: Buffer, operation: CounterOperation): Promise<void> {
     const day = await this.businessDay.today(branchId);
-    const row = await this.db.dailyClosing.findUnique({
-      where: { branchId_closingDate: { branchId, closingDate: dateValue(day) } },
-      select: { status: true },
-    });
-    if (counterRefusal(row?.status)) throw storeClosed(day, operation);
+    const [row, opened] = await Promise.all([
+      this.db.dailyClosing.findUnique({
+        where: { branchId_closingDate: { branchId, closingDate: dateValue(day) } },
+        select: { status: true },
+      }),
+      this.isOpened(branchId, day),
+    ]);
+    const refusal = counterRefusal(row?.status, opened);
+    if (refusal) throw storeClosed(day, operation, refusal);
   }
 
   /**
@@ -1583,7 +1969,28 @@ export class ClosingService {
       SELECT status FROM daily_closings
        WHERE company_id = ${companyId} AND branch_id = ${args.branchId} AND closing_date = ${args.businessDate}
        FOR UPDATE`);
-    if (counterRefusal(row?.status)) throw storeClosed(args.businessDate, args.operation);
+    // A closed day is refused on the lock alone. Otherwise the day must have been opened (docs/63): an opening only
+    // ever arrives, never leaves, so a plain read is enough, and one committing now is seen by the retry.
+    const opened =
+      row?.status === 'locked' ||
+      (
+        await tx.$queryRaw<{ one: number }[]>(Prisma.sql`
+          SELECT 1 AS one FROM closing_events
+           WHERE company_id = ${companyId} AND branch_id = ${args.branchId} AND business_date = ${args.businessDate}
+             AND kind IN (${Prisma.join([...DOOR_OPENS])})
+           LIMIT 1`)
+      ).length > 0;
+    const refusal = counterRefusal(row?.status, opened);
+    if (refusal) throw storeClosed(args.businessDate, args.operation, refusal);
+  }
+
+  /** Whether anybody opened this business day — an explicit opening or a reopen, the door's own events. */
+  private async isOpened(branchId: Buffer, day: string): Promise<boolean> {
+    const found = await this.db.closingEvent.findFirst({
+      where: { branchId, businessDate: dateValue(day), kind: { in: [...DOOR_OPENS] as ClosingEventKind[] } },
+      select: { id: true },
+    });
+    return found !== null;
   }
 
   /**
@@ -1751,12 +2158,12 @@ export class ClosingService {
     }
     const today = await this.businessDay.today(branchId);
     const range = { gte: dateValue(from), lte: dateValue(to) };
-    const opening = await this.openingCashDetail(companyId, branchId, today);
-    const openingToday = opening.amount;
+    const drawer = await this.dayChannels(companyId, branchId, today);
+    const opening = drawer.opening;
 
     const todayDate = dateValue(today);
     const [todayChannels, periodChannels, sales, dated, owedAll, expenses, reversals] = await Promise.all([
-      this.expectedChannels(companyId, branchId, today, today, openingToday),
+      Promise.resolve(drawer.channels),
       this.expectedChannels(companyId, branchId, from, to),
       this.db.sale.aggregate({
         where: { branchId, isReversed: false, businessDate: range },
@@ -1812,7 +2219,12 @@ export class ClosingService {
     // The drawer's position is this same expected figure, anchored on the same counted close.
     // The accounts' positions are the company's, so only someone who may record them (the Owner) reads them.
     const accountsVisible = this.cls.get('permissions')?.has('money.anchor.record') ?? false;
-    const trackedMoney = await this.moneyAnchors.trackedMoney(branchId, today, { opening, expected: cash?.expected ?? 0 }, accountsVisible);
+    const trackedMoney = await this.moneyAnchors.trackedMoney(
+      branchId,
+      today,
+      { opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom) },
+      accountsVisible,
+    );
 
     return {
       from,
@@ -1888,8 +2300,9 @@ export class ClosingService {
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
       include: { channelCounts: { include: { countedBy: { select: { name: true } } } }, closedBy: { select: { name: true } } },
     });
-    const openingCash = await this.openingCash(companyId, branchId, day);
-    const channels = await this.expectedChannels(companyId, branchId, day, day, openingCash);
+    const drawer = await this.dayChannels(companyId, branchId, day);
+    const openingCash = drawer.opening.amount;
+    const channels = drawer.channels;
     const recorded = new Map<string, RecordedCount>(
       (closing?.channelCounts ?? []).map((c) => [
         keyOf({ channel: c.channel, accountId: c.receivingAccountId ? binToUuid(c.receivingAccountId) : null }),
@@ -1944,6 +2357,10 @@ export class ClosingService {
       stale: fresh.stale,
       expectedCash: round2(cashRow?.expected ?? 0),
       openingCash,
+      /** The day's own amount set when the shop opened, as the drawer's figure uses it (docs/63). */
+      cashSet: drawer.declaredToday ? cashSetOf(drawer.declaredToday, drawer.adjustment, described.timezone) : null,
+      /** What the opening step shows (docs/63): each method now, who decides, and where today's opening stands. */
+      openingMoney: day === today ? await this.openingStep(branchId, today, drawer) : null,
       /** Movement since the last cash count: today's expected minus what it was when counted. */
       sinceLastCount: savedCash?.counted != null ? round2((cashRow?.expected ?? 0) - num(savedCash.expected)) : null,
       lastCountedAt: closing?.countedAt ?? null,
@@ -2162,8 +2579,8 @@ export class ClosingService {
       throw new ConflictException(`Day ${day} is already closed for this branch`);
     }
 
-    const openingCash = await this.openingCash(companyId, branchId, day);
-    const channels = await this.expectedChannels(companyId, branchId, day, day, openingCash);
+    // The same figures the live view and the report show, the amount set when the shop opened included (docs/63).
+    const { channels } = await this.dayChannels(companyId, branchId, day);
     const target = channels.find(
       (c) => c.channel === dto.channel && (c.accountId ?? null) === (dto.accountId ?? null),
     );
@@ -2315,6 +2732,7 @@ export class ClosingService {
     fromDay: string,
     toDay: string,
     cashOpening = 0,
+    cashSetAdjustment = 0,
   ): Promise<ChannelRow[]> {
     const [movements, accounts] = await Promise.all([
       this.channelMovements(companyId, branchId, fromDay, toDay),
@@ -2332,6 +2750,7 @@ export class ClosingService {
         sortOrder: a.sortOrder,
       })),
       cashOpening,
+      cashSetAdjustment,
     );
   }
 
@@ -2343,27 +2762,82 @@ export class ClosingService {
    * one — the same movements the closing counts, over that range. A locked day
    * closed without a physical check anchors nothing: it is carried forward by its
    * recorded movement like an unclosed day. A shop that has never counted a
-   * closed drawer starts from zero; the first counted close anchors the chain.
+   * closed drawer starts from zero; the first counted close anchors the chain —
+   * or an amount a shop opened with, when that came later (docs/63).
    */
-  private async openingCash(companyId: Buffer, branchId: Buffer, day: string): Promise<number> {
-    return (await this.openingCashDetail(companyId, branchId, day)).amount;
+  private async openingCashDetail(companyId: Buffer, branchId: Buffer, day: string): Promise<OpeningCash> {
+    return (await this.openingChain(companyId, branchId, day)).opening;
   }
 
-  private async openingCashDetail(companyId: Buffer, branchId: Buffer, day: string): Promise<OpeningCash> {
+  /**
+   * The drawer at the start of a day, and the decision it is carried from when a shop's opening anchored it (docs/63).
+   * The chain starts from whichever came last: the latest close with its drawer counted, or an amount a shop opened
+   * with after that count — that amount, plus what its own day recorded after it, plus every whole day between.
+   */
+  private async openingChain(companyId: Buffer, branchId: Buffer, day: string): Promise<{ opening: OpeningCash; declared: DrawerDecision | null }> {
     const last = await this.db.dailyClosing.findFirst({
       where: { branchId, status: 'locked', countedCash: { not: null }, closingDate: { lt: dateValue(day) } },
       orderBy: { closingDate: 'desc' },
-      select: { closingDate: true, countedCash: true },
+      select: { closingDate: true, countedCash: true, closedAt: true, channelCounts: { where: { channel: 'cash' }, select: { countedAt: true } } },
     });
-    if (!last) return { amount: 0, anchorDate: null, anchorVerified: false, carriedDays: 0 };
+    const lastAt = last ? (last.channelCounts[0]?.countedAt ?? last.closedAt) : null;
+    const declared = await this.drawerDecisionBefore(branchId, day, lastAt);
+    if (declared) {
+      const to = shiftDate(day, -1);
+      const since = await this.expectedChannels(companyId, branchId, declared.businessDate, to);
+      const net = since.find((c) => c.channel === 'cash')?.expected ?? 0;
+      const carriedDays = Math.round((dateValue(to).getTime() - dateValue(declared.businessDate).getTime()) / 86_400_000);
+      return {
+        opening: { amount: openingFromSet(declared, net), anchorDate: declared.businessDate, anchorVerified: false, carriedDays, anchorKind: 'opening_set' },
+        declared,
+      };
+    }
+    if (!last) return { opening: { amount: 0, anchorDate: null, anchorVerified: false, carriedDays: 0, anchorKind: null }, declared: null };
     const lastDay = dateKey(last.closingDate);
     const from = shiftDate(lastDay, 1);
     const to = shiftDate(day, -1);
-    if (from > to) return { amount: round2(num(last.countedCash)), anchorDate: lastDay, anchorVerified: true, carriedDays: 0 };
+    if (from > to) {
+      return { opening: { amount: round2(num(last.countedCash)), anchorDate: lastDay, anchorVerified: true, carriedDays: 0, anchorKind: 'counted_close' }, declared: null };
+    }
     const between = await this.expectedChannels(companyId, branchId, from, to);
     const cash = between.find((c) => c.channel === 'cash');
     const carriedDays = Math.round((dateValue(to).getTime() - dateValue(from).getTime()) / 86_400_000) + 1;
-    return { amount: round2(num(last.countedCash) + (cash?.expected ?? 0)), anchorDate: lastDay, anchorVerified: true, carriedDays };
+    return {
+      opening: { amount: round2(num(last.countedCash) + (cash?.expected ?? 0)), anchorDate: lastDay, anchorVerified: true, carriedDays, anchorKind: 'counted_close' },
+      declared: null,
+    };
+  }
+
+  /**
+   * A day's channels as its figures stand (docs/63): the drawer carried from its opening chain, and moved by the
+   * latest amount a shop opened with on that very day — from that instant the drawer holds it plus what the day
+   * recorded after it.
+   */
+  private async dayChannels(companyId: Buffer, branchId: Buffer, day: string) {
+    const [chain, declaredToday] = await Promise.all([this.openingChain(companyId, branchId, day), this.drawerDecisionOn(branchId, day)]);
+    const adjustment = declaredToday ? setAdjustment(declaredToday, chain.opening.amount) : 0;
+    const channels = await this.expectedChannels(companyId, branchId, day, day, chain.opening.amount, adjustment);
+    return { opening: chain.opening, carriedFrom: chain.declared, declaredToday, adjustment, channels };
+  }
+
+  /** The latest decision that anchors the drawer on a day — the day's own figures start from it — or null. */
+  private async drawerDecisionOn(branchId: Buffer, day: string): Promise<DrawerDecision | null> {
+    const row = await this.db.openingDecision.findFirst({
+      where: { branchId, businessDate: dateValue(day), cashAmount: { not: null } },
+      orderBy: [{ at: 'desc' }, { createdAt: 'desc' }],
+      select: drawerDecisionSelect,
+    });
+    return row ? drawerDecisionOf(row) : null;
+  }
+
+  /** The latest decision that anchors the drawer before a day, after the count the chain would otherwise start from. */
+  private async drawerDecisionBefore(branchId: Buffer, day: string, after: Date | null): Promise<DrawerDecision | null> {
+    const row = await this.db.openingDecision.findFirst({
+      where: { branchId, businessDate: { lt: dateValue(day) }, cashAmount: { not: null }, ...(after ? { at: { gt: after } } : {}) },
+      orderBy: [{ at: 'desc' }, { createdAt: 'desc' }],
+      select: drawerDecisionSelect,
+    });
+    return row ? drawerDecisionOf(row) : null;
   }
 
   /**
