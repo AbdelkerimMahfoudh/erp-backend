@@ -325,6 +325,7 @@ model Company {
   financialCorrections           FinancialCorrection[]
   financialCorrectionLegs        FinancialCorrectionLeg[]
   moneyAnchors                   MoneyAnchor[]
+  openingDecisions               OpeningDecision[]
   returnRequests                 ReturnRequest[]
   returnAdjustments              ReturnAdjustment[]
   returnReversals                ReturnReversal[]
@@ -428,6 +429,7 @@ model Branch {
   closingDiscrepancies ClosingDiscrepancy[]
   closingEvents        ClosingEvent[]
   moneyAnchorsRecorded MoneyAnchor[]
+  openingDecisions     OpeningDecision[]
   employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests         DailyDigest[]
   notifications        Notification[]
@@ -543,6 +545,7 @@ model User {
   closingsReopened      DailyClosing[]         @relation("ClosingReopenedBy")
   closingEvents         ClosingEvent[]         @relation("ClosingEventActor")
   moneyAnchorsRecorded  MoneyAnchor[]          @relation("MoneyAnchorRecordedBy")
+  openingDecisions      OpeningDecision[]      @relation("OpeningDecisionRecordedBy")
   branchPricesSet       BranchVariantPrice[]   @relation("BranchPriceSetBy")
   unitPricesSet         UnitPriceOverride[]    @relation("UnitPriceSetBy")
   priceChanges          PriceChangeEvent[]     @relation("PriceChangeActor")
@@ -1992,6 +1995,8 @@ model ClosingEvent {
   branch  Branch        @relation(fields: [branchId], references: [id])
   closing DailyClosing? @relation(fields: [closingId], references: [id])
   actor   User?         @relation("ClosingEventActor", fields: [actorId], references: [id])
+
+  openingDecisions OpeningDecision[]
 
   @@unique([companyId, dedupeKey], map: "ux_closing_events_dedupe")
   @@index([branchId, businessDate, at], map: "ix_closing_events_day")
@@ -3450,6 +3455,64 @@ model MoneyAnchor {
   @@index([recordedById], map: "ix_money_anchors_recorded_by")
   @@index([recordedAtBranchId], map: "ix_money_anchors_branch")
   @@map("money_anchors")
+}
+
+enum OpeningDecisionKind {
+  opening
+  owner_review
+}
+
+enum OpeningDecisionChoice {
+  /// The drawer as the app tracks it.
+  keep
+  /// The Owner's amount, true from the decision's instant.
+  set
+  /// Opened by a permitted non-Owner with the tracked amounts; awaiting the Owner's review.
+  carried
+}
+
+/// The opening decision (0083, docs/63): what a shop's cash starts from when it opens or reopens,
+/// with its author and its instant, saved with the opening itself. A set amount is a position, never
+/// a sale or an expense: the drawer then holds it plus what the day records after `at`
+/// (`cashDayNet` is the day's recorded movement at that instant). The company's accounts carry
+/// forward and are never set here; `methods` records what each showed. Append-only.
+model OpeningDecision {
+  id                Bytes                 @id @db.Binary(16)
+  companyId         Bytes                 @map("company_id") @db.Binary(16)
+  branchId          Bytes                 @map("branch_id") @db.Binary(16)
+  businessDate      DateTime              @map("business_date") @db.Date
+  kind              OpeningDecisionKind
+  decision          OpeningDecisionChoice
+  closingEventId    Bytes?                @map("closing_event_id") @db.Binary(16)
+  reviewOfId        Bytes?                @unique(map: "ux_opening_decisions_review") @map("review_of_id") @db.Binary(16)
+  /// The server clock at confirmation, never typed.
+  at                DateTime              @db.DateTime(6)
+  cashKnown         Boolean               @map("cash_known")
+  /// The Daily closing's expected cash at `at`.
+  cashTracked       Decimal               @map("cash_tracked") @db.Decimal(14, 2)
+  /// set: the Owner's amount; keep / carried: the tracked amount, NULL when it was unknown.
+  cashAmount        Decimal?              @map("cash_amount") @db.Decimal(14, 2)
+  /// The business day's recorded net cash movement at `at`.
+  cashDayNet        Decimal               @map("cash_day_net") @db.Decimal(14, 2)
+  methods           Json                  @db.Json
+  total             Decimal?              @db.Decimal(14, 2)
+  recordedById      Bytes                 @map("recorded_by_id") @db.Binary(16)
+  clientUuid        Bytes                 @map("client_uuid") @db.Binary(16)
+  clientRequestHash String                @map("client_request_hash") @db.Char(64)
+  createdAt         DateTime              @default(now()) @map("created_at") @db.DateTime(6)
+
+  company      Company          @relation(fields: [companyId], references: [id], map: "fk_opening_decisions_company")
+  branch       Branch           @relation(fields: [branchId], references: [id], map: "fk_opening_decisions_branch")
+  closingEvent ClosingEvent?    @relation(fields: [closingEventId], references: [id], map: "fk_opening_decisions_event")
+  reviewOf     OpeningDecision? @relation("OpeningReview", fields: [reviewOfId], references: [id], map: "fk_opening_decisions_review_of")
+  review       OpeningDecision? @relation("OpeningReview")
+  recordedBy   User             @relation("OpeningDecisionRecordedBy", fields: [recordedById], references: [id], map: "fk_opening_decisions_recorded_by")
+
+  @@unique([companyId, clientUuid], map: "ux_opening_decisions_client_uuid")
+  @@index([branchId, businessDate, at], map: "ix_opening_decisions_branch_day")
+  @@index([closingEventId], map: "ix_opening_decisions_event")
+  @@index([recordedById], map: "ix_opening_decisions_recorded_by")
+  @@map("opening_decisions")
 }
 
 /// What a goal measures (0047). Each one maps to a figure `daily_rollups`
