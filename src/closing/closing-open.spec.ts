@@ -106,7 +106,7 @@ describe('Open the boutique before 06:00 (docs/56)', () => {
   });
 
   it('the Owner’s start_new at 03:41 starts the 26th and opens it: two events, two audit rows, the choice on record', async () => {
-    const { svc, db, audit, describe } = build([before6, startedEarly], { mayStartEarly: true });
+    const { svc, db, audit, describe } = build([before6], { mayStartEarly: true });
     const view = await svc.open({ mode: 'start_new' });
     const [early, opened] = created(db);
     expect(early).toMatchObject({ kind: 'day_started_early', businessDate: dateValue('2026-09-26'), actorId: userId, closingId: null });
@@ -115,9 +115,60 @@ describe('Open the boutique before 06:00 (docs/56)', () => {
     expect(opened.payload).toMatchObject({ nth: 1, choice: 'start_new', calendarDate: '2026-09-26', localTime: expect.stringMatching(/^\d\d:\d\d$/) });
     expect(audit.record.mock.calls.map((c) => c[0].reason)).toEqual(['day_started_early', 'opening_money', 'opened']);
     expect(audit.record.mock.calls.find((c) => c[0].reason === 'opened')![0].after).toMatchObject({ businessDate: '2026-09-26', choice: 'start_new' });
-    // The business day was described again after the start, and the new day is what is opened and returned.
-    expect(describe).toHaveBeenCalledTimes(2);
+    // The new day is computed, not read back from a start already written: it is written with the opening.
+    expect(describe).toHaveBeenCalledTimes(1);
     expect(view).toEqual({ view: '2026-09-26' });
+  });
+
+  describe('the early start is part of the opening (the user’s brief of 2026-09-29)', () => {
+    const KEY29 = '019fb000-0000-7000-8000-000000000029';
+    /** The transaction's own client: every write it receives is undone if the transaction fails. */
+    function inTransaction(built: ReturnType<typeof build>, failDecision = false) {
+      const tx = {
+        closingEvent: { create: jest.fn(async (_args: { data: Record<string, any> }) => ({})) },
+        openingDecision: {
+          create: jest.fn(async (_args: unknown) => {
+            if (failDecision) throw new Error('connection lost');
+            return {};
+          }),
+        },
+      };
+      built.db.$transaction.mockImplementation(async (fn: (t: unknown) => Promise<unknown>) => fn(tx));
+      return tx;
+    }
+
+    it('the next day started early, its opening and its money are written in one transaction — nothing outside it', async () => {
+      const built = build([before6], { mayStartEarly: true, owner: true });
+      const tx = inTransaction(built);
+      await built.svc.open({ mode: 'start_new', openingMoney: { clientUuid: KEY29, decision: 'set', cashAmount: 250 } });
+      expect(built.db.closingEvent.create).not.toHaveBeenCalled();
+      expect(tx.closingEvent.create.mock.calls.map((c) => c[0].data.kind)).toEqual(['day_started_early', 'opened']);
+      expect(tx.closingEvent.create.mock.calls.map((c) => c[0].data.businessDate)).toEqual([dateValue('2026-09-26'), dateValue('2026-09-26')]);
+      // One instant for both: the day is started and opened by the same act.
+      const [early, opened] = tx.closingEvent.create.mock.calls.map((c) => c[0].data);
+      expect(early.at).toBe(opened.at);
+      expect(tx.openingDecision.create).toHaveBeenCalledTimes(1);
+      expect(built.audit.recordTx.mock.calls.map((c) => (c[1] as { reason: string }).reason)).toEqual(['day_started_early', 'opening_money', 'opened']);
+    });
+
+    it('a failed save before 06:00 moves nothing: the day is not started early, the store stays closed', async () => {
+      const built = build([before6], { mayStartEarly: true, owner: true });
+      inTransaction(built, true);
+      await expect(built.svc.open({ mode: 'start_new', openingMoney: { clientUuid: KEY29, decision: 'set', cashAmount: 250 } })).rejects.toThrow('connection lost');
+      // Nothing was written outside the transaction that failed — so its rollback leaves the 25th the business day.
+      expect(built.db.closingEvent.create).not.toHaveBeenCalled();
+      expect(built.audit.record.mock.calls.length).toBe(built.audit.recordTx.mock.calls.length);
+    });
+
+    it('a refused amounts step before 06:00 writes nothing at all', async () => {
+      const built = build([before6], { mayStartEarly: true, owner: true });
+      const tx = inTransaction(built);
+      const refusal = await built.svc.open({ mode: 'start_new', openingMoney: { clientUuid: KEY29, decision: 'set', cashAmount: -1 } }).catch((e: unknown) => e);
+      expect(refusal).toBeInstanceOf(BadRequestException);
+      expect(built.db.closingEvent.create).not.toHaveBeenCalled();
+      expect(tx.closingEvent.create).not.toHaveBeenCalled();
+      expect(built.db.$transaction).not.toHaveBeenCalled();
+    });
   });
 
   it('continue at 03:41 opens the 25th — the previous business day — and records that it was chosen', async () => {

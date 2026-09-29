@@ -1783,39 +1783,39 @@ export class ClosingService {
   /**
    * The Owner's early start (docs/50 §3.2): a `day_started_early` event for the
    * date after `day`, from which every new record carries that date. Nothing
-   * already recorded moves. Idempotent — a retry or a second tap finds the
-   * event already there, and the intent is satisfied.
+   * already recorded moves. Written in the opening's own transaction (the
+   * user's brief of 2026-09-29): a refused or failed opening leaves the
+   * business day where it was. Two at once collide on the event's dedupe key,
+   * and the loser's whole opening rolls back.
    */
-  private async startNextDayEarly(args: { companyId: Buffer; branchId: Buffer; userId: Buffer | null; now: Date; day: string }): Promise<string> {
+  private async startNextDayEarlyTx(
+    tx: TenantTx,
+    args: { companyId: Buffer; branchId: Buffer; userId: Buffer | null; now: Date; day: string },
+  ): Promise<void> {
     const { companyId, branchId, userId, now, day } = args;
     const next = shiftDate(day, 1);
-    try {
-      await this.db.closingEvent.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId,
-          branchId,
-          businessDate: dateValue(next),
-          closingId: null,
-          kind: 'day_started_early',
-          at: now,
-          actorId: userId,
-          dedupeKey: `early:${branchId.toString('hex')}:${next}`,
-          payload: { previousDate: day, startedAt: now.toISOString() } as Prisma.InputJsonValue,
-        },
-      });
-      await this.audit.record({
-        entityType: 'BusinessDay',
-        entityId: branchId,
-        action: 'create',
-        reason: 'day_started_early',
-        after: { businessDate: next, previousDate: day, at: now.toISOString() },
+    await tx.closingEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId,
         branchId,
-      });
-    } catch (e) {
-      if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
-    }
-    return next;
+        businessDate: dateValue(next),
+        closingId: null,
+        kind: 'day_started_early',
+        at: now,
+        actorId: userId,
+        dedupeKey: `early:${branchId.toString('hex')}:${next}`,
+        payload: { previousDate: day, startedAt: now.toISOString() } as Prisma.InputJsonValue,
+      },
+    });
+    await this.audit.recordTx(tx, {
+      entityType: 'BusinessDay',
+      entityId: branchId,
+      action: 'create',
+      reason: 'day_started_early',
+      after: { businessDate: next, previousDate: day, at: now.toISOString() },
+      branchId,
+    });
   }
 
   /**
@@ -1826,9 +1826,11 @@ export class ClosingService {
    *
    * Before 06:00 the business date is still the previous calendar day, and the
    * opening says which day was chosen (docs/56): `continue` opens that day —
-   * the default, and all anybody but the Owner can do; `start_new` first starts
-   * the next business date (the Owner's early start, same event as a reopen's)
-   * and then opens it. Both leave every record already written where it is.
+   * the default, and all anybody but the Owner can do; `start_new` starts the
+   * next business date (the Owner's early start, same event as a reopen's) and
+   * opens it — one transaction with the opening and its money, so a refused or
+   * failed amounts step never moves the business day. Both leave every record
+   * already written where it is.
    */
   async open(dto: OpenDayDto) {
     const companyId = this.tenant.companyId();
@@ -1842,22 +1844,24 @@ export class ClosingService {
     const replay = await this.openingReplay(request);
     if (replay) return this.openView(replay);
 
-    let described = await this.businessDay.describe(branchId, now);
+    const described = await this.businessDay.describe(branchId, now);
     const mode = dto.mode ?? 'continue';
     /** The store's calendar date has moved on but its business date has not: the moment a choice exists. */
     const beforeDayStart = described.localDate !== described.businessDate;
+    /** The day this opening leaves behind by starting the next one early — written with the opening, or not at all. */
+    let leaving: string | null = null;
     if (mode === 'start_new') {
       this.requireEarlyStartAuthority();
       if (!described.startedEarly) {
         // The day named, if any, is the one being left behind.
-        const leaving = this.requireDate(dto.date, described.businessDate);
+        leaving = this.requireDate(dto.date, described.businessDate);
         if (leaving !== described.businessDate) throw new BadRequestException('Only the current business day can be ended early');
         this.assertBeforeDayStart(described.canStartEarly);
-        await this.startNextDayEarly({ companyId, branchId, userId, now, day: leaving });
-        described = await this.businessDay.describe(branchId, now);
       }
     }
-    const day = mode === 'start_new' ? described.businessDate : this.requireDate(dto.date, described.businessDate);
+    /** The business date once this opening is recorded: the next one when it starts it early. */
+    const today = leaving ? shiftDate(leaving, 1) : described.businessDate;
+    const day = mode === 'start_new' ? today : this.requireDate(dto.date, described.businessDate);
     /** Recorded only when the person actually chose between two days, so a plain opening never claims a choice. */
     const choice = mode === 'start_new' || beforeDayStart ? mode : null;
     const dayDate = dateValue(day);
@@ -1868,7 +1872,7 @@ export class ClosingService {
       }),
       this.db.closingEvent.findMany({ where: { branchId, businessDate: dayDate }, orderBy: { at: 'asc' }, select: { kind: true } }),
     ]);
-    const openVerdict = canOpen(row ? { status: row.status, businessDate: day } : null, doorState(events), day, described.businessDate);
+    const openVerdict = canOpen(row ? { status: row.status, businessDate: day } : null, doorState(events), day, today);
     if (!openVerdict.ok) {
       throw new ConflictException({
         code: `open_${openVerdict.why}`,
@@ -1884,11 +1888,13 @@ export class ClosingService {
     }
     const n = events.filter((e) => e.kind === 'opened').length + 1;
     const eventId = newUuidV7Bin();
-    // Read before the transaction: until the day is opened the counter takes no money.
+    // Read before the transaction: until the day is opened the counter takes no money — and a day about to be started
+    // early has nothing recorded on it yet, whatever the transaction then decides.
     const position = await this.drawerNow(companyId, branchId, day);
     const cashAmount = decidedCash(verdict, position);
     try {
       await this.db.$transaction(async (tx) => {
+        if (leaving) await this.startNextDayEarlyTx(tx, { companyId, branchId, userId, now, day: leaving });
         await tx.closingEvent.create({
           data: {
             id: eventId,
