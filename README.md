@@ -71,6 +71,32 @@ npm test               # jest unit suite
 - Default `PORT=3010` in `.env` (3000 is taken by another local dev app on this machine — change freely).
 - Seeded login: `owner` / `OWNER_SEED_PASSWORD`.
 
+## A QA dataset (a disposable database, never live)
+`npm run qa:seed` provisions ten test boutiques — `boutique1@test.com` … `boutique10@test.com`, each its own company with
+one branch, one Owner and 100 items (80 phones with IMEIs, 20 barcoded accessories) — and the platform administrator
+`admin@test.com`, all eleven with the one password in `QA_PASSWORD`. It writes through the real API, which it starts
+privately on loopback, and refuses any database not named `prisma_qa` / `prisma_qa_<suffix>`, a production or staging
+environment, a server whose `sql_mode` has `ONLY_FULL_GROUP_BY` (live runs with `sql_mode=''`), unapplied migrations,
+and — on its first run — a database that already holds businesses. Details: `scripts/qa-boutiques.ts`.
+```bash
+# 1. The database, as the migrator (its prisma\_% grant covers it) or as root
+mysql -h 127.0.0.1 -P 3306 -u phonestore_migrator -p \
+  -e "CREATE DATABASE prisma_qa CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+# 2. Its schema
+DATABASE_URL="mysql://phonestore_migrator:<password>@127.0.0.1:3306/prisma_qa" npx prisma migrate deploy
+# 3. The dataset
+export QA_DATABASE_URL="mysql://phonestore_migrator:<password>@127.0.0.1:3306/prisma_qa"
+export QA_PASSWORD='<the QA-only password>'
+npm run qa:seed                  # checks and reports; writes nothing
+npm run qa:seed -- --apply       # provisions; a rerun adds nothing and finishes a run that stopped
+npm run qa:seed -- --verify      # 95 checks, through the API and in the database
+```
+- PowerShell: `$env:QA_DATABASE_URL = "…"; $env:QA_PASSWORD = "…"` instead of `export`.
+- Without `QA_DATABASE_URL`, the server and credentials come from `.env`'s `DATABASE_URL` and the database from `QA_DB`
+  (default `prisma_qa`).
+- A rerun gives a tester-changed fixture password back its QA value; sold or moved stock is not restored — for a
+  fresh dataset, drop and recreate the database. `--verify` checks the dataset as seeded.
+
 ## Notes
 - **Ids**: UUIDv7 stored as `BINARY(16)`, generated app-side; the API always emits/accepts canonical UUID strings.
 - **Money**: `DECIMAL(14,2)`. **Timestamps**: `DATETIME(6)` UTC.
