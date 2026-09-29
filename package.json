@@ -21,7 +21,8 @@
     "migrate:deploy": "prisma migrate deploy",
     "migrate:reset": "prisma migrate reset",
     "db:studio": "prisma studio",
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "ts-node prisma/seed.ts",
+    "qa:seed": "ts-node scripts/qa-boutiques.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
