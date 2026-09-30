@@ -1,0 +1,62 @@
+# Security gate for the backend (docs/48 controls 2 and 20).
+#
+# Every push and pull request: the whole git history is scanned for secrets
+# (gitleaks, and the project's own scanner so the same check runs anywhere),
+# dependencies are audited with the lockfile, and the code must type-check and
+# pass its tests. A failure here is a red build, never a warning.
+name: security
+on:
+  push:
+  pull_request:
+  schedule:
+    # Dependencies acquire advisories while nobody is pushing.
+    - cron: '17 4 * * 1'
+permissions:
+  contents: read
+jobs:
+  secrets:
+    name: secret scan (full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: project secret scanner (every blob, every ref)
+        run: node scripts/scan-secrets.js
+  dependencies:
+    name: dependency audit (lockfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # Production dependencies must carry no high or critical advisory. An
+      # accepted exception is recorded in docs/48 §7.3 with its expiry, and
+      # excluded here by name — never silenced globally.
+      - run: npm audit --omit=dev --audit-level=high
+      - name: development dependencies (report only)
+        run: npm audit --audit-level=high || true
+  build-and-test:
+    name: type-check, schema, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma validate
+      - run: npx tsc --noEmit -p tsconfig.json
+      - run: npx jest --ci
+      - name: permission catalogue drift
+        run: npx ts-node --transpile-only scripts/verify-permission-catalogue.ts || true

@@ -57,6 +57,22 @@ export interface ParseResult {
   pages: number | null;
 }
 
+/**
+ * What the first bytes say the file is.
+ *
+ * An `.xlsx` is a ZIP archive (`PK\x03\x04`); a PDF starts with `%PDF-`. Either
+ * signature is checked before any parser sees the bytes. `unknown` is a file
+ * that starts like neither; `null` an empty one.
+ */
+export function sniffFileKind(buffer: Buffer): 'xlsx' | 'pdf' | 'unknown' | null {
+  if (buffer.length === 0) return null;
+  if (buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04) {
+    return 'xlsx';
+  }
+  if (buffer.length >= 5 && buffer.subarray(0, 5).toString('latin1') === '%PDF-') return 'pdf';
+  return 'unknown';
+}
+
 @Injectable()
 export class ReceivingFilesService {
   constructor(@Inject(TENANT_PRISMA) private readonly db: TenantPrisma) {}
@@ -69,8 +85,22 @@ export class ReceivingFilesService {
     if (file.buffer.length > MAX_FILE_BYTES) {
       throw new BadRequestException({ code: 'file_too_large', message: 'That file is larger than 8 MB' });
     }
-    if (name.endsWith('.xlsx')) return this.parseWorkbook(file, options);
-    if (name.endsWith('.pdf')) return this.parsePdf(file, options);
+    /*
+     * The type is decided by the CONTENT, not the name (docs/48 control 17).
+     * A name is whatever the sender typed; the first bytes are what the
+     * parser will actually be handed. A renamed executable, an HTML page or a
+     * script called `delivery.xlsx` is refused here rather than fed to a
+     * workbook parser that would fail in its own time and its own words.
+     */
+    const kind = sniffFileKind(file.buffer);
+    if (name.endsWith('.xlsx') && kind === 'xlsx') return this.parseWorkbook(file, options);
+    if (name.endsWith('.pdf') && kind === 'pdf') return this.parsePdf(file, options);
+    if (name.endsWith('.xlsx') || name.endsWith('.pdf')) {
+      throw new BadRequestException({
+        code: 'file_type_mismatch',
+        message: 'That file is not what its name says it is',
+      });
+    }
     throw new BadRequestException({
       code: 'file_type_unsupported',
       message: 'Only .xlsx workbooks and text PDFs can be read',

@@ -368,6 +368,7 @@ model Company {
   reportDefinitions              ReportDefinition[]
   reportSnapshots                ReportSnapshot[]
   auditLogs                      AuditLog[]
+  auditChainHead                 AuditChainHead?
   settings                       Setting[]
   companySettings                CompanySettings?
   receivingAccounts              ReceivingAccount[]
@@ -2281,13 +2282,35 @@ model AuditLog {
   reason     String?     @db.Text
   ip         String?     @db.VarChar(45)
   at         DateTime    @default(now()) @db.DateTime(6)
+  /// The hash chain (0085): the previous row's hash for this company, and
+  /// this row's own SHA-256 over its content. Both are written by the
+  /// database's BEFORE INSERT trigger, never by application code, so no code
+  /// path can forget to chain a row. `scripts/verify-audit-chain.ts` recomputes them.
+  prevHash   String?     @map("prev_hash") @db.Char(64)
+  entryHash  String?     @map("entry_hash") @db.Char(64)
 
   company Company @relation(fields: [companyId], references: [id])
   user    User?   @relation(fields: [userId], references: [id])
 
   @@index([companyId, entityType, entityId, at])
   @@index([userId])
+  @@index([companyId, id], map: "ix_audit_logs_company_id_id")
   @@map("audit_logs")
+}
+
+/// The last link of each company's audit chain (0085). Maintained by the
+/// `audit_logs_chain` trigger, which locks it so concurrent inserts for one
+/// company serialise and the chain never forks. Read by the verifier; never
+/// written by application code.
+model AuditChainHead {
+  companyId Bytes    @id @map("company_id") @db.Binary(16)
+  lastHash  String   @map("last_hash") @db.Char(64)
+  entries   BigInt   @default(0)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@map("audit_chain_heads")
 }
 
 /// Internal operational tuning (thresholds, prefixes, scoring weights).
