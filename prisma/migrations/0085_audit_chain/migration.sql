@@ -108,15 +108,33 @@ DROP PROCEDURE `audit_chain_seal`;
 
 DROP TRIGGER IF EXISTS `audit_logs_chain`;
 
+-- Every company gets its head row now, so the trigger's "no head yet" branch
+-- runs only for a company created after this migration.
+INSERT IGNORE INTO `audit_chain_heads` (`company_id`, `last_hash`, `entries`)
+  SELECT `id`, '', 0 FROM `companies`;
+
 CREATE TRIGGER `audit_logs_chain` BEFORE INSERT ON `audit_logs`
 FOR EACH ROW
 BEGIN
   DECLARE prev CHAR(64) DEFAULT '';
+  DECLARE found INT DEFAULT 1;
+  DECLARE CONTINUE HANDLER FOR NOT FOUND SET found = 0;
   IF NEW.`at` IS NULL THEN
     SET NEW.`at` = CURRENT_TIMESTAMP(6);
   END IF;
-  INSERT IGNORE INTO `audit_chain_heads` (`company_id`, `last_hash`, `entries`) VALUES (NEW.`company_id`, '', 0);
+  /*
+   * The exclusive lock FIRST. An earlier version did `INSERT IGNORE` before
+   * this read: the duplicate-key path of INSERT IGNORE takes a SHARED lock on
+   * the existing head row, and two concurrent inserts for one company then
+   * both held S and both wanted X — a deadlock, seen 5 times in 30 parallel
+   * writes. Reading FOR UPDATE straight away takes X once, and the second
+   * writer simply waits.
+   */
   SELECT `last_hash` INTO prev FROM `audit_chain_heads` WHERE `company_id` = NEW.`company_id` FOR UPDATE;
+  IF found = 0 THEN
+    SET prev = '';
+    INSERT INTO `audit_chain_heads` (`company_id`, `last_hash`, `entries`) VALUES (NEW.`company_id`, '', 0);
+  END IF;
   SET NEW.`prev_hash` = prev;
   SET NEW.`entry_hash` = SHA2(CONCAT_WS('|', prev, HEX(NEW.`company_id`), IFNULL(HEX(NEW.`branch_id`), ''), IFNULL(HEX(NEW.`user_id`), ''),
                                         NEW.`entity_type`, IFNULL(HEX(NEW.`entity_id`), ''), NEW.`action`,
