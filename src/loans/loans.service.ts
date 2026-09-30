@@ -10,7 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import {
   assertMayStartDealing,
@@ -167,6 +167,8 @@ export class LoansService {
   }
 
   async get(id: string) {
+    // A malformed id names nothing — the same 404, never a crash.
+    if (!isUuid(id)) throw new NotFoundException('No such loan');
     const me = this.tenant.companyId();
     const loan = await this.prisma.loan.findFirst({
       where: { id: uuidToBin(id), ...this.visible(me) },
@@ -594,6 +596,7 @@ export class LoansService {
   // --- helpers --------------------------------------------------------------
 
   private async mine(id: string) {
+    if (!isUuid(id)) throw new NotFoundException('No such loan');
     const me = this.tenant.companyId();
     const loan = await this.prisma.loan.findFirst({
       where: { id: uuidToBin(id), ...this.visible(me) },

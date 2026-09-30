@@ -326,6 +326,8 @@ export class CatalogService {
   async findOrSuggest(params: { productId?: string; barcode?: string }): Promise<ProductSuggestion | null> {
     let product: Product | null = null;
     if (params.productId) {
+      // A malformed id matches nothing, like an unknown one — never a crash.
+      if (!isUuid(params.productId)) return null;
       product = await this.db.product.findFirst({ where: { id: uuidToBin(params.productId), deletedAt: null } });
     } else if (params.barcode) {
       product = await this.db.product.findFirst({ where: { barcode: params.barcode, deletedAt: null } });
