@@ -687,6 +687,24 @@ export class SalesService {
        */
       if (e instanceof WarningsPending) return e.response;
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        /**
+         * Two identical submissions racing — the same client key sent twice at
+         * once, as a phone retrying on a bad connection does. Both passed the
+         * replay check above before either committed, and the unique key on
+         * (company, client_uuid) rejected the loser. That loser is not a
+         * failure: its sale exists, made by its twin. It is answered with that
+         * sale, exactly as a replay is — the treatment purchases and transfers
+         * already give this race. Only a key that made nothing is a real
+         * conflict: a unit in this sale was taken by another sale at the same
+         * moment.
+         */
+        if (dto.clientUuid) {
+          const twin = await this.db.sale.findFirst({ where: { companyId, clientUuid: uuidToBin(dto.clientUuid) } });
+          if (twin) {
+            await this.assertReplayMatches(twin, dto);
+            return this.toResponse(twin);
+          }
+        }
         throw new ConflictException('A unit in this sale was just sold — please refresh and retry');
       }
       throw e;
