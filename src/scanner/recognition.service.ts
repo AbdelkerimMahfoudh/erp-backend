@@ -36,20 +36,21 @@ export interface LearningEvent {
 }
 
 /**
- * The company's recognition memory. `resolve()` reads the learned mapping;
- * `learn()` records confirmations/corrections and maintains the statistics that
- * a pluggable ConfidenceScorer consumes (0010).
+ * The company's recognition memory. `resolve()` reads the confirmed mapping;
+ * `learn()` records what receipts, sales and scans said about a code and
+ * maintains the statistics that a pluggable ConfidenceScorer consumes (0010).
  *
  * Guarantees:
  *  - Confidence is delegated to CONFIDENCE_SCORER — never hardcoded here.
  *  - Every learn emits an append-only audit event → observations never lost.
- *  - A correction re-points the aggregate but preserves the prior mapping in
- *    the event; it never hard-deletes.
+ *  - Learning is evidence, never authority: it proposes, agrees or disagrees,
+ *    and never confirms a mapping or moves one to another product. That is
+ *    the mapping ladder's decision (Milestone C, `TacMappingService`).
  */
 /** The subset of Prisma the learning path touches — request client or a tx. */
 type LearningTxClient = {
   productRecognition: {
-    findFirst: (args: unknown) => Promise<any>;
+    findMany: (args: unknown) => Promise<any[]>;
     create: (args: unknown) => Promise<any>;
     update: (args: unknown) => Promise<any>;
   };
@@ -100,7 +101,26 @@ export class RecognitionService {
   }
 
   /**
-   * Record a confirmed code -> product association.
+   * Record what a receipt (or a sale, scan or manual choice) said about a code.
+   *
+   * Learning is EVIDENCE, never authority (Milestone C, docs/21). Which product
+   * a code stands for is decided through the mapping ladder — an Employee
+   * proposes, an Owner or Manager confirms, a replaced mapping is superseded
+   * under a version — so this method never confirms anything and never moves
+   * a mapping:
+   *
+   *  - a code the company holds no mapping for gets a PROPOSAL, which the
+   *    ladder shows for review and never auto-selects;
+   *  - a sighting with the product the mapping already names counts as
+   *    agreement;
+   *  - a sighting with another product counts as DISAGREEMENT, and the mapping
+   *    keeps its product. It used to be re-pointed in place: one delivery
+   *    received under the wrong product silently changed what every later
+   *    scan of that model suggested, with no `catalog.manage`, no version and
+   *    no superseded row.
+   *
+   * Every event is appended to the audit trail, so an observation is never
+   * lost, and the counts stay what CONFIDENCE_SCORER reads.
    *
    * `opts` exists for the outbox worker, which runs OUTSIDE a request: there is
    * no CLS tenant context to read a company from, and the learning mutation
@@ -114,11 +134,19 @@ export class RecognitionService {
     const db = (opts?.tx ?? this.db) as LearningTxClient;
     const companyId = opts?.companyId ?? this.tenant.companyId();
     const now = new Date();
-    const existing = await db.productRecognition.findFirst({
-      where: { codeType: ev.codeType, code: ev.code, companyId },
-    });
 
-    // New mapping — first time this code is taught.
+    // The mapping that stands for this code: the confirmed one, else the open
+    // proposal. A superseded row is history, not a mapping.
+    const standing = await db.productRecognition.findMany({
+      where: { codeType: ev.codeType, code: ev.code, companyId, status: { in: ['confirmed', 'proposed'] } },
+      orderBy: { id: 'desc' },
+    });
+    const existing = standing.find((r) => r.status === 'confirmed') ?? standing[0] ?? null;
+
+    // Nothing held — propose. Never `confirmed`: that takes somebody with
+    // `catalog.manage`, and the database refuses a confirmed row without a
+    // `confirmed_at` (ck_prodrec_confirmed_fields) — which is what every
+    // receipt's learning used to fail on, eight times, then give up.
     if (!existing) {
       const id = newUuidV7Bin();
       await db.productRecognition.create({
@@ -128,27 +156,30 @@ export class RecognitionService {
           codeType: ev.codeType,
           code: ev.code,
           productId: ev.productId,
+          status: 'proposed',
+          evidenceSource: ev.source,
           timesSeen: 1,
-          confirmations: 1,
+          confirmations: 0,
           corrections: 0,
           lastSeenAt: now,
-          lastConfirmedAt: now,
           sourceStats: this.bumpSource(null, ev.source),
         },
       });
-      await this.recordEvent(id, `learned:${ev.source}`, null, ev.productId, ev.supplierId);
+      await this.recordEvent(id, `proposed:${ev.source}`, null, ev.productId, ev.supplierId);
       return;
     }
 
-    // Reinforcement — same code confirms the same product.
+    // Agreement — the code seen again with the product it stands for. Under a
+    // CONFIRMED mapping that is one more confirmation of it; a proposal only
+    // accumulates sightings, so its count is never mistaken for authority.
     if (existing.productId.equals(ev.productId)) {
+      const confirmed = existing.status === 'confirmed';
       await db.productRecognition.update({
         where: { id: existing.id },
         data: {
           timesSeen: { increment: 1 },
-          confirmations: { increment: 1 },
           lastSeenAt: now,
-          lastConfirmedAt: now,
+          ...(confirmed ? { confirmations: { increment: 1 }, lastConfirmedAt: now } : {}),
           sourceStats: this.bumpSource(existing.sourceStats, ev.source),
         },
       });
@@ -156,20 +187,17 @@ export class RecognitionService {
       return;
     }
 
-    // Correction — same code now maps to a different product. The aggregate
-    // follows the newest decision (confirmations reset for the new mapping;
-    // corrections is cumulative — a "confusing code" signal). The prior mapping
-    // survives as an append-only event.
-    await this.recordEvent(existing.id, `correction:${ev.source}`, existing.productId, ev.productId, ev.supplierId);
+    // Disagreement — the code seen with another product. The mapping stands;
+    // the disagreement is counted (the "confusing code" signal the scorer
+    // reads) and kept as an event naming what was seen, so a reviewer can act
+    // on it. Changing the product is the ladder's decision, made on purpose.
+    await this.recordEvent(existing.id, `disagreement:${ev.source}`, existing.productId, existing.productId, ev.supplierId, ev.productId);
     await db.productRecognition.update({
       where: { id: existing.id },
       data: {
-        productId: ev.productId,
         timesSeen: { increment: 1 },
-        confirmations: 1,
         corrections: { increment: 1 },
         lastSeenAt: now,
-        lastConfirmedAt: now,
         lastCorrectedAt: now,
         sourceStats: this.bumpSource(existing.sourceStats, ev.source),
       },
@@ -191,6 +219,8 @@ export class RecognitionService {
     beforeProductId: Buffer | null,
     afterProductId: Buffer,
     supplierId?: Buffer | null,
+    /** A product the code was seen with that the mapping does NOT follow. */
+    observedProductId?: Buffer,
   ): Promise<void> {
     return this.audit.record({
       entityType: 'ProductRecognition',
@@ -200,6 +230,7 @@ export class RecognitionService {
       before: beforeProductId ? { productId: binToUuid(beforeProductId) } : undefined,
       after: {
         productId: binToUuid(afterProductId),
+        ...(observedProductId ? { observedProductId: binToUuid(observedProductId) } : {}),
         ...(supplierId ? { supplierId: binToUuid(supplierId) } : {}),
       },
     });
