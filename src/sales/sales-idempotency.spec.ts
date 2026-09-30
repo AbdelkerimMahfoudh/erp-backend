@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { SalesService } from './sales.service';
 import { SalesController } from './sales.controller';
 import { REQUIRE_PERMISSIONS_KEY } from '../rbac/require-permissions.decorator';
@@ -95,6 +96,54 @@ describe('a different sale under the same key is refused', () => {
   it('a product line instead of the unit', () => conflicts({ ...base, lines: [{ productId: binToUuid(PRODUCT), quantity: 2, price: 899 }] }));
   it('different money at the counter', () => conflicts({ ...base, payments: [{ method: 'cash', amount: 500 }] }));
   it('a discount that was not there', () => conflicts({ ...base, saleDiscount: 50 }));
+});
+
+describe('two identical submissions racing', () => {
+  /**
+   * The unique key on (company, client_uuid) rejects the loser inside its
+   * transaction — after the replay check, which both passed while neither
+   * had committed. A phone retrying on a bad connection does exactly this.
+   */
+  const raced = () =>
+    new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the constraint: `ux_sales_company_client_uuid`', {
+      code: 'P2002',
+      clientVersion: 'test',
+    });
+
+  it('the loser answers with the sale its twin made, exactly as a replay does', async () => {
+    const { service, db } = harness(null);
+    // Nothing existed when this request looked; by the time it wrote, its twin had committed.
+    db.sale.findFirst.mockResolvedValueOnce(null).mockResolvedValue(sale);
+    db.$transaction = jest.fn(async () => { throw raced(); });
+
+    const r = (await service.createSale(base as never)) as { invoiceNo: string; id: string };
+
+    expect(r.invoiceNo).toBe('00042');
+    expect(r.id).toBe(binToUuid(SALE));
+  });
+
+  it('a twin under the same key that sold something else is still refused', async () => {
+    const { service, db } = harness(null);
+    db.sale.findFirst.mockResolvedValueOnce(null).mockResolvedValue(sale);
+    db.$transaction = jest.fn(async () => { throw raced(); });
+
+    let caught: unknown;
+    try {
+      await service.createSale({ ...base, lines: [{ identifier: IMEI, price: 1899 }], payments: [{ method: 'cash', amount: 1899 }] } as never);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ConflictException);
+    expect((caught as ConflictException).getResponse()).toMatchObject({ code: 'idempotency_conflict' });
+  });
+
+  it('a key that made nothing is a real conflict: a unit taken by another sale at the same moment', async () => {
+    const { service, db } = harness(null);
+    db.$transaction = jest.fn(async () => { throw raced(); });
+
+    await expect(service.createSale(base as never)).rejects.toBeInstanceOf(ConflictException);
+    await expect(service.createSale(base as never)).rejects.toMatchObject({ message: expect.stringMatching(/just sold/) });
+  });
 });
 
 describe('asking what a key recorded', () => {
