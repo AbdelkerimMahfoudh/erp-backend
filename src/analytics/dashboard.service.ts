@@ -16,7 +16,7 @@ import { PartnerRankingService } from '../consignment/partner-ranking.service';
 import { AnalyticsService } from './analytics.service';
 import { barsSumTo, dailyBars, groupedBars, hourlyBars, type Bar } from './home-series';
 import { periodFigures, sellerFigures } from './period-figures';
-import { productMovement } from './movement';
+import { productMovement, stockedSinceByProduct } from './movement';
 import { compare, precedingPeriod } from './accounting-rules';
 
 const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ? 0 : Number(d));
@@ -351,7 +351,9 @@ export class DashboardService {
   // --- components -----------------------------------------------------------
 
   /**
-   * Products with stock but no recent sale (older than `dead_stock_days`).
+   * Products with stock on hand for longer than `dead_stock_days` and no sale
+   * that stands inside that window. Stock younger than the window is new,
+   * whatever its sales: a delivery received this week is not dead stock.
    *
    * `limit` is the DASHBOARD's limit, not the report's. Ten is what fits on a
    * card; an export of the ten worst is not a dead-stock report, it is the
@@ -363,14 +365,18 @@ export class DashboardService {
     const cutoff = new Date(Date.now() - days * 86_400_000);
 
     // Last sold: the latest sale that stands — a cancelled sale is not movement (docs/54 D39).
-    const [valuations, movement] = await Promise.all([
+    const [valuations, movement, stockedSince] = await Promise.all([
       this.db.inventoryValuation.findMany({ where: branchId ? { branchId } : {} }),
       productMovement(this.db, this.tenant.companyId(), branchId ?? null, dayKey(this.windowStart(30))),
+      stockedSinceByProduct(this.db, this.tenant.companyId(), branchId ?? null),
     ]);
     const lastSoldByHex = new Map([...movement.entries()].map(([hex, m]) => [hex, m.lastSoldAt]));
 
     const dead = valuations.filter((r) => {
-      const last = lastSoldByHex.get(r.productId.toString('hex'));
+      const hex = r.productId.toString('hex');
+      const since = stockedSince.get(hex);
+      if (!since || since >= cutoff) return false;
+      const last = lastSoldByHex.get(hex);
       return !last || last < cutoff;
     });
     const labels = await this.productLabels(dead.map((d) => d.productId));
