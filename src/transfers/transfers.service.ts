@@ -17,7 +17,7 @@ import { InvoiceNumberService } from '../common/numbering/invoice-number.service
 import { PricingService } from '../pricing/pricing.service';
 import { SpineEventBus } from '../common/events/spine-event-bus';
 import { TransferNotifier } from './transfer-notifications';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { assertTransferTransition } from './transfer-state-machine';
 import { TransferStatus } from '@prisma/client';
 import { computeDiscrepancy, DiscrepancyReport } from './discrepancy.util';
@@ -1278,6 +1278,8 @@ export class TransfersService {
    * refusal. No cost, price or margin is returned at all.
    */
   async getById(idStr: string) {
+    // A malformed id names nothing — the same 404, never a crash.
+    if (!isUuid(idStr)) throw new NotFoundException('Transfer not found');
     const activeBranchId = this.tenant.requireBranchId();
     const transfer = await this.db.stockTransfer.findUnique({
       where: { id: uuidToBin(idStr) },
@@ -1409,6 +1411,7 @@ export class TransfersService {
   // --- helpers --------------------------------------------------------------
 
   private async load(idStr: string): Promise<StockTransfer> {
+    if (!isUuid(idStr)) throw new NotFoundException('Transfer not found');
     const transfer = await this.db.stockTransfer.findUnique({ where: { id: uuidToBin(idStr) } });
     if (!transfer) throw new NotFoundException('Transfer not found');
     return transfer;

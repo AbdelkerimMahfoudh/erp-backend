@@ -8,7 +8,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import {
   isVisibleInSearch,
   parseQuery,
@@ -762,6 +762,8 @@ export class ConnectionsService {
    * other.
    */
   private async mine(id: string) {
+    // A malformed id names nothing — the same 404, never a crash.
+    if (!isUuid(id)) throw new NotFoundException('No such connection');
     const me = this.tenant.companyId();
     const conn = await this.prisma.storeConnection.findFirst({
       where: {
