@@ -5,7 +5,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { dayKey } from '../common/utils/date.util';
 import { combineHealth, ComponentScore, HealthResult } from './health-score.util';
-import { productMovement } from './movement';
+import { productMovement, stockedSinceByProduct } from './movement';
 
 const num = (d: Prisma.Decimal | number | bigint | null): number => (d == null ? 0 : Number(d));
 const clamp01 = (n: number): number => (n < 0 ? 0 : n > 1 ? 1 : n);
@@ -40,11 +40,13 @@ export class HealthService {
     const todayDate = new Date(`${dayKey(now)}T00:00:00.000Z`);
     const deadDays = await this.numberSetting('dead_stock_days', 60);
 
-    // The stock snapshot and how products are moving (sales that stand, read now — docs/54 D39), fetched once.
-    const [valuations, movement, activeProducts] = await Promise.all([
+    // The stock snapshot, how products are moving (sales that stand, read now — docs/54 D39) and how long
+    // each has been on the shelf, fetched once.
+    const [valuations, movement, activeProducts, stockedSince] = await Promise.all([
       this.db.inventoryValuation.findMany({ where: branchWhere }),
       productMovement(this.db, this.tenant.companyId(), branchId ?? null, dayKey(new Date(now.getTime() - 29 * 86_400_000))),
       this.db.product.count({ where: { deletedAt: null } }),
+      stockedSinceByProduct(this.db, this.tenant.companyId(), branchId ?? null),
     ]);
     const velocity = [...movement.values()];
     const lastSoldByHex = new Map([...movement.entries()].map(([hex, m]) => [hex, m.lastSoldAt]));
@@ -53,7 +55,7 @@ export class HealthService {
       await this.profitTrend(branchWhere, todayDate),
       await this.cashFlow(branchWhere, todayDate),
       await this.overdueDebts(branchWhere, todayDate),
-      this.deadStock(valuations, lastSoldByHex, deadDays, now),
+      this.deadStock(valuations, lastSoldByHex, stockedSince, deadDays, now),
       this.velocityScore(valuations, velocity),
     ];
 
@@ -97,10 +99,11 @@ export class HealthService {
     return { key: 'overdue_debts', score: clamp01(1 - num(overdueAgg._sum.balanceDue) / total) };
   }
 
-  /** 1 − dead-stock value / total inventory value. */
+  /** 1 − dead-stock value / total inventory value. Dead as the dashboard counts it: on the shelf longer than the window, no sale inside it. */
   private deadStock(
     valuations: { productId: Buffer; inventoryValue: Prisma.Decimal }[],
     lastSoldByHex: Map<string, Date | null>,
+    stockedSince: Map<string, Date>,
     deadDays: number,
     now: Date,
   ): ComponentScore {
@@ -110,8 +113,10 @@ export class HealthService {
     for (const v of valuations) {
       const value = num(v.inventoryValue);
       total += value;
-      const last = lastSoldByHex.get(v.productId.toString('hex'));
-      if (!last || last < cutoff) dead += value;
+      const hex = v.productId.toString('hex');
+      const since = stockedSince.get(hex);
+      const last = lastSoldByHex.get(hex);
+      if (since && since < cutoff && (!last || last < cutoff)) dead += value;
     }
     if (total <= 0) return { key: 'dead_stock', score: NEUTRAL, insufficientData: true };
     return { key: 'dead_stock', score: clamp01(1 - dead / total) };
