@@ -299,9 +299,13 @@ model Company {
   timezone     String   @default("UTC") @db.VarChar(64)
   settingsJson Json     @map("settings") @db.Json
   isActive     Boolean  @default(true) @map("is_active")
+  /// When the Owner closed the business through the account-deletion flow
+  /// (0084, docs/64). Set exactly once; a closed company never reopens.
+  closedAt     DateTime? @map("closed_at") @db.DateTime(6)
   createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt    DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
+  accountDeletionRequests        AccountDeletionRequest[]
   branches                       Branch[]
   users                          User[]
   ownerInvitations               OwnerInvitation[]
@@ -497,6 +501,7 @@ model User {
   paymentsRecorded         Payment[]                @relation("PaymentRecordedBy")
   consignmentLedgerEntries ConsignmentLedgerEntry[]
   ownerInvitations         OwnerInvitation[]
+  accountDeletionRequests  AccountDeletionRequest[]
 
   /// Loan roles. Named, because who proposed and who decided must stay
   /// distinguishable even when an owner does both.
@@ -2721,6 +2726,31 @@ enum OtpPurpose {
   /// interchangeable, and a ticket minted to open a subscription page could be
   /// spent to complete somebody's registration.
   registration_continuation
+
+  /// The single-use code that confirms an account deletion (0084, docs/64).
+  /// Its own purpose so a code issued to verify a phone or a device can never
+  /// confirm a deletion, and the deletion executor can insist on it.
+  account_deletion
+}
+
+/// What an account-deletion request deletes (0084, docs/64).
+enum AccountDeletionKind {
+  /// One person's login. The business continues.
+  personal_login
+  /// The business and every login in it. Only the last active Owner can ask.
+  company_closure
+}
+
+/// How far a deletion request has got. It leaves `awaiting_code` exactly once,
+/// by a conditional update, so two confirmations of the same code produce one
+/// deletion.
+enum AccountDeletionStatus {
+  awaiting_code
+  confirmed
+  processing
+  completed
+  cancelled
+  failed
 }
 
 /// Terminal and non-terminal states of a challenge. A challenge leaves `pending`
@@ -2826,12 +2856,68 @@ model OtpChallenge {
   user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   device  UserDevice? @relation(fields: [deviceId], references: [id])
 
+  deletionRequests AccountDeletionRequest[]
+
   @@unique([activeKey])
   @@unique([companyId, idempotencyKey])
   @@index([companyId])
   @@index([userId, purpose, status])
   @@index([expiresAt])
   @@map("otp_challenges")
+}
+
+/// A request to delete a login or close a business (0084, docs/64).
+///
+/// The record the deletion executor insists on: it refuses to de-identify
+/// anything unless a row here is `confirmed` by a verified `account_deletion`
+/// challenge for the same person. No administrator tool, background job or
+/// other route has a way to reach that state without the code.
+///
+/// `activeKey` is the user id while the request is open and NULL once it is
+/// terminal, so the UNIQUE index makes "one open request per person" a
+/// database fact — the same pattern `OtpChallenge.activeKey` uses.
+model AccountDeletionRequest {
+  id        Bytes @id @db.Binary(16)
+  companyId Bytes @map("company_id") @db.Binary(16)
+  userId    Bytes @map("user_id") @db.Binary(16)
+
+  kind   AccountDeletionKind
+  status AccountDeletionStatus @default(awaiting_code)
+
+  /// The live deletion challenge. Replaced on resend; re-read by the executor.
+  challengeId       Bytes?  @map("challenge_id") @db.Binary(16)
+  /// Where the code went, masked. Never the full number.
+  destinationMasked String  @map("destination_masked") @db.VarChar(24)
+  language          String  @default("en") @db.VarChar(5)
+
+  activeKey  Bytes?  @map("active_key") @db.Binary(16)
+  clientUuid Bytes?  @map("client_uuid") @db.Binary(16)
+  requestIp  String? @map("request_ip") @db.VarChar(45)
+
+  reauthenticatedAt   DateTime  @map("reauthenticated_at") @db.DateTime(6)
+  codeSentAt          DateTime? @map("code_sent_at") @db.DateTime(6)
+  confirmedAt         DateTime? @map("confirmed_at") @db.DateTime(6)
+  processingStartedAt DateTime? @map("processing_started_at") @db.DateTime(6)
+  completedAt         DateTime? @map("completed_at") @db.DateTime(6)
+  cancelledAt         DateTime? @map("cancelled_at") @db.DateTime(6)
+  failureDetail       String?   @map("failure_detail") @db.VarChar(200)
+  /// Counts of what was kept and why. Never a name, a number or an amount.
+  retainedSummary     Json?     @map("retained_summary") @db.Json
+
+  version   Int      @default(0) @db.UnsignedInt
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company   Company       @relation(fields: [companyId], references: [id])
+  user      User          @relation(fields: [userId], references: [id])
+  challenge OtpChallenge? @relation(fields: [challengeId], references: [id])
+
+  @@unique([activeKey], map: "ux_account_deletion_active")
+  @@unique([companyId, clientUuid], map: "ux_account_deletion_client_uuid")
+  @@index([companyId, createdAt], map: "ix_account_deletion_company")
+  @@index([userId, createdAt], map: "ix_account_deletion_user")
+  @@index([challengeId], map: "ix_account_deletion_challenge")
+  @@map("account_deletion_requests")
 }
 
 /// A short-lived, opaque ticket proving "this password was correct, but the

@@ -1,7 +1,7 @@
 // ===========================================================================
 // Seed — idempotent. Runs as the MIGRATOR user. Two parts:
 //   1. Reference data (ALL envs): the 17 permissions.
-//   2. Demo data (dev only, SEED_DEMO != "false"): one company + branch + owner,
+//   2. Demo data (opt-in: SEED_DEMO="true", never in production): one company + branch + owner,
 //      the 5 roles + role->permission matrix, and default settings.
 // No application/business logic here — this only populates the database.
 //
@@ -14,6 +14,7 @@ import { Prisma, PrismaClient, RoleKey, TrackingType } from '@prisma/client';
 import { generatePersonalId } from '../src/auth/identifier';
 import * as argon2 from 'argon2';
 import { newUuidV7Bin, uuidToBin, binToUuid } from './lib/uuid';
+import { demoSeedAllowed } from './lib/demo-seed-policy';
 import { generateStoreCode } from '../src/common/utils/store-code.util';
 import { provisionDefaultRoles } from '../src/rbac/role-provisioning';
 import {
@@ -175,10 +176,13 @@ async function seedDemo() {
 async function main() {
   await seedPermissions();
 
-  if (process.env.SEED_DEMO === 'false') {
-    console.log('SEED_DEMO=false → skipping demo data (production-safe).');
-  } else {
+  const demo = demoSeedAllowed();
+  if (demo === 'yes') {
     await seedDemo();
+  } else if (demo === 'refused_production') {
+    console.log('Production runtime → demo data refused regardless of SEED_DEMO.');
+  } else {
+    console.log('SEED_DEMO is not "true" → skipping demo data (opt-in).');
   }
   console.log('Seed complete.');
 }

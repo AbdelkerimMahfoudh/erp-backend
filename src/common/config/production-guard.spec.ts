@@ -292,3 +292,77 @@ describe('who the client is behind a proxy', () => {
     expect(main).not.toMatch(/'trust proxy',\s*true/);
   });
 });
+
+describe('the legacy provisioning key and the demo seed (docs/48 R5, R7)', () => {
+  it('refuses a static provisioning key in production', () => {
+    const problems = productionConfigProblems({ ...SAFE, PLATFORM_ADMIN_KEY: 'a-sixteen-char-key-or-longer' });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('PLATFORM_ADMIN_KEY');
+  });
+
+  it('still lets staging keep the key for its tooling', () => {
+    expect(
+      productionConfigProblems({ ...SAFE, APP_ENV: 'staging', PLATFORM_ADMIN_KEY: 'a-sixteen-char-key-or-longer' }),
+    ).toEqual([]);
+  });
+
+  it('refuses SEED_DEMO=true in production', () => {
+    const problems = productionConfigProblems({ ...SAFE, SEED_DEMO: 'true' });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('SEED_DEMO');
+  });
+
+  it('accepts an unset or false SEED_DEMO', () => {
+    expect(productionConfigProblems({ ...SAFE, SEED_DEMO: 'false' })).toEqual([]);
+    expect(productionConfigProblems({ ...SAFE, SEED_DEMO: undefined })).toEqual([]);
+  });
+});
+
+describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () => {
+  it('refuses the development channel', () => {
+    expect(productionConfigProblems({ ...SAFE, WHATSAPP_CHANNEL: 'development-log' })[0]).toContain('development-log');
+  });
+
+  it('refuses cloud-api without credentials, template names and a pepper', () => {
+    const problems = productionConfigProblems({ ...SAFE, WHATSAPP_CHANNEL: 'cloud-api' });
+    expect(problems.join('\n')).toMatch(/WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_ACCESS_TOKEN/);
+    expect(problems.join('\n')).toMatch(/WHATSAPP_TEMPLATE_AUTH_OTP and\s+WHATSAPP_TEMPLATE_ACCOUNT_DELETION/);
+    expect(problems.join('\n')).toMatch(/OTP_PEPPER/);
+  });
+
+  it('accepts a complete cloud-api configuration', () => {
+    expect(
+      productionConfigProblems({
+        ...SAFE,
+        WHATSAPP_CHANNEL: 'cloud-api',
+        WHATSAPP_API_BASE_URL: 'https://graph.facebook.com',
+        WHATSAPP_PHONE_NUMBER_ID: '1234567890',
+        WHATSAPP_ACCESS_TOKEN: 'EAAB-real-token',
+        WHATSAPP_TEMPLATE_AUTH_OTP: 'erp_auth_code',
+        WHATSAPP_TEMPLATE_ACCOUNT_DELETION: 'erp_delete_code',
+        OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+      }),
+    ).toEqual([]);
+  });
+
+  it('refuses a plain-http provider address', () => {
+    const problems = productionConfigProblems({
+      ...SAFE,
+      WHATSAPP_CHANNEL: 'cloud-api',
+      WHATSAPP_API_BASE_URL: 'http://graph.example.test',
+      WHATSAPP_PHONE_NUMBER_ID: '1',
+      WHATSAPP_ACCESS_TOKEN: 't',
+      WHATSAPP_TEMPLATE_AUTH_OTP: 'a',
+      WHATSAPP_TEMPLATE_ACCOUNT_DELETION: 'b',
+      OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+    });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('https://');
+  });
+
+  it('requires the webhook secret and verify token together', () => {
+    expect(productionConfigProblems({ ...SAFE, WHATSAPP_APP_SECRET: 's' })).toHaveLength(1);
+    expect(productionConfigProblems({ ...SAFE, WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'v' })).toHaveLength(1);
+    expect(productionConfigProblems({ ...SAFE, WHATSAPP_APP_SECRET: 's', WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'v' })).toEqual([]);
+  });
+});

@@ -33,6 +33,10 @@ interface ErrorBody {
   acknowledgement?: unknown;
   businessDate?: unknown;
   closedReason?: unknown;
+  attemptsRemaining?: unknown;
+  resendAvailableAt?: unknown;
+  delivery?: unknown;
+  challengeId?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -78,6 +82,17 @@ const DETAIL_KEYS = [
   /* `store_closed`: a closed day (`closed`) or one nobody opened yet (`not_opened`, docs/63) — the screen offers the
    * reopen or the opening. Its own name, not `reason`, for the reason given above. */
   'closedReason',
+  /*
+   * Codes and account deletion (docs/64). `invalid_code` says how many attempts
+   * are left, `too_many_codes` says when a resend is allowed, and a refused
+   * delivery names the failure class (`delivery`) and the challenge it belongs
+   * to — none of which is a secret, and all of which the screen needs to say
+   * something truer than "try again".
+   */
+  'attemptsRemaining',
+  'resendAvailableAt',
+  'delivery',
+  'challengeId',
 ] as const;
 
 /**

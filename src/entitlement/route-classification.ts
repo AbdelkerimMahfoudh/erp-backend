@@ -58,6 +58,20 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
     'notifications/:id/read',
     'Sets a flag on the reader own notification. Audited in J as changing no business truth, which is why it is also the one queueable operation needing no client uuid',
   ),
+  /*
+   * The person's own account (docs/64). Deleting an account and proving the
+   * WhatsApp number it needs are rights the person keeps whatever the shop's
+   * subscription says: a pending, suspended or lapsed business still has people
+   * who may leave it, and the App Store requires that the way out is in the
+   * app. None of these writes business truth — they remove a person, or prove
+   * a contact.
+   */
+  allow('POST', 'account/deletion/request', 'Asking to delete your own account is a right the subscription cannot withhold; it creates no business record'),
+  allow('POST', 'account/deletion/resend', 'A second deletion code for an open request; same argument as the request itself'),
+  allow('POST', 'account/deletion/confirm', 'The code that completes a deletion; the one write that must never be blocked by a lapsed or pending subscription'),
+  allow('POST', 'account/deletion/cancel', 'Withdrawing a deletion request changes nothing but the request'),
+  allow('POST', 'account/whatsapp/verify/start', 'Proving the number a deletion code can be sent to; a pending shop must be able to do this before it is approved'),
+  allow('POST', 'account/whatsapp/verify/confirm', 'Completes the number proof; writes one contact on the caller own row and nothing else'),
 ] as const;
 
 const key = (method: string, path: string): string =>
@@ -132,6 +146,14 @@ export const ALWAYS_READABLE: readonly string[] = [
    * money, and reading it pays nothing.
    */
   'platform/payment-instructions',
+  /*
+   * The person's own account page and the state of their deletion request
+   * (docs/64). Where somebody goes to find their sign-in identifier, verify
+   * their number and see whether a deletion is pending — none of it business
+   * data, and all of it needed in exactly the states that close everything else.
+   */
+  'account',
+  'account/deletion',
 ] as const;
 
 export function isAlwaysReadable(path: string): boolean {

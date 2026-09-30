@@ -26,6 +26,8 @@ export const envValidationSchema = Joi.object({
   THROTTLE_TTL_SECONDS: Joi.number().integer().min(1).default(60),
   THROTTLE_LIMIT: Joi.number().integer().min(1).default(120),
   AUTH_THROTTLE_LIMIT: Joi.number().integer().min(1).default(10),
+  /** Per-client limit per minute on the code-issuing account routes (docs/64). Raised only for test harnesses. */
+  ACCOUNT_THROTTLE_LIMIT: Joi.number().integer().min(1).max(100000).default(5),
 
   // Logging.
   LOG_LEVEL: Joi.string()

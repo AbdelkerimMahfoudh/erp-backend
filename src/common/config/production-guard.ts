@@ -49,6 +49,9 @@ export interface ProductionGuardEnv {
   WHATSAPP_APP_SECRET?: string;
   WHATSAPP_WEBHOOK_VERIFY_TOKEN?: string;
   OTP_PEPPER?: string;
+  APP_ENV?: string;
+  PLATFORM_ADMIN_KEY?: string;
+  SEED_DEMO?: string;
 }
 
 /** A `.env` value that means "yes", matching `cookieSecure()`. */
@@ -196,6 +199,24 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
     problems.push(
       'WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN must be set together (the delivery webhook), or neither.',
     );
+  }
+
+  /*
+   * The legacy static-key provisioning route (docs/48 risk R5). The route
+   * itself refuses in production; a key configured there is a copied
+   * staging `.env`, and a static secret that grants subscription changes
+   * with no person behind it must not exist on a production host at all.
+   */
+  if ((env.APP_ENV ?? '').toLowerCase() !== 'staging' && env.PLATFORM_ADMIN_KEY?.trim()) {
+    problems.push(
+      'PLATFORM_ADMIN_KEY is set. The static-key provisioning route is closed in production; ' +
+        'use the platform administrator API and remove the key.',
+    );
+  }
+
+  // Demo data is opt-in everywhere and refused here regardless (docs/48 risk R7).
+  if (truthy(env.SEED_DEMO)) {
+    problems.push('SEED_DEMO is true. No demo company, demo owner or fixture password may exist in production.');
   }
 
   /*

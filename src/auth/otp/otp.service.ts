@@ -10,7 +10,25 @@ import {
   DeliveryResult,
   DeliveryFailureReason,
 } from '../../messaging/whatsapp-channel';
-import { AUTH_OTP_TEMPLATE, validateTemplateVariables, assertLanguageSupported } from '../../messaging/templates';
+import {
+  ACCOUNT_DELETION_TEMPLATE,
+  AUTH_OTP_TEMPLATE,
+  MessageLanguage,
+  TemplateDefinition,
+  validateTemplateVariables,
+  assertLanguageSupported,
+} from '../../messaging/templates';
+
+/**
+ * Which approved message carries the code for a purpose (docs/64 §4).
+ *
+ * A deletion code must say what it is for and that confirming is
+ * irreversible, which the authentication template cannot; every other purpose
+ * is a sign-in or verification code and uses the authentication template.
+ */
+export function templateForPurpose(purpose: OtpPurpose): TemplateDefinition {
+  return purpose === OtpPurpose.account_deletion ? ACCOUNT_DELETION_TEMPLATE : AUTH_OTP_TEMPLATE;
+}
 import {
   codeMatches,
   generateOtpCode,
@@ -128,7 +146,7 @@ export class OtpService {
     destination: string;
     deviceId?: Buffer | null;
     candidatePhone?: string | null;
-    language?: 'en' | 'ar';
+    language?: MessageLanguage;
     idempotencyKey?: string | null;
   }): Promise<RequestOutcome> {
     const pepper = this.config.otpPepper;
@@ -196,7 +214,13 @@ export class OtpService {
       destination: maskPhone(params.destination),
     }, 'OTP challenge requested');
 
-    const delivered = await this.deliver(created.id, code, params.destination, params.language ?? 'en');
+    const delivered = await this.deliver(
+      created.id,
+      code,
+      params.destination,
+      params.language ?? 'en',
+      templateForPurpose(params.purpose),
+    );
     const fresh = await this.prisma.otpChallenge.findUnique({ where: { id: created.id } });
     return { ok: true, challenge: this.toView(fresh!) };
   }
@@ -213,10 +237,11 @@ export class OtpService {
     challengeId: Buffer,
     code: string,
     destination: string,
-    language: 'en' | 'ar',
+    language: MessageLanguage,
+    template: TemplateDefinition,
   ): Promise<boolean> {
-    assertLanguageSupported(AUTH_OTP_TEMPLATE, language);
-    const variables = validateTemplateVariables(AUTH_OTP_TEMPLATE, {
+    assertLanguageSupported(template, language);
+    const variables = validateTemplateVariables(template, {
       code,
       ttlMinutes: String(Math.round(this.config.otpTtlSeconds / 60)),
     });
@@ -225,7 +250,7 @@ export class OtpService {
     try {
       result = await this.channel.send({
         to: destination,
-        template: AUTH_OTP_TEMPLATE.key,
+        template: template.key,
         language,
         variables,
         idempotencyKey: binToUuid(challengeId),
@@ -399,7 +424,7 @@ export class OtpService {
     companyId: Buffer;
     userId: Buffer;
     challengeId: Buffer;
-    language?: 'en' | 'ar';
+    language?: MessageLanguage;
   }): Promise<RequestOutcome> {
     const challenge = await this.prisma.otpChallenge.findUnique({ where: { id: params.challengeId } });
     if (

@@ -53,6 +53,7 @@ import { ImportsModule } from './imports/imports.module';
 import { ConsignmentModule } from './consignment/consignment.module';
 import { LoansModule } from './loans/loans.module';
 import { BusinessDayModule } from './common/business-day/business-day.module';
+import { AccountModule } from './account/account.module';
 
 @Module({
   imports: [
@@ -176,6 +177,7 @@ import { BusinessDayModule } from './common/business-day/business-day.module';
     LoansModule,
     SettingsModule,
     MessagingModule,
+    AccountModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

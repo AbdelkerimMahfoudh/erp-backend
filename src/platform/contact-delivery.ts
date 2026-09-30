@@ -178,7 +178,8 @@ export class WhatsAppContactDeliveryProvider extends ContactDeliveryProvider {
     if (result.status !== 'accepted') {
       throw new ServiceUnavailableException({
         code: 'delivery_failed',
-        reason: result.reason,
+        // The failure class, under the name the exception filter passes through.
+        delivery: result.reason,
         message: 'The verification code could not be sent. Please try again in a moment.',
       });
     }

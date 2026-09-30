@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Headers,
   Inject,
+  NotFoundException,
   Post,
 } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
@@ -14,7 +15,16 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AppConfigService } from '../common/config/app-config.service';
 import { Public } from '../common/decorators/public.decorator';
 import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { PlatformAdminService } from '../platform/platform-admin.service';
 import { CLOCK, type Clock } from './clock';
+
+/** Production, by either label. Staging runs with NODE_ENV=production and APP_ENV=staging and keeps the route. */
+export function isProductionRuntime(env: NodeJS.ProcessEnv = process.env): boolean {
+  const appEnv = (env.APP_ENV ?? '').toLowerCase();
+  if (appEnv === 'production') return true;
+  if (appEnv === 'staging') return false;
+  return (env.NODE_ENV ?? '').toLowerCase() === 'production';
+}
 
 /**
  * Platform provisioning (Milestone K).
@@ -80,12 +90,24 @@ export class ProvisioningController {
   ) {}
 
   private assertPlatform(key: string | undefined): void {
+    /*
+     * Closed in production, whatever is configured (docs/48 risk R5).
+     *
+     * This surface predates the platform administrator realm: one static key,
+     * no person behind it, no step-up, no session to revoke. The administrator
+     * API does everything it did with an audited actor, so in production this
+     * route does not exist. It stays available to development and staging
+     * tooling, and the production guard refuses to boot with a key configured.
+     */
+    if (isProductionRuntime()) {
+      throw new NotFoundException();
+    }
     const expected = process.env.PLATFORM_ADMIN_KEY;
     // An unset secret means the surface is closed, never that it is open.
     if (!expected || expected.length < 16) {
       throw new ForbiddenException('Provisioning is not configured on this server');
     }
-    if (!key || key !== expected) {
+    if (!key || !PlatformAdminService.safeEqual(key, expected)) {
       throw new ForbiddenException('Not a platform operator');
     }
   }

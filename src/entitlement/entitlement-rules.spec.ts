@@ -285,6 +285,12 @@ describe('route classification fails closed', () => {
      * entry has to be argued for here as well as written there.
      */
     expect(ALWAYS_ALLOWED.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+      'POST account/deletion/cancel',
+      'POST account/deletion/confirm',
+      'POST account/deletion/request',
+      'POST account/deletion/resend',
+      'POST account/whatsapp/verify/confirm',
+      'POST account/whatsapp/verify/start',
       'POST auth/login',
       'POST auth/logout',
       'POST auth/logout-all',
@@ -292,6 +298,28 @@ describe('route classification fails closed', () => {
       'POST notifications/:id/read',
       'POST platform/portal-handoff',
     ]);
+  });
+
+  it('a person may leave, whatever the shop owes (docs/64)', () => {
+    /*
+     * The App Store requires that the way out is in the app, and the product
+     * decision is that a pending, suspended or lapsed subscription never
+     * traps a person: deleting their own account, and proving the WhatsApp
+     * number the deletion code needs, survive every state.
+     */
+    for (const path of [
+      'account/deletion/request',
+      'account/deletion/resend',
+      'account/deletion/confirm',
+      'account/deletion/cancel',
+      'account/whatsapp/verify/start',
+      'account/whatsapp/verify/confirm',
+    ]) {
+      expect(isAllowedWhenExpired('POST', path)).toBe(true);
+    }
+    // But nothing under `account/` that is not listed — a future route is blocked by default.
+    expect(isAllowedWhenExpired('POST', 'account/anything-else')).toBe(false);
+    expect(isAllowedWhenExpired('DELETE', 'account')).toBe(false);
   });
 
   it('no OPERATIONAL route survives a lapsed subscription', () => {
@@ -335,6 +363,8 @@ describe('route classification fails closed', () => {
 describe('what a pending or suspended shop may still read', () => {
   it('the readable list stays exactly this short', () => {
     expect([...ALWAYS_READABLE].sort()).toEqual([
+      'account',
+      'account/deletion',
       'auth/logout',
       'auth/me',
       'auth/refresh',
@@ -370,7 +400,7 @@ describe('what a pending or suspended shop may still read', () => {
 
   it('names only account routes, never a business one', () => {
     for (const path of ALWAYS_READABLE) {
-      const accountish = /^(entitlement|health|auth\/|platform\/(my-subscription|payment-instructions))/;
+      const accountish = /^(entitlement|health|auth\/|account(\/deletion)?$|platform\/(my-subscription|payment-instructions))/;
       expect([path, accountish.test(path)]).toEqual([path, true]);
     }
   });

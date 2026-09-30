@@ -139,7 +139,7 @@ describe('the WhatsApp contact provider', () => {
 
     await expect(
       provider.send({ channel: 'phone', destination: '+22231234567', code: '123456', language: 'en' }),
-    ).rejects.toMatchObject({ response: { code: 'delivery_failed', reason: 'temporary' } });
+    ).rejects.toMatchObject({ response: { code: 'delivery_failed', delivery: 'temporary' } });
   });
 
   it('has no email provider and says so rather than pretending', async () => {
