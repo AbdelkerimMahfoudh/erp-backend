@@ -1,4 +1,14 @@
-import { codeMayBeReturned, outboxAllowed } from './contact-delivery';
+import { ServiceUnavailableException } from '@nestjs/common';
+import {
+  codeMayBeReturned,
+  outboxAllowed,
+  OutboxDeliveryProvider,
+  UnconfiguredDeliveryProvider,
+  WhatsAppContactDeliveryProvider,
+} from './contact-delivery';
+import { selectContactDelivery } from './platform.module';
+import { DevelopmentLogWhatsAppChannel, DisabledWhatsAppChannel, TestWhatsAppChannel } from '../messaging/channels';
+import { AUTH_OTP_TEMPLATE } from '../messaging/templates';
 
 /**
  * Which environment may use the outbox, and which may see a code.
@@ -72,5 +82,73 @@ describe('a code may be returned in a response only in development', () => {
     for (const e of envs) {
       if (codeMayBeReturned(e as never)) expect(outboxAllowed(e as never)).toBe(true);
     }
+  });
+});
+
+describe('which provider actually sends', () => {
+  const unconfigured = new UnconfiguredDeliveryProvider();
+  const outbox = new OutboxDeliveryProvider();
+  const whatsapp = (channel: TestWhatsAppChannel | DisabledWhatsAppChannel | DevelopmentLogWhatsAppChannel) =>
+    new WhatsAppContactDeliveryProvider(channel, unconfigured);
+
+  it('a real channel wins, wherever the outbox is allowed', () => {
+    const channel = new TestWhatsAppChannel();
+    const wa = whatsapp(channel);
+    expect(selectContactDelivery(channel, wa, outbox, unconfigured, true)).toBe(wa);
+    expect(selectContactDelivery(channel, wa, outbox, unconfigured, false)).toBe(wa);
+  });
+
+  it('a disabled channel falls back to the outbox only where that is allowed', () => {
+    const channel = new DisabledWhatsAppChannel();
+    const wa = whatsapp(channel);
+    expect(selectContactDelivery(channel, wa, outbox, unconfigured, true)).toBe(outbox);
+    expect(selectContactDelivery(channel, wa, outbox, unconfigured, false)).toBe(unconfigured);
+  });
+
+  it('the development-log channel is not treated as a real provider', () => {
+    // It prints codes to a sink; the outbox already does that more safely.
+    const channel = new DevelopmentLogWhatsAppChannel();
+    const wa = whatsapp(channel);
+    expect(selectContactDelivery(channel, wa, outbox, unconfigured, true)).toBe(outbox);
+    expect(selectContactDelivery(channel, wa, outbox, unconfigured, false)).toBe(unconfigured);
+  });
+});
+
+describe('the WhatsApp contact provider', () => {
+  const unconfigured = new UnconfiguredDeliveryProvider();
+
+  it('sends a phone code through the approved authentication template', async () => {
+    const channel = new TestWhatsAppChannel();
+    const provider = new WhatsAppContactDeliveryProvider(channel, unconfigured);
+
+    const result = await provider.send({ channel: 'phone', destination: '+22231234567', code: '123456', language: 'fr' });
+
+    expect(result).toEqual({ delivery: 'sent', provider: 'whatsapp' });
+    expect(channel.last).toMatchObject({
+      to: '+22231234567',
+      template: AUTH_OTP_TEMPLATE.key,
+      language: 'fr',
+      variables: { code: '123456', ttlMinutes: '10' },
+    });
+  });
+
+  it('refuses honestly when the channel does not accept the message', async () => {
+    const channel = new TestWhatsAppChannel();
+    channel.nextResult = { status: 'failed', reason: 'temporary', detail: 'simulated', provider: 'test' };
+    const provider = new WhatsAppContactDeliveryProvider(channel, unconfigured);
+
+    await expect(
+      provider.send({ channel: 'phone', destination: '+22231234567', code: '123456', language: 'en' }),
+    ).rejects.toMatchObject({ response: { code: 'delivery_failed', reason: 'temporary' } });
+  });
+
+  it('has no email provider and says so rather than pretending', async () => {
+    const channel = new TestWhatsAppChannel();
+    const provider = new WhatsAppContactDeliveryProvider(channel, unconfigured);
+
+    await expect(
+      provider.send({ channel: 'email', destination: 'owner@example.test', code: '123456', language: 'en' }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(channel.messages).toHaveLength(0);
   });
 });

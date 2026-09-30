@@ -1,7 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 
 /**
- * The template registry (F1 Stage 4A).
+ * The template registry (F1 Stage 4A; provider-backed since 2026-09-30).
  *
  * WhatsApp business messaging is template-based: you register text with the
  * provider, get it approved, and then send *that* by name with variables. This
@@ -13,62 +13,94 @@ import { BadRequestException } from '@nestjs/common';
  * adapter is called — so a caller cannot quietly ship an empty code or smuggle
  * a field into a message.
  *
- * **Only the authentication OTP template is active.** The future categories at
- * the bottom are recorded so nobody re-derives them, and deliberately not
- * implemented: activating one means approving copy with a provider, and this
- * stage has no provider.
+ * **The provider's own template names live in configuration**, one variable
+ * per template (`configKey`), never in source: a name is an approval the
+ * operator obtained at the provider, and it differs per deployment. A template
+ * whose variable is empty cannot be sent — the adapter refuses rather than
+ * guesses, because an unapproved template is rejected by every provider anyway
+ * and guessing would turn a configuration mistake into a silent non-delivery.
  */
 
-export type MessageCategory = 'authentication' | 'business_summary' | 'operational';
+export type MessageCategory = 'authentication' | 'account' | 'business_summary' | 'operational';
 
 /**
  * Languages a message may be requested in.
  *
- * Widened to include French with the French app catalogue (milestone M). Note
- * that this says what may be *asked for*, not what may be *sent* — a template
- * still has to declare the language itself, which is the point of
- * `assertLanguageSupported` below.
+ * What may be *asked for*, not what may be *sent*: a template still has to
+ * declare the language itself, which is the point of `assertLanguageSupported`
+ * below — and every declared language must be approved at the provider before
+ * the channel is enabled (docs/64).
  */
 export type MessageLanguage = 'en' | 'ar' | 'fr';
 
+/**
+ * How the provider expects the template to be filled.
+ *
+ *  - `authentication` — Meta's AUTHENTICATION category: a fixed body with ONE
+ *    parameter (the code) and a copy-code button carrying the same code. The
+ *    expiry wording is part of the approved text, so `ttlMinutes` is validated
+ *    here and not sent as a parameter.
+ *  - `utility` — body parameters in the registry's declared order.
+ */
+export type ProviderKind = 'authentication' | 'utility';
+
 export interface TemplateDefinition {
-  /** Stable internal key. Never sent to a provider — see `providerTemplateName`. */
+  /** Stable internal key. Never sent to a provider — see `configKey`. */
   readonly key: string;
   readonly category: MessageCategory;
   /** Variables the template requires, in the order a provider expects them. */
   readonly variables: readonly string[];
   readonly languages: readonly MessageLanguage[];
-  /**
-   * The provider's own template name, from configuration.
-   *
-   * Null until a provider exists and the template is approved there. Sending
-   * with a null name must fail loudly rather than guess — an unapproved
-   * template is rejected by every provider anyway, and guessing would turn a
-   * configuration mistake into a silent non-delivery.
-   */
-  readonly providerTemplateName: string | null;
+  readonly providerKind: ProviderKind;
+  /** The environment variable holding the provider's approved template name. */
+  readonly configKey: string;
 }
 
 /**
  * Authentication one-time code.
  *
- * `code` is the only variable, and it is passed through the delivery call —
- * never persisted with the message, never logged. `ttlMinutes` lets the message
- * say how long the code lasts, which measurably cuts "it stopped working"
- * support questions.
+ * `code` is the only variable a provider receives, and it is passed through the
+ * delivery call — never persisted with the message, never logged. `ttlMinutes`
+ * is validated so the caller states how long the code lasts; the approved
+ * authentication template carries that wording itself.
  */
 export const AUTH_OTP_TEMPLATE: TemplateDefinition = {
   key: 'auth.otp',
   category: 'authentication',
   variables: ['code', 'ttlMinutes'],
-  // Deliberately NOT 'fr', even though the app now speaks French. This registry
-  // mirrors what a provider has approved, and no French one-time-code template
-  // has been approved anywhere — claiming it here would let the app try to send
-  // a message that does not exist. `assertLanguageSupported` refuses it until
-  // there is a real approval to mirror.
-  languages: ['en', 'ar'],
-  // Set from configuration once a provider is chosen (Stage 4B).
-  providerTemplateName: null,
+  languages: ['en', 'ar', 'fr'],
+  providerKind: 'authentication',
+  configKey: 'WHATSAPP_TEMPLATE_AUTH_OTP',
+};
+
+/**
+ * The account-deletion code (docs/64).
+ *
+ * A UTILITY template, not an authentication one, on purpose: the approved text
+ * must say what the code is for and that confirming is irreversible, and the
+ * provider's authentication category allows neither. The approved copy, in all
+ * three languages, is recorded in docs/64 §4.
+ */
+export const ACCOUNT_DELETION_TEMPLATE: TemplateDefinition = {
+  key: 'account.deletion',
+  category: 'account',
+  variables: ['code', 'ttlMinutes'],
+  languages: ['en', 'ar', 'fr'],
+  providerKind: 'utility',
+  configKey: 'WHATSAPP_TEMPLATE_ACCOUNT_DELETION',
+};
+
+/**
+ * Told once the deletion is complete (docs/64). `what` is the localised phrase
+ * for what was deleted — a login, or a business and every login in it.
+ */
+export const ACCOUNT_DELETED_TEMPLATE: TemplateDefinition = {
+  key: 'account.deleted',
+  category: 'account',
+  variables: ['what'],
+  languages: ['en', 'ar', 'fr'],
+  providerKind: 'utility',
+  configKey: 'WHATSAPP_TEMPLATE_ACCOUNT_DELETED',
 };
 
 /**
@@ -76,18 +108,14 @@ export const AUTH_OTP_TEMPLATE: TemplateDefinition = {
  * a day reopened after a counted close, each sale completed while it was
  * open again, and the reclose. The variables are composed by
  * `closing/closing-notices.ts`, which refuses a full identifier or a cost.
- *
- * Registered in all three app languages because the shop chooses its Owner's
- * language in Settings; like the OTP template, `providerTemplateName` stays
- * null until a provider has approved the copy, and a send through the
- * `disabled` channel reports `channel_unavailable` rather than pretending.
  */
 export const CLOSING_REOPENED_TEMPLATE: TemplateDefinition = {
   key: 'closing.reopened',
   category: 'operational',
   variables: ['branch', 'time', 'date', 'what'],
   languages: ['en', 'ar', 'fr'],
-  providerTemplateName: null,
+  providerKind: 'utility',
+  configKey: 'WHATSAPP_TEMPLATE_CLOSING_REOPENED',
 };
 
 export const CLOSING_SALE_TEMPLATE: TemplateDefinition = {
@@ -95,7 +123,8 @@ export const CLOSING_SALE_TEMPLATE: TemplateDefinition = {
   category: 'operational',
   variables: ['branch', 'time', 'date', 'item', 'money'],
   languages: ['en', 'ar', 'fr'],
-  providerTemplateName: null,
+  providerKind: 'utility',
+  configKey: 'WHATSAPP_TEMPLATE_CLOSING_SALE',
 };
 
 export const CLOSING_RECLOSED_TEMPLATE: TemplateDefinition = {
@@ -103,17 +132,23 @@ export const CLOSING_RECLOSED_TEMPLATE: TemplateDefinition = {
   category: 'operational',
   variables: ['branch', 'time', 'date', 'since', 'whole'],
   languages: ['en', 'ar', 'fr'],
-  providerTemplateName: null,
+  providerKind: 'utility',
+  configKey: 'WHATSAPP_TEMPLATE_CLOSING_RECLOSED',
 };
 
 const REGISTRY: Record<string, TemplateDefinition> = {
   [AUTH_OTP_TEMPLATE.key]: AUTH_OTP_TEMPLATE,
+  [ACCOUNT_DELETION_TEMPLATE.key]: ACCOUNT_DELETION_TEMPLATE,
+  [ACCOUNT_DELETED_TEMPLATE.key]: ACCOUNT_DELETED_TEMPLATE,
   [CLOSING_REOPENED_TEMPLATE.key]: CLOSING_REOPENED_TEMPLATE,
   [CLOSING_SALE_TEMPLATE.key]: CLOSING_SALE_TEMPLATE,
   [CLOSING_RECLOSED_TEMPLATE.key]: CLOSING_RECLOSED_TEMPLATE,
 };
 
 export type TemplateKey = keyof typeof REGISTRY & string;
+
+/** Every registered template, for configuration and documentation. */
+export const ALL_TEMPLATES: readonly TemplateDefinition[] = Object.freeze(Object.values(REGISTRY));
 
 export function getTemplate(key: string): TemplateDefinition {
   const found = REGISTRY[key];
@@ -172,16 +207,16 @@ export function assertLanguageSupported(
  *
  * | Future template | Category | Blocked on |
  * |---|---|---|
- * | Daily Owner summary | `business_summary` | Provider choice + approved copy. Content must never enter OTP tables |
+ * | Daily Owner summary | `business_summary` | Approved copy. Content must never enter OTP tables |
  * | Monthly Owner summary | `business_summary` | Same |
- * | Inter-store consignment notice | `operational` | The Consignment module does not exist |
- * | Loan / debt reminder | `operational` | The Money & reconciliation module does not exist |
+ * | Inter-store consignment notice | `operational` | Approved copy |
+ * | Loan / debt reminder | `operational` | Approved copy |
  *
  * Business summaries are already gated by Owner preference
  * (`CompanySettings.whatsappDailyEnabled` / `whatsappMonthlyEnabled` /
- * `whatsappIncludeAmounts`). Authentication messages are **not** subject to
- * those preferences: an Owner turning off nightly summaries must not
- * accidentally disable everyone's ability to sign in.
+ * `whatsappIncludeAmounts`). Authentication and account messages are **not**
+ * subject to those preferences: an Owner turning off nightly summaries must not
+ * accidentally disable everyone's ability to sign in or to delete an account.
  */
 export const PLANNED_TEMPLATES = Object.freeze([
   'summary.daily',

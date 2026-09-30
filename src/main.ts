@@ -22,7 +22,12 @@ async function bootstrap(): Promise<void> {
    */
   assertProductionConfig();
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
+  /*
+   * `rawBody`: the provider's delivery webhook is authenticated by an HMAC over
+   * the exact bytes received, so the parsed body is not enough. Kept only for
+   * the request's lifetime, on the request object, like the parsed body.
+   */
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true, rawBody: true });
   const config = app.get(AppConfigService);
 
   /**

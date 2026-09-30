@@ -1,5 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import type { ContactChannel } from '@prisma/client';
+import { WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel';
+import { AUTH_OTP_TEMPLATE } from '../messaging/templates';
 
 /**
  * Sending a code to a contact.
@@ -132,8 +135,53 @@ export class UnconfiguredDeliveryProvider extends ContactDeliveryProvider {
   readonly name = 'none';
 
   async send(): Promise<DeliveryResult> {
-    throw new Error(
-      'No contact delivery provider is configured. Refusing to claim a message was sent.',
-    );
+    throw new ServiceUnavailableException({
+      code: 'delivery_unavailable',
+      message: 'No contact delivery provider is configured. Refusing to claim a message was sent.',
+    });
+  }
+}
+
+/**
+ * The real one for WhatsApp numbers (docs/64 §3).
+ *
+ * A registration code to a WhatsApp number goes through the same messaging
+ * boundary as every other code — the same approved template, the same
+ * classification of failures. An email destination still has no provider, so
+ * it is handed to the unconfigured provider and refused honestly.
+ *
+ * A refused or failed delivery is a 503 with a stable code, never a 200 that
+ * claims a message went out.
+ */
+@Injectable()
+export class WhatsAppContactDeliveryProvider extends ContactDeliveryProvider {
+  readonly name = 'whatsapp';
+
+  constructor(
+    @Inject(WHATSAPP_CHANNEL) private readonly channel: WhatsAppChannel,
+    private readonly unconfigured: UnconfiguredDeliveryProvider,
+  ) {
+    super();
+  }
+
+  async send(req: DeliveryRequest): Promise<DeliveryResult> {
+    if (req.channel !== 'phone') return this.unconfigured.send();
+
+    const result = await this.channel.send({
+      to: req.destination,
+      template: AUTH_OTP_TEMPLATE.key,
+      language: req.language,
+      variables: { code: req.code, ttlMinutes: '10' },
+      // A retried `start()` issues a NEW code, so each delivery is its own message.
+      idempotencyKey: randomUUID(),
+    });
+    if (result.status !== 'accepted') {
+      throw new ServiceUnavailableException({
+        code: 'delivery_failed',
+        reason: result.reason,
+        message: 'The verification code could not be sent. Please try again in a moment.',
+      });
+    }
+    return { delivery: 'sent', provider: this.name };
   }
 }

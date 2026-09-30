@@ -7,6 +7,8 @@ import {
   maskDestination,
 } from './channels';
 import {
+  ACCOUNT_DELETED_TEMPLATE,
+  ACCOUNT_DELETION_TEMPLATE,
   AUTH_OTP_TEMPLATE,
   assertLanguageSupported,
   getTemplate,
@@ -172,15 +174,26 @@ describe('template registry', () => {
   });
 
   it('rejects an unsupported language', () => {
-    expect(() => assertLanguageSupported(AUTH_OTP_TEMPLATE, 'fr' as never)).toThrow(
-      /has no fr version/,
+    expect(() => assertLanguageSupported(AUTH_OTP_TEMPLATE, 'de' as never)).toThrow(
+      /has no de version/,
     );
+  });
+
+  it('declares every product language for the codes people must receive', () => {
+    // The app ships in English, French and Arabic; a code that cannot be sent
+    // in the reader's language is a code sent in a language they may not read.
+    for (const template of [AUTH_OTP_TEMPLATE, ACCOUNT_DELETION_TEMPLATE, ACCOUNT_DELETED_TEMPLATE]) {
+      expect([...template.languages].sort()).toEqual(['ar', 'en', 'fr']);
+    }
   });
 
   it('has no provider template name until a provider is chosen', () => {
     // Guessing a name would turn a configuration mistake into a silent
     // non-delivery; every provider rejects an unapproved template anyway.
-    expect(AUTH_OTP_TEMPLATE.providerTemplateName).toBeNull();
+    // The provider's name is configuration, never source: it is an approval the
+    // operator obtained, and it differs per deployment.
+    expect(AUTH_OTP_TEMPLATE.configKey).toBe('WHATSAPP_TEMPLATE_AUTH_OTP');
+    expect(AUTH_OTP_TEMPLATE.providerKind).toBe('authentication');
     expect(AUTH_OTP_TEMPLATE.category).toBe('authentication');
   });
 });

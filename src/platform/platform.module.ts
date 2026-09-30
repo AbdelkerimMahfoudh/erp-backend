@@ -19,7 +19,36 @@ import {
   outboxAllowed,
   OutboxDeliveryProvider,
   UnconfiguredDeliveryProvider,
+  WhatsAppContactDeliveryProvider,
 } from './contact-delivery';
+import { WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel';
+
+/**
+ * Which delivery provider is real is an environment decision, and the unsafe
+ * combination is refused rather than defaulted: production with nothing
+ * configured gets a provider that throws, never the outbox. An outbox in
+ * production would tell every new shop a code was on its way and strand all
+ * of them.
+ *
+ * Order of preference:
+ *  1. a real WhatsApp channel (`cloud-api`) — codes go out as messages;
+ *  2. the development outbox, where it is allowed;
+ *  3. the honest refusal.
+ *
+ * The development-log channel is deliberately NOT treated as real: it prints
+ * codes to a log sink, which is what the outbox already does more safely.
+ */
+export function selectContactDelivery(
+  channel: WhatsAppChannel,
+  whatsapp: WhatsAppContactDeliveryProvider,
+  outbox: OutboxDeliveryProvider,
+  unconfigured: UnconfiguredDeliveryProvider,
+  allowOutbox: boolean = outboxAllowed(),
+): ContactDeliveryProvider {
+  if (channel.isEnabled && channel.name !== 'development-log') return whatsapp;
+  if (allowOutbox) return outbox;
+  return unconfigured;
+}
 
 /**
  * Platform control.
@@ -49,24 +78,20 @@ import {
     RegistrationContinuationService,
     OwnerInvitationService,
     {
-      /*
-       * Which delivery provider is real is an environment decision, and the
-       * unsafe combination is refused rather than defaulted: production with
-       * nothing configured gets a provider that throws, never the outbox. An
-       * outbox in production would tell every new shop a code was on its way
-       * and strand all of them.
-       */
       provide: ContactDeliveryProvider,
       /*
-       * useExisting, NOT useClass.
+       * A factory over the REGISTERED instances, never `useClass`.
        *
        * useClass makes Nest build a SECOND instance, so the outbox that
        * stored a code and the outbox something later reads are different
-       * objects — and the code is silently never found. Aliasing the single
-       * registered instance is what makes the development flow work at all.
+       * objects — and the code is silently never found. Selecting among the
+       * single registered instances is what makes the development flow work
+       * at all.
        */
-      useExisting: outboxAllowed() ? OutboxDeliveryProvider : UnconfiguredDeliveryProvider,
+      inject: [WHATSAPP_CHANNEL, WhatsAppContactDeliveryProvider, OutboxDeliveryProvider, UnconfiguredDeliveryProvider],
+      useFactory: selectContactDelivery,
     },
+    WhatsAppContactDeliveryProvider,
     OutboxDeliveryProvider,
     UnconfiguredDeliveryProvider,
   ],

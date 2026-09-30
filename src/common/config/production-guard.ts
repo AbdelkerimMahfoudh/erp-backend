@@ -40,6 +40,15 @@ export interface ProductionGuardEnv {
   CORS_ORIGINS?: string;
   JWT_ACCESS_SECRET?: string;
   APP_DATABASE_URL?: string;
+  WHATSAPP_CHANNEL?: string;
+  WHATSAPP_API_BASE_URL?: string;
+  WHATSAPP_PHONE_NUMBER_ID?: string;
+  WHATSAPP_ACCESS_TOKEN?: string;
+  WHATSAPP_TEMPLATE_AUTH_OTP?: string;
+  WHATSAPP_TEMPLATE_ACCOUNT_DELETION?: string;
+  WHATSAPP_APP_SECRET?: string;
+  WHATSAPP_WEBHOOK_VERIFY_TOKEN?: string;
+  OTP_PEPPER?: string;
 }
 
 /** A `.env` value that means "yes", matching `cookieSecure()`. */
@@ -134,6 +143,58 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
     problems.push(
       'JWT_ACCESS_SECRET looks like a placeholder from an example file. ' +
         'Generate a real one.',
+    );
+  }
+
+  /*
+   * Transport (docs/48 §7.1, control 19).
+   *
+   * The edge terminates TLS, so the process cannot see its own scheme — but it
+   * can refuse the configuration that only makes sense on plain HTTP. A browser
+   * origin on `http://` in production is a portal serving session cookies in
+   * clear text, and a provider address on `http://` is a token in clear text.
+   */
+  // A development host is already reported above; reporting it twice would
+  // bury the more specific message.
+  const plainOrigins = (env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0 && !/^https:\/\//i.test(o) && !devOrigins.includes(o));
+  if (plainOrigins.length > 0) {
+    problems.push(
+      `CORS_ORIGINS names non-HTTPS origins in production: ${plainOrigins.join(', ')}. ` +
+        'Every browser origin must be https://.',
+    );
+  }
+  const channel = (env.WHATSAPP_CHANNEL ?? 'disabled').trim().toLowerCase();
+  if (channel === 'development-log') {
+    problems.push('WHATSAPP_CHANNEL=development-log writes one-time codes to a log sink. Use cloud-api or disabled.');
+  }
+  if (channel === 'cloud-api') {
+    if (env.WHATSAPP_API_BASE_URL && !/^https:\/\//i.test(env.WHATSAPP_API_BASE_URL.trim())) {
+      problems.push('WHATSAPP_API_BASE_URL must be an https:// address in production.');
+    }
+    if (!env.WHATSAPP_PHONE_NUMBER_ID?.trim() || !env.WHATSAPP_ACCESS_TOKEN?.trim()) {
+      problems.push(
+        'WHATSAPP_CHANNEL=cloud-api without WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_ACCESS_TOKEN. ' +
+          'Set both, or set WHATSAPP_CHANNEL=disabled — nothing is faked.',
+      );
+    }
+    if (!env.WHATSAPP_TEMPLATE_AUTH_OTP?.trim() || !env.WHATSAPP_TEMPLATE_ACCOUNT_DELETION?.trim()) {
+      problems.push(
+        'WHATSAPP_CHANNEL=cloud-api needs the approved template names WHATSAPP_TEMPLATE_AUTH_OTP and ' +
+          'WHATSAPP_TEMPLATE_ACCOUNT_DELETION; without them sign-in codes and account deletion cannot be delivered.',
+      );
+    }
+    if (!env.OTP_PEPPER || env.OTP_PEPPER.length < 32) {
+      problems.push('WHATSAPP_CHANNEL=cloud-api needs OTP_PEPPER (32+ characters), or no code can be issued.');
+    }
+  }
+  const hasSecret = Boolean(env.WHATSAPP_APP_SECRET?.trim());
+  const hasVerify = Boolean(env.WHATSAPP_WEBHOOK_VERIFY_TOKEN?.trim());
+  if (hasSecret !== hasVerify) {
+    problems.push(
+      'WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN must be set together (the delivery webhook), or neither.',
     );
   }
 

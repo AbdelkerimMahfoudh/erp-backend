@@ -72,9 +72,44 @@ export class AppConfigService {
     return this.get('WHATSAPP_CHANNEL');
   }
 
-  /** Provider template id for the auth OTP; empty until Stage 4B. */
+  /** Provider template id for the auth OTP; empty until approved at the provider. */
   get whatsappAuthOtpTemplate(): string {
     return this.get('WHATSAPP_TEMPLATE_AUTH_OTP');
+  }
+
+  /** The provider's name for a registered template, by its configuration variable; empty when unapproved. */
+  whatsappTemplateName(configKey: string): string {
+    return (this.config.get<string>(configKey) ?? '').trim();
+  }
+
+  get whatsappApiBaseUrl(): string {
+    return this.get('WHATSAPP_API_BASE_URL');
+  }
+  get whatsappApiVersion(): string {
+    return this.get('WHATSAPP_API_VERSION');
+  }
+  get whatsappPhoneNumberId(): string {
+    return this.get('WHATSAPP_PHONE_NUMBER_ID');
+  }
+  /** Secret. Read here and handed to the adapter; never returned, logged or audited. */
+  get whatsappAccessToken(): string {
+    return this.get('WHATSAPP_ACCESS_TOKEN');
+  }
+  get whatsappAppSecret(): string {
+    return this.get('WHATSAPP_APP_SECRET');
+  }
+  get whatsappWebhookVerifyToken(): string {
+    return this.get('WHATSAPP_WEBHOOK_VERIFY_TOKEN');
+  }
+  get whatsappSendTimeoutMs(): number {
+    return this.get('WHATSAPP_SEND_TIMEOUT_MS');
+  }
+  get whatsappLanguageCodes(): { en: string; fr: string; ar: string } {
+    return {
+      en: this.get('WHATSAPP_TEMPLATE_LANGUAGE_EN'),
+      fr: this.get('WHATSAPP_TEMPLATE_LANGUAGE_FR'),
+      ar: this.get('WHATSAPP_TEMPLATE_LANGUAGE_AR'),
+    };
   }
 
   /**
