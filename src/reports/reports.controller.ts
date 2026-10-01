@@ -3,6 +3,7 @@ import { ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { ReportsService } from './reports.service';
+import { ReportDocumentsService } from './report-documents.service';
 import { ExportReportDto } from './dto/export-report.dto';
 import { isReportKind, REPORT_KINDS } from './report-catalogue';
 import { BadRequestException } from '@nestjs/common';
@@ -33,7 +34,34 @@ import { BadRequestException } from '@nestjs/common';
 @ApiTags('reports')
 @Controller('reports')
 export class ReportsController {
-  constructor(private readonly reports: ReportsService) {}
+  constructor(
+    private readonly reports: ReportsService,
+    private readonly documents: ReportDocumentsService,
+  ) {}
+
+  /**
+   * The daily report of one business date as one document (docs/66) — what the in-app PDF
+   * prints. `closing.count` is the Daily closing's own route permission, so the document
+   * never shows anybody money they could not see on that screen.
+   */
+  @Get('daily')
+  @RequirePermissions('report.view', 'closing.count')
+  @ApiOperation({ summary: 'The daily report of one business date, as one document (the in-app PDF)' })
+  @ApiQuery({ name: 'date', required: false, description: 'YYYY-MM-DD; default the current business date' })
+  @Header('Cache-Control', 'private, no-store')
+  daily(@Query('date') date?: string) {
+    return this.documents.daily(date);
+  }
+
+  /** The monthly report of one calendar month as one document (docs/66). */
+  @Get('monthly')
+  @RequirePermissions('report.view')
+  @ApiOperation({ summary: 'The monthly report of one calendar month, as one document (the in-app PDF)' })
+  @ApiQuery({ name: 'month', required: false, description: 'YYYY-MM; default the current month, to date' })
+  @Header('Cache-Control', 'private, no-store')
+  monthly(@Query('month') month?: string) {
+    return this.documents.monthly(month);
+  }
 
   /**
    * Gated on `report.view` like every other reporting route. Reports needing

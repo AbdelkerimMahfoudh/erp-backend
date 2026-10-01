@@ -31,6 +31,6 @@ import { ConsignmentModule } from '../consignment/consignment.module';
     DashboardService,
     HealthService,
   ],
-  exports: [RollupService, ROLLUP_QUEUE, AnalyticsService, DashboardService],
+  exports: [RollupService, ROLLUP_QUEUE, AnalyticsService, DashboardService, SummaryService],
 })
 export class AnalyticsModule {}

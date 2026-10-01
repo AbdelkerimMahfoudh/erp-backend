@@ -22,6 +22,7 @@ import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayWindow, isDateString, localParts, localTimeOf, shiftDate } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
 import { fromCents, sharesBySale } from '../sales/sale-shares';
+import { openReceivables } from '../sales/open-receivables';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
@@ -2177,11 +2178,7 @@ export class ClosingService {
       }),
       // Invoices, cancellations and returns, each on the date that carries it (docs/53 D29).
       periodFigures(this.db, companyId, branchId, from, to),
-      this.db.sale.aggregate({
-        where: { branchId, isReversed: false, balanceDue: { gt: 0 } },
-        _sum: { balanceDue: true },
-        _count: true,
-      }),
+      openReceivables(this.db, branchId),
       // Today's expenses by the Daily closing's rule: a variable one on its confirmation date, a fixed one on its due date.
       this.db.expense.findMany({
         where: {
@@ -2276,7 +2273,7 @@ export class ClosingService {
         /** Refunds CONFIRMED in the period — money leaving on the confirmation date, no profit effect. */
         refunds: round2(refunds),
       },
-      outstandingAll: { amount: round2(num(owedAll._sum.balanceDue)), sales: owedAll._count },
+      outstandingAll: owedAll,
       expensesToday: expensesTodayOf(expenses, reversals),
       /**
        * Money's top card (docs/60): what each method holds as the app tracks it — an anchor plus the movement
