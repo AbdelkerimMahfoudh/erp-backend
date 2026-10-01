@@ -10,6 +10,7 @@ import {
   forgivenessIsCash,
   GROUP_OF,
   invert,
+  isOwnOffer,
   LoanRefused,
   paymentAffectsProfit,
   principalAffectsProfit,
@@ -106,6 +107,19 @@ describe('nobody accepts their own offer', () => {
     expect(
       assertDecision({ action: 'accept', from: 'counter_proposed', isOwnOffer: false }),
     ).toBe('accepted');
+  });
+
+  it('whose offer it is: the last proposer, against a real store only — and the same answer every loan carries', () => {
+    const us = Buffer.from('0190000000007000800000000000000a', 'hex');
+    const them = Buffer.from('0190000000007000800000000000000b', 'hex');
+    // Our proposal to another store on the app: theirs to answer, never ours to accept.
+    expect(isOwnOffer({ counterpartyCompanyId: them, proposedByCompanyId: us }, us)).toBe(true);
+    // Their counter: now ours to answer.
+    expect(isOwnOffer({ counterpartyCompanyId: them, proposedByCompanyId: them }, us)).toBe(false);
+    // A manual counterparty answers through the Owner, so nothing is ever their own offer.
+    expect(isOwnOffer({ counterpartyCompanyId: null, proposedByCompanyId: us }, us)).toBe(false);
+    // Equal bytes in different buffers still match.
+    expect(isOwnOffer({ counterpartyCompanyId: them, proposedByCompanyId: Buffer.from(us) }, Buffer.from(us))).toBe(true);
   });
 });
 

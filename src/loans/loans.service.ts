@@ -26,6 +26,7 @@ import {
   directionFor,
   fingerprintPayment,
   GROUP_OF,
+  isOwnOffer,
   LoanRefused,
   readable,
   remaining,
@@ -226,14 +227,14 @@ export class LoansService {
      * the other side to answer, so the Owner records the other party's decision
      * — and `isOwnOffer` is false, because they are acting for them.
      */
-    const isOwnOffer = Boolean(loan.counterpartyCompanyId) && loan.proposedByCompanyId.equals(me);
+    const ownOffer = isOwnOffer(loan, me);
 
     let next: LoanStatus;
     try {
       next = assertDecision({
         action: dto.action,
         from: loan.status as LoanStatus,
-        isOwnOffer,
+        isOwnOffer: ownOffer,
         amount: dto.amount,
         reason: dto.reason,
       });
@@ -650,6 +651,7 @@ export class LoansService {
       id: Buffer;
       companyId: Buffer;
       counterpartyCompanyId: Buffer | null;
+      proposedByCompanyId: Buffer;
       direction: string;
       status: string;
       proposedAmount: Prisma.Decimal;
@@ -686,6 +688,8 @@ export class LoansService {
       remaining: remaining(rows),
       createdAt: loan.createdAt,
       version: loan.version,
+      /** This company's own offer is on the table: it may not accept or counter it, only wait, dispute or cancel. */
+      ownOffer: isOwnOffer(loan, me),
     };
   }
 }

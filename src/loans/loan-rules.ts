@@ -197,6 +197,20 @@ export const TRANSITIONS: Record<Action, Rule> = {
   cancel: { from: ['proposed', 'counter_proposed', 'disputed'], to: 'cancelled' },
 };
 
+/**
+ * Whether the offer on the table is this company's own — the one it may not
+ * accept or counter (see `assertDecision`). With a manual counterparty there is
+ * nobody on the other side to answer, so the Owner records the other party's
+ * decision and the offer never counts as their own. Exposed on every loan so a
+ * screen offers only what the server allows.
+ */
+export function isOwnOffer(
+  loan: { counterpartyCompanyId: Uint8Array | null; proposedByCompanyId: Uint8Array },
+  me: Uint8Array,
+): boolean {
+  return Boolean(loan.counterpartyCompanyId) && Buffer.from(loan.proposedByCompanyId).equals(Buffer.from(me));
+}
+
 export interface DecideInput {
   action: Action;
   from: LoanStatus;
