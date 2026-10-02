@@ -8,7 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import {
   assertMayStartDealing,
   newDealingRefusal,
@@ -245,6 +245,8 @@ export class ConsignmentsService {
   }
 
   async get(id: string) {
+    // A malformed id names nothing — the same 404, never a crash.
+    if (!isUuid(id)) throw new NotFoundException('No such consignment');
     const me = this.tenant.companyId();
     const c = await this.prisma.consignment.findFirst({
       where: { id: uuidToBin(id), ...visibleToCompany(me) },
@@ -928,6 +930,7 @@ export class ConsignmentsService {
 
   /** A consignment I am party to, or a 404. Never a 403 — see `sideOf`. */
   private async mine(id: string) {
+    if (!isUuid(id)) throw new NotFoundException('No such consignment');
     const me = this.tenant.companyId();
     const c = await this.prisma.consignment.findFirst({
       where: { id: uuidToBin(id), ...visibleToCompany(me) },

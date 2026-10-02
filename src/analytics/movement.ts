@@ -47,3 +47,33 @@ export async function productMovement(
       .map((r) => [r.product_id.toString('hex'), { sold30d: Number(r.sold_30d ?? 0), lastSoldAt: r.last_sold_at ? new Date(r.last_sold_at) : null }]),
   );
 }
+
+/**
+ * How long each product has had stock on hand: the earliest arrival still on
+ * the shelf. For a serialized product, the oldest unit still in stock; for a
+ * quantity product, when its stock line at the branch was opened (lots are not
+ * kept, so that is the closest the books come).
+ *
+ * "Not moving" is measured against this as well as against the last sale: a
+ * product that arrived this week and has not sold yet is new, not dead. It
+ * used to be listed as dead on the day it was received.
+ */
+export async function stockedSinceByProduct(
+  db: RawRunner,
+  companyId: Buffer,
+  branchId: Buffer | null,
+): Promise<Map<string, Date>> {
+  const rows = await db.$queryRaw<{ product_id: Buffer; since: Date }[]>(Prisma.sql`
+    SELECT product_id, MIN(since) AS since
+      FROM (SELECT u.product_id, u.date_in AS since
+              FROM units u
+             WHERE u.company_id = ${companyId} ${branchId ? Prisma.sql`AND u.branch_id = ${branchId}` : Prisma.empty}
+               AND u.status = 'in_stock'
+             UNION ALL
+            SELECT s.product_id, s.created_at AS since
+              FROM stock_items s
+             WHERE s.company_id = ${companyId} ${branchId ? Prisma.sql`AND s.branch_id = ${branchId}` : Prisma.empty}
+               AND s.quantity > 0) AS on_hand
+     GROUP BY product_id`);
+  return new Map(rows.filter((r) => r.product_id && r.since).map((r) => [r.product_id.toString('hex'), new Date(r.since)]));
+}

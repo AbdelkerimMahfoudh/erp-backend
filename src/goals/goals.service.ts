@@ -5,7 +5,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { AccessService } from '../rbac/access.service';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { ADJUSTMENT, computeProgress, isMoneyMetric, METRIC_COLUMN, type GoalMetricKey } from './goal-progress';
 import { CreateGoalDto } from './dto/create-goal.dto';
@@ -170,6 +170,8 @@ export class GoalsService {
   }
 
   async get(id: string) {
+    // A malformed id names nothing — the same 404, never a crash.
+    if (!isUuid(id)) throw new NotFoundException('No such goal');
     const branchId = this.tenant.requireBranchId();
     const goal = await this.db.goal.findFirst({
       where: { id: uuidToBin(id), OR: [{ scope: 'company' }, { branchId }] },
@@ -197,6 +199,7 @@ export class GoalsService {
    * history, and removing it would make every past period look met.
    */
   async archive(id: string, dto: ArchiveGoalDto) {
+    if (!isUuid(id)) throw new NotFoundException('No such goal');
     const branchId = this.tenant.requireBranchId();
     const goal = await this.db.goal.findFirst({
       where: { id: uuidToBin(id), OR: [{ scope: 'company' }, { branchId }] },

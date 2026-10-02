@@ -14,7 +14,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { PricingService } from '../pricing/pricing.service';
 import { AppClsStore } from '../common/context/request-context';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 
 /**
  * Owner-approved exceptions to the configured selling price (A2).
@@ -241,6 +241,8 @@ export class DiscountApprovalsService {
     const approverId = this.tenant.userId();
     if (!approverId) throw new ForbiddenException('Not signed in');
 
+    // A malformed id names nothing — the same 404, never a crash.
+    if (!isUuid(id)) throw new NotFoundException('No such request');
     const approvalId = uuidToBin(id);
     const current = await this.db.discountApproval.findFirst({ where: { id: approvalId } });
     if (!current) throw new NotFoundException('No such request');
@@ -321,6 +323,7 @@ export class DiscountApprovalsService {
 
   /** The requester changed their mind before anybody decided. */
   async cancel(id: string) {
+    if (!isUuid(id)) throw new NotFoundException('No such request');
     const approvalId = uuidToBin(id);
     const current = await this.db.discountApproval.findFirst({ where: { id: approvalId } });
     if (!current) throw new NotFoundException('No such request');
@@ -375,6 +378,7 @@ export class DiscountApprovalsService {
    * may read any. A deep link is not an authorisation.
    */
   async get(id: string) {
+    if (!isUuid(id)) throw new NotFoundException('No such request');
     const row = await this.db.discountApproval.findFirst({
       where: { id: uuidToBin(id) },
       include: DETAIL,
