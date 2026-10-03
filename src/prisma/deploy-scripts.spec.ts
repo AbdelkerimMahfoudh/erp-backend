@@ -53,6 +53,19 @@ describe('deploy/mysql-identities.sql', () => {
   });
 });
 
+describe('deploy/verify-mysql-identities.sh', () => {
+  const verify = readFileSync(join(ROOT, 'deploy', 'verify-mysql-identities.sh'), 'utf8');
+
+  it('passes a trigger probe only on the trigger refusing it, never on a missing grant', () => {
+    const probes = verify.split('\n').filter((l) => l.includes('must_fail') && l.includes('(trigger)'));
+    expect(probes).toHaveLength(3);
+    for (const line of probes) {
+      expect(line.trim().endsWith('"append-only"')).toBe(true);
+      expect(line).not.toMatch(/denied/);
+    }
+  });
+});
+
 describe('deploy/restore-drill.sh', () => {
   /** The sed program the drill pipes the decrypted dump through. */
   const program = /sed -E '([^']+)'/.exec(drill)?.[1];

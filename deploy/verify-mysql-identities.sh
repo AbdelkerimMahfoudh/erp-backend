@@ -36,10 +36,13 @@ must_fail "app cannot read another schema"     phonestore_app "$APP_PW" "SELECT 
 # A company to hang an audit row on (the row is left in place; this is a copy).
 COMPANY_HEX=$(MYSQL_PWD="$APP_PW" mysql "${CONN[@]}" -u phonestore_app -N -B "$DB" -e "SELECT HEX(id) FROM companies LIMIT 1" 2>/dev/null)
 if [ -n "$COMPANY_HEX" ]; then
+  # The three below pass only on the TRIGGER's own refusal (SIGNAL 45000, "... is
+  # append-only"). A refusal for want of a grant would say "denied" and prove
+  # nothing about the trigger — the restore drill made that mistake (2026-10-03).
   must_pass "app can append an audit row"      phonestore_app "$APP_PW" "INSERT INTO audit_logs (company_id, entity_type, action, reason) VALUES (UNHEX('$COMPANY_HEX'), 'IdentityProbe', 'create', 'verify-mysql-identities')"
-  must_fail "app cannot UPDATE an audit row (trigger)" phonestore_app "$APP_PW" "UPDATE audit_logs SET reason='tampered' WHERE entity_type='IdentityProbe'" "append-only\|not allowed\|cannot\|denied\|1644"
-  must_fail "app cannot DELETE an audit row (trigger)" phonestore_app "$APP_PW" "DELETE FROM audit_logs WHERE entity_type='IdentityProbe'" "append-only\|not allowed\|cannot\|denied\|1644"
-  must_fail "app cannot rewrite a subscription event (trigger)" phonestore_app "$APP_PW" "UPDATE subscription_events SET note='tampered' WHERE company_id=UNHEX('$COMPANY_HEX')" "append-only\|not allowed\|cannot\|denied\|1644"
+  must_fail "app cannot UPDATE an audit row (trigger)" phonestore_app "$APP_PW" "UPDATE audit_logs SET reason='tampered' WHERE entity_type='IdentityProbe'" "append-only"
+  must_fail "app cannot DELETE an audit row (trigger)" phonestore_app "$APP_PW" "DELETE FROM audit_logs WHERE entity_type='IdentityProbe'" "append-only"
+  must_fail "app cannot rewrite a subscription event (trigger)" phonestore_app "$APP_PW" "UPDATE subscription_events SET note='tampered' WHERE company_id=UNHEX('$COMPANY_HEX')" "append-only"
 else
   echo "SKIP audit-trigger probes: no company row in $DB"
 fi
