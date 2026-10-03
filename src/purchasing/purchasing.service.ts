@@ -527,10 +527,12 @@ export class PurchasingService {
 
     const received = committableUnits.length + preparedStock.reduce((s, l) => s + l.quantity, 0);
     if (received > 0) {
+      // No amount: this goes to everybody in the company, and a purchase total
+      // is COST — readable only with `cost.view`, which the Administrator role
+      // is denied by design (D11). The figure stays on the purchase itself.
       await this.notifications.emit({
         type: 'stock.received',
         title: `Received ${received} item(s)`,
-        body: `Purchase total ${total}`,
       });
       // Intake changed inventory: work the branch refresh requested with the purchase.
       void this.rollups.processNow();

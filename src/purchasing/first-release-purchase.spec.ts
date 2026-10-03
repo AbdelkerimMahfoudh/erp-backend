@@ -70,12 +70,13 @@ function harness(account: { isActive: boolean } | null = { isActive: true }, fai
       recognitionKey: () => null,
     }),
   };
+  const notifications = { emit: jest.fn(async () => ({})) };
   const service = new PurchasingService(
     db,
     { companyId: () => COMPANY, requireBranchId: () => BRANCH, userId: () => null } as never,
     { recordTx: async () => ({}) } as never,
     inventory,
-    { emit: async () => ({}) } as never,
+    notifications as never,
     strategies,
     {} as never,
     { enqueueTx: async () => ({}), processNow: async () => ({}) } as never,
@@ -84,7 +85,7 @@ function harness(account: { isActive: boolean } | null = { isActive: true }, fai
     // The day is always open here: a closed day refuses the receipt (purchase-store-closed.spec.ts).
     { assertCounterOpen: async () => undefined, assertCounterOpenTx: async () => undefined } as never,
   );
-  return { service, writes, db };
+  return { service, writes, db, notifications };
 }
 
 const SERVICE = readFileSync(join(__dirname, 'purchasing.service.ts'), 'utf8');
@@ -130,6 +131,15 @@ describe('an ordinary purchase', () => {
     expect(writes.purchases[0]).toMatchObject({ supplierId: null, total: 1500, amountPaid: 1500, status: 'paid', dueDate: null });
     expect(writes.payments[0]).toMatchObject({ supplierId: null, amount: 1500, method: 'cash', receivingAccountId: null });
     expect(writes.units[0]).toMatchObject({ supplierId: null, cost: 1500 });
+  });
+
+  it('tells everybody stock arrived, but never what it cost — the notice reaches roles without cost.view', async () => {
+    const { service, notifications } = harness();
+    await service.createPurchase({ clientUuid: KEY, paymentMethod: 'cash', items: [line] } as never);
+    expect(notifications.emit).toHaveBeenCalledTimes(1);
+    const notice = (notifications.emit.mock.calls[0] as unknown[])[0] as Record<string, unknown>;
+    expect(notice).toMatchObject({ type: 'stock.received', title: 'Received 1 item(s)' });
+    expect(JSON.stringify(notice)).not.toMatch(/1500|total/i);
   });
 
   it('never touches a supplier balance or creates a supplier', async () => {
