@@ -141,10 +141,13 @@ export class AccountDeletionService {
   /**
    * Ask to delete: the password again, then a code to the verified number.
    *
-   * Refuses, in order: a wrong password (generic, timing-even), a login with
-   * no verified WhatsApp number (the only channel; nothing is substituted), a
-   * server that cannot issue codes at all. A request that is already open is
-   * returned as it is rather than replaced, so a double tap sends one code.
+   * Refuses, in order: a wrong password (generic, timing-even), a server that
+   * cannot send codes at all — before the number, so a login without one is not
+   * sent to verify a number that could not be verified either — and a login
+   * with no verified WhatsApp number (the only channel; nothing is
+   * substituted). Nothing is created by a refusal. A request that is already
+   * open is returned as it is rather than replaced, so a double tap sends one
+   * code.
    */
   async start(
     p: DeletionPrincipal,
@@ -153,18 +156,18 @@ export class AccountDeletionService {
     const now = new Date();
     const user = await this.reauthenticate(p, input.password);
 
+    if (!this.otp.canDeliver) {
+      throw refuse(
+        HttpStatus.SERVICE_UNAVAILABLE,
+        'deletion_unavailable',
+        'Deletion codes cannot be sent by this server right now. Nothing was changed.',
+      );
+    }
     if (!user.phone || !user.phoneVerifiedAt) {
       throw refuse(
         HttpStatus.CONFLICT,
         'whatsapp_number_required',
         'Add and verify your WhatsApp number first. The deletion code is sent only there.',
-      );
-    }
-    if (!this.otp.isEnabled) {
-      throw refuse(
-        HttpStatus.SERVICE_UNAVAILABLE,
-        'deletion_unavailable',
-        'Deletion codes cannot be sent by this server right now. Nothing was changed.',
       );
     }
 
@@ -228,7 +231,7 @@ export class AccountDeletionService {
       await this.markFailed(open.id, 'number_changed');
       throw refuse(HttpStatus.CONFLICT, 'number_changed', 'Your WhatsApp number changed. Verify it and start again.');
     }
-    if (!this.otp.isEnabled) {
+    if (!this.otp.canDeliver) {
       throw refuse(HttpStatus.SERVICE_UNAVAILABLE, 'deletion_unavailable', 'Deletion codes cannot be sent right now.');
     }
 

@@ -1,9 +1,10 @@
 import { HttpException } from '@nestjs/common';
 import { OtpService } from '../auth/otp/otp.service';
-import { TestWhatsAppChannel } from '../messaging/channels';
+import { DisabledWhatsAppChannel, TestWhatsAppChannel } from '../messaging/channels';
 import { ACCOUNT_DELETED_TEMPLATE, ACCOUNT_DELETION_TEMPLATE } from '../messaging/templates';
 import { uuidToBin } from '../common/utils/uuid.util';
 import { AccountDeletionService, DeletionPrincipal } from './account-deletion.service';
+import { AccountService } from './account.service';
 import { FakePrisma } from './testing/fake-prisma';
 import { DELETED_USER_NAME, UNUSABLE_PASSWORD_HASH } from './deletion-rules';
 
@@ -56,9 +57,11 @@ function user(over: Record<string, unknown>) {
   };
 }
 
-function harness(opts: { pepper?: string | null; withOtherOwner?: boolean } = {}) {
+function harness(opts: { pepper?: string | null; withOtherOwner?: boolean; whatsappOff?: boolean } = {}) {
   const prisma = new FakePrisma();
   const channel = new TestWhatsAppChannel();
+  /** `WHATSAPP_CHANNEL=disabled` with a pepper set: production while WhatsApp sending is postponed. */
+  const sender = opts.whatsappOff ? new DisabledWhatsAppChannel() : channel;
   const audits: Record<string, unknown>[] = [];
   const config = {
     otpPepper: opts.pepper === undefined ? PEPPER : opts.pepper,
@@ -74,8 +77,9 @@ function harness(opts: { pepper?: string | null; withOtherOwner?: boolean } = {}
     verifyDummy: async () => false,
   };
   const otpAudit = { record: jest.fn(async (p: Record<string, unknown>) => void audits.push(p)) };
-  const otp = new OtpService(prisma as never, config as never, otpAudit as never, channel);
-  const service = new AccountDeletionService(prisma as never, hashing as never, otp, channel);
+  const otp = new OtpService(prisma as never, config as never, otpAudit as never, sender);
+  const service = new AccountDeletionService(prisma as never, hashing as never, otp, sender);
+  const account = new AccountService(prisma as never, hashing as never, otp, service);
 
   prisma.seed('company', { id: C1, name: 'Boutique Un', isActive: true, closedAt: null, publicPhone: '+22200000001', logoRef: 'logo', isDiscoverable: true });
   prisma.seed('company', { id: C2, name: 'Boutique Deux', isActive: true, closedAt: null, publicPhone: null, logoRef: null, isDiscoverable: false });
@@ -128,7 +132,7 @@ function harness(opts: { pepper?: string | null; withOtherOwner?: boolean } = {}
   const lastCode = () => channel.messages.filter((m) => m.template === ACCOUNT_DELETION_TEMPLATE.key).slice(-1)[0]?.variables.code;
   const row = (model: string, key: Buffer) => prisma.rows(model).find((r) => (r.id as Buffer).equals(key))!;
 
-  return { prisma, channel, service, otp, audits, principal, lastCode, row };
+  return { prisma, channel, service, account, otp, audits, principal, lastCode, row };
 }
 
 const codeOf = (e: unknown) => (e as HttpException).getResponse() as { code: string; [k: string]: unknown };
@@ -184,6 +188,41 @@ describe('asking to delete', () => {
       (e: unknown) => statusOf(e) === 503 && codeOf(e).code === 'deletion_unavailable',
     );
     expect(h.row('user', EMPLOYEE).deletedAt).toBeNull();
+  });
+
+  describe('with WhatsApp switched off (a pepper, but no channel that sends)', () => {
+    it('refuses a login with a verified number before anything is created — no request, no challenge', async () => {
+      const h = harness({ whatsappOff: true });
+      await expect(h.service.start(h.principal(EMPLOYEE), { password: 'employee-pw', clientUuid: '018f0000-0000-7000-8000-00000000dddd' })).rejects.toSatisfy(
+        (e: unknown) => statusOf(e) === 503 && codeOf(e).code === 'deletion_unavailable',
+      );
+      expect(h.prisma.rows('accountDeletionRequest')).toHaveLength(0);
+      expect(h.prisma.rows('otpChallenge')).toHaveLength(0);
+      expect(h.row('user', EMPLOYEE).deletedAt).toBeNull();
+    });
+
+    it('tells an email-only login that codes cannot be sent, rather than sending it to verify a number', async () => {
+      const h = harness({ whatsappOff: true });
+      await expect(h.service.start(h.principal(NO_PHONE), { password: 'fatou-pw' })).rejects.toSatisfy(
+        (e: unknown) => statusOf(e) === 503 && codeOf(e).code === 'deletion_unavailable',
+      );
+      expect(h.prisma.rows('accountDeletionRequest')).toHaveLength(0);
+    });
+
+    it('still asks for the password first, and says nothing more on a wrong one', async () => {
+      const h = harness({ whatsappOff: true });
+      await expect(h.service.start(h.principal(EMPLOYEE), { password: 'wrong' })).rejects.toSatisfy(
+        (e: unknown) => statusOf(e) === 401 && codeOf(e).code === 'reauthentication_failed',
+      );
+    });
+
+    it('refuses to verify a WhatsApp number without writing a challenge, and blames no number', async () => {
+      const h = harness({ whatsappOff: true });
+      await expect(
+        h.account.startPhoneVerification(h.principal(NO_PHONE), { password: 'fatou-pw', phone: '+22231234569' }),
+      ).rejects.toSatisfy((e: unknown) => statusOf(e) === 503 && codeOf(e).code === 'verification_unavailable');
+      expect(h.prisma.rows('otpChallenge')).toHaveLength(0);
+    });
   });
 
   it('sends a deletion code — not a sign-in code — to the verified number, in the asked language', async () => {

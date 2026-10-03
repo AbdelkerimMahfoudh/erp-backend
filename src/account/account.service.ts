@@ -127,7 +127,9 @@ export class AccountService {
     if (clash) {
       throw refuse(HttpStatus.CONFLICT, 'phone_in_use', 'Another person in this business already uses that number.');
     }
-    if (!this.otp.isEnabled) {
+    // Before a challenge is written: with no channel it could never go out, and
+    // "could not be delivered to that number" would blame a number that is fine.
+    if (!this.otp.canDeliver) {
       throw refuse(HttpStatus.SERVICE_UNAVAILABLE, 'verification_unavailable', 'Codes cannot be sent by this server right now.');
     }
 

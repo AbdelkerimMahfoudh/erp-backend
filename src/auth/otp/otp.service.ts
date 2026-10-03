@@ -129,6 +129,17 @@ export class OtpService {
     return this.config.otpPepper !== null;
   }
 
+  /**
+   * Whether a code can actually reach a person: a pepper to hash it AND a
+   * channel that sends. Asked before anything is created for somebody to wait
+   * on. With WhatsApp postponed (`WHATSAPP_CHANNEL=disabled`) the pepper alone
+   * let a challenge be written that could never go out, so a person was shown
+   * a code field no code would ever fill (the 2026-10-03 rehearsal).
+   */
+  get canDeliver(): boolean {
+    return this.isEnabled && this.channel.isEnabled;
+  }
+
   // ------------------------------------------------------------- requesting
 
   /**
