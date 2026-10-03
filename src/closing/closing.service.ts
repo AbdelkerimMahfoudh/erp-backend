@@ -2944,7 +2944,11 @@ export class ClosingService {
 
       UNION ALL
       -- Corrections APPROVED in the range (B): money coming back, so added. The
-      -- account comes from the payout or settlement being corrected.
+      -- account comes from the payout or settlement being corrected. Grouped by
+      -- exactly what it selects: MySQL's default ONLY_FULL_GROUP_BY refuses an
+      -- account read inside IF() when only the bare COALESCE is grouped, which
+      -- failed the Daily closing, its report, Money's movements and the daily PDF
+      -- on any server not running live's empty sql_mode (2026-10-03).
       SELECT IF(fc.method = 'cash', 'cash', 'account'),
              IF(fc.method = 'cash', NULL, COALESCE(rp.receiving_account_id, ss.receiving_account_id)),
              'correctionsIn', SUM(fc.amount)
@@ -2954,7 +2958,8 @@ export class ClosingService {
       WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
         AND fc.target_kind IN ('refund_payout', 'supplier_settlement')
         AND fc.status = 'approved' AND fc.correction_date BETWEEN ${fromDay} AND ${toDay}
-      GROUP BY fc.method, COALESCE(rp.receiving_account_id, ss.receiving_account_id)
+      GROUP BY IF(fc.method = 'cash', 'cash', 'account'),
+               IF(fc.method = 'cash', NULL, COALESCE(rp.receiving_account_id, ss.receiving_account_id))
 
       UNION ALL
       -- Every leg of every other correction approved in the range (0078, 0079): money

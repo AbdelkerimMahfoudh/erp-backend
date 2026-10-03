@@ -33,6 +33,16 @@ describe('period movements', () => {
     expect(movements).toMatch(/fc\.correction_date BETWEEN \$\{fromDay\} AND \$\{toDay\}\s+GROUP BY l\.method, l\.receiving_account_id, l\.direction/);
   });
 
+  it("the older corrections group by exactly what they select — MySQL's default ONLY_FULL_GROUP_BY accepts it", () => {
+    // Grouping by the bare COALESCE while selecting it inside IF() failed every
+    // closing read on a server with the default sql_mode (live runs it empty).
+    const branch = movements.slice(movements.indexOf("'correctionsIn', SUM(fc.amount)"), movements.indexOf('FROM financial_correction_legs'));
+    expect(branch).toMatch(
+      /GROUP BY IF\(fc\.method = 'cash', 'cash', 'account'\),\s+IF\(fc\.method = 'cash', NULL, COALESCE\(rp\.receiving_account_id, ss\.receiving_account_id\)\)/,
+    );
+    expect(branch).not.toMatch(/GROUP BY fc\.method, COALESCE/);
+  });
+
   it('no component reads a timestamp window any more — every day is a stored date', () => {
     expect(movements).not.toMatch(/paid_at >= /);
     expect(movements).not.toMatch(/86_400_000/);
