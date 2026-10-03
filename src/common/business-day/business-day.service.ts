@@ -17,8 +17,8 @@ export const dateValue = (date: string): Date => new Date(`${date}T00:00:00.000Z
 /** The YYYY-MM-DD of a DATE column value. */
 export const dateKey = (value: Date): string => value.toISOString().slice(0, 10);
 
-/** Any client that can read the two tables the assignment needs. */
-type Reader = Pick<Prisma.TransactionClient, 'closingEvent'>;
+/** Any client that can read the two facts the assignment needs: the company's timezone and an early start. */
+type Reader = Pick<Prisma.TransactionClient, 'closingEvent' | '$queryRaw'>;
 
 export interface BusinessDayDescription {
   businessDate: string;
@@ -56,11 +56,21 @@ export class BusinessDayService {
    * The company's timezone, validated. An invalid name would make every day
    * boundary wrong, so it falls back to UTC and says so once — never silently.
    */
-  async timezone(companyId: Buffer = this.tenant.companyId()): Promise<string> {
-    // Always the UNSCOPED client: `Company` has no `companyId` column, and the
-    // tenant extension would inject one into this `where` and refuse the query.
-    const company = await this.prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } });
-    const tz = company?.timezone?.trim() || 'UTC';
+  async timezone(companyId: Buffer = this.tenant.companyId(), db?: Pick<Reader, '$queryRaw'>): Promise<string> {
+    // Inside a caller's transaction, through that transaction. A second
+    // connection taken from the pool while the transaction holds its own is
+    // how as many concurrent sales as the pool has connections each wait for a
+    // connection another one holds, until every one of them times out (the
+    // 2026-10-03 rehearsal: three sales at once per shop on a five-connection
+    // pool). Raw, because `Company` has no `companyId` column and the tenant
+    // extension would inject one into a model query and refuse it — which is
+    // also why, outside a transaction, the UNSCOPED client reads it.
+    const stored = db
+      ? (await db.$queryRaw<{ timezone: string | null }[]>(
+          Prisma.sql`SELECT timezone FROM companies WHERE id = ${companyId} LIMIT 1`,
+        ))[0]?.timezone
+      : (await this.prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } }))?.timezone;
+    const tz = stored?.trim() || 'UTC';
     if (isValidTimezone(tz)) return tz;
     const key = companyId.toString('hex');
     if (!this.warned.has(key)) {
@@ -77,12 +87,12 @@ export class BusinessDayService {
    * did so at or before this instant — then it is that date. Passing the
    * transaction client keeps the lookup inside the caller's transaction.
    */
-  async assign(branchId: Buffer, instant: Date, db: Reader = this.prisma): Promise<string> {
+  async assign(branchId: Buffer, instant: Date, db?: Reader): Promise<string> {
     const companyId = this.tenant.companyId();
-    const tz = await this.timezone(companyId);
+    const tz = await this.timezone(companyId, db);
     const natural = businessDateOf(instant, tz);
     const next = shiftDate(natural, 1);
-    const early = await db.closingEvent.findFirst({
+    const early = await (db ?? this.prisma).closingEvent.findFirst({
       where: { companyId, branchId, kind: 'day_started_early', businessDate: dateValue(next), at: { lte: instant } },
       select: { id: true },
     });
@@ -90,7 +100,7 @@ export class BusinessDayService {
   }
 
   /** The branch's current business date. */
-  async today(branchId: Buffer, db: Reader = this.prisma): Promise<string> {
+  async today(branchId: Buffer, db?: Reader): Promise<string> {
     return this.assign(branchId, new Date(), db);
   }
 
