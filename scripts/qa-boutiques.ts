@@ -1,193 +1,284 @@
 // ===========================================================================
-// The QA fixture: ten boutiques, 100 available units each, and a platform
-// administrator — in the DISPOSABLE QA database, through the product itself.
+// The QA fixture: ten boutiques with 100 items each, and a platform
+// administrator — in a DISPOSABLE QA database, through the product itself.
 //
-//   QA_PASSWORD=… npx ts-node scripts/qa-boutiques.ts            # reports only
-//   QA_PASSWORD=… npx ts-node scripts/qa-boutiques.ts --apply    # provisions
-//   QA_PASSWORD=… npx ts-node scripts/qa-boutiques.ts --verify   # checks it through the API only
+//   npm run qa:seed                   # checks and reports; writes nothing
+//   npm run qa:seed -- --apply        # provisions; a rerun adds nothing
+//   npm run qa:seed -- --verify       # proves the dataset, through the API and in the database
 //
-//   QA_DB   the QA schema (default `prisma_qa`; anything else starting `prisma_qa`)
-//   QA_API  the QA API serving that schema (default http://127.0.0.1:3020/api/v1)
+//   QA_PASSWORD      the one password of all eleven accounts — required, never printed
+//   QA_DATABASE_URL  mysql://user:password@host:port/prisma_qa — the QA database, outright;
+//                    or, without it, backend/.env's DATABASE_URL server and credentials
+//                    with the database QA_DB (default prisma_qa)
+//
+// Creating, migrating and seeding a QA database, step by step: README.md, "A QA dataset".
 //
 // Every boutique is its own company with one branch and one Owner
 // (`boutique1@test.com` … `boutique10@test.com`), registered, verified and
-// activated through the platform's own routes; its two categories and 32 products
-// are created through the catalogue, its day is opened, and its stock arrives by an
-// ordinary receipt — 80 phones (IMEI units over 26 variants, some with a second
-// IMEI) and 20 accessories (quantity stock, EAN-13 barcodes). Nothing is written into a table a service
-// owns, except the platform administrator, which by design has no HTTP route
-// (`prisma/create-platform-admin.ts`): it is created the same way, with the app's
-// own hashing.
+// activated through the platform's own routes; its two categories and 32
+// products are created through the catalogue, its day is opened, and its stock
+// arrives by an ordinary receipt — 80 phones (IMEI units over 26 variants,
+// some with a second IMEI) and 20 accessories (quantity stock, EAN-13
+// barcodes). The data itself is `scripts/qa-fixture.ts`.
 //
-// **Repeatable.** Registration and the receipt carry deterministic request keys,
-// products are matched before they are created, and verification and activation
-// are skipped when done: a second run changes nothing.
+// **The product does the writing.** The command starts the real API
+// (`src/main.ts`) as a private child process — loopback only, a random port,
+// its own token secret, messaging disabled — connected to the QA database and
+// nothing else, and stops it at the end. It READS state from the database and
+// WRITES through that API, so every row is made by the code that owns it. Two
+// exceptions, both the documented CLI paths: the platform administrator, which
+// by design has no HTTP route (`prisma/create-platform-admin.ts`), and resetting
+// a fixture Owner's password back to QA_PASSWORD — both with the app's own
+// Argon2id hashing, both revoking the account's sessions.
 //
-// **Never the live database.** The schema must be a `prisma_qa*` schema, and the
-// API must prove it serves that schema — it has to accept the administrator this
-// script just wrote there — before anything is sent to it.
+// **Repeatable.** Registration, the day's opening and the receipt carry
+// deterministic request keys, categories and products are matched before they
+// are created, and every step already done is skipped: a second run adds
+// nothing. A run that stopped halfway is finished by the next one.
 //
-// **Credentials.** The one password arrives in `QA_PASSWORD`, is hashed by the
-// app, and is never printed, logged or stored here. Nothing is ever sent to any
-// address: the platform has no email provider, and in development a contact code
-// stays in the API's in-memory outbox; this script reads it back from its hash.
+// **Never anything but a QA database.** The database must be named
+// `prisma_qa[_…]`; NODE_ENV and APP_ENV must not name a deployment; the
+// connection must report that database; its migrations must be applied; and a
+// FIRST run needs it empty — it refuses a database holding businesses or
+// administrators this fixture did not create (a copy of live, say).
 //
-// Note: the administrator's QA password may be shorter than the 12 characters
-// `create-platform-admin.ts` asks of a real one — this account exists only in
-// the QA schema.
+// **Credentials.** The password arrives in QA_PASSWORD — for this dataset,
+// the QA-only value the user chose — and is hashed by the app; it is never
+// printed, logged, stored here or passed to the API process. Nothing is sent to
+// any address: in development a contact code stays in the API's in-memory
+// outbox, and this command reads it back from its hash.
 // ===========================================================================
 
 import { config as loadEnv } from 'dotenv';
-import { PrismaClient } from '@prisma/client';
-import { createHash as sha256 } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, openSync, readdirSync } from 'node:fs';
+import { createServer, type AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PrismaClient, type SubscriptionStatus } from '@prisma/client';
 import { HashingService } from '../src/common/security/hashing.service';
-import { isValidImei, luhnValid } from '../src/inventory/imei.util';
-import { newUuidV7Bin } from '../src/common/utils/uuid.util';
+import { binToUuid, newUuidV7Bin, uuidToBin } from '../src/common/utils/uuid.util';
+import { ROLE_PERMISSIONS } from '../src/rbac/role-permissions';
+import {
+  ACCESSORIES,
+  ACCESSORIES_CATEGORY,
+  ADMIN_EMAIL,
+  ADMIN_NAME,
+  BOUTIQUES,
+  CITY,
+  GRANT_DAYS,
+  GRANT_REASON,
+  ITEMS_PER_BOUTIQUE,
+  PHONES_CATEGORY,
+  assertQaEnvironment,
+  barcodeFor,
+  boutiqueEmail,
+  boutiqueName,
+  openingKey,
+  ownerName,
+  phoneVariant,
+  planFixture,
+  privateApiEnvironment,
+  qaPassword,
+  receiptKey,
+  receiptReference,
+  registrationKey,
+  resolveQaTarget,
+  type BoutiquePlan,
+  type QaTarget,
+} from './qa-fixture';
 
+// backend/.env, for DATABASE_URL when QA_DATABASE_URL is not given. It never overrides the shell.
 loadEnv();
 
 const APPLY = process.argv.includes('--apply');
 const VERIFY = process.argv.includes('--verify');
-const QA_DB = process.env.QA_DB ?? 'prisma_qa';
-const QA_API = (process.env.QA_API ?? 'http://127.0.0.1:3020/api/v1').replace(/\/+$/, '');
-const BOUTIQUES = 10;
-const ADMIN_EMAIL = 'admin@test.com';
-const ADMIN_NAME = 'QA Platform Administrator';
-const GRANT_DAYS = 365;
-const GRANT_REASON = 'QA fixture — ten test boutiques (scripts/qa-boutiques.ts)';
+const ROOT = join(__dirname, '..');
 
-// ── Guards ─────────────────────────────────────────────────────────────────
-
-function qaDatabaseUrl(): string {
-  if (!/^prisma_qa[a-z0-9_]*$/.test(QA_DB)) throw new Error(`Refusing: "${QA_DB}" is not a prisma_qa* schema.`);
-  const base = process.env.DATABASE_URL;
-  if (!base) throw new Error('DATABASE_URL is not set (backend/.env). Refusing.');
-  const url = new URL(base);
-  url.pathname = `/${QA_DB}`;
-  const name = url.pathname.slice(1);
-  for (const forbidden of [/^phonestore$/i, /stag/i, /prod/i, /live/i, /demo/i]) {
-    if (forbidden.test(name)) throw new Error(`Refusing: "${name}" looks protected.`);
-  }
-  return url.toString();
-}
-
-function password(): string {
-  const value = process.env.QA_PASSWORD;
-  if (!value) throw new Error('Set QA_PASSWORD in the environment. It is never a command-line argument.');
-  if (value.length < 8) throw new Error('QA_PASSWORD must have at least 8 characters.');
-  return value;
-}
-
-// ── Deterministic identities ───────────────────────────────────────────────
-
-/** A request key derived from a name, so a rerun sends the same key and is answered with what was done. */
-function keyFor(name: string): string {
-  const h = sha256('sha256').update(`qa-boutiques:${name}`).digest('hex');
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16], 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
-}
-
-function checkDigit14(fourteen: string): string {
-  for (let d = 0; d <= 9; d++) if (luhnValid(fourteen + d)) return fourteen + d;
-  throw new Error(`no check digit completes ${fourteen}`);
-}
+// ── Preconditions ──────────────────────────────────────────────────────────
 
 /**
- * Synthetic IMEIs — no real device identifier is copied. The TAC is `0199`, the boutique and the model (a range no
- * allocation uses here), the serial runs per unit, and the fifteenth digit is the Luhn check the app validates.
- * A second IMEI sits in a disjoint serial band, so it never equals any first IMEI.
+ * Everything that must hold before a single row is written, reported together.
+ *
+ * `ONLY_FULL_GROUP_BY`: the day's opening and Money queries fail under it (the
+ * handoff's open item "fix ONLY_FULL_GROUP_BY in closing.service.ts"), so a QA
+ * server running it could neither be seeded nor used. Live runs with
+ * `sql_mode=''`. Drop this check once those queries are fixed.
  */
-function imeiFor(boutique: number, model: number, unit: number, secondary = false): string {
-  const tac = `0199${String(boutique).padStart(2, '0')}${String(model).padStart(2, '0')}`;
-  const serial = String((secondary ? 500_000 : 100_000) + unit).padStart(6, '0');
-  const imei = checkDigit14(tac + serial);
-  if (!isValidImei(imei)) throw new Error(`generated an invalid IMEI ${imei}`);
-  return imei;
+async function preflight(prisma: PrismaClient, target: QaTarget): Promise<string> {
+  const [session] = await prisma.$queryRaw<{ db: string; mode: string }[]>`SELECT DATABASE() AS db, @@SESSION.sql_mode AS mode`;
+  if (session.db !== target.database) throw new Error(`Refusing: the connection reports "${session.db}", not "${target.database}".`);
+
+  const problems: string[] = [];
+  if (/ONLY_FULL_GROUP_BY/i.test(session.mode)) {
+    problems.push(
+      "the server's sql_mode includes ONLY_FULL_GROUP_BY, under which the day's opening fails. Run the QA server as live runs: " +
+        "sql_mode='' (start mysqld with --sql-mode=\"\", or SET GLOBAL sql_mode = '' as an administrator).",
+    );
+  }
+
+  const local = readdirSync(join(ROOT, 'prisma', 'migrations'), { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
+  let applied = new Set<string>();
+  try {
+    const rows = await prisma.$queryRaw<{ name: string }[]>`
+      SELECT migration_name AS name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`;
+    applied = new Set(rows.map((r) => r.name));
+  } catch {
+    // No migration table: nothing was ever applied.
+  }
+  const missing = local.filter((m) => !applied.has(m));
+  if (missing.length > 0) {
+    problems.push(`${missing.length} of ${local.length} migrations are not applied (first: ${missing[0]}). Run "npx prisma migrate deploy" against the QA database first.`);
+    throw new Error(`Refusing:\n    - ${problems.join('\n    - ')}`);
+  }
+
+  // A first run needs an empty database; later runs recognise the fixture's own registrations.
+  const keys = Array.from({ length: BOUTIQUES }, (_, i) => registrationKey(i + 1));
+  const ours = await prisma.registrationAttempt.count({ where: { idempotencyKey: { in: keys } } });
+  let contents = `the fixture's own data (${ours} of ${BOUTIQUES} boutiques registered)`;
+  if (ours === 0) {
+    const companies = await prisma.company.count();
+    const admins = await prisma.platformAdmin.count({ where: { email: { not: ADMIN_EMAIL } } });
+    if (companies > 0 || admins > 0) {
+      problems.push(
+        `the database holds ${companies} business(es) and ${admins} administrator(s) this fixture did not create. ` +
+          'A first run needs a freshly migrated, empty QA database.',
+      );
+    }
+    contents = 'an empty database';
+  }
+  if (problems.length > 0) throw new Error(`Refusing:\n    - ${problems.join('\n    - ')}`);
+  return `sql_mode ok · ${local.length} of ${local.length} migrations applied · ${contents}`;
 }
 
-/** EAN-13 in the in-store range (`29…`): thirteen digits, so never an IMEI, and distinct per boutique and product. */
-function barcodeFor(boutique: number, item: number): string {
-  const twelve = `29${String(boutique).padStart(3, '0')}${String(item).padStart(7, '0')}`;
-  const sum = [...twelve].reduce((s, c, i) => s + Number(c) * (i % 2 === 0 ? 1 : 3), 0);
-  return twelve + ((10 - (sum % 10)) % 10);
+// ── State, read from the database ──────────────────────────────────────────
+
+interface BoutiqueState {
+  companyId: Buffer | null;
+  ownerId: Buffer | null;
+  verified: boolean;
+  subscription: SubscriptionStatus | null;
+  passwordOk: boolean;
+  stocked: boolean;
 }
 
-// ── The shelf ──────────────────────────────────────────────────────────────
+async function readState(prisma: PrismaClient, hashing: HashingService, pw: string, n: number): Promise<BoutiqueState> {
+  const attempt = await prisma.registrationAttempt.findUnique({
+    where: { idempotencyKey: registrationKey(n) },
+    select: { companyId: true },
+  });
+  const companyId = attempt?.companyId ?? null;
+  if (!companyId) return { companyId: null, ownerId: null, verified: false, subscription: null, passwordOk: false, stocked: false };
 
-interface PhoneLine {
-  brand: string;
-  model: string;
-  storage: string;
-  colour: string;
-  cost: number;
-  price: number;
-  /** How many of this exact variant the boutique holds. */
-  units: number;
-  /** A second IMEI on every unit of this variant (dual-SIM handsets; still one unit each). */
-  dual?: boolean;
+  const owner = await prisma.user.findFirst({
+    where: { companyId, email: boutiqueEmail(n) },
+    select: { id: true, emailVerifiedAt: true, passwordHash: true },
+  });
+  const subscription = await prisma.subscription.findFirst({ where: { companyId }, select: { status: true } });
+  const receipts = await prisma.purchase.count({ where: { companyId, clientUuid: uuidToBin(receiptKey(n)) } });
+  return {
+    companyId,
+    ownerId: owner?.id ?? null,
+    verified: Boolean(owner?.emailVerifiedAt),
+    subscription: subscription?.status ?? null,
+    passwordOk: owner ? await hashing.verify(owner.passwordHash, pw) : false,
+    stocked: receipts > 0,
+  };
 }
 
-/** Thirty variants; each boutique takes 26 of them (a different window), 80 units in all. MRU, as the shops price. */
-const PHONES: Omit<PhoneLine, 'units'>[] = [
-  { brand: 'Apple', model: 'iPhone 15 Pro Max', storage: '256 GB', colour: 'Gray', cost: 44000, price: 49500, dual: true },
-  { brand: 'Apple', model: 'iPhone 15 Pro', storage: '128 GB', colour: 'Blue', cost: 38000, price: 42500, dual: true },
-  { brand: 'Apple', model: 'iPhone 15', storage: '128 GB', colour: 'Black', cost: 29000, price: 33000 },
-  { brand: 'Apple', model: 'iPhone 14', storage: '128 GB', colour: 'Purple', cost: 24000, price: 27500 },
-  { brand: 'Apple', model: 'iPhone 13', storage: '128 GB', colour: 'Pink', cost: 19000, price: 22000 },
-  { brand: 'Apple', model: 'iPhone 13', storage: '256 GB', colour: 'Blue', cost: 21500, price: 24500 },
-  { brand: 'Apple', model: 'iPhone 12', storage: '64 GB', colour: 'White', cost: 13500, price: 16000 },
-  { brand: 'Apple', model: 'iPhone 11', storage: '64 GB', colour: 'Black', cost: 10000, price: 12500 },
-  { brand: 'Samsung', model: 'Galaxy S24 Ultra', storage: '256 GB', colour: 'Gray', cost: 41000, price: 46000, dual: true },
-  { brand: 'Samsung', model: 'Galaxy S24', storage: '128 GB', colour: 'Yellow', cost: 27000, price: 30500, dual: true },
-  { brand: 'Samsung', model: 'Galaxy S23 FE', storage: '128 GB', colour: 'Green', cost: 19500, price: 22500 },
-  { brand: 'Samsung', model: 'Galaxy A55', storage: '128 GB', colour: 'Blue', cost: 14500, price: 17000, dual: true },
-  { brand: 'Samsung', model: 'Galaxy A35', storage: '128 GB', colour: 'Black', cost: 11500, price: 13500, dual: true },
-  { brand: 'Samsung', model: 'Galaxy A15', storage: '128 GB', colour: 'Blue', cost: 6500, price: 8000, dual: true },
-  { brand: 'Samsung', model: 'Galaxy A05s', storage: '64 GB', colour: 'Silver', cost: 4500, price: 5500, dual: true },
-  { brand: 'Redmi', model: 'Redmi Note 13 Pro', storage: '256 GB', colour: 'Purple', cost: 12500, price: 14500, dual: true },
-  { brand: 'Redmi', model: 'Redmi Note 13', storage: '128 GB', colour: 'Black', cost: 8500, price: 10000, dual: true },
-  { brand: 'Redmi', model: 'Redmi 13C', storage: '128 GB', colour: 'Green', cost: 5000, price: 6200, dual: true },
-  { brand: 'Xiaomi', model: 'Xiaomi 14', storage: '256 GB', colour: 'White', cost: 30000, price: 34000, dual: true },
-  { brand: 'POCO', model: 'POCO X6 Pro', storage: '256 GB', colour: 'Yellow', cost: 13500, price: 15500, dual: true },
-  { brand: 'Tecno', model: 'Camon 30', storage: '256 GB', colour: 'Black', cost: 9500, price: 11000, dual: true },
-  { brand: 'Tecno', model: 'Spark 20 Pro', storage: '256 GB', colour: 'Orange', cost: 7000, price: 8300, dual: true },
-  { brand: 'Infinix', model: 'Note 40 Pro', storage: '256 GB', colour: 'Green', cost: 10500, price: 12300, dual: true },
-  { brand: 'Infinix', model: 'Hot 40', storage: '128 GB', colour: 'Blue', cost: 5500, price: 6700, dual: true },
-  { brand: 'itel', model: 'A70', storage: '64 GB', colour: 'Gold', cost: 3000, price: 3800, dual: true },
-  { brand: 'OPPO', model: 'Reno12', storage: '256 GB', colour: 'Silver', cost: 16500, price: 19000, dual: true },
-  { brand: 'OPPO', model: 'A58', storage: '128 GB', colour: 'Green', cost: 7500, price: 8900, dual: true },
-  { brand: 'realme', model: 'C65', storage: '128 GB', colour: 'Purple', cost: 5200, price: 6400, dual: true },
-  { brand: 'Huawei', model: 'nova 12', storage: '256 GB', colour: 'Black', cost: 15000, price: 17500, dual: true },
-  { brand: 'Honor', model: 'X8b', storage: '128 GB', colour: 'Silver', cost: 8000, price: 9500, dual: true },
-];
-
-/** How 80 units spread over 26 variants: a few deep lines for the variant and list tests, most with two or three. */
-const DEPTHS = [6, 6, 5, 5, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1];
-
-interface AccessoryLine {
-  brand: string;
-  model: string;
-  variant: string;
-  cost: number;
-  price: number;
-  quantity: number;
+/** What `--apply` would do for this boutique, step for step as `provisionBoutique` does it. */
+function describeState(s: BoutiqueState): string {
+  if (!s.companyId) return 'would be registered, verified, activated and stocked';
+  const todo: string[] = [];
+  if (!s.verified) todo.push('verified');
+  if (s.subscription === 'pending_activation') todo.push('activated');
+  else if (s.subscription !== 'activated') {
+    return `present — ${todo.length > 0 ? `would be ${todo.join(', ')}; ` : ''}subscription ${s.subscription}, left as it is, nothing else done`;
+  }
+  if (!s.passwordOk) todo.push('password reset to QA_PASSWORD');
+  if (!s.stocked) todo.push('stocked');
+  return todo.length > 0 ? `present — would be ${todo.join(', ')}` : 'present · verified · activated · stocked';
 }
 
-/** Twenty pieces over six products. */
-const ACCESSORIES: AccessoryLine[] = [
-  { brand: 'Anker', model: 'PowerCore 10000', variant: 'Black', cost: 700, price: 950, quantity: 4 },
-  { brand: 'Apple', model: 'USB-C Power Adapter', variant: '20W', cost: 550, price: 800, quantity: 3 },
-  { brand: 'Samsung', model: 'Super Fast Charger', variant: '25W', cost: 450, price: 650, quantity: 3 },
-  { brand: 'Anker', model: 'USB-C to Lightning Cable', variant: '1m', cost: 200, price: 350, quantity: 4 },
-  { brand: 'Generic', model: 'Tempered Glass', variant: 'iPhone 13/14', cost: 60, price: 150, quantity: 3 },
-  { brand: 'Generic', model: 'Silicone Case', variant: 'iPhone 15 · Black', cost: 90, price: 250, quantity: 3 },
-];
+// ── The private API ────────────────────────────────────────────────────────
 
-function shelfFor(boutique: number): PhoneLine[] {
-  // A different window over the thirty variants for each boutique, and a different order of depths.
-  const start = ((boutique - 1) * 3) % PHONES.length;
-  const picked = Array.from({ length: DEPTHS.length }, (_, i) => PHONES[(start + i) % PHONES.length]);
-  const rotate = (boutique - 1) % DEPTHS.length;
-  return picked.map((p, i) => ({ ...p, units: DEPTHS[(i + rotate) % DEPTHS.length] }));
+interface PrivateApi {
+  log: string;
+  stop(): Promise<void>;
+}
+
+let apiBase = '';
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as AddressInfo;
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+async function startPrivateApi(target: QaTarget): Promise<PrivateApi> {
+  const port = await freePort();
+  const log = join(tmpdir(), `qa-boutiques-api-${Date.now()}.log`);
+  const out = openSync(log, 'a');
+  const env = privateApiEnvironment(process.env, target, port, randomBytes(48).toString('base64url'), join(tmpdir(), 'qa-boutiques-uploads'));
+  const child = spawn(process.execPath, ['-r', require.resolve('ts-node/register/transpile-only'), join('src', 'main.ts')], {
+    cwd: ROOT,
+    env,
+    stdio: ['ignore', out, out],
+    windowsHide: true,
+  });
+  closeSync(out);
+
+  let running = true;
+  const exited = new Promise<void>((resolve) =>
+    child.once('exit', () => {
+      running = false;
+      resolve();
+    }),
+  );
+  const killNow = (): void => {
+    if (running) child.kill();
+  };
+  const onSignal = (): void => {
+    killNow();
+    process.exit(130);
+  };
+  process.once('exit', killNow);
+  process.once('SIGINT', onSignal);
+
+  const stop = async (): Promise<void> => {
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('exit', killNow);
+    if (!running) return;
+    const force = setTimeout(() => child.kill('SIGKILL'), 10_000);
+    child.kill('SIGTERM');
+    await exited;
+    clearTimeout(force);
+  };
+
+  const deadline = Date.now() + 180_000;
+  for (;;) {
+    if (!running) throw new Error(`the private API stopped while starting — see ${log}`);
+    try {
+      if ((await fetch(`http://127.0.0.1:${port}/api/health`)).ok) break;
+    } catch {
+      // Not listening yet.
+    }
+    if (Date.now() > deadline) {
+      await stop();
+      throw new Error(`the private API did not start within three minutes — see ${log}`);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  apiBase = `http://127.0.0.1:${port}/api/v1`;
+  return { log, stop };
 }
 
 // ── HTTP ───────────────────────────────────────────────────────────────────
@@ -200,7 +291,7 @@ interface Reply {
 
 async function call(method: string, path: string, opts: { body?: unknown; token?: string; branch?: string; cookie?: string } = {}): Promise<Reply> {
   for (let attempt = 0; attempt < 12; attempt++) {
-    const res = await fetch(`${QA_API}/${path}`, {
+    const res = await fetch(`${apiBase}/${path}`, {
       method,
       headers: {
         ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -211,13 +302,18 @@ async function call(method: string, path: string, opts: { body?: unknown; token?
       },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
+    // The public routes keep their own limits (ten a minute each), so a burst waits its turn.
     if (res.status === 429) {
       const wait = Number(res.headers.get('retry-after')) || 15;
       await new Promise((r) => setTimeout(r, Math.min(60, wait) * 1000));
       continue;
     }
     let json: any = null;
-    try { json = await res.json(); } catch { json = null; }
+    try {
+      json = await res.json();
+    } catch {
+      json = null;
+    }
     const setCookie = res.headers.get('set-cookie');
     return { status: res.status, json, cookie: setCookie ? setCookie.split(';')[0] : null };
   }
@@ -229,20 +325,32 @@ function expectOk(r: Reply, what: string): any {
   return r.json;
 }
 
+const rowsOf = (j: any): any[] => (Array.isArray(j) ? j : j?.rows ?? j?.items ?? []);
+
 // ── Steps ──────────────────────────────────────────────────────────────────
 
-async function ensureAdmin(prisma: PrismaClient, hashing: HashingService, pw: string): Promise<string> {
+/** The administrator has no HTTP route by design; written the way `create-platform-admin.ts` writes one. */
+async function ensureAdmin(prisma: PrismaClient, hashing: HashingService, pw: string, write: boolean): Promise<string> {
   const existing = await prisma.platformAdmin.findUnique({ where: { email: ADMIN_EMAIL } });
   if (existing && existing.isActive && !existing.deletedAt && (await hashing.verify(existing.passwordHash, pw))) return 'present';
-  if (!APPLY) return existing ? 'would be reset' : 'would be created';
+  if (!write) return existing ? 'would be reset to QA_PASSWORD' : 'would be created';
   const passwordHash = await hashing.hash(pw);
   if (existing) {
     await prisma.platformAdmin.update({ where: { email: ADMIN_EMAIL }, data: { passwordHash, name: ADMIN_NAME, isActive: true, deletedAt: null } });
     await prisma.platformAdminSession.updateMany({ where: { adminId: existing.id, revokedAt: null }, data: { revokedAt: new Date() } });
-    return 'reset';
+    return 'reset to QA_PASSWORD';
   }
   await prisma.platformAdmin.create({ data: { id: newUuidV7Bin(), email: ADMIN_EMAIL, name: ADMIN_NAME, passwordHash } });
   return 'created';
+}
+
+/**
+ * A fixture Owner whose password no longer matches — changed while testing — gets QA_PASSWORD back, the way
+ * `prisma/create-user.ts` resets a test account, and loses every session the old password opened.
+ */
+async function resetOwnerPassword(prisma: PrismaClient, hashing: HashingService, ownerId: Buffer, pw: string): Promise<void> {
+  await prisma.user.update({ where: { id: ownerId }, data: { passwordHash: await hashing.hash(pw) } });
+  await prisma.authSession.updateMany({ where: { userId: ownerId, revokedAt: null }, data: { revokedAt: new Date() } });
 }
 
 /** The code the outbox holds, read back from the hash the verification service stored — never delivered anywhere. */
@@ -254,21 +362,21 @@ async function codeFor(prisma: PrismaClient, destination: string): Promise<strin
   });
   for (let i = 0; i < 1_000_000; i++) {
     const candidate = String(i).padStart(6, '0');
-    if (sha256('sha256').update(`${destination}:${candidate}`).digest('hex') === row.codeHash) return candidate;
+    if (createHash('sha256').update(`${destination}:${candidate}`).digest('hex') === row.codeHash) return candidate;
   }
   throw new Error(`could not recover the code for ${destination}`);
 }
 
-async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, adminCookie: string): Promise<{ companyId: string; created: boolean }> {
-  const email = `boutique${n}@test.com`;
+async function register(prisma: PrismaClient, n: number, pw: string): Promise<void> {
+  const email = boutiqueEmail(n);
   const reg = expectOk(
     await call('POST', 'platform/register', {
       body: {
-        idempotencyKey: `qa-boutique-${n}`,
-        ownerName: `Owner Boutique ${n}`,
-        businessName: `Boutique ${n}`,
-        branchName: `Boutique ${n}`,
-        city: 'Nouakchott',
+        idempotencyKey: registrationKey(n),
+        ownerName: ownerName(n),
+        businessName: boutiqueName(n),
+        branchName: boutiqueName(n),
+        city: CITY,
         email,
         password: pw,
         language: 'fr',
@@ -276,150 +384,217 @@ async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, ad
     }),
     `register ${email}`,
   );
-  if (reg.continuation?.token) {
-    expectOk(await call('POST', 'platform/register/verify/start', { body: { continuation: reg.continuation.token, language: 'fr' } }), `verify start ${email}`);
-    const code = await codeFor(prisma, email);
-    const done = expectOk(await call('POST', 'platform/register/verify/confirm', { body: { continuation: reg.continuation.token, code } }), `verify ${email}`);
-    // Completion signs the Owner in; the fixture is signed into later, so that session is closed at once.
-    if (done?.accessToken) await call('POST', 'auth/logout-all', { token: done.accessToken, body: {} });
-  }
-  const found = expectOk(await call('GET', `platform/businesses?q=${encodeURIComponent(email)}`, { cookie: adminCookie }), `find ${email}`);
-  const row = (found.rows ?? []).find((r: any) => r.name === `Boutique ${n}`);
-  if (!row) throw new Error(`Boutique ${n} is not listed after registration`);
-  const status = row.subscription?.status ?? row.status ?? row.subscriptionStatus;
-  if (status !== 'activated') {
-    expectOk(
-      await call('POST', `platform/businesses/${row.id}/activate-grant`, { cookie: adminCookie, body: { days: GRANT_DAYS, reason: GRANT_REASON, confirmPassword: pw } }),
-      `activate Boutique ${n}`,
-    );
-  }
-  return { companyId: row.id, created: Boolean(reg.created) };
+  if (!reg.continuation?.token) return;
+  expectOk(await call('POST', 'platform/register/verify/start', { body: { continuation: reg.continuation.token, language: 'fr' } }), `verify start ${email}`);
+  const code = await codeFor(prisma, email);
+  const done = expectOk(await call('POST', 'platform/register/verify/confirm', { body: { continuation: reg.continuation.token, code } }), `verify ${email}`);
+  // Completion signs the Owner in; the fixture is signed into later, so that session is closed at once.
+  if (done?.accessToken) await call('POST', 'auth/logout-all', { token: done.accessToken, body: {} });
 }
 
 async function signIn(email: string, pw: string): Promise<{ token: string; branch: string }> {
   const login = expectOk(await call('POST', 'auth/login', { body: { identifier: email, password: pw } }), `sign in ${email}`);
-  const branches = expectOk(await call('GET', 'auth/branches', { token: login.accessToken }), `branches ${email}`);
-  if (!Array.isArray(branches) || branches.length !== 1) throw new Error(`${email}: expected one branch, got ${Array.isArray(branches) ? branches.length : '?'}`);
+  const branches = rowsOf(expectOk(await call('GET', 'auth/branches', { token: login.accessToken }), `branches ${email}`));
+  if (branches.length !== 1) throw new Error(`${email}: expected one branch, got ${branches.length}`);
   return { token: login.accessToken, branch: branches[0].id };
 }
 
-async function stockBoutique(n: number, pw: string): Promise<{ products: number; phones: number; accessories: number; stocked: boolean }> {
-  const email = `boutique${n}@test.com`;
-  const { token, branch } = await signIn(email, pw);
-  const as = { token, branch };
+async function stockBoutique(prisma: PrismaClient, plan: BoutiquePlan, companyId: Buffer, pw: string): Promise<string> {
+  const { n } = plan;
+  const as = await signIn(boutiqueEmail(n), pw);
+  try {
+    // A registered shop starts with no categories; its Owner creates them (Catalogue → Categories) — the two used here.
+    const category = async (name: string, defaultTrackingType: 'imei' | 'quantity'): Promise<string> => {
+      const found = await prisma.productCategory.findFirst({ where: { companyId, name }, select: { id: true } });
+      if (found) return binToUuid(found.id);
+      return expectOk(await call('POST', 'categories', { ...as, body: { name, defaultTrackingType } }), `category ${name}`).id;
+    };
+    const phonesCategory = await category(PHONES_CATEGORY, 'imei');
+    const accessoriesCategory = await category(ACCESSORIES_CATEGORY, 'quantity');
 
-  // A registered shop starts with no categories; its Owner creates them (Catalogue → Categories) — the two used here.
-  const categories = expectOk(await call('GET', 'categories', as), 'categories');
-  const list: any[] = Array.isArray(categories) ? categories : categories.rows ?? categories.items ?? [];
-  const category = async (name: string, defaultTrackingType: 'imei' | 'quantity') =>
-    list.find((c) => c.name === name) ?? expectOk(await call('POST', 'categories', { ...as, body: { name, defaultTrackingType } }), `category ${name}`);
-  const phonesCat = await category('Smartphones', 'imei');
-  const accessoriesCat = await category('Accessories', 'quantity');
+    let created = 0;
+    const product = async (brand: string, model: string, variant: string, details: Record<string, unknown>): Promise<string> => {
+      const found = await prisma.product.findFirst({ where: { companyId, brand, model, variant, deletedAt: null }, select: { id: true } });
+      if (found) return binToUuid(found.id);
+      created++;
+      return expectOk(await call('POST', 'products', { ...as, body: { brand, model, variant, ...details } }), `product ${brand} ${model} ${variant}`).id;
+    };
 
-  const existing = expectOk(await call('GET', 'products?limit=100&active=all', as), 'products');
-  const products: any[] = Array.isArray(existing) ? existing : existing.rows ?? existing.items ?? [];
-  const idOf = async (brand: string, model: string, variant: string, create: Record<string, unknown>): Promise<string> => {
-    const hit = products.find((p) => p.brand === brand && p.model === model && (p.variant ?? '') === variant);
-    if (hit) return hit.id;
-    const made = expectOk(await call('POST', 'products', { ...as, body: { brand, model, variant, ...create } }), `product ${brand} ${model} ${variant}`);
-    products.push(made);
-    return made.id;
-  };
+    const items: unknown[] = [];
+    for (const [index, line] of plan.shelf.entries()) {
+      const productId = await product(line.brand, line.model, phoneVariant(line), {
+        trackingType: 'imei',
+        categoryId: phonesCategory,
+        defaultCost: line.cost,
+        defaultPrice: line.price,
+      });
+      items.push({ productId, unitCost: line.cost, units: plan.units[index] });
+    }
+    for (const [index, a] of ACCESSORIES.entries()) {
+      const productId = await product(a.brand, a.model, a.variant, {
+        trackingType: 'quantity',
+        categoryId: accessoriesCategory,
+        barcode: barcodeFor(n, index + 1),
+        defaultCost: a.cost,
+        defaultPrice: a.price,
+      });
+      items.push({ productId, unitCost: a.cost, quantity: a.quantity, price: a.price });
+    }
 
-  const shelf = shelfFor(n);
-  const items: unknown[] = [];
-  for (const [index, line] of shelf.entries()) {
-    const variant = `${line.storage} · ${line.colour}`;
-    const productId = await idOf(line.brand, line.model, variant, {
-      trackingType: 'imei',
-      categoryId: phonesCat.id,
-      defaultCost: line.cost,
-      defaultPrice: line.price,
-    });
-    const model = PHONES.indexOf(PHONES.find((p) => p.brand === line.brand && p.model === line.model && p.storage === line.storage)!);
-    items.push({
-      productId,
-      unitCost: line.cost,
-      units: Array.from({ length: line.units }, (_, u) => ({
-        identifier: imeiFor(n, model, index * 10 + u),
-        ...(line.dual && u % 2 === 0 ? { imeiSecondary: imeiFor(n, model, index * 10 + u, true) } : {}),
-      })),
-    });
-  }
-  for (const [index, a] of ACCESSORIES.entries()) {
-    const productId = await idOf(a.brand, a.model, a.variant, {
-      trackingType: 'quantity',
-      categoryId: accessoriesCat.id,
-      barcode: barcodeFor(n, index + 1),
-      defaultCost: a.cost,
-      defaultPrice: a.price,
-    });
-    items.push({ productId, unitCost: a.cost, quantity: a.quantity, price: a.price });
-  }
+    // Receipts wait for the day's opening (docs/63): open it — before 06:00 start today early — keeping the amounts.
+    const day = expectOk(await call('GET', 'closings/business-day', as), 'business day');
+    if (day.door === 'closed') {
+      throw new Error(`${boutiqueName(n)}: today's business day is closed, so it cannot receive stock. Reopen it in the app, then run --apply again.`);
+    }
+    if (day.door === 'never_opened') {
+      const view = expectOk(await call('GET', 'closings/open/view', as), 'open view');
+      const mode = (view.openChoices ?? []).includes('start_new') ? 'start_new' : 'continue';
+      expectOk(
+        await call('POST', 'closings/open', { ...as, body: { mode, openingMoney: { clientUuid: openingKey(n), decision: 'keep' } } }),
+        `open ${boutiqueName(n)}`,
+      );
+    }
 
-  const phones = shelf.reduce((s, l) => s + l.units, 0);
-  const accessories = ACCESSORIES.reduce((s, a) => s + a.quantity, 0);
-  // Already received (the fixture's first IMEI is on the shelf or was sold from it): no day is opened, nothing sent.
-  const firstImei = (items[0] as { units: { identifier: string }[] }).units[0].identifier;
-  if ((await call('GET', `units/${firstImei}`, as)).status === 200) return { products: products.length, phones, accessories, stocked: true };
-
-  // Receipts wait for the day's opening (docs/63): open it — before 06:00 start today early — keeping the amounts.
-  const day = expectOk(await call('GET', 'closings/business-day', as), 'business day');
-  if (day.door === 'never_opened') {
-    const view = expectOk(await call('GET', 'closings/open/view', as), 'open view');
-    const mode = (view.openChoices ?? []).includes('start_new') ? 'start_new' : 'continue';
     expectOk(
-      await call('POST', 'closings/open', { ...as, body: { mode, openingMoney: { clientUuid: keyFor(`boutique-${n}-opening`), decision: 'keep' } } }),
-      `open Boutique ${n}`,
+      await call('POST', 'purchases', {
+        ...as,
+        body: { clientUuid: receiptKey(n), paymentMethod: 'cash', referenceNo: receiptReference(n), items },
+      }),
+      `receipt ${boutiqueName(n)}`,
     );
+    return `${created} product(s) created · ${plan.phones} phones + ${plan.accessories} accessories received`;
+  } finally {
+    await call('POST', 'auth/logout-all', { token: as.token, body: {} });
   }
-
-  const receipt = await call('POST', 'purchases', {
-    ...as,
-    body: { clientUuid: keyFor(`boutique-${n}-stock-v1`), paymentMethod: 'cash', referenceNo: `QA-B${n}-STOCK`, items },
-  });
-  expectOk(receipt, `receipt Boutique ${n}`);
-  return { products: products.length, phones, accessories, stocked: false };
 }
 
-// ── Verification, through the API only ─────────────────────────────────────
+async function provisionBoutique(
+  prisma: PrismaClient,
+  hashing: HashingService,
+  plan: BoutiquePlan,
+  pw: string,
+  adminCookie: () => Promise<string>,
+): Promise<string> {
+  const { n } = plan;
+  const done: string[] = [];
+  let state = await readState(prisma, hashing, pw, n);
+
+  if (!state.companyId || !state.verified) {
+    await register(prisma, n, pw);
+    done.push(state.companyId ? 'verified' : 'registered and verified');
+    state = await readState(prisma, hashing, pw, n);
+    if (!state.companyId || !state.ownerId || !state.verified) throw new Error(`${boutiqueName(n)}: registration did not complete`);
+  }
+
+  if (state.subscription === 'pending_activation') {
+    expectOk(
+      await call('POST', `platform/businesses/${binToUuid(state.companyId)}/activate-grant`, {
+        cookie: await adminCookie(),
+        body: { days: GRANT_DAYS, reason: GRANT_REASON, confirmPassword: pw },
+      }),
+      `activate ${boutiqueName(n)}`,
+    );
+    done.push(`activated (${GRANT_DAYS}-day grant)`);
+  } else if (state.subscription !== 'activated') {
+    // Suspended, cancelled or rejected from the platform portal: somebody's decision, which a fixture does not overrule.
+    return `subscription ${state.subscription} — left as it is, nothing else done`;
+  }
+
+  if (!state.passwordOk && state.ownerId) {
+    await resetOwnerPassword(prisma, hashing, state.ownerId, pw);
+    done.push('password reset to QA_PASSWORD');
+  }
+
+  if (!state.stocked) done.push(await stockBoutique(prisma, plan, state.companyId, pw));
+  return done.length > 0 ? done.join(' · ') : 'already complete — nothing to do';
+}
+
+/** The API serves THIS database: it has to accept the administrator this command wrote there. */
+async function adminSignIn(pw: string): Promise<string> {
+  const signIn = await call('POST', 'platform/admin/sign-in', { body: { email: ADMIN_EMAIL, password: pw } });
+  const cookie = signIn.cookie ?? (signIn.json?.sessionToken ? `erp_platform_session=${signIn.json.sessionToken}` : null);
+  if (signIn.status !== 200 || !cookie) throw new Error(`the administrator could not sign in to the private API (${signIn.status})`);
+  return cookie;
+}
+
+// ── Verification ───────────────────────────────────────────────────────────
 
 /**
- * The eleven sign-ins; each Owner sees exactly their own 100 available units and none of another boutique's; the
- * Owners have no platform access; the administrator reaches the platform and nothing of a shop.
+ * The dataset exactly as seeded: eleven sign-ins with QA_PASSWORD; each Owner in its own single branch, holding
+ * exactly the Owner role's permissions, with exactly its 100 items — the planned IMEIs and barcodes — and nobody
+ * else's; every password stored as Argon2id; the administrator on the platform and nowhere in a shop. After QA has
+ * sold or moved stock the counts differ by design — recreate the database for a fresh dataset.
  */
-async function verify(pw: string): Promise<boolean> {
+async function verify(prisma: PrismaClient, plan: BoutiquePlan[], pw: string): Promise<boolean> {
+  let passed = 0;
   let failed = 0;
   const check = (name: string, ok: boolean, detail = ''): void => {
-    if (!ok) failed++;
+    if (ok) passed++;
+    else failed++;
     console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
   };
-  const rowsOf = (j: any): any[] => (Array.isArray(j) ? j : j?.rows ?? j?.items ?? []);
+  const ownerPermissions = [...ROLE_PERMISSIONS.owner].sort().join(',');
 
   const owners: { n: number; token: string; branch: string; productId: string; imei: string }[] = [];
-  for (let n = 1; n <= BOUTIQUES; n++) {
-    const email = `boutique${n}@test.com`;
+  for (const p of plan) {
+    const { n } = p;
+    const email = boutiqueEmail(n);
     const login = await call('POST', 'auth/login', { body: { identifier: email, password: pw } });
     check(`${email} signs in`, login.status === 200 && Boolean(login.json?.accessToken), String(login.status));
     if (login.status !== 200) continue;
     const token = login.json.accessToken as string;
+
     const branches = rowsOf((await call('GET', 'auth/branches', { token })).json);
-    check(`${email}: one branch, its own`, branches.length === 1 && branches[0].name === `Boutique ${n}`, branches.map((b: any) => b.name).join(', '));
+    check(`${email}: one branch, its own`, branches.length === 1 && branches[0].name === boutiqueName(n), branches.map((b: any) => b.name).join(', '));
     const branch = branches[0]?.id as string;
+
+    const held = ((await call('GET', 'auth/permissions', { token, branch })).json?.permissions ?? []) as string[];
+    check(`${email}: holds exactly the Owner role's ${ROLE_PERMISSIONS.owner.length} permissions`, [...held].sort().join(',') === ownerPermissions, `${held.length} held`);
+
     const summary = rowsOf((await call('GET', 'inventory/summary', { token, branch })).json);
     const available = summary.reduce((s: number, r: any) => s + Number(r.available ?? 0), 0);
     const phones = summary.filter((r: any) => r.trackingType === 'imei').reduce((s: number, r: any) => s + Number(r.available ?? 0), 0);
-    check(`${email}: exactly 100 available — ${phones} phones, ${available - phones} accessories, ${summary.length} variants`, available === 100, `available ${available}`);
+    check(
+      `${email}: exactly ${ITEMS_PER_BOUTIQUE} available — ${phones} phones, ${available - phones} accessories, ${summary.length} variants`,
+      available === ITEMS_PER_BOUTIQUE && phones === p.phones,
+      `available ${available}`,
+    );
     const list = (await call('GET', 'inventory?status=in_stock&limit=1', { token, branch })).json;
+    check(`${email}: the unit list agrees (${list?.totals?.units} phones in stock)`, list?.totals?.units === p.phones, JSON.stringify(list?.totals ?? null));
+
     const firstPhone = summary.find((r: any) => r.trackingType === 'imei');
     const unitList = rowsOf((await call('GET', `inventory?productId=${firstPhone?.productId}&limit=1`, { token, branch })).json);
     owners.push({ n, token, branch, productId: firstPhone?.productId, imei: unitList[0]?.identifier ?? unitList[0]?.imeiPrimary });
-    check(`${email}: the unit list agrees (${list?.totals?.units} phones in stock)`, list?.totals?.units === phones, JSON.stringify(list?.totals ?? null));
+  }
+
+  // The receipt, in the database: the planned identifiers and nothing else, every password hashed with Argon2id.
+  for (const p of plan) {
+    const { n } = p;
+    const attempt = await prisma.registrationAttempt.findUnique({ where: { idempotencyKey: registrationKey(n) }, select: { companyId: true } });
+    const companyId = attempt?.companyId ?? Buffer.alloc(16);
+    const receipt = await prisma.purchase.findFirst({ where: { companyId, clientUuid: uuidToBin(receiptKey(n)) }, select: { id: true } });
+    const units = receipt
+      ? await prisma.unit.findMany({ where: { companyId, purchaseId: receipt.id }, select: { imeiPrimary: true, imeiSecondary: true } })
+      : [];
+    const got = units.map((u) => `${u.imeiPrimary}/${u.imeiSecondary ?? ''}`).sort().join(',');
+    const want = p.units.flat().map((u) => `${u.identifier}/${u.imeiSecondary ?? ''}`).sort().join(',');
+    const seconds = p.units.flat().filter((u) => u.imeiSecondary).length;
+    const barcodes = await prisma.product.count({
+      where: { companyId, barcode: { in: ACCESSORIES.map((_, i) => barcodeFor(n, i + 1)) }, trackingType: 'quantity' },
+    });
+    check(
+      `${boutiqueName(n)}: its receipt holds the planned ${p.phones} IMEIs (${seconds} with a second) and ${barcodes} barcoded accessories`,
+      Boolean(receipt) && got === want && barcodes === ACCESSORIES.length,
+      receipt ? `${units.length} units` : 'no receipt',
+    );
+    const owner = await prisma.user.findFirst({ where: { companyId, email: boutiqueEmail(n) }, select: { passwordHash: true } });
+    check(`${boutiqueEmail(n)}: password stored as Argon2id`, Boolean(owner?.passwordHash.startsWith('$argon2id$')));
   }
 
   // Another boutique's records: never readable.
   for (const me of owners) {
-    const other = owners.find((o) => o.n === (me.n % BOUTIQUES) + 1)!;
+    const other = owners.find((o) => o.n === (me.n % BOUTIQUES) + 1);
+    if (!other) continue;
     // The control: the same reads of its OWN product and phone succeed, so a refusal below is the boundary, not a typo.
     const ownProduct = await call('GET', `products/${me.productId}`, { token: me.token, branch: me.branch });
     const ownUnit = await call('GET', `units/${me.imei}`, { token: me.token, branch: me.branch });
@@ -432,8 +607,10 @@ async function verify(pw: string): Promise<boolean> {
       product.status >= 400 && unit.status >= 400 && theirShelf.status >= 400,
       `${product.status} / ${unit.status} / ${theirShelf.status}`,
     );
-    const platform = await call('GET', 'platform/businesses', { token: me.token });
-    if (me.n === 1) check('an Owner has no platform access', platform.status === 401 || platform.status === 403, String(platform.status));
+    if (me.n === 1) {
+      const platform = await call('GET', 'platform/businesses', { token: me.token });
+      check('an Owner has no platform access', platform.status === 401 || platform.status === 403, String(platform.status));
+    }
   }
 
   // The administrator: the platform, and nothing of a shop.
@@ -447,81 +624,77 @@ async function verify(pw: string): Promise<boolean> {
   const shop = await call('GET', 'products', { cookie });
   const shopLogin = await call('POST', 'auth/login', { body: { identifier: ADMIN_EMAIL, password: pw } });
   check('the administrator has no shop access: no shop session, no shop account', shop.status === 401 && shopLogin.status === 401, `${shop.status} / ${shopLogin.status}`);
+  const admin = await prisma.platformAdmin.findUnique({ where: { email: ADMIN_EMAIL }, select: { passwordHash: true } });
+  check(`${ADMIN_EMAIL}: password stored as Argon2id`, Boolean(admin?.passwordHash.startsWith('$argon2id$')));
   await call('POST', 'platform/admin/sign-out', { cookie, body: {} });
 
   // The sessions opened here are closed again.
   for (const o of owners) await call('POST', 'auth/logout-all', { token: o.token, body: {} });
-  console.log(`\n  ${failed === 0 ? 'all checks passed' : `${failed} check(s) FAILED`}\n`);
+  console.log(`\n  ${failed === 0 ? `all ${passed} checks passed` : `${failed} of ${passed + failed} checks FAILED`}\n`);
   return failed === 0;
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const url = qaDatabaseUrl();
-  const pw = password();
-  const prisma = new PrismaClient({ datasources: { db: { url } } });
+  if (APPLY && VERIFY) throw new Error('Pass --apply or --verify, not both.');
+  assertQaEnvironment(process.env);
+  const target = resolveQaTarget(process.env);
+  const pw = qaPassword(process.env);
+  const plan = planFixture();
+
+  console.log(`\n  QA fixture — database ${target.database} on ${target.server}${VERIFY ? '   (verification)' : APPLY ? '' : '   (dry run — nothing is written)'}\n`);
+  const identifiers = plan.reduce((s, p) => s + p.units.flat().reduce((c, u) => c + (u.imeiSecondary ? 2 : 1), 0) + ACCESSORIES.length, 0);
+  console.log(`  plan: ${BOUTIQUES} boutiques × (${plan[0].phones} phones + ${plan[0].accessories} accessories); ${identifiers} distinct identifiers (IMEIs and barcodes)`);
+
+  const prisma = new PrismaClient({ datasources: { db: { url: target.url } } });
   const hashing = new HashingService();
-  console.log(`\n  QA fixture — schema ${QA_DB}, API ${QA_API}${VERIFY ? '   (verification)' : APPLY ? '' : '   (dry run)'}\n`);
-
-  // The plan, before anything else.
-  for (let n = 1; n <= BOUTIQUES; n++) {
-    const shelf = shelfFor(n);
-    const phones = shelf.reduce((s, l) => s + l.units, 0);
-    const accessories = ACCESSORIES.reduce((s, a) => s + a.quantity, 0);
-    if (phones + accessories !== 100) throw new Error(`Boutique ${n} would hold ${phones + accessories} units, not 100`);
-  }
-  const all = new Set<string>();
-  for (let n = 1; n <= BOUTIQUES; n++) {
-    for (const [index, line] of shelfFor(n).entries()) {
-      const model = PHONES.findIndex((p) => p.brand === line.brand && p.model === line.model && p.storage === line.storage);
-      for (let u = 0; u < line.units; u++) {
-        for (const id of [imeiFor(n, model, index * 10 + u), ...(line.dual && u % 2 === 0 ? [imeiFor(n, model, index * 10 + u, true)] : [])]) {
-          if (all.has(id)) throw new Error(`IMEI ${id} would repeat`);
-          all.add(id);
-        }
-      }
-    }
-    for (let i = 1; i <= ACCESSORIES.length; i++) {
-      const code = barcodeFor(n, i);
-      if (all.has(code)) throw new Error(`barcode ${code} would repeat`);
-      all.add(code);
-    }
-  }
-  console.log(`  plan: ${BOUTIQUES} boutiques × (80 phones + 20 accessories); ${all.size} distinct identifiers (IMEIs and barcodes)`);
-
+  let api: PrivateApi | null = null;
   try {
+    console.log(`  checks: ${await preflight(prisma, target)}`);
+
+    if (!APPLY && !VERIFY) {
+      const admin = await ensureAdmin(prisma, hashing, pw, false);
+      console.log(`  administrator ${ADMIN_EMAIL}: ${admin}`);
+      for (const p of plan) {
+        const state = await readState(prisma, hashing, pw, p.n);
+        console.log(`  ${boutiqueName(p.n).padEnd(12)} ${describeState(state)}`);
+      }
+      console.log('\n  nothing was written. Pass --apply to provision, --verify to check the dataset through the API.\n');
+      return;
+    }
+
+    if (APPLY) {
+      const admin = await ensureAdmin(prisma, hashing, pw, true);
+      console.log(`  administrator ${ADMIN_EMAIL}: ${admin}`);
+    }
+    api = await startPrivateApi(target);
+    console.log(`  private API up (loopback only; its log: ${api.log})\n`);
+
     if (VERIFY) {
-      if (!(await verify(pw))) process.exitCode = 1;
-      return;
-    }
-    const admin = await ensureAdmin(prisma, hashing, pw);
-    console.log(`  administrator ${ADMIN_EMAIL}: ${admin}`);
-    if (!APPLY) {
-      console.log('\n  nothing was written. Pass --apply to provision.\n');
+      if (!(await verify(prisma, plan, pw))) process.exitCode = 1;
       return;
     }
 
-    // The API must serve THIS schema: it has to accept the administrator just written here.
-    const signIn = await call('POST', 'platform/admin/sign-in', { body: { email: ADMIN_EMAIL, password: pw } });
-    const token = signIn.json?.sessionToken as string | undefined;
-    const adminCookie = signIn.cookie ?? (token ? `erp_platform_session=${token}` : null);
-    if (signIn.status !== 200 || !adminCookie) throw new Error(`Refusing: the API at ${QA_API} does not serve ${QA_DB} (administrator sign-in: ${signIn.status}).`);
-
-    for (let n = 1; n <= BOUTIQUES; n++) {
-      const b = await provisionBoutique(n, prisma, pw, adminCookie);
-      const s = await stockBoutique(n, pw);
-      console.log(`  Boutique ${n}: ${b.created ? 'registered' : 'present'} · ${s.products} products · ${s.stocked ? 'already stocked' : `${s.phones} phones + ${s.accessories} accessories received`}`);
+    // Signed in only when an activation needs it, so a rerun with nothing to do writes nothing at all.
+    let adminSession = null as string | null;
+    const adminCookie = async (): Promise<string> => (adminSession ??= await adminSignIn(pw));
+    for (const p of plan) {
+      const outcome = await provisionBoutique(prisma, hashing, p, pw, adminCookie);
+      console.log(`  ${boutiqueName(p.n).padEnd(12)} ${outcome}`);
     }
-    await call('POST', 'platform/admin/sign-out', { cookie: adminCookie, body: {} });
-    console.log('\n  done.\n');
+    if (adminSession) await call('POST', 'platform/admin/sign-out', { cookie: adminSession, body: {} });
+    console.log(
+      `\n  done. Sign in with QA_PASSWORD as ${boutiqueEmail(1)} … ${boutiqueEmail(BOUTIQUES)} (the app) or ${ADMIN_EMAIL} (the platform portal).` +
+        '\n  Check it: npm run qa:seed -- --verify\n',
+    );
   } finally {
+    await api?.stop();
     await prisma.$disconnect();
   }
 }
 
 main().catch((e) => {
   console.error(`\n  failed: ${e instanceof Error ? e.message : String(e)}\n`);
-  process.exit(1);
+  process.exitCode = 1;
 });
-
