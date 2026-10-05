@@ -45,8 +45,12 @@ export type EntitlementState =
 export const GRACE_HOURS = 72;
 export const GRACE_MS = GRACE_HOURS * 60 * 60 * 1000;
 
-/** Included staff seats per subscribed branch. Pooled across the company. */
-export const SEATS_PER_BRANCH = 2;
+/**
+ * Included staff seats per store (docs/21, 2026-10-05). One, and it belongs to
+ * the store: a person working at two stores holds a seat at each, and within
+ * one store they are counted once. This replaced two pooled seats per branch.
+ */
+export const INCLUDED_SEATS_PER_STORE = 1;
 
 export interface SubscriptionRecord {
   subscribedBranchCount: number;
@@ -62,10 +66,28 @@ export interface SubscriptionRecord {
   status?: SubscriptionStatus;
 }
 
+/** One store's seats: who works there, and what the shop holds for it. */
+export interface BranchSeatUsage {
+  branchId: string;
+  name: string;
+  /** Distinct active non-Owner people assigned to this store. */
+  seatsUsed: number;
+  /** Seats bought and confirmed for this store. */
+  paidSeats: number;
+  /** Seats held without a charge — the transition, or a platform grant. */
+  grantedSeats: number;
+}
+
 export interface SeatUsage {
-  /** Active users holding a seat-consuming (non-Owner) role. */
+  /**
+   * Active non-Owner assignments, counted per store. Without `branches` it is
+   * read as a company-wide figure against the company-wide pool, which is how
+   * callers written before seats belonged to stores still read it.
+   */
   seatsUsed: number;
   activeBranchCount: number;
+  /** Per-store detail. Present whenever the server computed it. */
+  branches?: BranchSeatUsage[];
 }
 
 /**
@@ -182,6 +204,15 @@ export function graceHoursRemaining(sub: SubscriptionRecord, now: Date): number 
   return Math.max(0, Math.ceil((ends.getTime() - now.getTime()) / (60 * 60 * 1000)));
 }
 
+export interface BranchSeatMath extends BranchSeatUsage {
+  includedSeats: number;
+  /** Included + paid + granted: how many people may work at this store. */
+  seatLimit: number;
+  seatsAvailable: number;
+  /** More people than seats. Only staff who predate the rule can be here; nobody is deactivated for it. */
+  overLimit: boolean;
+}
+
 export interface SeatMath {
   includedSeats: number;
   additionalSeats: number;
@@ -189,40 +220,113 @@ export interface SeatMath {
   seatsUsed: number;
   overLimit: boolean;
   seatsAvailable: number;
+  /** One line per store. Empty when the usage carried no per-store detail. */
+  branches: BranchSeatMath[];
+  /**
+   * Seats bought under the pooled rule and not yet converted to a store by the
+   * transition. Usable at any store until then, so nobody who paid loses a seat.
+   */
+  pooledSeats: number;
 }
 
 /**
- * Seat arithmetic.
+ * Seat arithmetic (docs/21, 2026-10-05).
  *
- * Included seats come from the number of SUBSCRIBED branches and are pooled
- * freely across the company — a shop that hires its second person at the quieter
- * branch has not changed what it owes. The Owner is excluded entirely: charging
- * for the account that pays the bill would be absurd.
+ * Each store includes ONE seat; the Owner never counts. A shop holds further
+ * seats store by store — bought, or granted — and a person is seated at every
+ * store they work in. Nothing pools across stores any more, with one honest
+ * exception: seats a shop bought under the earlier pooled rule stay usable
+ * anywhere until the transition assigns them to a store.
  */
 export function seatMath(sub: SubscriptionRecord, usage: SeatUsage): SeatMath {
-  const includedSeats = Math.max(0, sub.subscribedBranchCount) * SEATS_PER_BRANCH;
-  const seatLimit = includedSeats + Math.max(0, sub.additionalSeats);
-  const seatsUsed = Math.max(0, usage.seatsUsed);
+  const pooledSeats = Math.max(0, sub.additionalSeats);
+  const used = (n: number) => Math.max(0, Math.trunc(n));
+
+  if (usage.branches === undefined) {
+    // No per-store detail: the company-wide reading, one included seat per store.
+    const includedSeats = Math.max(0, sub.subscribedBranchCount) * INCLUDED_SEATS_PER_STORE;
+    const seatLimit = includedSeats + pooledSeats;
+    const seatsUsed = used(usage.seatsUsed);
+    return {
+      includedSeats,
+      additionalSeats: pooledSeats,
+      seatLimit,
+      seatsUsed,
+      overLimit: seatsUsed > seatLimit,
+      seatsAvailable: Math.max(0, seatLimit - seatsUsed),
+      branches: [],
+      pooledSeats,
+    };
+  }
+
+  const branches: BranchSeatMath[] = usage.branches.map((b) => {
+    const seatsUsed = used(b.seatsUsed);
+    const paidSeats = used(b.paidSeats);
+    const grantedSeats = used(b.grantedSeats);
+    const seatLimit = INCLUDED_SEATS_PER_STORE + paidSeats + grantedSeats;
+    return {
+      branchId: b.branchId,
+      name: b.name,
+      seatsUsed,
+      paidSeats,
+      grantedSeats,
+      includedSeats: INCLUDED_SEATS_PER_STORE,
+      seatLimit,
+      seatsAvailable: Math.max(0, seatLimit - seatsUsed),
+      overLimit: seatsUsed > seatLimit,
+    };
+  });
+
+  const includedSeats = branches.length * INCLUDED_SEATS_PER_STORE;
+  const heldSeats = branches.reduce((n, b) => n + b.paidSeats + b.grantedSeats, 0);
+  const additionalSeats = heldSeats + pooledSeats;
+  const seatLimit = includedSeats + additionalSeats;
+  const seatsUsed = branches.reduce((n, b) => n + b.seatsUsed, 0);
+  // People seated beyond their own store's seats, store by store. The pool may
+  // still cover them; past that the company is over its limit.
+  const overflow = branches.reduce((n, b) => n + Math.max(0, b.seatsUsed - b.seatLimit), 0);
+
   return {
     includedSeats,
-    additionalSeats: Math.max(0, sub.additionalSeats),
+    additionalSeats,
     seatLimit,
     seatsUsed,
-    overLimit: seatsUsed > seatLimit,
+    overLimit: overflow > pooledSeats,
     seatsAvailable: Math.max(0, seatLimit - seatsUsed),
+    branches,
+    pooledSeats,
   };
 }
 
 /**
- * Whether one more seat-consuming person may be activated.
+ * Whether one more seat-consuming person may be activated, company-wide.
+ *
+ * Kept for the callers that have no store in hand. When the maths carries
+ * per-store detail, prefer {@link mayConsumeSeatIn}: a free seat at the quiet
+ * store does not seat somebody at the busy one.
  *
  * Note what this does NOT do: nothing here deactivates anybody. A company that
- * drops a branch and lands over its limit keeps every employee it has, and is
+ * drops a store and lands over its limit keeps every employee it has, and is
  * simply blocked from adding more until the Owner rearranges. An app that fires
  * somebody to balance an invoice is not a tool anybody should trust.
  */
 export function mayConsumeSeat(math: SeatMath): boolean {
   return math.seatsUsed < math.seatLimit;
+}
+
+/**
+ * Whether one more person may be seated at THIS store.
+ *
+ * The store's own seats first — included, paid, granted — then the unconverted
+ * pool bought under the earlier rule. An unknown store seats nobody: failing
+ * closed is the right way round for a billing boundary.
+ */
+export function mayConsumeSeatIn(math: SeatMath, branchId: string): boolean {
+  const line = math.branches.find((b) => b.branchId === branchId);
+  if (!line) return false;
+  if (line.seatsUsed < line.seatLimit) return true;
+  const overflow = math.branches.reduce((n, b) => n + Math.max(0, b.seatsUsed - b.seatLimit), 0);
+  return overflow < math.pooledSeats;
 }
 
 /** The stable code the client keys on. It never parses English. */
@@ -248,6 +352,8 @@ export interface Entitlement {
   seatLimit: number;
   seatsUsed: number;
   overLimit: boolean;
+  /** Seats store by store (docs/21, 2026-10-05). Empty when not computed. */
+  seatsByStore: BranchSeatMath[];
   canRead: boolean;
   canWrite: boolean;
   isComplimentary: boolean;
@@ -285,6 +391,7 @@ export function buildEntitlement(
     seatLimit: seats.seatLimit,
     seatsUsed: seats.seatsUsed,
     overLimit: seats.overLimit,
+    seatsByStore: seats.branches,
     canRead: canRead(state),
     canWrite: canWrite(state),
     isComplimentary: state === 'complimentary',

@@ -1,9 +1,11 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CLOCK, type Clock } from '../entitlement/clock';
+import { seatCensus } from '../entitlement/seat-census';
 import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
 import {
   assessPeriod,
+  estimateFor,
   nextRenewalEstimate,
   quoteFor,
   type CompanySize,
@@ -35,7 +37,7 @@ export interface SubscriptionPricing {
   plan: PlanVersionView;
   /** A scheduled future price, when one exists. The customer is told. */
   upcomingPlan: PlanVersionView | null;
-  /** Today's size at today's plan. */
+  /** Today's size at today's plan, store by store. */
   quote: Quote;
   /** What this period is actually assessed at — never below what was charged. */
   currentPeriod: {
@@ -47,10 +49,31 @@ export interface SubscriptionPricing {
     adjustments: number;
     available: boolean;
   };
-  /** Today's size at the plan that will apply next. Goes down when staff leave. */
+  /** Today's size at the plan that will apply next. Goes down when seats are released. */
   nextRenewalEstimate: Quote;
   currency: 'MRU';
 }
+
+/** The plan in force, as the public website may show it. Prices only; nothing about any business. */
+export interface PublicPlan {
+  version: number;
+  branchMonthly: number;
+  includedSeatsPerStore: number;
+  extraSeatMonthly: number;
+  currency: 'MRU';
+  effectiveFrom: string;
+  upcoming: {
+    version: number;
+    branchMonthly: number;
+    includedSeatsPerStore: number;
+    extraSeatMonthly: number;
+    effectiveFrom: string;
+  } | null;
+}
+
+/** An applicant may describe at most this many stores in one estimate. */
+export const ESTIMATE_MAX_STORES = 50;
+export const ESTIMATE_MAX_STAFF_PER_STORE = 500;
 
 @Injectable()
 export class BillingService {
@@ -60,40 +83,25 @@ export class BillingService {
   ) {}
 
   /**
-   * How big the company is, for pricing.
+   * How big the company is, for pricing — store by store.
    *
-   * Two rules do the work, and both are easy to get wrong:
-   *
-   *  - **Distinct people, not assignments.** Somebody working across three
-   *    branches is one person being paid for once. Counting `user_branches`
-   *    rows would charge a shop for organising itself sensibly.
-   *  - **The Owner is never counted.** Charging for the account that pays the
-   *    bill would be absurd, and it matches the seat maths that has always
-   *    been in `entitlement-rules.ts`.
-   *
-   * Inactive and soft-deleted users are excluded, and so are archived branches.
-   * A pending invitation has no user row at all, so it cannot be counted by
-   * construction.
+   * The census is shared with entitlement (`seat-census.ts`), so the seats a
+   * shop is charged for and the seats it may fill are counted by one piece of
+   * code. A pending invitation is `is_active = 0` until the server activates
+   * it, so it cannot be counted by construction.
    */
   async sizeOf(companyId: Buffer): Promise<CompanySize> {
-    const staff = await this.prisma.$queryRaw<{ n: bigint }[]>`
-      SELECT COUNT(DISTINCT u.id) AS n
-      FROM users u
-      JOIN user_branches ub ON ub.user_id = u.id
-      JOIN roles r ON r.id = ub.role_id
-      WHERE u.company_id = ${companyId}
-        AND u.is_active = 1
-        AND u.deleted_at IS NULL
-        AND r.\`key\` <> 'owner'
-    `;
-
-    const activeBranchCount = await this.prisma.branch.count({
-      where: { companyId, isActive: true },
-    });
-
+    const census = await seatCensus(this.prisma, companyId);
     return {
-      activeBranchCount,
-      activeStaffCount: Number(staff[0]?.n ?? 0),
+      activeBranchCount: census.activeBranchCount,
+      activeStaffCount: census.seatsUsed,
+      branches: census.branches.map((b) => ({
+        branchId: b.branchId,
+        name: b.name,
+        staffCount: b.seatsUsed,
+        paidSeats: b.paidSeats,
+        grantedSeats: b.grantedSeats,
+      })),
     };
   }
 
@@ -133,6 +141,61 @@ export class BillingService {
       includedStaffPerBranch: v.includedStaffPerBranch,
       extraStaffMonthly: v.extraStaffMonthly,
     };
+  }
+
+  /**
+   * The plan in force, for the public website.
+   *
+   * Prices and dates only. Nothing here names, counts or describes any
+   * business, so showing it to an anonymous visitor reveals nothing but the
+   * price list — which is the one thing the website exists to show.
+   */
+  async publicPlan(): Promise<PublicPlan> {
+    const plans = await this.planAt(this.clock.now());
+    const c = plans.current;
+    const u = plans.upcoming;
+    return {
+      version: c.version,
+      branchMonthly: c.branchMonthly,
+      includedSeatsPerStore: c.includedStaffPerBranch,
+      extraSeatMonthly: c.extraStaffMonthly,
+      currency: 'MRU',
+      effectiveFrom: c.effectiveFrom,
+      upcoming: u
+        ? {
+            version: u.version,
+            branchMonthly: u.branchMonthly,
+            includedSeatsPerStore: u.includedStaffPerBranch,
+            extraSeatMonthly: u.extraStaffMonthly,
+            effectiveFrom: u.effectiveFrom,
+          }
+        : null,
+    };
+  }
+
+  /**
+   * What a business of this shape would pay — the applicant's estimate.
+   *
+   * Stateless: it reads the plan and nothing else, so it can neither reveal a
+   * real business nor be steered by a client-side figure. The website renders
+   * the result and computes none of it.
+   */
+  async estimate(staffPerStore: readonly number[]): Promise<Quote> {
+    if (!Array.isArray(staffPerStore) || staffPerStore.length === 0) {
+      throw new BadRequestException('Describe at least one store.');
+    }
+    if (staffPerStore.length > ESTIMATE_MAX_STORES) {
+      throw new BadRequestException(`Describe at most ${ESTIMATE_MAX_STORES} stores.`);
+    }
+    for (const n of staffPerStore) {
+      if (!Number.isInteger(n) || n < 0 || n > ESTIMATE_MAX_STAFF_PER_STORE) {
+        throw new BadRequestException(
+          `Each store takes a whole number of employees, up to ${ESTIMATE_MAX_STAFF_PER_STORE}.`,
+        );
+      }
+    }
+    const plans = await this.planAt(this.clock.now());
+    return estimateFor(staffPerStore, this.pricingOf(plans.current));
   }
 
   /**
@@ -181,7 +244,10 @@ export class BillingService {
 
     const assessment = assessPeriod(
       size,
-      { assessedBranchFee: period.assessedBranchFee, assessedStaffFee: period.assessedStaffFee },
+      {
+        assessedBranchFee: period.assessedBranchFee,
+        assessedStaffFee: period.assessedStaffFee,
+      },
       // Priced with the period's OWN copied unit prices, never today's plan.
       {
         branchMonthly: period.branchMonthly,
@@ -211,11 +277,11 @@ export class BillingService {
   /**
    * Raise this period's assessment to cover the company as it is now.
    *
-   * Called when a company grows. Never lowers anything: there is no prorating,
-   * so a removal reduces the next renewal and nothing else.
+   * Called when a company grows — a store or a paid seat confirmed mid-period
+   * costs the whole month at once. Never lowers anything: there is no
+   * prorating, so a release reduces the next renewal and nothing else.
    */
   async assessNow(companyId: Buffer): Promise<void> {
-    const now = this.clock.now();
     const period = await this.prisma.billingPeriod.findFirst({
       where: { companyId },
       orderBy: { periodStart: 'desc' },
@@ -225,7 +291,10 @@ export class BillingService {
     const size = await this.sizeOf(companyId);
     const assessment = assessPeriod(
       size,
-      { assessedBranchFee: period.assessedBranchFee, assessedStaffFee: period.assessedStaffFee },
+      {
+        assessedBranchFee: period.assessedBranchFee,
+        assessedStaffFee: period.assessedStaffFee,
+      },
       {
         branchMonthly: period.branchMonthly,
         includedStaffPerBranch: period.includedStaffPerBranch,
@@ -247,7 +316,6 @@ export class BillingService {
         assessedTotal: assessment.assessedTotal,
       },
     });
-    void now;
   }
 
   /**

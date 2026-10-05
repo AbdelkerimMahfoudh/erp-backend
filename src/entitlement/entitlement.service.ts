@@ -2,11 +2,16 @@ import { Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { CLOCK, type Clock } from './clock';
+import { seatCensus } from './seat-census';
+import { binToUuid } from '../common/utils/uuid.util';
 import {
   buildEntitlement,
   canWrite,
   mayConsumeSeat,
+  mayConsumeSeatIn,
   seatMath,
+  type BranchSeatMath,
+  type SeatUsage,
   stateOf,
   type Entitlement,
   type SubscriptionRecord,
@@ -73,27 +78,16 @@ export class EntitlementService {
   }
 
   /**
-   * Seats in use across the whole company.
+   * Seats in use, store by store (docs/21, 2026-10-05).
    *
-   * Counts **active, non-Owner** users. The Owner is excluded because charging
-   * for the account that pays the bill would be absurd, and inactive users are
-   * excluded because a seat is a person working, not a row that once existed.
-   *
-   * Counted on `user_branches` distinct by user: somebody assigned to two
-   * branches is one employee, not two.
+   * Counts **active, non-Owner** people at each active store, and what the shop
+   * holds for that store — through the census that billing also reads, so the
+   * two never disagree. The Owner is excluded because charging for the account
+   * that pays the bill would be absurd; a pending invitation is inactive until
+   * the server activates it, so it holds nothing yet.
    */
-  private async seatUsage(companyId: Buffer): Promise<{ seatsUsed: number; activeBranchCount: number }> {
-    const rows = await this.prisma.$queryRaw<{ n: bigint }[]>`
-      SELECT COUNT(DISTINCT u.id) AS n
-      FROM users u
-      JOIN user_branches ub ON ub.user_id = u.id
-      JOIN roles r ON r.id = ub.role_id
-      WHERE u.company_id = ${companyId}
-        AND u.is_active = 1
-        AND r.\`key\` <> 'owner'
-    `;
-    const branches = await this.prisma.branch.count({ where: { companyId } });
-    return { seatsUsed: Number(rows[0]?.n ?? 0), activeBranchCount: branches };
+  private async seatUsage(companyId: Buffer): Promise<SeatUsage> {
+    return seatCensus(this.prisma, companyId);
   }
 
   /** The full object the mobile app renders and never recomputes. */
@@ -145,12 +139,24 @@ export class EntitlementService {
   /**
    * Whether one more seat-consuming person may be activated.
    *
+   * With `branchIds`, the question is asked store by store — a free seat at the
+   * quiet store does not seat somebody at the busy one — and every store named
+   * must have room. Without them it is the company-wide reading kept for
+   * callers that have no store in hand.
+   *
    * Asked at the moment of activation rather than trusted from a cached figure,
    * because two Owners adding the last seat at once must not both succeed.
    */
-  async maySeat(companyId: Buffer): Promise<{ allowed: boolean; seatsUsed: number; seatLimit: number }> {
+  async maySeat(
+    companyId: Buffer,
+    branchIds?: readonly Buffer[],
+  ): Promise<{ allowed: boolean; seatsUsed: number; seatLimit: number; stores: BranchSeatMath[]; full: string[] }> {
     const [record, usage] = await Promise.all([this.recordFor(companyId), this.seatUsage(companyId)]);
     const math = seatMath(record, usage);
-    return { allowed: mayConsumeSeat(math), seatsUsed: math.seatsUsed, seatLimit: math.seatLimit };
+    if (!branchIds) {
+      return { allowed: mayConsumeSeat(math), seatsUsed: math.seatsUsed, seatLimit: math.seatLimit, stores: math.branches, full: [] };
+    }
+    const full = branchIds.map((id) => binToUuid(id)).filter((id) => !mayConsumeSeatIn(math, id));
+    return { allowed: full.length === 0, seatsUsed: math.seatsUsed, seatLimit: math.seatLimit, stores: math.branches, full };
   }
 }

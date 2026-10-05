@@ -493,10 +493,14 @@ export class PlatformController {
       tally[e.state] = (tally[e.state] ?? 0) + 1;
     }
 
-    const [businesses, branches, activeUsers] = await Promise.all([
+    const [businesses, branches, activeUsers, pendingSeatRequests, pendingStaff] = await Promise.all([
       this.prisma.company.count(),
       this.prisma.branch.count(),
       this.prisma.user.count({ where: { isActive: true, deletedAt: null } }),
+      // Waiting for a payment to be confirmed (docs/21, 2026-10-05).
+      this.prisma.seatAllocation.count({ where: { status: 'pending_payment' } }),
+      // Created from Team, not yet activated: waiting on a contact, a payment, or both.
+      this.prisma.user.count({ where: { deletedAt: null, activatedAt: null, invitedAt: { not: null } } }),
     ]);
 
     return {
@@ -513,6 +517,8 @@ export class PlatformController {
       businesses,
       branches,
       activeUsers,
+      pendingSeatRequests,
+      pendingStaff,
       /*
        * No revenue figure. Payment history is incomplete by construction —
        * this checkpoint records manual payments only, and no provider is
@@ -646,25 +652,19 @@ export class PlatformController {
             phoneVerifiedAt: true,
             isActive: true,
             lastLoginAt: true,
+            invitedAt: true,
+            activatedAt: true,
           },
           take: 50,
         },
       },
     });
 
-    const now = new Date();
     const sub = company.subscription;
-    const seatsUsed = company.users.filter((u) => u.isActive).length - 1;
-    const ent = sub
-      ? buildEntitlement(
-          { ...sub, status: sub.status },
-          {
-            seatsUsed: Math.max(0, seatsUsed),
-            activeBranchCount: company.branches.length,
-          },
-          now,
-        )
-      : null;
+    // The real census, store by store (docs/21, 2026-10-05) — the same figures
+    // the shop's own app and the invoice are built from.
+    const ent = sub ? await this.entitlement.forCompany(companyId) : null;
+    const pricing = sub ? await this.billing.pricingFor(companyId) : null;
 
     const timeline = await this.lifecycle.timeline(id);
 
@@ -687,9 +687,12 @@ export class PlatformController {
         emailVerified: u.emailVerifiedAt !== null,
         phoneVerified: u.phoneVerifiedAt !== null,
         isActive: u.isActive,
+        /** `pending`: created from Team and not yet activated by the server (0086). */
+        status: !u.isActive ? (u.invitedAt && !u.activatedAt ? 'pending' : 'inactive') : 'active',
         lastLoginAt: u.lastLoginAt?.toISOString() ?? null,
       })),
       entitlement: ent,
+      pricing,
       version: sub?.version ?? 0,
       ...timeline,
     };

@@ -16,6 +16,7 @@ import { scrubQuery, scrubUrl } from './common/http/log-scrub';
 import { TenantModule } from './common/tenant/tenant.module';
 import { EntitlementModule } from './entitlement/entitlement.module';
 import { PlatformModule } from './platform/platform.module';
+import { StaffModule } from './staff/staff.module';
 import { EntitlementInterceptor } from './entitlement/entitlement.interceptor';
 import { AuditModule } from './common/audit/audit.module';
 import { NumberingModule } from './common/numbering/numbering.module';
@@ -151,6 +152,7 @@ import { AccountModule } from './account/account.module';
     AuthModule,
     EntitlementModule,
     PlatformModule,
+    StaffModule,
     NotificationsModule,
     TrackingModule,
     CatalogModule,

@@ -58,6 +58,15 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
    * "device and session security", `docs/21`.)
    */
   allow('DELETE', 'devices/:deviceId', 'Revoking one of your own devices signs it out: a security action like logout-all, writing no business truth'),
+  /*
+   * Buying more of the subscription (docs/21, 2026-10-05). A lapsed shop asking
+   * for a seat or a store is the shop trying to pay; refusing it would be the
+   * one refusal that keeps a customer lapsed. Nothing is granted by asking —
+   * the request waits for an administrator to confirm a payment.
+   */
+  allow('POST', 'platform/my-subscription/seat-requests', 'Asking for a seat is asking to pay; nothing is granted until the platform confirms the payment'),
+  allow('POST', 'platform/my-subscription/store-requests', 'Asking for a store is asking to pay; the store exists only once the payment is confirmed'),
+  allow('POST', 'platform/my-subscription/seat-requests/:rid/withdraw', 'Withdrawing an unpaid request writes no business truth'),
   allow('DELETE', 'devices/users/:userId/:deviceId', 'The Owner revoking a member device after a loss or a departure: the same security action, never a business record'),
   allow(
     'POST',

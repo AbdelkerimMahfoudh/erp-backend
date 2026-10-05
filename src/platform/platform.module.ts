@@ -2,6 +2,9 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { HashingService } from '../common/security/hashing.service';
 import { PlatformController } from './platform.controller';
+import { SeatRequestsController } from './seat-requests.controller';
+import { SeatAllocationService } from './seat-allocation.service';
+import { StaffActivationService } from './staff-activation.service';
 import { PlatformAdminService } from './platform-admin.service';
 import { PlatformAdminGuard } from './platform-admin.guard';
 import { PlatformAuditService } from './platform-audit.service';
@@ -64,7 +67,7 @@ export function selectContactDelivery(
  */
 @Module({
   imports: [PrismaModule, EntitlementModule, AuthModule],
-  controllers: [PlatformController],
+  controllers: [PlatformController, SeatRequestsController],
   providers: [
     HashingService,
     PlatformAdminService,
@@ -77,6 +80,8 @@ export function selectContactDelivery(
     PortalHandoffService,
     RegistrationContinuationService,
     OwnerInvitationService,
+    SeatAllocationService,
+    StaffActivationService,
     {
       provide: ContactDeliveryProvider,
       /*
@@ -95,6 +100,17 @@ export function selectContactDelivery(
     OutboxDeliveryProvider,
     UnconfiguredDeliveryProvider,
   ],
-  exports: [PlatformAdminService, SubscriptionLifecycleService, RegistrationService, BillingService],
+  exports: [
+    PlatformAdminService,
+    SubscriptionLifecycleService,
+    RegistrationService,
+    BillingService,
+    // For the staff module (docs/21, 2026-10-05): verification, delivery, seats and activation.
+    ContactVerificationService,
+    ContactDeliveryProvider,
+    OutboxDeliveryProvider,
+    SeatAllocationService,
+    StaffActivationService,
+  ],
 })
 export class PlatformModule {}

@@ -6,6 +6,7 @@ import { PlatformController } from './platform.controller';
 import { PlatformAdminGuard } from './platform-admin.guard';
 import { IS_PUBLIC_KEY } from '../common/decorators/public.decorator';
 import { ALWAYS_ALLOWED, ALWAYS_READABLE } from '../entitlement/route-classification';
+import { SeatRequestsController } from './seat-requests.controller';
 import {
   PAYMENT_PROVIDER_CATALOGUE,
   PLACEHOLDER_CODE,
@@ -389,7 +390,87 @@ describe('a closed business stays closed on the server', () => {
   it('the only platform routes open to a locked tenant are its own account surface', () => {
     const allowedWrites = ALWAYS_ALLOWED.map((r) => r.path).filter((p) => p.startsWith('platform/'));
     const allowedReads = ALWAYS_READABLE.filter((p) => p.startsWith('platform/'));
-    expect(allowedWrites).toEqual(['platform/portal-handoff']);
+    // Asking to pay for a seat or a store is the one thing a lapsed or pending shop most needs
+    // to be allowed (docs/21, 2026-10-05); nothing is granted by asking.
+    expect(allowedWrites).toEqual([
+      'platform/my-subscription/seat-requests',
+      'platform/my-subscription/store-requests',
+      'platform/my-subscription/seat-requests/:rid/withdraw',
+      'platform/portal-handoff',
+    ]);
     expect(allowedReads).toEqual(['platform/my-subscription', 'platform/payment-instructions']);
+  });
+});
+
+describe('the seat-requests controller keeps the same three realms (docs/21, 2026-10-05)', () => {
+  const PUBLIC_UNGUARDED = new Set(['plan', 'quote']);
+  const TENANT = new Set(['mySeatRequests', 'requestSeat', 'requestStore', 'withdrawSeatRequest']);
+  const SOURCE = readFileSync('src/platform/seat-requests.controller.ts', 'utf8');
+
+  const proto = SeatRequestsController.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
+  const handlers = Object.getOwnPropertyNames(proto).filter(
+    (name) => name !== 'constructor' && Reflect.hasMetadata(PATH_METADATA, proto[name]),
+  );
+  const guardsOf = (name: string): unknown[] => Reflect.getMetadata(GUARDS_METADATA, proto[name]) ?? [];
+  const isPublic = (name: string): boolean => Reflect.getMetadata(IS_PUBLIC_KEY, proto[name]) === true;
+  const methodOf = (name: string): RequestMethod => Reflect.getMetadata(METHOD_METADATA, proto[name]);
+
+  function bodyOf(name: string): string {
+    const start = SOURCE.search(new RegExp(`\\n  (?:async )?${name}\\(`));
+    expect(start).toBeGreaterThan(0);
+    const rest = SOURCE.slice(start + 1);
+    const next = rest.search(/\n  (?:@|\/\/ ──|\/\*\*|private )/);
+    return next < 0 ? rest : rest.slice(0, next);
+  }
+
+  it('has every route accounted for', () => {
+    for (const name of [...PUBLIC_UNGUARDED, ...TENANT, 'seatRequests', 'businessSeatRequests', 'confirmSeatPayment', 'refuseSeatRequest', 'releaseSeat']) {
+      expect(handlers).toContain(name);
+    }
+  });
+
+  it('administrator routes stand down the tenant guard and stand behind the platform guard; the others do not', () => {
+    for (const name of handlers) {
+      const admin = !PUBLIC_UNGUARDED.has(name) && !TENANT.has(name);
+      expect({ name, isPublic: isPublic(name) }).toEqual({ name, isPublic: admin || PUBLIC_UNGUARDED.has(name) });
+      expect({ name, guarded: guardsOf(name).includes(PlatformAdminGuard) }).toEqual({ name, guarded: admin });
+    }
+  });
+
+  it('every administrator mutation re-asks for the password', () => {
+    for (const name of handlers) {
+      if (PUBLIC_UNGUARDED.has(name) || TENANT.has(name)) continue;
+      if (methodOf(name) === RequestMethod.GET) continue;
+      expect({ name, ok: /confirmPassword\(admin\.id, dto\.confirmPassword\)/.test(bodyOf(name)) }).toEqual({ name, ok: true });
+    }
+  });
+
+  it('no administrator route reads the tenant context; every tenant route answers about the caller’s own company', () => {
+    for (const name of handlers) {
+      if (PUBLIC_UNGUARDED.has(name) || TENANT.has(name)) continue;
+      expect({ name, ok: !/this\.tenant\b/.test(bodyOf(name)) }).toEqual({ name, ok: true });
+    }
+    for (const name of TENANT) expect(bodyOf(name)).toMatch(/this\.tenant\.companyId\(\)/);
+  });
+
+  it('a customer never approves their own payment: confirming, refusing and releasing exist only behind the platform guard', () => {
+    for (const name of ['confirmSeatPayment', 'refuseSeatRequest', 'releaseSeat']) {
+      expect(guardsOf(name).includes(PlatformAdminGuard)).toBe(true);
+    }
+    // And no tenant route carries an amount, a status or a confirmation flag.
+    for (const name of TENANT) expect(bodyOf(name)).not.toMatch(/amount|confirm|status:/);
+  });
+
+  it('a payment confirmation requires a reference and records that no provider verified it', () => {
+    const service = readFileSync('src/platform/seat-allocation.service.ts', 'utf8');
+    expect(service).toMatch(/reference_required/);
+    expect(service).toMatch(/providerVerified: false/);
+    expect(bodyOf('confirmSeatPayment')).toMatch(/reference: dto\.reference \?\? ''/);
+  });
+
+  it('the public routes answer with prices and an estimate only — never a business', () => {
+    expect(bodyOf('plan')).toMatch(/publicPlan\(\)/);
+    expect(bodyOf('quote')).toMatch(/estimate\(dto\.stores\)/);
+    for (const name of PUBLIC_UNGUARDED) expect(bodyOf(name)).not.toMatch(/companyId|business/);
   });
 });

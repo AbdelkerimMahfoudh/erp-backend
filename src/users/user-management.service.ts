@@ -40,7 +40,16 @@ const CLOSING_PERMISSION = 'closing.perform';
  * or recovery. Derived, not stored: adding a lifecycle column would risk pushing
  * the existing users (who predate contact capture) into a "broken" state.
  */
-export type UserStatus = 'active' | 'inactive' | 'pending_contact';
+export type UserStatus = 'active' | 'inactive' | 'pending_contact' | 'pending';
+
+/** What still stands between a pending account and its first sign-in (docs/21, 2026-10-05). */
+export interface PendingView {
+  /** `not_selected` when the Owner gave no such contact. */
+  email: 'verified' | 'awaiting' | 'not_selected';
+  phone: 'verified' | 'awaiting' | 'not_selected';
+  /** One per store: `included` (a free seat), `held` (paid or granted for this person) or `awaiting_payment`. */
+  seats: { branchId: string; branchName: string; state: 'included' | 'held' | 'awaiting_payment' }[];
+}
 
 export interface UserBranchView {
   branchId: string;
@@ -70,6 +79,12 @@ export interface UserView {
   emailVerifiedAt: string | null;
   isActive: boolean;
   status: UserStatus;
+  /** Set when an Owner created this account from Team; null for accounts that predate the flow. */
+  invitedAt: string | null;
+  /** When the server activated the account. Null while it waits. */
+  activatedAt: string | null;
+  /** Present only while `status` is `pending`. */
+  pending: PendingView | null;
   lastLoginAt: string | null;
   branches: UserBranchView[];
   /** Permissions an Owner is allowed to delegate at all (the allow-list). */
@@ -86,7 +101,13 @@ const USER_SELECT = {
   phoneVerifiedAt: true,
   emailVerifiedAt: true,
   isActive: true,
+  invitedAt: true,
+  activatedAt: true,
   lastLoginAt: true,
+  seatAllocations: {
+    where: { kind: 'seat' as const, status: { in: ['pending_payment', 'paid', 'granted'] as const } },
+    select: { branchId: true, status: true },
+  },
   userBranches: {
     select: {
       branch: { select: { id: true, name: true } },
@@ -206,6 +227,19 @@ export class UserManagementService {
     }
 
     if (dto.isActive !== undefined && dto.isActive !== before.isActive) {
+      /*
+       * An account still waiting to be activated cannot be switched on by hand
+       * (docs/21, 2026-10-05): only the server activates it, once every selected
+       * contact is verified and a seat is held. Otherwise a PATCH from an older
+       * client would be the one door past the verification rule.
+       */
+      if (dto.isActive === true && statusOf(before) === 'pending') {
+        throw new BadRequestException({
+          code: 'activation_pending',
+          message:
+            'This account is waiting for the person to verify their contact and for a seat. It cannot be switched on by hand.',
+        });
+      }
       if (dto.isActive === false && this.isSelf(id)) {
         throw new BadRequestException('You cannot deactivate your own account');
       }
@@ -222,7 +256,11 @@ export class UserManagementService {
        * *removing* staff would trap them there.
        */
       if (dto.isActive === true) {
-        const seats = await this.entitlement.maySeat(this.tenant.companyId());
+        // Store by store (docs/21, 2026-10-05): a free seat elsewhere does not seat somebody here.
+        const seats = await this.entitlement.maySeat(
+          this.tenant.companyId(),
+          before.userBranches.map((ub) => ub.branch.id),
+        );
         if (!seats.allowed) {
           throw new ConflictException({
             code: SEAT_LIMIT_REACHED,
@@ -598,7 +636,10 @@ export class UserManagementService {
       phoneVerifiedAt: row.phoneVerifiedAt ? row.phoneVerifiedAt.toISOString() : null,
       emailVerifiedAt: row.emailVerifiedAt ? row.emailVerifiedAt.toISOString() : null,
       isActive: row.isActive,
-      status: !row.isActive ? 'inactive' : row.phone ? 'active' : 'pending_contact',
+      status: statusOf(row),
+      invitedAt: row.invitedAt ? row.invitedAt.toISOString() : null,
+      activatedAt: row.activatedAt ? row.activatedAt.toISOString() : null,
+      pending: statusOf(row) === 'pending' ? pendingOf(row) : null,
       lastLoginAt: row.lastLoginAt ? row.lastLoginAt.toISOString() : null,
       branches: row.userBranches.map((ub) => ({
         branchId: binToUuid(ub.branch.id),
@@ -636,4 +677,30 @@ export class UserManagementService {
     }
     return out as Prisma.InputJsonValue;
   }
+}
+
+/**
+ * `pending` — created from Team and not yet activated by the server. Read from
+ * the two activation columns rather than from `isActive`, because a legacy
+ * account that was deactivated by hand is also inactive and is NOT pending.
+ */
+function statusOf(row: { isActive: boolean; phone: string | null; invitedAt?: Date | null; activatedAt?: Date | null }): UserStatus {
+  if (!row.isActive) return row.invitedAt && !row.activatedAt ? 'pending' : 'inactive';
+  return row.phone ? 'active' : 'pending_contact';
+}
+
+function pendingOf(row: UserRow): PendingView {
+  const allocations = row.seatAllocations ?? [];
+  return {
+    email: row.email ? (row.emailVerifiedAt ? 'verified' : 'awaiting') : 'not_selected',
+    phone: row.phone ? (row.phoneVerifiedAt ? 'verified' : 'awaiting') : 'not_selected',
+    seats: row.userBranches.map((ub) => {
+      const own = allocations.find((a) => a.branchId !== null && a.branchId.equals(ub.branch.id));
+      return {
+        branchId: binToUuid(ub.branch.id),
+        branchName: ub.branch.name,
+        state: own ? (own.status === 'pending_payment' ? 'awaiting_payment' : 'held') : 'included',
+      };
+    }),
+  };
 }

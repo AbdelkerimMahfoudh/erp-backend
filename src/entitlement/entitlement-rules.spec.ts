@@ -8,7 +8,8 @@ import {
   graceHoursRemaining,
   mayConsumeSeat,
   seatMath,
-  SEATS_PER_BRANCH,
+  INCLUDED_SEATS_PER_STORE,
+  mayConsumeSeatIn,
   stateOf,
   type SubscriptionRecord,
 } from './entitlement-rules';
@@ -135,48 +136,79 @@ describe('a complimentary grant outranks the paid period', () => {
   });
 });
 
-describe('seats', () => {
-  it('gives two included seats per subscribed branch', () => {
-    expect(SEATS_PER_BRANCH).toBe(2);
-    expect(seatMath(sub({ subscribedBranchCount: 3 }), { seatsUsed: 0, activeBranchCount: 3 }).includedSeats).toBe(6);
+describe('seats belong to a store (docs/21, 2026-10-05)', () => {
+  const stores = (...lines: { name: string; used: number; paid?: number; granted?: number }[]) =>
+    lines.map((l, i) => ({ branchId: `b${i}`, name: l.name, seatsUsed: l.used, paidSeats: l.paid ?? 0, grantedSeats: l.granted ?? 0 }));
+
+  it('gives one included seat per store, and the Owner never counts', () => {
+    expect(INCLUDED_SEATS_PER_STORE).toBe(1);
+    const m = seatMath(sub({ subscribedBranchCount: 3 }), { seatsUsed: 0, activeBranchCount: 3, branches: stores({ name: 'A', used: 0 }, { name: 'B', used: 0 }, { name: 'C', used: 0 }) });
+    expect(m.includedSeats).toBe(3);
+    expect(m.seatLimit).toBe(3);
   });
 
-  it('pools them across the company rather than pinning them to a branch', () => {
-    /*
-      Three subscribed branches give six seats, and all six may sit in one shop.
-      A company that hires its second person at the quieter branch has not
-      changed what it owes.
-    */
-    const m = seatMath(sub({ subscribedBranchCount: 3 }), { seatsUsed: 6, activeBranchCount: 3 });
-    expect(m.overLimit).toBe(false);
+  it('does NOT pool across stores: a free seat at the quiet store seats nobody at the busy one', () => {
+    const m = seatMath(sub({ subscribedBranchCount: 2 }), { seatsUsed: 1, activeBranchCount: 2, branches: stores({ name: 'Busy', used: 1 }, { name: 'Quiet', used: 0 }) });
+    expect(mayConsumeSeatIn(m, 'b0')).toBe(false);
+    expect(mayConsumeSeatIn(m, 'b1')).toBe(true);
+    expect(m.seatsAvailable).toBe(1);
+  });
+
+  it('a paid or granted seat opens one more place at THAT store only', () => {
+    const m = seatMath(sub({ subscribedBranchCount: 2 }), { seatsUsed: 2, activeBranchCount: 2, branches: stores({ name: 'A', used: 1, paid: 1 }, { name: 'B', used: 1, granted: 0 }) });
+    expect(m.branches[0].seatLimit).toBe(2);
+    expect(mayConsumeSeatIn(m, 'b0')).toBe(true);
+    expect(mayConsumeSeatIn(m, 'b1')).toBe(false);
+    expect(m.additionalSeats).toBe(1);
+  });
+
+  it('a person at two stores holds a seat at each', () => {
+    // The same person appears in both stores' head-counts.
+    const m = seatMath(sub({ subscribedBranchCount: 2 }), { seatsUsed: 2, activeBranchCount: 2, branches: stores({ name: 'A', used: 1 }, { name: 'B', used: 1 }) });
+    expect(m.seatsUsed).toBe(2);
     expect(m.seatsAvailable).toBe(0);
+    expect(mayConsumeSeatIn(m, 'b0')).toBe(false);
   });
 
-  it('adds bought seats on top', () => {
-    const m = seatMath(sub({ subscribedBranchCount: 1, additionalSeats: 3 }), { seatsUsed: 0, activeBranchCount: 1 });
-    expect(m.seatLimit).toBe(5);
+  it('an unknown store seats nobody — the boundary fails closed', () => {
+    const m = seatMath(sub(), { seatsUsed: 0, activeBranchCount: 1, branches: stores({ name: 'A', used: 0 }) });
+    expect(mayConsumeSeatIn(m, 'nowhere')).toBe(false);
   });
 
-  it('allows one more while there is room', () => {
-    expect(mayConsumeSeat(seatMath(sub(), { seatsUsed: 1, activeBranchCount: 1 }))).toBe(true);
+  it('seats bought under the pooled rule and not yet assigned stay usable anywhere', () => {
+    const m = seatMath(sub({ subscribedBranchCount: 1, additionalSeats: 1 }), { seatsUsed: 1, activeBranchCount: 1, branches: stores({ name: 'A', used: 1 }) });
+    expect(m.pooledSeats).toBe(1);
+    expect(mayConsumeSeatIn(m, 'b0')).toBe(true);
+    const full = seatMath(sub({ subscribedBranchCount: 1, additionalSeats: 1 }), { seatsUsed: 2, activeBranchCount: 1, branches: stores({ name: 'A', used: 2 }) });
+    expect(mayConsumeSeatIn(full, 'b0')).toBe(false);
+    expect(full.overLimit).toBe(false);
   });
 
-  it('refuses the one that would exceed the limit', () => {
-    expect(mayConsumeSeat(seatMath(sub(), { seatsUsed: 2, activeBranchCount: 1 }))).toBe(false);
-  });
-
-  it('reports being over the limit without proposing to fix it', () => {
+  it('reports a store over its seats without proposing to fix it', () => {
     /*
-      A plan reduction can leave a company above its limit. Nobody is deactivated
-      automatically: the Owner is told, further activations are blocked, and the
-      decision about who stays belongs to the shop. An app that fires somebody to
-      balance an invoice is not a tool anybody should trust.
+      Staff who predate the rule may outnumber a store's seats. Nobody is
+      deactivated automatically: the Owner is told, further activations at that
+      store are blocked, and the decision about who stays belongs to the shop.
     */
-    const m = seatMath(sub({ subscribedBranchCount: 1 }), { seatsUsed: 5, activeBranchCount: 1 });
+    const m = seatMath(sub({ subscribedBranchCount: 1 }), { seatsUsed: 3, activeBranchCount: 1, branches: stores({ name: 'A', used: 3 }) });
+    expect(m.branches[0].overLimit).toBe(true);
     expect(m.overLimit).toBe(true);
-    expect(m.seatLimit).toBe(2);
-    expect(m.seatsUsed).toBe(5);
-    expect(mayConsumeSeat(m)).toBe(false);
+    expect(mayConsumeSeatIn(m, 'b0')).toBe(false);
+  });
+
+  it('granted seats from the transition bring a store back within its seats, uncharged', () => {
+    const m = seatMath(sub(), { seatsUsed: 3, activeBranchCount: 1, branches: stores({ name: 'A', used: 3, granted: 2 }) });
+    expect(m.branches[0].overLimit).toBe(false);
+    expect(m.overLimit).toBe(false);
+    expect(mayConsumeSeatIn(m, 'b0')).toBe(false);
+  });
+
+  it('without per-store detail it reads company-wide, one seat per subscribed store', () => {
+    const m = seatMath(sub({ subscribedBranchCount: 2, additionalSeats: 1 }), { seatsUsed: 2, activeBranchCount: 2 });
+    expect(m.includedSeats).toBe(2);
+    expect(m.seatLimit).toBe(3);
+    expect(mayConsumeSeat(m)).toBe(true);
+    expect(mayConsumeSeat(seatMath(sub({ subscribedBranchCount: 1 }), { seatsUsed: 1, activeBranchCount: 1 }))).toBe(false);
   });
 });
 
@@ -187,10 +219,11 @@ describe('the whole answer is calculated on the server', () => {
       state: 'active',
       subscribedBranchCount: 1,
       activeBranchCount: 1,
-      includedSeats: 2,
-      seatLimit: 2,
+      includedSeats: 1,
+      seatLimit: 1,
       seatsUsed: 1,
       overLimit: false,
+      seatsByStore: [],
       canRead: true,
       canWrite: true,
       isComplimentary: false,
@@ -310,6 +343,9 @@ describe('route classification fails closed', () => {
       'POST auth/logout-all',
       'POST auth/refresh',
       'POST notifications/:id/read',
+      'POST platform/my-subscription/seat-requests',
+      'POST platform/my-subscription/seat-requests/:rid/withdraw',
+      'POST platform/my-subscription/store-requests',
       'POST platform/portal-handoff',
     ]);
   });
@@ -357,9 +393,16 @@ describe('route classification fails closed', () => {
 
   it('and the handoff is the only platform route allowed through', () => {
     const platform = ALWAYS_ALLOWED.filter((r) => r.path.startsWith('platform/'));
-    expect(platform.map((r) => r.path)).toEqual(['platform/portal-handoff']);
+    // The handoff, and asking to pay for a seat or a store (docs/21, 2026-10-05):
+    // nothing is granted by asking, and a lapsed shop must be able to ask.
+    expect(platform.map((r) => r.path)).toEqual([
+      'platform/my-subscription/seat-requests',
+      'platform/my-subscription/store-requests',
+      'platform/my-subscription/seat-requests/:rid/withdraw',
+      'platform/portal-handoff',
+    ]);
     // Minting a ticket is not spending one, and neither moves money.
-    expect(platform[0].method).toBe('POST');
+    for (const r of platform) expect(r.method).toBe('POST');
   });
 
   it('the code the client keys on is stable', () => {

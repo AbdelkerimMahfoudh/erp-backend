@@ -72,6 +72,16 @@ enum SubscriptionEventKind {
   rejected
   /// 0075: an administrator set the period end directly, with a reason.
   period_corrected
+  /// 0086: a staff seat beyond the store's included one was requested; its charge awaits payment.
+  seat_requested
+  /// 0086: an administrator confirmed the payment for a seat or a store, with a reference.
+  seat_paid
+  /// 0086: a staff account became usable — every selected contact verified and a seat held.
+  staff_activated
+  /// 0086: a seat request was refused or withdrawn, or a held seat was released.
+  seat_closed
+  /// 0086: an additional store was requested; its charge awaits payment.
+  store_requested
 }
 
 /// Where a subscription sits in its lifecycle (0056).
@@ -295,15 +305,15 @@ model Company {
   /// be used to harvest phone numbers.
   publicPhone       String?            @map("public_phone") @db.VarChar(40)
 
-  currency     String   @default("USD") @db.Char(3)
-  timezone     String   @default("UTC") @db.VarChar(64)
-  settingsJson Json     @map("settings") @db.Json
-  isActive     Boolean  @default(true) @map("is_active")
+  currency     String    @default("USD") @db.Char(3)
+  timezone     String    @default("UTC") @db.VarChar(64)
+  settingsJson Json      @map("settings") @db.Json
+  isActive     Boolean   @default(true) @map("is_active")
   /// When the Owner closed the business through the account-deletion flow
   /// (0084, docs/64). Set exactly once; a closed company never reopens.
   closedAt     DateTime? @map("closed_at") @db.DateTime(6)
-  createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
 
   accountDeletionRequests        AccountDeletionRequest[]
   branches                       Branch[]
@@ -394,6 +404,7 @@ model Company {
   subscriptionPayments           SubscriptionPayment[]
   billingPeriods                 BillingPeriod[]
   anomalyDismissals              AnomalyDismissal[]
+  seatAllocations                SeatAllocation[]
 
   @@map("companies")
 }
@@ -446,6 +457,7 @@ model Branch {
   priceChangeEvents    PriceChangeEvent[]
   supplierSettlements  SupplierSettlement[]
   rollupRequests       RollupRequest[]
+  seatAllocations      SeatAllocation[]
 
   @@unique([companyId, name]) // company_id is the leftmost column → covers company scans
   @@map("branches")
@@ -538,6 +550,14 @@ model User {
   passwordHash    String    @map("password_hash") @db.VarChar(255)
   pinHash         String?   @map("pin_hash") @db.VarChar(255)
   isActive        Boolean   @default(true) @map("is_active")
+  /// 0086: set when an Owner created this account from Team. Such an account is
+  /// unusable until `activatedAt` is set; null for every account that predates
+  /// the staff flow.
+  invitedAt       DateTime? @map("invited_at") @db.DateTime(6)
+  /// 0086: when the account became usable — every selected contact verified
+  /// and a seat held at each of its stores. Backfilled to `createdAt` for every
+  /// existing account, so nobody who already worked here reads as pending.
+  activatedAt     DateTime? @map("activated_at") @db.DateTime(6)
   lastLoginAt     DateTime? @map("last_login_at") @db.DateTime(6)
   createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt       DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
@@ -590,6 +610,7 @@ model User {
   settlementsReported   SupplierSettlement[]   @relation("SettlementReportedBy")
   settlementsConfirmed  SupplierSettlement[]   @relation("SettlementConfirmedBy")
   anomalyDismissals     AnomalyDismissal[]     @relation("AnomalyDismissedBy")
+  seatAllocations       SeatAllocation[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -2908,10 +2929,10 @@ model AccountDeletionRequest {
   status AccountDeletionStatus @default(awaiting_code)
 
   /// The live deletion challenge. Replaced on resend; re-read by the executor.
-  challengeId       Bytes?  @map("challenge_id") @db.Binary(16)
+  challengeId       Bytes? @map("challenge_id") @db.Binary(16)
   /// Where the code went, masked. Never the full number.
-  destinationMasked String  @map("destination_masked") @db.VarChar(24)
-  language          String  @default("en") @db.VarChar(5)
+  destinationMasked String @map("destination_masked") @db.VarChar(24)
+  language          String @default("en") @db.VarChar(5)
 
   activeKey  Bytes?  @map("active_key") @db.Binary(16)
   clientUuid Bytes?  @map("client_uuid") @db.Binary(16)
@@ -4261,10 +4282,11 @@ model Subscription {
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
   version   Int      @default(0) @db.UnsignedInt
 
-  company  Company               @relation(fields: [companyId], references: [id])
-  events   SubscriptionEvent[]
-  payments SubscriptionPayment[]
-  periods  BillingPeriod[]
+  company         Company               @relation(fields: [companyId], references: [id])
+  events          SubscriptionEvent[]
+  payments        SubscriptionPayment[]
+  periods         BillingPeriod[]
+  seatAllocations SeatAllocation[]
 
   @@map("subscriptions")
 }
@@ -4436,11 +4458,93 @@ model SubscriptionPayment {
 
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
-  company      Company      @relation(fields: [companyId], references: [id])
-  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+  company         Company          @relation(fields: [companyId], references: [id])
+  subscription    Subscription     @relation(fields: [subscriptionId], references: [id])
+  seatAllocations SeatAllocation[]
 
   @@index([companyId, paidAt], map: "ix_subpayments_company")
   @@map("subscription_payments")
+}
+
+/// Why a seat row exists (0086, docs/21 2026-10-05).
+enum SeatAllocationKind {
+  /// One additional staff seat at ONE store, beyond the store's included seat.
+  seat
+  /// One additional store for the company.
+  store
+}
+
+/// Where a seat or store request sits (0086).
+enum SeatAllocationStatus {
+  /// Requested; the charge is known; nothing is granted until payment is confirmed.
+  pending_payment
+  /// Payment confirmed by an administrator with a reference. Counts as a held seat.
+  paid
+  /// Held without a charge: the 2026-10-05 transition (staff above the included
+  /// seat when the rule changed) or an administrator's decision, with a reason.
+  granted
+  /// Given back, or withdrawn before it was paid. Counts for nothing.
+  released
+  /// Refused by an administrator, with a reason. Counts for nothing.
+  refused
+}
+
+/// A seat beyond a store's included one, or an additional store (0086).
+///
+/// The billing unit of the 2026-10-05 rule: every store includes one staff seat
+/// (the Owner never counts); each further seat at that store is one of these
+/// rows, 100 MRU per month, charged in full. A person working at two stores
+/// holds a seat at each. Nothing is granted by requesting: the row waits in
+/// `pending_payment` until an administrator confirms a real payment, with a
+/// reference, and the activation of the person it was requested for waits too.
+model SeatAllocation {
+  id             Bytes  @id @db.Binary(16)
+  companyId      Bytes  @map("company_id") @db.Binary(16)
+  subscriptionId Bytes  @map("subscription_id") @db.Binary(16)
+  /// The store the seat belongs to. Null for a store request.
+  branchId       Bytes? @map("branch_id") @db.Binary(16)
+  /// The person the seat was requested for, when it was requested for somebody.
+  userId         Bytes? @map("user_id") @db.Binary(16)
+
+  kind   SeatAllocationKind
+  status SeatAllocationStatus @default(pending_payment)
+
+  /// The requested store's name, for a store request. Null for a seat.
+  label String? @db.VarChar(160)
+
+  /// Integer MRU per month, copied from the plan when requested. Zero for a grant.
+  monthlyAmount Int    @map("monthly_amount") @db.UnsignedInt
+  currency      String @default("MRU") @db.Char(3)
+
+  /// Who asked: the Owner's email or number, the transition, or an administrator.
+  requestedBy String   @map("requested_by") @db.VarChar(160)
+  requestedAt DateTime @default(now()) @map("requested_at") @db.DateTime(6)
+
+  /// The recorded payment that paid for it. Never set without a reference.
+  paymentId   Bytes?    @map("payment_id") @db.Binary(16)
+  confirmedBy String?   @map("confirmed_by") @db.VarChar(160)
+  confirmedAt DateTime? @map("confirmed_at") @db.DateTime(6)
+  closedAt    DateTime? @map("closed_at") @db.DateTime(6)
+  closedBy    String?   @map("closed_by") @db.VarChar(160)
+  reason      String?   @db.VarChar(500)
+
+  /// Optimistic concurrency, as on `subscriptions`: two confirmations of the
+  /// same request produce one payment and one refusal, never two payments.
+  version   Int      @default(0) @db.UnsignedInt
+  createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company      Company              @relation(fields: [companyId], references: [id])
+  subscription Subscription         @relation(fields: [subscriptionId], references: [id])
+  branch       Branch?              @relation(fields: [branchId], references: [id])
+  user         User?                @relation(fields: [userId], references: [id])
+  payment      SubscriptionPayment? @relation(fields: [paymentId], references: [id])
+
+  @@index([companyId, status], map: "ix_seat_alloc_company_status")
+  @@index([branchId, status], map: "ix_seat_alloc_branch_status")
+  @@index([userId], map: "ix_seat_alloc_user")
+  @@index([status, requestedAt], map: "ix_seat_alloc_status_requested")
+  @@map("seat_allocations")
 }
 
 /// One registration attempt, so a retry cannot create a second business.
