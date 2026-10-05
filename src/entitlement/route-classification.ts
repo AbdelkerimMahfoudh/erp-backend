@@ -48,6 +48,17 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
     'auth/logout-all',
     'Revoking every session is how somebody responds to a lost phone, and a lapsed subscription is no reason to leave a stolen device signed in',
   ),
+  /*
+   * Device security (docs/23). Revoking a device — one of your own, or as the
+   * Owner a member's — removes authority the way `logout-all` does, and a
+   * lapsed subscription is no reason to leave a stolen phone signed in.
+   * Adopting a device GRANTS authority and stays blocked: a lapsed shop
+   * enrolling new phones is exactly the case where a stale subscription should
+   * stop mattering to the platform. (2026-10-05: the expired state keeps
+   * "device and session security", `docs/21`.)
+   */
+  allow('DELETE', 'devices/:deviceId', 'Revoking one of your own devices signs it out: a security action like logout-all, writing no business truth'),
+  allow('DELETE', 'devices/users/:userId/:deviceId', 'The Owner revoking a member device after a loss or a departure: the same security action, never a business record'),
   allow(
     'POST',
     'platform/portal-handoff',
@@ -133,7 +144,7 @@ export const ALWAYS_READABLE: readonly string[] = [
   // somebody goes to find out why they cannot get in.
   'platform/my-subscription',
   /*
-   * How to pay, for a shop that has not paid.
+   * How to pay, for a shop that has not paid — the website's account page.
    *
    * This sat outside the list and the CP8 acceptance found what that meant: a
    * pending Owner arrived at the portal from the app, the page asked for the
@@ -142,8 +153,9 @@ export const ALWAYS_READABLE: readonly string[] = [
    * needs it. `my-subscription` was already here for exactly this reason; the
    * instructions are the other half of the same page.
    *
-   * It returns a provider list and a placeholder code. No operational data, no
-   * money, and reading it pays nothing.
+   * It returns the offered providers — none, until a real code is configured
+   * (2026-10-05). No operational data, no money, and reading it pays nothing.
+   * The mobile app never reads it.
    */
   'platform/payment-instructions',
   /*

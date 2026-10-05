@@ -9,6 +9,7 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { AppConfigService } from './common/config/app-config.service';
 import { assertProductionConfig } from './common/config/production-guard';
+import { assertPaymentInstructionsSafeForProduction } from './platform/payment-instructions';
 import { isIngressMode, trustProxySetting } from './common/config/ingress';
 
 async function bootstrap(): Promise<void> {
@@ -21,6 +22,8 @@ async function bootstrap(): Promise<void> {
    * cookie in clear text is not seen at all.
    */
   assertProductionConfig();
+  // A production API never offers a stand-in payment code (docs/21, 2026-10-05).
+  assertPaymentInstructionsSafeForProduction();
 
   /*
    * `rawBody`: the provider's delivery webhook is authenticated by an HMAC over

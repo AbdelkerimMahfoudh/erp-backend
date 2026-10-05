@@ -152,3 +152,23 @@ describe('the WhatsApp contact provider', () => {
     expect(channel.messages).toHaveLength(0);
   });
 });
+
+describe('whether a code can leave at all — asked before anything is created (2026-10-05)', () => {
+  const unconfigured = new UnconfiguredDeliveryProvider();
+
+  it('the outbox takes every channel; nothing configured takes none', () => {
+    const outbox = new OutboxDeliveryProvider();
+    expect(outbox.canDeliver('email')).toBe(true);
+    expect(outbox.canDeliver('phone')).toBe(true);
+    expect(unconfigured.canDeliver('email')).toBe(false);
+    expect(unconfigured.canDeliver('phone')).toBe(false);
+  });
+
+  it('WhatsApp takes a number while the channel is on, and never an email', () => {
+    const on = new WhatsAppContactDeliveryProvider(new TestWhatsAppChannel(), unconfigured);
+    expect(on.canDeliver('phone')).toBe(true);
+    expect(on.canDeliver('email')).toBe(false);
+    const off = new WhatsAppContactDeliveryProvider(new DisabledWhatsAppChannel(), unconfigured);
+    expect(off.canDeliver('phone')).toBe(false);
+  });
+});

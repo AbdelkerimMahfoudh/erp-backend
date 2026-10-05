@@ -10,11 +10,13 @@ import {
   Query,
   Req,
   Res,
+  ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
+import type { ContactChannel } from '@prisma/client';
 import {
   IsEmail,
   IsIn,
@@ -51,6 +53,7 @@ import { RegistrationService } from './registration.service';
 import { OwnerInvitationService, OWNER_PASSWORD_MIN_LENGTH } from './owner-invitation.service';
 import { BillingService } from '../billing/billing.service';
 import { ContactVerificationService } from './contact-verification.service';
+import { ContactDeliveryProvider } from './contact-delivery';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { randomBytes } from 'node:crypto';
@@ -237,6 +240,7 @@ export class PlatformController {
     private readonly handoff: PortalHandoffService,
     private readonly continuation: RegistrationContinuationService,
     private readonly invitations: OwnerInvitationService,
+    private readonly delivery: ContactDeliveryProvider,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -246,6 +250,24 @@ export class PlatformController {
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   async register(@Body() dto: RegisterDto) {
+    /*
+     * Before anything is created (2026-10-05). A registration can only finish
+     * by proving the contact, so a server that cannot send that code must
+     * refuse here — not create a pending business whose Owner then waits for a
+     * code that is never coming, and can sign in to *Waiting for activation*
+     * meanwhile (`docs/67` RC-02). The same rule the deletion flow follows
+     * (`56bddbe`): refused up front, and nothing was saved. The channel is the
+     * one the Owner record will carry: the email when one is given, else the
+     * number.
+     */
+    const channel: ContactChannel = dto.email?.trim() ? 'email' : 'phone';
+    if (!this.delivery.canDeliver(channel)) {
+      throw new ServiceUnavailableException({
+        code: 'registration_unavailable',
+        message: 'Registration cannot be completed right now: no verification code can be sent. Nothing was saved.',
+      });
+    }
+
     const result = await this.registration.register({
       idempotencyKey: dto.idempotencyKey,
       ownerName: dto.ownerName,
@@ -376,20 +398,6 @@ export class PlatformController {
     return { verified: true };
   }
 
-  /**
-   * What a business would pay, as it currently stands.
-   *
-   * Public and read-only. It returns a PRICE for a company id somebody
-   * already holds — no identity, no contact, no history — so a shop can see
-   * its own quote immediately after registering, before it can sign in.
-   */
-  @Public()
-  @Throttle(PUBLIC_THROTTLE)
-  @Get('quote/:id')
-  async quote(@Param('id') id: string) {
-    if (!isUuid(id)) throw new BadRequestException('Unknown business');
-    return this.billing.pricingFor(uuidToBin(id));
-  }
 
   // ── Administrator sign-in ────────────────────────────────────────────────
 
@@ -1167,11 +1175,13 @@ export class PlatformController {
   }
 
   /**
-   * How to pay, for an authenticated Owner.
+   * How to pay, for an authenticated Owner — the website's account page.
    *
    * **Instructions, not an integration.** Reading this calls no provider,
    * creates no payment row, reports nothing, confirms nothing and moves no
-   * subscription. A shop pays out-of-band and a person confirms it.
+   * subscription. A shop pays out-of-band and a person confirms it. Until a
+   * provider is offered with a real code it answers `available: false` with
+   * no provider and no code (2026-10-05); the mobile app never reads it.
    */
   @Get('payment-instructions')
   async paymentInstructions() {

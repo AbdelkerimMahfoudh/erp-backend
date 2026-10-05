@@ -1,11 +1,17 @@
 import 'reflect-metadata';
 import { readFileSync } from 'node:fs';
-import { RequestMethod, UnauthorizedException } from '@nestjs/common';
+import { RequestMethod, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { PlatformController } from './platform.controller';
 import { PlatformAdminGuard } from './platform-admin.guard';
 import { IS_PUBLIC_KEY } from '../common/decorators/public.decorator';
 import { ALWAYS_ALLOWED, ALWAYS_READABLE } from '../entitlement/route-classification';
+import {
+  PAYMENT_PROVIDER_CATALOGUE,
+  PLACEHOLDER_CODE,
+  assertPaymentInstructionsSafeForProduction,
+  paymentInstructions,
+} from './payment-instructions';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import {
   ENTITLEMENT_PENDING,
@@ -29,6 +35,7 @@ const CONTROLLER = readFileSync('src/platform/platform.controller.ts', 'utf8');
 const GUARD = readFileSync('src/platform/platform-admin.guard.ts', 'utf8');
 const ADMINS = readFileSync('src/platform/platform-admin.service.ts', 'utf8');
 const ENTITLEMENT = readFileSync('src/entitlement/entitlement.service.ts', 'utf8');
+const MAIN = readFileSync('src/main.ts', 'utf8');
 
 const IDENTITY = { id: Buffer.alloc(16, 1), email: 'ops@example.test', name: 'Ops' };
 
@@ -128,7 +135,6 @@ describe('the controller, from the platform’s side', () => {
     'continueConfirm',
     'verifyStart',
     'verifyConfirm',
-    'quote',
     'adminSignIn',
     'exchangePortalHandoff',
     'portalSignOut',
@@ -215,6 +221,114 @@ describe('the controller, from the platform’s side', () => {
     const body = bodyOf('createBusiness');
     expect(body).toMatch(/password: randomBytes\(48\)/);
     expect(body).toMatch(/if \(!result\.created\) \{\s*return \{ \.\.\.result, invitation: null \};/);
+  });
+
+  it('no public route answers with a price — the quote by company id is gone (2026-10-05)', () => {
+    /*
+     * `GET platform/quote/:id` returned a company's size and its monthly price
+     * to anybody holding its id, with no credential. Prices belong to the
+     * website's commercial contract and the platform's own tools (docs/68);
+     * the Owner's own figure stays on the tenant route `my-subscription`.
+     */
+    expect(handlers).not.toContain('quote');
+    expect(CONTROLLER).not.toMatch(/@Get\('quote/);
+    for (const name of PUBLIC_UNGUARDED) {
+      expect({ name, pricing: /this\.billing\./.test(bodyOf(name)) }).toEqual({ name, pricing: false });
+    }
+  });
+
+  describe('registration is refused before anything is created when no code can be delivered (2026-10-05)', () => {
+    const stub = {} as never;
+    function controllerWith(registration: unknown, delivery: unknown) {
+      return new PlatformController(
+        stub, stub, stub, stub,
+        registration as never,
+        stub, stub, stub, stub, stub, stub, stub,
+        delivery as never,
+      );
+    }
+    const attempt = {
+      idempotencyKey: 'k-1',
+      ownerName: 'Aicha',
+      businessName: 'Boutique Aicha',
+      branchName: 'Main',
+      email: 'aicha@example.test',
+      phone: '+22243210987',
+      password: 'password-1',
+      language: 'en' as const,
+    };
+
+    it('refuses with its own code, and the database is never reached', async () => {
+      const reached: string[] = [];
+      const controller = controllerWith(
+        { register: async () => { reached.push('register'); throw new Error('must not be reached'); } },
+        { name: 'none', canDeliver: () => false },
+      );
+      const refusal = await controller.register(attempt as never).catch((e: unknown) => e);
+      expect(refusal).toBeInstanceOf(ServiceUnavailableException);
+      expect((refusal as ServiceUnavailableException).getResponse()).toMatchObject({ code: 'registration_unavailable' });
+      expect(JSON.stringify((refusal as ServiceUnavailableException).getResponse())).toMatch(/Nothing was saved/);
+      expect(reached).toEqual([]);
+    });
+
+    it('asks about the channel the Owner record will carry: the email when one is given, else the number', async () => {
+      const asked: string[] = [];
+      const controller = controllerWith({ register: async () => { throw new Error('must not be reached'); } }, {
+        canDeliver: (channel: string) => { asked.push(channel); return false; },
+      });
+      await controller.register(attempt as never).catch(() => undefined);
+      await controller.register({ ...attempt, email: undefined } as never).catch(() => undefined);
+      await controller.register({ ...attempt, email: '   ' } as never).catch(() => undefined);
+      expect(asked).toEqual(['email', 'phone', 'phone']);
+    });
+
+    it('and proceeds exactly as before once a code can go out', async () => {
+      const seen: string[] = [];
+      const controller = controllerWith(
+        {
+          register: async (input: { email?: string }) => {
+            seen.push(input.email ?? '');
+            return { companyId: 'c', publicStoreId: 'ABCDEF0123', branchId: 'b', ownerUserId: 'u', status: 'pending_activation', created: true };
+          },
+          pendingOwnerFor: async () => null,
+        },
+        { canDeliver: (channel: string) => channel === 'email' },
+      );
+      await expect(controller.register(attempt as never)).resolves.toMatchObject({ created: true, next: 'sign_in', continuation: null });
+      expect(seen).toEqual(['aicha@example.test']);
+    });
+  });
+});
+
+describe('payment instructions serve no stand-in (2026-10-05)', () => {
+  it('nothing is offered until a real code exists: unavailable, no provider, no code', () => {
+    const answer = paymentInstructions();
+    expect(answer).toEqual({ available: false, providers: [], defaultProvider: null, placeholder: false });
+    expect(JSON.stringify(answer)).not.toContain(PLACEHOLDER_CODE);
+    for (const p of PAYMENT_PROVIDER_CATALOGUE) {
+      expect({ key: p.key, offeredStandIn: p.enabled && p.placeholder }).toEqual({ key: p.key, offeredStandIn: false });
+    }
+  });
+
+  it('an offered provider with a real code is served, Bankily first', () => {
+    const real = PAYMENT_PROVIDER_CATALOGUE.map((p) => ({ ...p, enabled: true, code: `${p.order}2345`, placeholder: false }));
+    const answer = paymentInstructions(real);
+    expect(answer.available).toBe(true);
+    expect(answer.defaultProvider).toBe('bankily');
+    expect(answer.placeholder).toBe(false);
+    expect(answer.providers.map((p) => p.key)).toEqual(['bankily', 'masrivi', 'sedad', 'bimbank', 'click']);
+  });
+
+  it('production refuses to boot the moment a stand-in would be offered — and boot asks', () => {
+    const production = { APP_ENV: 'production' } as NodeJS.ProcessEnv;
+    expect(() => assertPaymentInstructionsSafeForProduction(production)).not.toThrow();
+    const offeredStub = PAYMENT_PROVIDER_CATALOGUE.map((p) => ({ ...p, enabled: true }));
+    expect(() => assertPaymentInstructionsSafeForProduction(production, offeredStub)).toThrow(/placeholder/);
+    expect(() => assertPaymentInstructionsSafeForProduction({ NODE_ENV: 'production' } as NodeJS.ProcessEnv, offeredStub)).toThrow();
+    expect(() =>
+      assertPaymentInstructionsSafeForProduction({ NODE_ENV: 'production', APP_ENV: 'staging' } as NodeJS.ProcessEnv, offeredStub),
+    ).not.toThrow();
+    expect(MAIN).toMatch(/^\s*assertPaymentInstructionsSafeForProduction\(\);/m);
   });
 });
 

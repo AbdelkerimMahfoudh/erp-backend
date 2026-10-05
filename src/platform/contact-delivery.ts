@@ -80,6 +80,15 @@ export interface DeliveryResult {
 export abstract class ContactDeliveryProvider {
   abstract readonly name: string;
   abstract send(req: DeliveryRequest): Promise<DeliveryResult>;
+  /**
+   * Whether a code to this kind of contact can actually leave this server.
+   *
+   * Asked BEFORE anything is created for somebody to wait on — the rule the
+   * deletion flow follows (`56bddbe`). A registration refused up front with
+   * "nothing was saved" is honest; a pending business whose Owner waits for a
+   * code that is never coming is not (`docs/67` RC-02).
+   */
+  abstract canDeliver(channel: ContactChannel): boolean;
 }
 
 /**
@@ -96,6 +105,11 @@ export abstract class ContactDeliveryProvider {
 @Injectable()
 export class OutboxDeliveryProvider extends ContactDeliveryProvider {
   readonly name = 'dev-outbox';
+
+  /** Development only: the outbox takes every channel. */
+  canDeliver(_channel: ContactChannel): boolean {
+    return true;
+  }
   private readonly log = new Logger('ContactOutbox');
   private readonly recent = new Map<string, { code: string; at: Date }>();
 
@@ -134,6 +148,10 @@ export class OutboxDeliveryProvider extends ContactDeliveryProvider {
 export class UnconfiguredDeliveryProvider extends ContactDeliveryProvider {
   readonly name = 'none';
 
+  canDeliver(_channel: ContactChannel): boolean {
+    return false;
+  }
+
   async send(): Promise<DeliveryResult> {
     throw new ServiceUnavailableException({
       code: 'delivery_unavailable',
@@ -162,6 +180,11 @@ export class WhatsAppContactDeliveryProvider extends ContactDeliveryProvider {
     private readonly unconfigured: UnconfiguredDeliveryProvider,
   ) {
     super();
+  }
+
+  /** A WhatsApp number, while the channel is on. An email still has no provider. */
+  canDeliver(channel: ContactChannel): boolean {
+    return channel === 'phone' && this.channel.isEnabled;
   }
 
   async send(req: DeliveryRequest): Promise<DeliveryResult> {

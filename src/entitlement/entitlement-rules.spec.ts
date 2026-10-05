@@ -259,10 +259,22 @@ describe('route classification fails closed', () => {
       ['POST', 'users'],
       ['PUT', 'settings'],
       ['POST', 'devices/adopt'],
-      ['DELETE', 'devices/:deviceId'],
     ] as const) {
       expect(isAllowedWhenExpired(m, p)).toBe(false);
     }
+  });
+
+  it('a device may be revoked, never adopted, once the subscription lapsed (2026-10-05)', () => {
+    /*
+     * Revoking removes authority, the way `logout-all` does: a stolen phone is
+     * signed out whatever the shop owes. Adopting GRANTS authority, and a
+     * lapsed shop enrolling new phones is exactly the case the block exists for.
+     */
+    expect(isAllowedWhenExpired('DELETE', 'devices/:deviceId')).toBe(true);
+    expect(isAllowedWhenExpired('DELETE', 'devices/users/:userId/:deviceId')).toBe(true);
+    expect(isAllowedWhenExpired('POST', 'devices/adopt')).toBe(false);
+    // Nothing else under devices/ — a future route is blocked by default.
+    expect(isAllowedWhenExpired('POST', 'devices/:deviceId')).toBe(false);
   });
 
   it('knows which methods can change something', () => {
@@ -285,6 +297,8 @@ describe('route classification fails closed', () => {
      * entry has to be argued for here as well as written there.
      */
     expect(ALWAYS_ALLOWED.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+      'DELETE devices/:deviceId',
+      'DELETE devices/users/:userId/:deviceId',
       'POST account/deletion/cancel',
       'POST account/deletion/confirm',
       'POST account/deletion/request',
