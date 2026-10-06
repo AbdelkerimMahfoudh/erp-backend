@@ -30,6 +30,8 @@ import { OpenDayDto } from './dto/open-day.dto';
 import { ReviewOpeningDto } from './dto/review-opening.dto';
 import {
   openingDecisionFor,
+  reviewableOpening,
+  withDrawerKnown,
   openingFingerprint,
   openingFromSet,
   openingMethods,
@@ -1486,6 +1488,7 @@ export class ClosingService {
     const eventId = newUuidV7Bin();
     // Read before the transaction: the day is locked, so nothing moves the drawer in between.
     const position = await this.drawerNow(companyId, branchId, day);
+    this.requireKnownForKeep(verdict, position);
     const cashAmount = decidedCash(verdict, position);
     try {
       await this.db.$transaction(async (tx) => {
@@ -1564,15 +1567,34 @@ export class ClosingService {
     const opening = await this.db.openingDecision.findFirst({
       where: { branchId, businessDate: dateValue(day), kind: 'opening' },
       orderBy: [{ at: 'desc' }, { createdAt: 'desc' }],
-      select: { id: true, decision: true, review: { select: { id: true } } },
+      select: { id: true, decision: true, cashAmount: true, review: { select: { id: true } } },
     });
     const nothingToReview = () =>
       new ConflictException({ code: 'no_opening_to_review', message: 'Today’s opening is not awaiting the Owner’s review' });
-    if (!opening || opening.decision !== 'carried' || opening.review) throw nothingToReview();
     const position = await this.drawerNow(companyId, branchId, day);
+    // The opening somebody else carried, or one that left the drawer unknown — or, with no decision recorded at all,
+    // the open day whose drawer is unknown (2026-10-06): the Owner sets what is in it, and the figure is known from now.
+    const target = reviewableOpening(
+      opening ? { decision: opening.decision, cashKnown: opening.cashAmount !== null, reviewed: opening.review !== null } : null,
+      { opened: opening ? true : await this.isOpened(branchId, day), drawerKnown: position.known },
+    );
+    if (!target) throw nothingToReview();
+    this.requireKnownForKeep(verdict, position);
     try {
       await this.db.$transaction(async (tx) => {
-        await this.recordDecisionTx(tx, { companyId, branchId, userId, day, now, kind: 'owner_review', eventId: null, reviewOfId: opening.id, verdict, request, position });
+        await this.recordDecisionTx(tx, {
+          companyId,
+          branchId,
+          userId,
+          day,
+          now,
+          kind: 'owner_review',
+          eventId: null,
+          reviewOfId: target === 'opening' ? opening!.id : null,
+          verdict,
+          request,
+          position,
+        });
       });
     } catch (e) {
       // One review per opening: a retry answers with itself; a different review that came first stands.
@@ -1600,10 +1622,27 @@ export class ClosingService {
       opening_amounts_owner_only: 'Only the Owner sets the money a shop opens with; open with the tracked amounts.',
       amount_invalid: 'Enter the cash in the drawer: zero or more, with at most two decimals.',
       amount_not_expected: 'Keeping the tracked amounts takes no amount.',
+      opening_cash_unknown: 'No previous amount is known for this drawer. Enter the cash in the drawer now — 0 if it is empty.',
     }[verdict.code];
     throw verdict.status === 403
       ? new ForbiddenException({ code: verdict.code, message })
       : new BadRequestException({ code: verdict.code, message });
+  }
+
+  /**
+   * Keep needs something to keep (the user's brief of 2026-10-06): while the drawer's amount is unknown, keeping it
+   * would open the boutique on a figure nobody has. Refused by name, before anything is written; the Owner sets the
+   * cash instead — 0 when the drawer is empty. A carried opening still carries an unknown drawer, marked for the
+   * Owner's review, where the same rule then applies.
+   */
+  private requireKnownForKeep(verdict: Extract<OpeningVerdict, { ok: true }>, position: { known: boolean }): void {
+    const checked = withDrawerKnown(verdict, position.known);
+    if (!checked.ok) {
+      throw new BadRequestException({
+        code: checked.code,
+        message: 'No previous amount is known for this drawer. Enter the cash in the drawer now — 0 if it is empty.',
+      });
+    }
   }
 
   /** The key an opening request is bound to — the phone's, or one of the server's for an older phone that sent none. */
@@ -1892,6 +1931,7 @@ export class ClosingService {
     // Read before the transaction: until the day is opened the counter takes no money — and a day about to be started
     // early has nothing recorded on it yet, whatever the transaction then decides.
     const position = await this.drawerNow(companyId, branchId, day);
+    this.requireKnownForKeep(verdict, position);
     const cashAmount = decidedCash(verdict, position);
     try {
       await this.db.$transaction(async (tx) => {

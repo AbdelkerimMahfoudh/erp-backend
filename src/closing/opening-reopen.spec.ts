@@ -24,9 +24,11 @@ interface Options {
   opened?: boolean;
   won?: number;
   prior?: { businessDate: Date; clientRequestHash: string } | null;
-  /** The day's latest opening, for the review. */
-  opening?: { id: Buffer; decision: 'keep' | 'set' | 'carried'; review: { id: Buffer } | null } | null;
+  /** The day's latest opening, for the review. `cashAmount` null: the drawer was unknown when it was recorded. */
+  opening?: { id: Buffer; decision: 'keep' | 'set' | 'carried'; cashAmount?: number | null; review: { id: Buffer } | null } | null;
   race?: boolean;
+  /** The drawer as Money shows it now; null when unknown. */
+  previous?: number | null;
 }
 
 function build(opts: Options = {}) {
@@ -71,10 +73,10 @@ function build(opts: Options = {}) {
     drawerNow: jest.fn(async () => ({
       tracked: 3450,
       dayNet: 2450,
-      previous: 3400,
-      known: true,
+      previous: opts.previous === undefined ? 3400 : opts.previous,
+      known: opts.previous !== null,
       methods: [
-        { key: 'cash', channel: 'cash', accountId: null, label: '', scope: 'branch', position: 3400 },
+        { key: 'cash', channel: 'cash', accountId: null, label: '', scope: 'branch', position: opts.previous === undefined ? 3400 : opts.previous },
         { key: 'account:a1', channel: 'account', accountId: 'a1', label: 'Bankily', scope: 'company', position: 3600 },
       ],
     })),
@@ -183,14 +185,47 @@ describe('the Owner’s review of a carried opening (docs/63)', () => {
   });
 
   it.each([
-    ['no opening today', null],
-    ['an opening the Owner decided', { id: Buffer.alloc(16, 6), decision: 'keep' as const, review: null }],
-    ['an opening already reviewed', { ...carried, review: { id: Buffer.alloc(16, 7) } }],
-  ])('%s has nothing to review', async (_label, opening) => {
-    const { svc, db } = build({ owner: true, opening });
+    ['no opening today, on a day that is not open', null, false],
+    ['no opening today while the drawer is known', null, true],
+    ['an opening the Owner decided with a known amount', { id: Buffer.alloc(16, 6), decision: 'keep' as const, cashAmount: 3400, review: null }, true],
+    ['an opening already reviewed', { ...carried, cashAmount: 3400, review: { id: Buffer.alloc(16, 7) } }, true],
+  ])('%s has nothing to review', async (_label, opening, opened) => {
+    const { svc, db } = build({ owner: true, opening, opened, previous: opening === null && !opened ? null : 3400 });
     const refusal = await svc.reviewOpening({ clientUuid: KEY, decision: 'keep' }).catch((e: unknown) => e);
     expect((refusal as ConflictException).getResponse()).toMatchObject({ code: 'no_opening_to_review' });
     expect(db.openingDecision.create).not.toHaveBeenCalled();
+  });
+
+  describe('an open day whose drawer is unknown is the Owner’s to set (2026-10-06)', () => {
+    const keptUnknown = { id: Buffer.alloc(16, 9), decision: 'keep' as const, cashAmount: null, review: null };
+
+    it('the Owner’s own keep from before the rule left the drawer unknown: the review sets it, as a review of that opening', async () => {
+      const { svc, db } = build({ owner: true, opening: keptUnknown, previous: null });
+      await svc.reviewOpening({ clientUuid: KEY, decision: 'set', cashAmount: 0 });
+      expect(decided(db)[0]).toMatchObject({ kind: 'owner_review', decision: 'set', reviewOfId: keptUnknown.id, cashAmount: 0, cashKnown: false });
+    });
+
+    it('keeping an unknown drawer is refused in the review too — opening_cash_unknown — and nothing is written', async () => {
+      for (const opening of [keptUnknown, { ...carried, cashAmount: null }]) {
+        const { svc, db } = build({ owner: true, opening, previous: null });
+        const refusal = await svc.reviewOpening({ clientUuid: KEY, decision: 'keep' }).catch((e: unknown) => e);
+        expect(refusal).toBeInstanceOf(BadRequestException);
+        expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'opening_cash_unknown' });
+        expect(db.openingDecision.create).not.toHaveBeenCalled();
+      }
+    });
+
+    it('a day opened without any decision (an older phone) and still unknown: the Owner sets it, and the review stands on its own', async () => {
+      const { svc, db } = build({ owner: true, opening: null, opened: true, previous: null });
+      await svc.reviewOpening({ clientUuid: KEY, decision: 'set', cashAmount: 1500 });
+      expect(decided(db)[0]).toMatchObject({ kind: 'owner_review', decision: 'set', reviewOfId: null, closingEventId: null, cashAmount: 1500 });
+    });
+
+    it('a carried opening whose drawer was known keeps both choices', async () => {
+      const { svc, db } = build({ owner: true, opening: { ...carried, cashAmount: 3400 } });
+      await svc.reviewOpening({ clientUuid: KEY, decision: 'keep' });
+      expect(decided(db)[0]).toMatchObject({ kind: 'owner_review', decision: 'keep', cashAmount: 3400 });
+    });
   });
 
   it('is the Owner’s alone', async () => {

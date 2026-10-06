@@ -7,6 +7,8 @@ import {
   openingStateOf,
   reviewDecisionFor,
   setAdjustment,
+  reviewableOpening,
+  withDrawerKnown,
 } from './opening-money';
 
 /**
@@ -63,6 +65,34 @@ describe('who decides the money a shop opens with', () => {
     expect(isValidCashAmount(-0.01)).toBe(false);
     expect(isValidCashAmount(0.001)).toBe(false);
     expect(isValidCashAmount('10')).toBe(false);
+  });
+});
+
+describe('keep needs something to keep (2026-10-06)', () => {
+  const keep = { ok: true as const, decision: 'keep' as const, cashAmount: null };
+  const set = { ok: true as const, decision: 'set' as const, cashAmount: 0 };
+  const carried = { ok: true as const, decision: 'carried' as const, cashAmount: null };
+
+  it('an unknown drawer refuses keep by name; set and carried pass; a known drawer changes nothing', () => {
+    expect(withDrawerKnown(keep, false)).toEqual({ ok: false, status: 400, code: 'opening_cash_unknown' });
+    expect(withDrawerKnown(set, false)).toBe(set);
+    expect(withDrawerKnown(carried, false)).toBe(carried);
+    expect(withDrawerKnown(keep, true)).toBe(keep);
+    const refusal = { ok: false as const, status: 400 as const, code: 'amount_invalid' as const };
+    expect(withDrawerKnown(refusal, false)).toBe(refusal);
+  });
+
+  it('what the Owner may review: a carried opening, an opening that left the drawer unknown, or an open day with no decision and an unknown drawer', () => {
+    const day = { opened: true, drawerKnown: true };
+    expect(reviewableOpening({ decision: 'carried', cashKnown: true, reviewed: false }, day)).toBe('opening');
+    expect(reviewableOpening({ decision: 'carried', cashKnown: false, reviewed: false }, day)).toBe('opening');
+    expect(reviewableOpening({ decision: 'keep', cashKnown: false, reviewed: false }, day)).toBe('opening');
+    expect(reviewableOpening({ decision: 'keep', cashKnown: true, reviewed: false }, day)).toBeNull();
+    expect(reviewableOpening({ decision: 'set', cashKnown: true, reviewed: false }, day)).toBeNull();
+    expect(reviewableOpening({ decision: 'carried', cashKnown: false, reviewed: true }, day)).toBeNull();
+    expect(reviewableOpening(null, { opened: true, drawerKnown: false })).toBe('day');
+    expect(reviewableOpening(null, { opened: false, drawerKnown: false })).toBeNull();
+    expect(reviewableOpening(null, { opened: true, drawerKnown: true })).toBeNull();
   });
 });
 

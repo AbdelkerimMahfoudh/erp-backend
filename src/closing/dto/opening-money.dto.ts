@@ -15,7 +15,9 @@ export class OpeningMoneyDto {
 
   @ApiPropertyOptional({
     enum: ['keep', 'set'],
-    description: '`keep` the drawer as tracked (an unknown one stays unknown), or `set` it to `cashAmount` — the Owner alone',
+    description:
+      '`keep` the drawer as tracked — only while its amount is known; an unknown drawer is refused with ' +
+      '`opening_cash_unknown` and must be `set` — or `set` it to `cashAmount` (0 when empty) — the Owner alone',
   })
   @IsOptional()
   @IsIn(['keep', 'set'])

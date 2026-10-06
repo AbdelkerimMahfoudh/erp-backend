@@ -259,10 +259,29 @@ describe('the money a shop opens with (docs/63)', () => {
     expect(d.methods.slice(1).every((m: { set: boolean }) => !m.set)).toBe(true);
   });
 
-  it('keep leaves an unknown drawer unknown: no amount, no total', async () => {
+  it('keep with an unknown drawer is refused by name — opening_cash_unknown — and nothing is written (2026-10-06)', async () => {
     const { svc, db } = build([after6], { owner: true, previous: null });
-    await svc.open({ openingMoney: { clientUuid: KEY, decision: 'keep' } });
-    expect(decided(db)[0]).toMatchObject({ decision: 'keep', cashAmount: null, cashKnown: false, total: null });
+    const refusal = await svc.open({ openingMoney: { clientUuid: KEY, decision: 'keep' } }).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(BadRequestException);
+    expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'opening_cash_unknown' });
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(db.closingEvent.create).not.toHaveBeenCalled();
+    expect(db.openingDecision.create).not.toHaveBeenCalled();
+  });
+
+  it('an unknown drawer is opened by setting it: the amount is known from now, 0 when the drawer is empty', async () => {
+    const { svc, db } = build([after6], { owner: true, previous: null });
+    await svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 0 } });
+    const [d] = decided(db);
+    expect(d).toMatchObject({ decision: 'set', cashAmount: 0, cashKnown: false, total: 3600 });
+    expect(d.methods[0]).toMatchObject({ key: 'cash', previous: null, amount: 0, set: true });
+    expect(created(db)[0].payload).toMatchObject({ opening: { decision: 'set', cash: 0 } });
+  });
+
+  it('somebody else still opens an unknown drawer as carried — the day awaits the Owner, who then sets it', async () => {
+    const { svc, db } = build([after6], { previous: null });
+    await svc.open({});
+    expect(decided(db)[0]).toMatchObject({ decision: 'carried', cashAmount: null, cashKnown: false, total: null });
   });
 
   it.each([[-1], [1.234], [Number.NaN]])('an invalid amount (%s) is refused by name, nothing written', async (amount) => {

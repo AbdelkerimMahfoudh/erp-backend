@@ -369,7 +369,9 @@ async function stockBoutique(n: number, pw: string): Promise<{ products: number;
     const view = expectOk(await call('GET', 'closings/open/view', as), 'open view');
     const mode = (view.openChoices ?? []).includes('start_new') ? 'start_new' : 'continue';
     expectOk(
-      await call('POST', 'closings/open', { ...as, body: { mode, openingMoney: { clientUuid: keyFor(`boutique-${n}-opening`), decision: 'keep' } } }),
+      // A boutique that never counted a drawer has nothing to keep: the opening sets the cash — 0, explicitly —
+      // as the server has required since 2026-10-06 (`opening_cash_unknown` refuses a keep of an unknown drawer).
+      await call('POST', 'closings/open', { ...as, body: { mode, openingMoney: { clientUuid: keyFor(`boutique-${n}-opening`), decision: 'set', cashAmount: 0 } } }),
       `open Boutique ${n}`,
     );
   }

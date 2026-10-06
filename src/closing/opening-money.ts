@@ -9,7 +9,10 @@ import type { TrackedMethod } from './money-positions';
  * transaction as the opening itself:
  *
  * - **keep** — the Owner keeps the drawer as the app tracks it. Nothing new is
- *   anchored; an unknown drawer stays unknown.
+ *   anchored. Since the user's brief of 2026-10-06 there must be something to
+ *   keep: a drawer the records cannot establish is never carried into an open
+ *   day as "unknown" — `withDrawerKnown` refuses keep then, and the Owner sets
+ *   what is in the drawer, 0 included.
  * - **set** — the Owner says what is in the drawer now. That amount is a
  *   position, never a sale or an expense, and it is true from the decision's
  *   instant: the drawer then holds it plus what the day records after it. A
@@ -36,7 +39,11 @@ export interface OpeningMoneyInput {
 export type OpeningVerdict =
   | { ok: true; decision: 'keep' | 'carried'; cashAmount: null }
   | { ok: true; decision: 'set'; cashAmount: number }
-  | { ok: false; status: 400 | 403; code: 'opening_amounts_required' | 'opening_amounts_owner_only' | 'amount_invalid' | 'amount_not_expected' };
+  | {
+      ok: false;
+      status: 400 | 403;
+      code: 'opening_amounts_required' | 'opening_amounts_owner_only' | 'amount_invalid' | 'amount_not_expected' | 'opening_cash_unknown';
+    };
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -74,6 +81,37 @@ export function openingDecisionFor(input: OpeningMoneyInput | undefined, isOwner
 /** The Owner's review of a carried opening: the same two choices, always explicit. */
 export function reviewDecisionFor(input: OpeningMoneyInput | undefined): OpeningVerdict {
   return openingDecisionFor(input, true);
+}
+
+/**
+ * Keep needs something to keep (the user's brief of 2026-10-06). While the
+ * drawer's amount is unknown — no counted close, no earlier amount — keeping it
+ * would open the boutique on a figure nobody has, for the whole day. The Owner
+ * sets the cash instead, 0 included when the drawer is empty. A decision that
+ * sets an amount, or carries the drawer for the Owner's review, passes through.
+ */
+export function withDrawerKnown(verdict: OpeningVerdict, drawerKnown: boolean): OpeningVerdict {
+  if (verdict.ok && verdict.decision === 'keep' && !drawerKnown) return { ok: false, status: 400, code: 'opening_cash_unknown' };
+  return verdict;
+}
+
+/**
+ * What the Owner may review on the current day (docs/63 §4.3, widened by the
+ * brief of 2026-10-06): the day's opening when it was carried by somebody else,
+ * or when it left the drawer unknown — the Owner's own keep from before the rule
+ * above, or a carried unknown drawer; or, when no decision was recorded at all
+ * (an older phone opened the day) while the day is open and the drawer unknown,
+ * the day itself. Reviewed once; a known amount the Owner decided is not revised here.
+ */
+export function reviewableOpening(
+  opening: { decision: OpeningDecisionValue; cashKnown: boolean; reviewed: boolean } | null,
+  day: { opened: boolean; drawerKnown: boolean },
+): 'opening' | 'day' | null {
+  if (opening) {
+    if (opening.reviewed) return null;
+    return opening.decision === 'carried' || !opening.cashKnown ? 'opening' : null;
+  }
+  return day.opened && !day.drawerKnown ? 'day' : null;
 }
 
 /**
