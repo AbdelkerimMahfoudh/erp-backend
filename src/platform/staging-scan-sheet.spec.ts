@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as QRCode from 'qrcode';
 import { isValidImei, luhnValid } from '../inventory/imei.util';
@@ -194,10 +194,9 @@ describe('the QR fixtures', () => {
      * angle, in a shop's lighting, is a question only a phone answers — and
      * `docs/24` §9n keeps it open.
      */
-    const checklist = readFileSync(
-      join(__dirname, '..', '..', '..', 'docs', '24_DEVICE_QA_CHECKLIST.md'),
-      'utf8',
-    );
+    // The documentation repository nests this one (../docs); on the owner's PC it sits beside it (../erp-docs/docs).
+    const docs = [join(__dirname, '..', '..', '..', 'docs'), join(__dirname, '..', '..', '..', 'erp-docs', 'docs')].find((d) => existsSync(d))!;
+    const checklist = readFileSync(join(docs, '24_DEVICE_QA_CHECKLIST.md'), 'utf8');
     expect(checklist).toMatch(/no camera has read anything/i);
   });
 });

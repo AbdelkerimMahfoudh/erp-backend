@@ -13,7 +13,9 @@ import { localDateOf, localTimeOf } from '../common/business-day';
  */
 
 const SRC = join(__dirname, '..');
-const read = (...p: string[]) => readFileSync(join(SRC, ...p), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+// Line endings normalised first: a Windows checkout (core.autocrlf) carries CRLF, and these checks match on LF.
+const read = (...p: string[]) =>
+  readFileSync(join(SRC, ...p), 'utf8').replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
 // ── D37: a branch units goal, the production expression evaluated per day and summed ──
 const COLUMNS = ['qty_sold', 'sales_count', 'cancelled_qty', 'cancelled_count', 'returns_count'];

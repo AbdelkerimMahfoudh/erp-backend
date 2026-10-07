@@ -35,7 +35,8 @@ import { makeHarness } from '../transfers/__testing__/harness';
  */
 
 const SRC = join(__dirname, '..');
-const read = (...p: string[]) => readFileSync(join(SRC, ...p), 'utf8');
+// Line endings normalised: a Windows checkout (core.autocrlf) carries CRLF, and these checks match on LF.
+const read = (...p: string[]) => readFileSync(join(SRC, ...p), 'utf8').replace(/\r\n/g, '\n');
 const code = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 const between = (s: string, from: string, to: string) => {
   const a = s.indexOf(from);
