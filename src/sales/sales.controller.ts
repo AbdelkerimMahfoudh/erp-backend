@@ -5,6 +5,7 @@ import { SalesService } from './sales.service';
 import { SalePaymentsService } from './sale-payments.service';
 import { SaleSelectionService } from './sale-selection.service';
 import { RecordSalePaymentDto } from './dto/record-payment.dto';
+import { CorrectPayerNumberDto } from './dto/correct-payer-number.dto';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
 
@@ -132,6 +133,26 @@ export class SalesController {
   })
   recordPayment(@Param('id') id: string, @Body() dto: RecordSalePaymentDto) {
     return this.payments.record(id, dto);
+  }
+
+  /**
+   * Correct the number a non-cash payment came from (D151).
+   *
+   * `financial.correction.request` (Owner, Store Manager): the people who may
+   * ask for a money correction may fix this record, which moves no money at
+   * all — nothing about the amount, method, account or day changes.
+   */
+  @Post(':id/payments/:paymentId/payer-number')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions('financial.correction.request')
+  @ApiOperation({
+    summary: 'Correct the payer number of a non-cash payment',
+    description:
+      'Sets, changes or removes the number the money came from. Refused for cash (payer_number_cash) and for a ' +
+      'malformed number (payer_number_invalid). The same value again changes nothing; a change is audited.',
+  })
+  correctPayerNumber(@Param('id') id: string, @Param('paymentId') paymentId: string, @Body() dto: CorrectPayerNumberDto) {
+    return this.payments.correctPayerNumber(id, paymentId, dto);
   }
 
   /**

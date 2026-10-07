@@ -18,6 +18,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { IsMoney } from '../../common/money/is-money.decorator';
+import { PAYER_NUMBER_MAX_INPUT } from '../payer-number';
 
 /**
  * A sale line is EITHER a serialized unit (scan its `identifier` — IMEI or
@@ -83,6 +84,20 @@ export class PaymentInputDto {
   @IsOptional()
   @IsUUID()
   receivingAccountId?: string;
+
+  /**
+   * The phone or account number this money came FROM (D151, 0087) — optional,
+   * non-cash only, normalised by the server (`sales/payer-number.ts`). Not the
+   * customer's phone and not a transfer reference; no provider verified it.
+   */
+  @ApiPropertyOptional({
+    maxLength: PAYER_NUMBER_MAX_INPUT,
+    description: 'The number the payment came from: digits, spaces, hyphens, an optional leading +. Omit for cash.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(PAYER_NUMBER_MAX_INPUT)
+  payerNumber?: string | null;
 }
 
 /**

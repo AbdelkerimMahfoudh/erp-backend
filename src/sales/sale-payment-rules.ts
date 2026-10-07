@@ -198,6 +198,10 @@ export function resolvePaidAt(requested: string | undefined, soldAt: Date, now: 
  * Everything that changes what is recorded goes in, so reusing a key for a
  * different amount, account or day is detected. The date is reduced to the
  * minute: a retry a few seconds later is the same payment.
+ *
+ * The payer number (D151) joins only when there is one, already normalised: a
+ * payment without one hashes exactly as it did before 0087, so a retry that
+ * spans the deploy is still recognised as itself.
  */
 export function collectionFingerprint(input: {
   saleId: string;
@@ -207,6 +211,7 @@ export function collectionFingerprint(input: {
   paidAt?: string | null;
   reference?: string | null;
   note?: string | null;
+  payerNumber?: string | null;
 }): string {
   const canonical = JSON.stringify({
     saleId: input.saleId,
@@ -216,6 +221,7 @@ export function collectionFingerprint(input: {
     paidAt: input.paidAt ? new Date(input.paidAt).toISOString().slice(0, 16) : null,
     reference: input.reference?.trim() || null,
     note: input.note?.trim() || null,
+    ...(input.payerNumber ? { payerNumber: input.payerNumber } : {}),
   });
   return createHash('sha256').update(canonical).digest('hex');
 }

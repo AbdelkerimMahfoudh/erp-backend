@@ -1505,6 +1505,14 @@ model Payment {
   /// payment look like it used the new one. Both are answered by freezing the
   /// provider beside the label.
   accountProviderSnapshot String? @map("account_provider_snapshot") @db.VarChar(60)
+  /// The phone or account number the customer paid FROM (0087, D151) — typed at
+  /// the till for a bank or wallet payment, optional, never verified by any
+  /// provider. Stored normalised (`+` and digits). Not the transfer `reference`,
+  /// not the customer's saved phone, not the account the money reached. Always
+  /// NULL for cash, enforced by `ck_payments_cash_no_payer`. No total, balance
+  /// or reconciliation figure reads it; receipts, exports and notifications
+  /// never print it.
+  payerNumber             String? @map("payer_number") @db.VarChar(40)
 
   company          Company                  @relation(fields: [companyId], references: [id])
   sale             Sale                     @relation(fields: [saleId], references: [id], onDelete: Cascade)

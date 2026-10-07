@@ -580,6 +580,24 @@ describe('deleting a login', () => {
 });
 
 describe('closing the business', () => {
+  it('clears the numbers its payments came from (D151) and keeps every payment; another business keeps its own', async () => {
+    const h = harness();
+    h.prisma.seed(
+      'payment',
+      { id: id('9601'), companyId: C1, method: 'mobile', amount: 300, payerNumber: '+22236123456' },
+      { id: id('9602'), companyId: C1, method: 'cash', amount: 599, payerNumber: null },
+      { id: id('9603'), companyId: C2, method: 'mobile', amount: 100, payerNumber: '+22245000000' },
+    );
+    await h.service.start(h.principal(OWNER), { password: 'owner-pw', language: 'ar' });
+    const view = await h.service.confirm(h.principal(OWNER), h.lastCode()!);
+    expect(view.status).toBe('completed');
+
+    expect(h.row('payment', id('9601'))).toMatchObject({ method: 'mobile', amount: 300, payerNumber: null });
+    expect(h.row('payment', id('9602'))).toMatchObject({ method: 'cash', amount: 599, payerNumber: null });
+    expect(h.row('payment', id('9603'))).toMatchObject({ payerNumber: '+22245000000' });
+    expect(h.prisma.rows('payment')).toHaveLength(3);
+  });
+
   it('removes every person, contact and credential in it, closes it, and keeps the books', async () => {
     const h = harness();
     await h.service.start(h.principal(OWNER), { password: 'owner-pw', language: 'ar' });

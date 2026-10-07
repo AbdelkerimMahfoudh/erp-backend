@@ -181,6 +181,7 @@ export async function planSalePayment(db: CorrectionDb, ctx: PlanContext, input:
       method: true,
       receivingAccountId: true,
       accountLabelSnapshot: true,
+      payerNumber: true,
       businessDate: true,
       corrections: { select: { id: true, status: true } },
       sale: {
@@ -216,6 +217,8 @@ export async function planSalePayment(db: CorrectionDb, ctx: PlanContext, input:
     amount: amountPaid,
     method: from.method,
     accountLabel: from.label,
+    // Preserved, not corrected (D151): a channel correction moves money and leaves the payer number on the payment.
+    payerNumber: p.payerNumber,
     paymentDay: dayKey(p.businessDate),
   };
   const saleState = openOrApproved(sale.corrections, ctx.ignoreCorrectionId);

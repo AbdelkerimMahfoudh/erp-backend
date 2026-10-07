@@ -508,6 +508,8 @@ export class AccountDeletionService {
 
     const customers = await tx.customer.updateMany({ where: { companyId }, data: { name: null, phone: null, notes: null } });
     const suppliers = await tx.supplier.updateMany({ where: { companyId }, data: { phone: null, notes: null } });
+    // The numbers payments came from are people's contact details too (D151); the money itself stays.
+    await tx.payment.updateMany({ where: { companyId, payerNumber: { not: null } }, data: { payerNumber: null } });
     await tx.branch.updateMany({ where: { companyId }, data: { isActive: false, phone: null } });
     await tx.registrationAttempt.updateMany({
       where: { companyId },

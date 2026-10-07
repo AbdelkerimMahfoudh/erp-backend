@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { PaymentMethod } from '@prisma/client';
 import { IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
 import { IsMoney } from '../../common/money/is-money.decorator';
+import { PAYER_NUMBER_MAX_INPUT } from '../payer-number';
 
 /**
  * Money received later against a sale's balance (0074).
@@ -57,4 +58,14 @@ export class RecordSalePaymentDto {
   @IsString()
   @MaxLength(255)
   note?: string;
+
+  /** The number this money came FROM (D151, 0087): optional, non-cash only, never the reference above. */
+  @ApiPropertyOptional({
+    maxLength: PAYER_NUMBER_MAX_INPUT,
+    description: 'The number the payment came from: digits, spaces, hyphens, an optional leading +. Omit for cash.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(PAYER_NUMBER_MAX_INPUT)
+  payerNumber?: string | null;
 }

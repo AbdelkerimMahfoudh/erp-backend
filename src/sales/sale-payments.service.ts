@@ -15,7 +15,9 @@ import { BusinessDayService, dateValue } from '../common/business-day/business-d
 import { ClosingService } from '../closing/closing.service';
 import { assertDayOpen } from '../expenses/expense-rules';
 import { RecordSalePaymentDto } from './dto/record-payment.dto';
+import { CorrectPayerNumberDto } from './dto/correct-payer-number.dto';
 import { afterPayment, assertCollectable, collectionFingerprint, resolvePaidAt } from './sale-payment-rules';
+import { payerNumberFor } from './payer-number';
 
 const num = (v: unknown): number => (v == null ? 0 : Number(v));
 
@@ -66,6 +68,8 @@ export class SalePaymentsService {
 
     const saleId = uuidToBin(saleIdStr);
     const clientUuid = uuidToBin(dto.clientUuid);
+    // The number the money came from (D151): normalised, never on cash — and bound into the key's payload.
+    const payerNumber = payerNumberFor(dto.method, dto.payerNumber);
     const hash = collectionFingerprint({
       saleId: saleIdStr,
       amount: dto.amount,
@@ -74,6 +78,7 @@ export class SalePaymentsService {
       paidAt: dto.paidAt ?? null,
       reference: dto.reference ?? null,
       note: dto.note ?? null,
+      payerNumber,
     });
 
     // A retry of something already recorded answers with what it recorded.
@@ -204,6 +209,7 @@ export class SalePaymentsService {
                 ? (account.providerName ?? 'other')
                 : account.provider
               : null,
+            payerNumber,
           },
         });
 
@@ -231,6 +237,7 @@ export class SalePaymentsService {
             paidAt,
             // The minute the person chose, when the payment was lifted to its sale's instant within it (docs/61 §9).
             ...(dto.paidAt && new Date(dto.paidAt).getTime() !== paidAt.getTime() ? { paidAtRequested: dto.paidAt } : {}),
+            ...(payerNumber ? { payerNumber } : {}),
             remaining: next.remaining,
             payStatus: next.payStatus,
           },
@@ -250,6 +257,48 @@ export class SalePaymentsService {
       throw e;
     }
 
+    return this.state(saleId);
+  }
+
+  /**
+   * Correct the number a payment came from (D151) — the one payment fact fixed
+   * in place, because it moves no money: amount, method, account and day stay
+   * exactly as recorded, so no total, balance, expected cash or reconciliation
+   * figure changes, and no closing is touched.
+   *
+   * Owner and Store Manager (`financial.correction.request`), at the payment's
+   * own branch; another branch's or company's payment is simply not found.
+   * Cash has no payer number. The same value again writes nothing; a change is
+   * written with its before and after in the audit history.
+   */
+  async correctPayerNumber(saleIdStr: string, paymentIdStr: string, dto: CorrectPayerNumberDto) {
+    if (!isUuid(saleIdStr) || !isUuid(paymentIdStr)) throw new NotFoundException('No such payment');
+    const branchId = this.tenant.requireBranchId();
+    const saleId = uuidToBin(saleIdStr);
+    const paymentId = uuidToBin(paymentIdStr);
+
+    const payment = await this.db.payment.findFirst({
+      where: { id: paymentId, saleId, sale: { branchId } },
+      select: { id: true, method: true, payerNumber: true },
+    });
+    if (!payment) throw new NotFoundException('No such payment at this branch');
+
+    const next = payerNumberFor(payment.method, dto.payerNumber);
+    if (next === payment.payerNumber) return this.state(saleId);
+
+    const reason = dto.reason?.trim() || null;
+    await this.db.$transaction(async (tx) => {
+      await tx.payment.update({ where: { id: paymentId }, data: { payerNumber: next } });
+      await this.audit.recordTx(tx, {
+        entityType: 'Payment',
+        entityId: paymentId,
+        action: 'update',
+        reason: 'payer_number_corrected',
+        before: { saleId: saleIdStr, payerNumber: payment.payerNumber },
+        after: { saleId: saleIdStr, payerNumber: next, ...(reason ? { note: reason } : {}) },
+        branchId,
+      });
+    });
     return this.state(saleId);
   }
 
@@ -310,6 +359,7 @@ export const paymentSelect = {
   note: true,
   accountLabelSnapshot: true,
   accountProviderSnapshot: true,
+  payerNumber: true,
   recordedBy: { select: { name: true } },
 } satisfies Prisma.PaymentSelect;
 
@@ -328,6 +378,8 @@ export function toPaymentView(p: PaymentRow) {
     // deactivation of the account does not reach back into this history.
     accountLabel: p.accountLabelSnapshot,
     accountProvider: p.accountProviderSnapshot,
+    // The number the money came from (D151), beside — never inside — the reference. Same visibility as the reference.
+    payerNumber: p.payerNumber,
     recordedBy: p.recordedBy?.name ?? null,
   };
 }

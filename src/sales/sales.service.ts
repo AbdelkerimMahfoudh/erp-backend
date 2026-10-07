@@ -28,6 +28,7 @@ import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
 import { evaluateEligibility, NO_RETURNS, resolveWindowForSale, snapshotPolicy } from './return-policy';
 import { assertDebtorForBalance, assertPaymentParts, chooseDebtor, type DebtorChoice, STORE_KINDS } from './sale-payment-rules';
+import { assertPayerNumbers, payerNumberFor } from './payer-number';
 import { assertMayStartDealing } from '../consignment/dealing-authorization';
 import { paymentSelect, toPaymentView } from './sale-payments.service';
 import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
@@ -334,6 +335,8 @@ export class SalesService {
             },
           });
         }
+        // Each part's payer number (D151): well formed, and never on cash — refused before anything is written.
+        assertPayerNumbers(dto.payments);
         assertPaymentParts(dto.payments);
         const { amountPaid, balanceDue, payStatus } = this.policy.reconcilePayments(dto.payments, total);
         /**
@@ -576,6 +579,8 @@ export class SalesService {
                   ? (account.providerName ?? 'other')
                   : account.provider
                 : null,
+              // The number THIS part came from, normalised (D151); validated above, NULL for cash.
+              payerNumber: payerNumberFor(pay.method, pay.payerNumber),
             },
           });
         }
@@ -589,11 +594,15 @@ export class SalesService {
           });
         }
 
+        // The payer numbers taken with the sale, part by part (D151): the audit keeps what the till recorded.
+        const payerParts = dto.payments
+          .map((p) => ({ method: p.method, amount: p.amount, payerNumber: payerNumberFor(p.method, p.payerNumber) }))
+          .filter((p) => p.payerNumber !== null);
         await this.audit.recordTx(tx, {
           entityType: 'Sale',
           entityId: saleId,
           action: 'create',
-          after: { invoiceNo, total, margin },
+          after: { invoiceNo, total, margin, ...(payerParts.length ? { payerNumbers: payerParts } : {}) },
           branchId,
         });
         if (margin < 0) {
@@ -1365,7 +1374,10 @@ export class SalesService {
         where: { saleId: existing.id },
         select: { unitId: true, productId: true, quantity: true, price: true },
       }),
-      this.db.payment.findMany({ where: { saleId: existing.id, kind: 'at_sale' }, select: { method: true, amount: true } }),
+      this.db.payment.findMany({
+        where: { saleId: existing.id, kind: 'at_sale' },
+        select: { method: true, amount: true, receivingAccountId: true, payerNumber: true },
+      }),
     ]);
 
     const stored = items
@@ -1399,8 +1411,29 @@ export class SalesService {
     }
     requested.sort();
 
-    const storedPayments = payments.map((p) => `${p.method}:${Number(p.amount)}`).sort();
-    const requestedPayments = dto.payments.map((p) => `${p.method}:${p.amount}`).sort();
+    /*
+     * Each part as it is recorded: method and amount, and for money that is not
+     * cash the account it reached and the number it came from (D151). Swapping
+     * two parts' payer numbers, or changing one, is then a different sale, while
+     * a retry of the same body — or of a body from before payer numbers, whose
+     * parts carry none — still matches. Cash is compared as the write loop
+     * stores it: no account, no payer number.
+     */
+    const part = (method: string, amount: number, account: string | null, payer: string | null) =>
+      `${method}:${amount}${account ? `@${account}` : ''}${payer ? `#${payer}` : ''}`;
+    const storedPayments = payments
+      .map((p) => part(p.method, Number(p.amount), p.receivingAccountId ? p.receivingAccountId.toString('hex') : null, p.payerNumber ?? null))
+      .sort();
+    const requestedPayments = dto.payments
+      .map((p) =>
+        part(
+          p.method,
+          p.amount,
+          p.method === 'cash' || !p.receivingAccountId ? null : uuidToBin(p.receivingAccountId).toString('hex'),
+          payerNumberFor(p.method, p.payerNumber),
+        ),
+      )
+      .sort();
     const requestedDiscount = this.policy.round(
       dto.lines.reduce((s, l) => s + (l.discount ?? 0), 0) + (dto.saleDiscount ?? 0),
     );
