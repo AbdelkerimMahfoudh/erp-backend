@@ -1,9 +1,12 @@
 import { BadRequestException } from '@nestjs/common';
 import { buildChannels, moneyByMethod, type AccountRow, type MovementRow } from './channels';
 import {
+  accountMethod,
   anchorFingerprint,
   assertAnchorAmount,
+  cashDayRows,
   cashMethod,
+  movementOf,
   movementWindow,
   trackedMoney,
   type CountedClose,
@@ -20,6 +23,9 @@ import {
  * keep it honest: no invented opening, no day's net read as a position, and an
  * unknown method shown as unknown, with no total over it.
  */
+
+/** No movement on the day: the drawer's figure alone is under test. */
+const NO_MOVE = movementOf('2026-09-26', []);
 
 const BANKILY = '01a0b1c2-0000-7000-8000-00000000000b';
 const MASRVI = '01a0b1c2-0000-7000-8000-00000000000c';
@@ -65,6 +71,7 @@ const card = (
     movements?: MovementRow[];
     withMovement?: string[];
     accountsVisible?: boolean;
+    dayMovements?: MovementRow[];
   } = {},
 ) =>
   trackedMoney({
@@ -77,6 +84,7 @@ const card = (
     movements: over.movements ?? day2Accounts,
     withMovement: new Set(over.withMovement ?? []),
     accountsVisible: over.accountsVisible ?? true,
+    dayMovements: over.dayMovements ?? [],
   });
 
 const positions = (c: ReturnType<typeof card>) => c.methods.map((m) => [m.key, m.position]);
@@ -124,6 +132,7 @@ describe('carried across midnight — the overnight case', () => {
       unknownReason: null,
       anchor: { source: 'counted_close', amount: 0, at: '2026-09-25T22:10:00.000Z', businessDate: '2026-09-25', byName: 'Aicha' },
       sinceAnchorNet: 3400,
+      movement: { businessDate: '2026-09-26', inflows: 0, outflows: 0, net: 0 },
     });
     expect(bankily).toEqual({
       key: `account:${BANKILY}`,
@@ -137,6 +146,7 @@ describe('carried across midnight — the overnight case', () => {
       unknownReason: null,
       anchor: { source: 'declared', amount: 0, at: '2026-09-26T06:30:00.000Z', businessDate: '2026-09-26', byName: 'Owner' },
       sinceAnchorNet: 2000,
+      movement: { businessDate: '2026-09-26', inflows: 0, outflows: 0, net: 0 },
     });
   });
 });
@@ -172,7 +182,7 @@ describe('unknown is unknown, never 0', () => {
 describe('the drawer', () => {
   it('a current day locked with its drawer counted holds what was counted, not what was expected', () => {
     const today: CountedClose = { closingDate: '2026-09-26', countedCash: 3350, at: new Date('2026-09-26T21:40:00Z'), byName: 'Aicha' };
-    const cash = cashMethod({ countedToday: today, openingAnchor: day1Close, expected: 3400 });
+    const cash = cashMethod({ countedToday: today, openingAnchor: day1Close, expected: 3400 }, NO_MOVE);
     expect(cash).toMatchObject({
       known: true,
       position: 3350,
@@ -182,12 +192,12 @@ describe('the drawer', () => {
   });
 
   it('otherwise it is the closing’s expected figure, measured from the counted close it is carried from', () => {
-    const cash = cashMethod({ countedToday: null, openingAnchor: { ...day1Close, countedCash: 1000 }, expected: 4400 });
+    const cash = cashMethod({ countedToday: null, openingAnchor: { ...day1Close, countedCash: 1000 }, expected: 4400 }, NO_MOVE);
     expect(cash).toMatchObject({ known: true, position: 4400, anchor: { amount: 1000, businessDate: '2026-09-25' }, sinceAnchorNet: 3400 });
   });
 
   it('a counted close that recorded no time still anchors, with no instant', () => {
-    const cash = cashMethod({ countedToday: null, openingAnchor: { ...day1Close, at: null }, expected: 0 });
+    const cash = cashMethod({ countedToday: null, openingAnchor: { ...day1Close, at: null }, expected: 0 }, NO_MOVE);
     expect(cash.anchor).toMatchObject({ at: null, amount: 0 });
   });
 });
@@ -468,7 +478,7 @@ describe('the drawer anchored by the money a shop opened with (docs/63)', () => 
   };
 
   it('is known from the opening, even when no drawer was ever counted — the closing’s figure, from that amount', () => {
-    const cash = cashMethod({ countedToday: null, openingAnchor: null, opened, expected: 3500 });
+    const cash = cashMethod({ countedToday: null, openingAnchor: null, opened, expected: 3500 }, NO_MOVE);
     expect(cash).toMatchObject({
       known: true,
       position: 3500,
@@ -478,22 +488,22 @@ describe('the drawer anchored by the money a shop opened with (docs/63)', () => 
   });
 
   it('a carried opening awaits the Owner’s review — never presented as checked — until the Owner reviews it', () => {
-    const carried = cashMethod({ countedToday: null, openingAnchor: day1Close, opened: { ...opened, decision: 'carried' }, expected: 3400 });
+    const carried = cashMethod({ countedToday: null, openingAnchor: day1Close, opened: { ...opened, decision: 'carried' }, expected: 3400 }, NO_MOVE);
     expect(carried.anchor).toMatchObject({ source: 'opening', decision: 'carried', awaitingOwnerReview: true });
-    const reviewed = cashMethod({ countedToday: null, openingAnchor: day1Close, opened: { ...opened, decision: 'carried', reviewed: true }, expected: 3400 });
+    const reviewed = cashMethod({ countedToday: null, openingAnchor: day1Close, opened: { ...opened, decision: 'carried', reviewed: true }, expected: 3400 }, NO_MOVE);
     expect(reviewed.anchor).toMatchObject({ awaitingOwnerReview: false });
   });
 
   it('a day closed with its drawer counted still holds its count', () => {
     const today: CountedClose = { closingDate: '2026-09-27', countedCash: 3480, at: new Date('2026-09-27T21:00:00Z'), byName: 'Aicha' };
-    expect(cashMethod({ countedToday: today, openingAnchor: day1Close, opened, expected: 3500 })).toMatchObject({
+    expect(cashMethod({ countedToday: today, openingAnchor: day1Close, opened, expected: 3500 }, NO_MOVE)).toMatchObject({
       position: 3480,
       anchor: { source: 'counted_close' },
     });
   });
 
   it('with no anchor at all the drawer stays unknown — an opening never invents one', () => {
-    expect(cashMethod({ countedToday: null, openingAnchor: null, opened: null, expected: 0 })).toMatchObject({ known: false, position: null });
+    expect(cashMethod({ countedToday: null, openingAnchor: null, opened: null, expected: 0 }, NO_MOVE)).toMatchObject({ known: false, position: null });
   });
 
   it('3 400 kept at the opening + 2 000 + 1 600 = 7 000, the next morning included', () => {
@@ -504,5 +514,64 @@ describe('the drawer anchored by the money a shop opened with (docs/63)', () => 
       [`account:${MASRVI}`, 1600],
     ]);
     expect(c.total).toBe(7000);
+  });
+});
+
+describe('what moved on the day, beside the position (the user’s brief of 2026-10-07)', () => {
+  const SEDAD = '01a0b1c2-0000-7000-8000-00000000000e';
+  const sedad = account(SEDAD, 'Sedad', 3);
+  const dayRows = (...rows: MovementRow[]) => rows;
+
+  it('an unknown Sedad with a 20 000 sale today: the position stays unknown, the day shows +20 000 recorded', () => {
+    const c = card({ accounts: [...accounts, sedad], movements: [], dayMovements: dayRows(move(SEDAD, 'salesIn', 20000)) } as never);
+    const m = c.methods.find((x) => x.accountId === SEDAD)!;
+    expect(m).toMatchObject({ known: false, position: null, unknownReason: 'no_anchor', anchor: null, sinceAnchorNet: null });
+    expect(m.movement).toEqual({ businessDate: '2026-09-26', inflows: 20000, outflows: 0, net: 20000 });
+    // The others moved nothing today, and say so; no total while any method is unknown.
+    expect(c.methods.find((x) => x.accountId === BANKILY)!.movement).toEqual({ businessDate: '2026-09-26', inflows: 0, outflows: 0, net: 0 });
+    expect(c.total).toBeNull();
+    expect(c.unknownKeys).toEqual([`account:${SEDAD}`]);
+  });
+
+  it('a known Sedad at 5 000 with a 20 000 sale after the record: 25 000, and the day says +20 000', () => {
+    const anchors = [...morningAnchors, declared(SEDAD, 5000, '2026-09-26T06:30:00Z', '2026-09-26')];
+    const c = card({ accounts: [...accounts, sedad], anchors, movements: [...day2Accounts, move(SEDAD, 'salesIn', 20000)], dayMovements: dayRows(move(SEDAD, 'salesIn', 20000)) } as never);
+    const m = c.methods.find((x) => x.accountId === SEDAD)!;
+    expect(m).toMatchObject({ known: true, position: 25000, sinceAnchorNet: 20000, movement: { inflows: 20000, outflows: 0, net: 20000 } });
+    expect(c.total).toBe(3400 + 2000 + 1600 + 25000);
+  });
+
+  it('an amount the Owner set to 0 is known and reads 0 — never Unknown', () => {
+    const anchors = [...morningAnchors, declared(SEDAD, 0, '2026-09-26T06:30:00Z', '2026-09-26')];
+    const c = card({ accounts: [...accounts, sedad], anchors, movements: day2Accounts } as never);
+    const m = c.methods.find((x) => x.accountId === SEDAD)!;
+    expect(m).toMatchObject({ known: true, position: 0, movement: { net: 0 } });
+    expect(c.unknownKeys).toEqual([]);
+  });
+
+  it('the day’s movement never becomes a position: 20 000 in and 20 000 refunded out leave an unknown account unknown, net 0', () => {
+    const c = card({ accounts: [sedad], anchors: [], movements: [], dayMovements: dayRows(move(SEDAD, 'salesIn', 20000), move(SEDAD, 'refundsOut', 20000)) } as never);
+    const m = c.methods.find((x) => x.accountId === SEDAD)!;
+    expect(m.position).toBeNull();
+    expect(m.movement).toEqual({ businessDate: '2026-09-26', inflows: 20000, outflows: 20000, net: 0 });
+  });
+
+  it('the drawer’s day comes from its closing row, with the closing’s signs; a row that moved nothing yields no rows', () => {
+    const row = { salesIn: 10000, refundsOut: 500, supplierOut: 2000, expensesOut: 300, correctionsIn: 50, correctionsOut: 25 };
+    const rows = cashDayRows(row);
+    expect(rows.every((r) => r.channel === 'cash' && r.accountId === null)).toBe(true);
+    expect(movementOf('2026-09-26', rows)).toEqual({ businessDate: '2026-09-26', inflows: 10050, outflows: 2825, net: 7225 });
+    expect(cashDayRows({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0, correctionsOut: 0 })).toEqual([]);
+    expect(cashDayRows(null)).toEqual([]);
+    const c = card({ drawer: { dayRows: rows } } as never);
+    expect(c.methods[0].movement).toEqual({ businessDate: '2026-09-26', inflows: 10050, outflows: 2825, net: 7225 });
+  });
+
+  it('rounds to the cent and keeps a method’s day apart from another’s', () => {
+    const m = accountMethod(sedad, null, [], movementOf('2026-09-26', [move(SEDAD, 'salesIn', 0.1), move(SEDAD, 'salesIn', 0.2), move(SEDAD, 'expensesOut', 0.05)]));
+    expect(m.movement).toEqual({ businessDate: '2026-09-26', inflows: 0.3, outflows: 0.05, net: 0.25 });
+    const c = card({ accounts: [...accounts, sedad], anchors: [], movements: [], dayMovements: dayRows(move(BANKILY, 'salesIn', 700)) } as never);
+    expect(c.methods.find((x) => x.accountId === BANKILY)!.movement.net).toBe(700);
+    expect(c.methods.find((x) => x.accountId === SEDAD)!.movement.net).toBe(0);
   });
 });

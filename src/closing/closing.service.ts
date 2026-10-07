@@ -26,6 +26,7 @@ import { openReceivables } from '../sales/open-receivables';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
+import { cashDayRows } from './money-positions';
 import { OpenDayDto } from './dto/open-day.dto';
 import { ReviewOpeningDto } from './dto/review-opening.dto';
 import {
@@ -1683,7 +1684,7 @@ export class ClosingService {
     const money = await this.moneyAnchors.trackedMoney(
       branchId,
       day,
-      { opening: drawer.opening, expected: tracked, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom) },
+      { opening: drawer.opening, expected: tracked, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom), dayRows: cashDayRows(cash) },
       true,
     );
     const cashMethod = money.methods.find((m) => m.channel === 'cash');
@@ -1784,7 +1785,7 @@ export class ClosingService {
     const money = await this.moneyAnchors.trackedMoney(
       branchId,
       day,
-      { opening: drawer.opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom) },
+      { opening: drawer.opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom), dayRows: cashDayRows(cash) },
       isOwner,
     );
     return {
@@ -2265,7 +2266,7 @@ export class ClosingService {
     const trackedMoney = await this.moneyAnchors.trackedMoney(
       branchId,
       today,
-      { opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom) },
+      { opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom), dayRows: cashDayRows(cash) },
       accountsVisible,
     );
 

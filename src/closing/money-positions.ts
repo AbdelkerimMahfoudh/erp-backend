@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
 import { shiftDate } from '../common/business-day';
 import { parseMoney } from '../common/money/money';
-import { COMPONENT_SIGN, type AccountRow, type MovementRow } from './channels';
+import { COMPONENT_SIGN, type AccountRow, type ChannelRow, type MovementRow } from './channels';
 
 /**
  * The money each method holds as this app tracks it (Money's top card, 2026-09-27).
@@ -30,6 +30,58 @@ import { COMPONENT_SIGN, type AccountRow, type MovementRow } from './channels';
 
 export type TrackedChannel = 'cash' | 'account';
 export type UnknownReason = 'no_counted_close' | 'no_anchor';
+
+/**
+ * What moved through a method on the current business day (the user's brief of
+ * 2026-10-07): the day's inflows, its confirmed outflows and the net, with the
+ * closing's own components and signs — so a method whose position is unknown
+ * still shows the money the records hold for it, and a known one shows the
+ * same day figure the Daily closing will. An unknown opening is never turned
+ * into a balance by a movement: the position stays null; the movement is its
+ * own figure.
+ *
+ * Scope follows the method: the drawer's day is this branch's; an account is
+ * the company's, so its day is every shop's movement on that account, keyed by
+ * the requesting branch's business date.
+ */
+export interface MethodMovement {
+  /** The business day the figures cover — the requesting branch's current one. */
+  businessDate: string;
+  /** Received from sales, and money put back by an approved correction. */
+  inflows: number;
+  /** Refunds, supplier payments and expenses that were confirmed, and money an approved correction took out. */
+  outflows: number;
+  net: number;
+}
+
+const INFLOW: ReadonlySet<MovementRow['component']> = new Set(['salesIn', 'correctionsIn']);
+
+/** The day's movement of one method from its component rows, with the closing's signs. */
+export function movementOf(businessDate: string, rows: readonly Pick<MovementRow, 'component' | 'amount'>[]): MethodMovement {
+  let inflows = 0;
+  let outflows = 0;
+  for (const r of rows) {
+    if (INFLOW.has(r.component)) inflows += r.amount;
+    else outflows += r.amount;
+  }
+  inflows = round2(inflows);
+  outflows = round2(outflows);
+  return { businessDate, inflows, outflows, net: round2(inflows - outflows) };
+}
+
+/** The drawer's day rows from its closing channel row — the same sums the Daily closing shows. */
+export function cashDayRows(row: Pick<ChannelRow, 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut'> | null | undefined): MovementRow[] {
+  if (!row) return [];
+  const parts: [MovementRow['component'], number][] = [
+    ['salesIn', row.salesIn],
+    ['refundsOut', row.refundsOut],
+    ['supplierOut', row.supplierOut],
+    ['expensesOut', row.expensesOut],
+    ['correctionsIn', row.correctionsIn],
+    ['correctionsOut', row.correctionsOut],
+  ];
+  return parts.filter(([, amount]) => amount !== 0).map(([component, amount]) => ({ channel: 'cash', accountId: null, component, amount }));
+}
 
 export interface TrackedAnchor {
   source: 'counted_close' | 'declared' | 'opening';
@@ -70,6 +122,8 @@ export interface TrackedMethod {
   unknownReason: UnknownReason | null;
   anchor: TrackedAnchor | null;
   sinceAnchorNet: number | null;
+  /** The current business day's movement, whatever the position — see `MethodMovement`. */
+  movement: MethodMovement;
 }
 
 export interface TrackedMoney {
@@ -110,6 +164,8 @@ export interface DrawerInputs {
   opened?: OpenedAnchor | null;
   /** The drawer's expected figure for the current business day — the overview's `cashNow`. */
   expected: number;
+  /** This branch's drawer movement on the current business day (`cashDayRows`). */
+  dayRows?: MovementRow[];
 }
 
 /** The latest amount the Owner recorded for an account. */
@@ -139,8 +195,8 @@ const countedAnchor = (close: CountedClose): TrackedAnchor => ({
  * reopened day anchors nothing, and a shop that never counted a closed drawer
  * does not know what it holds.
  */
-export function cashMethod(input: DrawerInputs): TrackedMethod {
-  const base = { key: 'cash', channel: 'cash' as const, accountId: null, label: '', scope: 'branch' as const, isActive: true };
+export function cashMethod(input: DrawerInputs, movement: MethodMovement): TrackedMethod {
+  const base = { key: 'cash', channel: 'cash' as const, accountId: null, label: '', scope: 'branch' as const, isActive: true, movement };
   if (input.countedToday) {
     const anchor = countedAnchor(input.countedToday);
     return { ...base, known: true, position: anchor.amount, unknownReason: null, anchor, sinceAnchorNet: 0 };
@@ -185,7 +241,7 @@ export function movementWindow(anchor: Pick<DeclaredAnchor, 'at' | 'businessDate
  * closing's own signs. `movements` are that window's sums per component; money
  * that named no account belongs to no method and never arrives here.
  */
-export function accountMethod(account: AccountRow, anchor: DeclaredAnchor | null, movements: MovementRow[]): TrackedMethod {
+export function accountMethod(account: AccountRow, anchor: DeclaredAnchor | null, movements: MovementRow[], movement: MethodMovement): TrackedMethod {
   const base = {
     key: `account:${account.id}`,
     channel: 'account' as const,
@@ -193,6 +249,7 @@ export function accountMethod(account: AccountRow, anchor: DeclaredAnchor | null
     label: account.label,
     scope: 'company' as const,
     isActive: account.isActive,
+    movement,
   };
   if (!anchor) {
     return { ...base, known: false, position: null, unknownReason: 'no_anchor', anchor: null, sinceAnchorNet: null };
@@ -230,6 +287,8 @@ export function trackedMoney(input: {
   /** Deactivated accounts that ever recorded money: they may still hold it, so they are listed. */
   withMovement: ReadonlySet<string>;
   accountsVisible: boolean;
+  /** The current business day's account rows, company-wide (every shop), keyed by `businessDate`. */
+  dayMovements?: MovementRow[];
 }): TrackedMoney {
   const anchorOf = new Map(input.anchors.map((a) => [a.accountId, a]));
   const byOrder = (a: AccountRow, b: AccountRow) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label);
@@ -240,9 +299,11 @@ export function trackedMoney(input: {
         ...input.accounts.filter((a) => !a.isActive && (anchorOf.has(a.id) || input.withMovement.has(a.id))).sort(byOrder),
       ]
     : [];
+  const dayRows = input.dayMovements ?? [];
+  const dayOf = (accountId: string) => movementOf(input.businessDate, dayRows.filter((r) => r.channel === 'account' && r.accountId === accountId));
   const methods = [
-    cashMethod(input.drawer),
-    ...listed.map((a) => accountMethod(a, anchorOf.get(a.id) ?? null, input.movements)),
+    cashMethod(input.drawer, movementOf(input.businessDate, input.drawer.dayRows ?? [])),
+    ...listed.map((a) => accountMethod(a, anchorOf.get(a.id) ?? null, input.movements, dayOf(a.id))),
   ];
   const unknownKeys = methods.filter((m) => !m.known).map((m) => m.key);
   return {

@@ -6,13 +6,14 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
-import type { AccountRow, Component, MovementRow } from './channels';
+import type { AccountRow, Channel, Component, MovementRow } from './channels';
 import type { OpeningCash } from './closing-report';
 import { RecordMoneyAnchorDto } from './dto/record-money-anchor.dto';
 import {
   accountMethod,
   anchorFingerprint,
   assertAnchorAmount,
+  movementOf,
   movementWindow,
   trackedMoney,
   type CountedClose,
@@ -73,7 +74,7 @@ export class MoneyAnchorsService {
   async trackedMoney(
     branchId: Buffer,
     businessDate: string,
-    drawer: { opening: OpeningCash; expected: number; opened?: OpenedAnchor | null },
+    drawer: { opening: OpeningCash; expected: number; opened?: OpenedAnchor | null; dayRows?: MovementRow[] },
     accountsVisible: boolean,
   ): Promise<TrackedMoney> {
     const companyId = this.tenant.companyId();
@@ -90,21 +91,95 @@ export class MoneyAnchorsService {
     const anchors = (await Promise.all(rows.map((a) => this.latestAnchor(this.db, a.id)))).filter(
       (a): a is DeclaredAnchor => a !== null,
     );
-    const [movements, withMovement] = await Promise.all([
+    const [movements, withMovement, dayMovements] = await Promise.all([
       this.movementsSince(this.db, companyId, anchors, businessDate),
       this.everMoved(companyId, rows.filter((a) => !a.isActive && !anchors.some((x) => x.accountId === a.id)).map((a) => a.id)),
+      // The day's movement of every account, anchored or not (2026-10-07): an unknown position still shows what moved.
+      accountsVisible ? this.accountDayMovements(this.db, companyId, businessDate) : Promise.resolve([]),
     ]);
     return trackedMoney({
       asOf,
       businessDate,
       branchCount,
-      drawer: { countedToday, openingAnchor, opened: drawer.opened ?? null, expected: drawer.expected },
+      drawer: { countedToday, openingAnchor, opened: drawer.opened ?? null, expected: drawer.expected, dayRows: drawer.dayRows },
       accounts: rows,
       anchors,
       movements,
       withMovement,
       accountsVisible,
+      dayMovements,
     });
+  }
+
+  /**
+   * What moved through each account on one business day, at every shop (the
+   * accounts are the company's): the same seven sources and status filters as
+   * the Daily closing's per-channel figures, keyed by the day each record
+   * already carries — a payment's business date, a confirmation, due or
+   * correction date — so a method's day figure here equals what its closing
+   * line will show. Reported-but-unconfirmed refunds, settlements and expenses
+   * are not movements; a correction counts on the day it was approved. Cash is
+   * not read here: the drawer is one branch's, and its day comes from that
+   * branch's closing row.
+   */
+  private async accountDayMovements(client: Pick<TenantPrisma, '$queryRaw'>, companyId: Buffer, day: string): Promise<MovementRow[]> {
+    const rows = await client.$queryRaw<{ account_id: Buffer | null; component: string; amount: unknown }[]>(Prisma.sql`
+      SELECT p.receiving_account_id AS account_id, 'salesIn' AS component, SUM(p.amount) AS amount
+      FROM payments p
+      WHERE p.company_id = ${companyId} AND p.method <> 'cash' AND p.business_date = ${day}
+      GROUP BY p.receiving_account_id
+
+      UNION ALL
+      SELECT receiving_account_id, 'refundsOut', SUM(reported_amount)
+      FROM refund_payouts
+      WHERE company_id = ${companyId} AND method <> 'cash' AND status = 'confirmed' AND confirmation_date = ${day}
+      GROUP BY receiving_account_id
+
+      UNION ALL
+      SELECT receiving_account_id, 'supplierOut', SUM(amount)
+      FROM supplier_settlements
+      WHERE company_id = ${companyId} AND method <> 'cash' AND status = 'confirmed' AND confirmation_date = ${day}
+      GROUP BY receiving_account_id
+
+      UNION ALL
+      SELECT sp.receiving_account_id, 'supplierOut', SUM(sp.amount)
+      FROM supplier_payments sp
+      WHERE sp.company_id = ${companyId} AND sp.method <> 'cash' AND sp.business_date = ${day}
+      GROUP BY sp.receiving_account_id
+
+      UNION ALL
+      SELECT receiving_account_id, 'expensesOut', SUM(amount)
+      FROM expenses
+      WHERE company_id = ${companyId} AND method <> 'cash' AND status = 'confirmed'
+        AND IF(expense_class = 'fixed', due_date, confirmation_date) = ${day}
+      GROUP BY receiving_account_id
+
+      UNION ALL
+      SELECT COALESCE(rp.receiving_account_id, ss.receiving_account_id), 'correctionsIn', SUM(fc.amount)
+      FROM financial_corrections fc
+      LEFT JOIN refund_payouts rp ON rp.id = fc.target_refund_payout_id
+      LEFT JOIN supplier_settlements ss ON ss.id = fc.target_supplier_settlement_id
+      WHERE fc.company_id = ${companyId} AND fc.method <> 'cash'
+        AND fc.target_kind IN ('refund_payout', 'supplier_settlement')
+        AND fc.status = 'approved' AND fc.correction_date = ${day}
+      GROUP BY COALESCE(rp.receiving_account_id, ss.receiving_account_id)
+
+      UNION ALL
+      SELECT l.receiving_account_id, IF(l.direction = 'in', 'correctionsIn', 'correctionsOut'), SUM(l.amount)
+      FROM financial_correction_legs l
+      JOIN financial_corrections fc ON fc.id = l.correction_id
+      WHERE fc.company_id = ${companyId} AND l.method <> 'cash'
+        AND fc.status = 'approved' AND fc.correction_date = ${day}
+      GROUP BY l.receiving_account_id, l.direction
+    `);
+    return rows
+      .filter((r) => r.amount != null && r.account_id != null)
+      .map((r) => ({
+        channel: 'account' as Channel,
+        accountId: binToUuid(r.account_id as Buffer),
+        component: r.component as Component,
+        amount: round2(num(r.amount as Prisma.Decimal)),
+      }));
   }
 
   /** Which of these accounts ever recorded money, in any direction — they may still hold some. */
@@ -244,8 +319,11 @@ export class MoneyAnchorsService {
   /** One account's method: its latest anchor and the movements after it. */
   private async methodOf(client: PositionReader, companyId: Buffer, today: string, account: AccountRow): Promise<TrackedMethod> {
     const anchor = await this.latestAnchor(client, account.id);
-    const movements = anchor ? await this.movementsSince(client, companyId, [anchor], today) : [];
-    return accountMethod(account, anchor, movements);
+    const [movements, dayRows] = await Promise.all([
+      anchor ? this.movementsSince(client, companyId, [anchor], today) : Promise.resolve([]),
+      this.accountDayMovements(client, companyId, today),
+    ]);
+    return accountMethod(account, anchor, movements, movementOf(today, dayRows.filter((r) => r.accountId === account.id)));
   }
 
   /** The latest amount recorded for an account: the latest instant, then the latest written. */

@@ -52,6 +52,8 @@ type MovementRaw = { account_id: Buffer; component: string; amount: string };
 
 /** The read that asks which deactivated, unanchored accounts ever recorded money. */
 const isEverMoved = (sql: Prisma.Sql) => sql.sql.includes('UNION SELECT receiving_account_id FROM supplier_payments');
+/** The read of what moved through the accounts on one business day (keyed by the day, never windowed by an instant). */
+const isDayMovement = (sql: Prisma.Sql) => sql.sql.includes('p.business_date = ?');
 
 const stored = (over: Partial<StoredAnchor> = {}): StoredAnchor => ({
   id: uuidToBin('01a0b1c2-0000-7000-8000-0000000000f1'),
@@ -76,6 +78,8 @@ function harness(
     account?: { label: string; isActive: boolean } | null;
     anchors?: StoredAnchor[];
     movementsAfter?: (after: Date) => MovementRaw[];
+    /** What the day-movement read answers for a business day. */
+    dayMovements?: (day: string) => MovementRaw[];
     /** Accounts that recorded money at some point, as the "ever moved" read finds them. */
     moved?: string[];
     beforeCreate?: (anchors: StoredAnchor[]) => void;
@@ -92,6 +96,10 @@ function harness(
     if (isEverMoved(sql)) {
       const asked = sql.values.filter((v): v is Buffer => Buffer.isBuffer(v));
       return (opts.moved ?? []).filter((id) => asked.some((b) => b.equals(uuidToBin(id)))).map((id) => ({ account_id: uuidToBin(id) }));
+    }
+    if (isDayMovement(sql)) {
+      const day = sql.values.find((v): v is string => typeof v === 'string');
+      return day && opts.dayMovements ? opts.dayMovements(day) : [];
     }
     const after = sql.values.find((v): v is Date => v instanceof Date);
     return after && opts.movementsAfter ? opts.movementsAfter(after) : [];
@@ -224,6 +232,7 @@ describe('recording what an account holds', () => {
         unknownReason: null,
         anchor: { source: 'declared', amount: 2000, at: data.at.toISOString(), businessDate: '2026-09-26', byName: 'Owner' },
         sinceAnchorNet: 0,
+        movement: { businessDate: '2026-09-26', inflows: 0, outflows: 0, net: 0 },
       },
     });
   });
@@ -453,9 +462,9 @@ describe('tracked money through the service', () => {
     closes: Record<string, ReturnType<typeof closeRow> | null>,
     anchors: StoredAnchor[],
     movements: MovementRaw[],
-    more: { accounts?: AccountStub[]; moved?: string[] } = {},
+    more: { accounts?: AccountStub[]; moved?: string[]; dayMovements?: MovementRaw[] } = {},
   ) {
-    const h = harness({ anchors, movementsAfter: () => movements, moved: more.moved });
+    const h = harness({ anchors, movementsAfter: () => movements, moved: more.moved, dayMovements: () => more.dayMovements ?? [] });
     const db = Object.assign(h.db, {
       dailyClosing: {
         findUnique: jest.fn(async (args: { where: { branchId_closingDate: { closingDate: Date } } }) =>
@@ -566,6 +575,95 @@ describe('tracked money through the service', () => {
       expect(queries.filter(isEverMoved)).toHaveLength(0);
     }
   });
+  describe('what moved on the day, beside each position (the brief of 2026-10-07)', () => {
+    const SEDAD = MASRVI;
+    const sedadSale = [{ account_id: uuidToBin(SEDAD), component: 'salesIn', amount: '20000.00' }];
+    const drawerRows = [
+      { channel: 'cash' as const, accountId: null, component: 'salesIn' as const, amount: 1500 },
+      { channel: 'cash' as const, accountId: null, component: 'expensesOut' as const, amount: 200 },
+    ];
+
+    it('Sedad never recorded, 20 000 received through it today: still Unknown, no total, and the 20 000 said beside it', async () => {
+      // Only Bankily is anchored; Sedad has no record of what it held.
+      const { svc, queries } = build({ '2026-09-25': closeRow('locked', 0) }, [anchors[0]], [], { dayMovements: sedadSale });
+      const card = await svc.trackedMoney(BRANCH, DAY, { opening, expected: 3400, dayRows: drawerRows }, true);
+      const sedad = card.methods.find((m) => m.key === `account:${SEDAD}`)!;
+      expect(sedad).toMatchObject({ known: false, position: null, unknownReason: 'no_anchor', anchor: null, sinceAnchorNet: null });
+      expect(sedad.movement).toEqual({ businessDate: DAY, inflows: 20000, outflows: 0, net: 20000 });
+      expect(card.total).toBeNull();
+      expect(card.unknownKeys).toEqual([`account:${SEDAD}`]);
+      // The anchored account moved nothing today; the drawer's own day rows are this branch's.
+      expect(card.methods.find((m) => m.key === `account:${BANKILY}`)!.movement).toEqual({ businessDate: DAY, inflows: 0, outflows: 0, net: 0 });
+      expect(card.methods[0].movement).toEqual({ businessDate: DAY, inflows: 1500, outflows: 200, net: 1300 });
+      // One day read, for the company and the requesting branch's business day — no branch narrows it.
+      const [day] = queries.filter(isDayMovement);
+      expect(queries.filter(isDayMovement)).toHaveLength(1);
+      expect(day.values.filter((v) => v === DAY)).toHaveLength(7);
+      expect(day.values.filter((v) => Buffer.isBuffer(v) && v.equals(COMPANY))).toHaveLength(7);
+      expect(day.sql).not.toMatch(/branch_id/);
+    });
+
+    it('Bankily recorded at 5 000, the same 20 000 received: 25 000 — the movement is counted once, in the position and beside it', async () => {
+      const bankilySale = [{ account_id: uuidToBin(BANKILY), component: 'salesIn', amount: '20000.00' }];
+      const five = [stored({ amount: 5000, at: new Date('2026-09-27T06:30:00Z'), businessDate: dateValue(DAY) })];
+      const { svc } = build({ '2026-09-25': closeRow('locked', 0) }, five, bankilySale, { accounts: [shop[0]], dayMovements: bankilySale });
+      const card = await svc.trackedMoney(BRANCH, DAY, { opening, expected: 3400, dayRows: [] }, true);
+      expect(card.methods[1]).toMatchObject({ known: true, position: 25000, sinceAnchorNet: 20000, movement: { inflows: 20000, outflows: 0, net: 20000 } });
+      expect(card.total).toBe(28400);
+    });
+
+    it('an account recorded at exactly 0 is known, and shows 0', async () => {
+      const zero = [stored({ amount: 0, at: new Date('2026-09-27T06:30:00Z'), businessDate: dateValue(DAY) })];
+      const { svc } = build({ '2026-09-25': closeRow('locked', 0) }, zero, [], { accounts: [shop[0]] });
+      const card = await svc.trackedMoney(BRANCH, DAY, { opening, expected: 3400, dayRows: [] }, true);
+      expect(card.methods[1]).toMatchObject({ known: true, position: 0, unknownReason: null, movement: { net: 0 } });
+      expect(card.total).toBe(3400);
+    });
+
+    it('nobody who may not see the accounts triggers the day read', async () => {
+      const { svc, queries } = build({ '2026-09-25': closeRow('locked', 0) }, anchors, day2, { dayMovements: sedadSale });
+      await svc.trackedMoney(BRANCH, DAY, { opening, expected: 3400, dayRows: drawerRows }, false);
+      expect(queries.filter(isDayMovement)).toHaveLength(0);
+    });
+  });
+});
+
+describe('the day read: the closing’s seven sources on one business day, company-wide, accounts only', () => {
+  const source = readFileSync(join(__dirname, 'money-anchors.service.ts'), 'utf8');
+  const start = source.indexOf('private async accountDayMovements(');
+  const query = source.slice(source.indexOf('client.$queryRaw', start), source.indexOf('`);', start));
+  const branches = query.split('UNION ALL');
+  const branch = (marker: string) => {
+    const hits = branches.filter((b) => b.includes(marker));
+    expect(hits).toHaveLength(1);
+    return hits[0];
+  };
+
+  it('seven sources, each keyed by the day the closing books it on', () => {
+    expect(branches).toHaveLength(7);
+    expect(branch('FROM payments p')).toContain("p.method <> 'cash' AND p.business_date = ${day}");
+    expect(branch('FROM supplier_payments sp')).toContain('sp.business_date = ${day}');
+    expect(branch('FROM refund_payouts')).toContain("status = 'confirmed' AND confirmation_date = ${day}");
+    expect(branch('FROM supplier_settlements')).toContain("status = 'confirmed' AND confirmation_date = ${day}");
+    expect(branch('FROM expenses')).toContain("IF(expense_class = 'fixed', due_date, confirmation_date) = ${day}");
+    expect(branch("fc.target_kind IN ('refund_payout', 'supplier_settlement')")).toContain("fc.status = 'approved' AND fc.correction_date = ${day}");
+    expect(branch('FROM financial_correction_legs l')).toContain("fc.status = 'approved' AND fc.correction_date = ${day}");
+  });
+
+  it('a day, never a window: nothing is bounded by an instant or an anchor', () => {
+    expect(query).not.toMatch(/>=? \$\{/);
+    expect(query).not.toMatch(/paid_at|reported_at|decided_at|confirmed_at/);
+  });
+
+  it('with the closing’s own status filters and components, every branch of the company, accounts only', () => {
+    expect((query.match(/status = 'confirmed'/g) ?? []).length).toBe(3);
+    expect((query.match(/fc\.status = 'approved'/g) ?? []).length).toBe(2);
+    expect((query.match(/method <> 'cash'/g) ?? []).length).toBe(7);
+    expect(query).toMatch(/IF\(l\.direction = 'in', 'correctionsIn', 'correctionsOut'\)/);
+    expect(query).toMatch(/SUM\(reported_amount\)/);
+    for (const component of ["'salesIn'", "'refundsOut'", "'supplierOut'", "'expensesOut'", "'correctionsIn'"]) expect(query).toContain(component);
+    expect(query).not.toMatch(/branch_id/);
+  });
 });
 
 describe('the overview carries trackedMoney beside its existing fields, unchanged', () => {
@@ -616,7 +714,7 @@ describe('the overview carries trackedMoney beside its existing fields, unchange
     expect(view.accountsToday).toEqual([{ accountId: BANKILY, label: 'Bankily', isUnattributed: false, moneyIn: 0, moneyOut: 0, net: 0 }]);
     expect(dayChannels).toHaveBeenCalledWith(COMPANY, BRANCH, '2026-09-27');
     // The drawer's position is built on the same opening, the same expected figure and the decision anchoring it.
-    expect(moneyAnchors.trackedMoney).toHaveBeenCalledWith(BRANCH, '2026-09-27', { opening, expected: 3400, opened: null }, true);
+    expect(moneyAnchors.trackedMoney).toHaveBeenCalledWith(BRANCH, '2026-09-27', { opening, expected: 3400, opened: null, dayRows: [] }, true);
   });
 
   it('the accounts are read only for a caller who may record them', async () => {
@@ -628,7 +726,7 @@ describe('the overview carries trackedMoney beside its existing fields, unchange
     for (const [permissions, visible] of cases) {
       const { svc, moneyAnchors, opening } = overviewOf(permissions);
       await svc.overview('2026-09-27', '2026-09-27');
-      expect(moneyAnchors.trackedMoney).toHaveBeenCalledWith(BRANCH, '2026-09-27', { opening, expected: 3400, opened: null }, visible);
+      expect(moneyAnchors.trackedMoney).toHaveBeenCalledWith(BRANCH, '2026-09-27', { opening, expected: 3400, opened: null, dayRows: [] }, visible);
     }
   });
 
@@ -645,6 +743,8 @@ describe('the overview carries trackedMoney beside its existing fields, unchange
     expect(block).toMatch(/Promise\.resolve\(drawer\.channels\),/);
     // Whether the accounts are listed is the caller's own permission, read from the request.
     expect(block).toMatch(/const accountsVisible = this\.cls\.get\('permissions'\)\?\.has\('money\.anchor\.record'\) \?\? false;/);
-    expect(block).toMatch(/\{ opening, expected: cash\?\.expected \?\? 0, opened: openedAnchorOf\(drawer\.declaredToday \?\? drawer\.carriedFrom\) \},\s*accountsVisible,/);
+    expect(block).toMatch(
+      /\{ opening, expected: cash\?\.expected \?\? 0, opened: openedAnchorOf\(drawer\.declaredToday \?\? drawer\.carriedFrom\), dayRows: cashDayRows\(cash\) \},\s*accountsVisible,/,
+    );
   });
 });
