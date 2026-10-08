@@ -164,6 +164,19 @@ describe('per-item detail survives the filter', () => {
     expect(body).toMatchObject({ code: 'store_closed', closedReason: 'not_opened', businessDate: '2026-10-01' });
   });
 
+  it('says what a branch is subscribed to and what the route needed (D156)', () => {
+    // The app says "this branch does not sell" from the two fields, never from the sentence.
+    const body = runFilter(
+      new ForbiddenException({
+        code: 'activity_not_subscribed',
+        message: 'no',
+        activity: 'money_agent',
+        required: 'electronics',
+      }),
+    );
+    expect(body).toMatchObject({ code: 'activity_not_subscribed', activity: 'money_agent', required: 'electronics' });
+  });
+
   it('still reveals nothing about an unexpected error', () => {
     const body = runFilter(new Error('connect ECONNREFUSED 127.0.0.1:3306'));
     expect(body.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);

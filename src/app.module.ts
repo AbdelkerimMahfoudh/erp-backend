@@ -18,6 +18,7 @@ import { EntitlementModule } from './entitlement/entitlement.module';
 import { PlatformModule } from './platform/platform.module';
 import { StaffModule } from './staff/staff.module';
 import { EntitlementInterceptor } from './entitlement/entitlement.interceptor';
+import { ActivityGateInterceptor } from './entitlement/activity-gate.interceptor';
 import { AuditModule } from './common/audit/audit.module';
 import { NumberingModule } from './common/numbering/numbering.module';
 import { EventsModule } from './common/events/events.module';
@@ -190,6 +191,9 @@ import { AccountModule } from './account/account.module';
     // run proved global guards run in registration order — this one ran before
     // the JWT guard and refused every write with its fail-closed branch.
     { provide: APP_INTERCEPTOR, useClass: EntitlementInterceptor },
+    // Right after the company-level check, so pending, suspended and expired
+    // have answered before a branch's activity is asked (D156).
+    { provide: APP_INTERCEPTOR, useClass: ActivityGateInterceptor },
     { provide: APP_INTERCEPTOR, useClass: CostGatingInterceptor },
     { provide: APP_INTERCEPTOR, useClass: BinaryUuidInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
