@@ -269,6 +269,32 @@ describe('the money a shop opens with (docs/63)', () => {
     expect(db.openingDecision.create).not.toHaveBeenCalled();
   });
 
+  it('keep with a drawer tracked below zero is refused by name — opening_cash_negative, with the amount — and nothing is written (2026-10-08)', async () => {
+    const { svc, db } = build([after6], { owner: true, previous: -1231250 });
+    const refusal = await svc.open({ openingMoney: { clientUuid: KEY, decision: 'keep' } }).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(BadRequestException);
+    expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'opening_cash_negative', trackedCash: -1231250 });
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(db.closingEvent.create).not.toHaveBeenCalled();
+    expect(db.openingDecision.create).not.toHaveBeenCalled();
+  });
+
+  it('a drawer tracked below zero is opened by setting what it holds: the amount is known from now, the negative figure never read as zero', async () => {
+    const { svc, db } = build([after6], { owner: true, previous: -1231250 });
+    await svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 1000 } });
+    const [d] = decided(db);
+    expect(d).toMatchObject({ decision: 'set', cashAmount: 1000 });
+    expect(d.methods[0]).toMatchObject({ key: 'cash', previous: -1231250, amount: 1000, set: true });
+  });
+
+  it('somebody else opens a drawer tracked below zero as carried — the day awaits the Owner, who must set it', async () => {
+    const { svc, db } = build([after6], { previous: -1231250 });
+    await svc.open({});
+    const [d] = decided(db);
+    expect(d).toMatchObject({ decision: 'carried', cashAmount: null, total: null });
+    expect(d.methods[0]).toMatchObject({ key: 'cash', previous: -1231250, amount: null, set: false });
+  });
+
   it('an unknown drawer is opened by setting it: the amount is known from now, 0 when the drawer is empty', async () => {
     const { svc, db } = build([after6], { owner: true, previous: null });
     await svc.open({ openingMoney: { clientUuid: KEY, decision: 'set', cashAmount: 0 } });

@@ -121,6 +121,14 @@ describe('the reopen carries the money the shop reopens with (docs/63)', () => {
     expect(db.closingEvent.create).not.toHaveBeenCalled();
   });
 
+  it('the Owner keeping a drawer tracked below zero is refused on the reopen — opening_cash_negative — and nothing is written (2026-10-08)', async () => {
+    const { svc, db } = build({ owner: true, previous: -1231250 });
+    const refusal = await svc.reopen({ openingMoney: { clientUuid: KEY, decision: 'keep' } }).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(BadRequestException);
+    expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'opening_cash_negative', trackedCash: -1231250 });
+    expect(db.openingDecision.create).not.toHaveBeenCalled();
+  });
+
   it('a named delegate reopens with the carried amounts, awaiting the Owner — and may not set one', async () => {
     const carried = build();
     await carried.svc.reopen({});
@@ -213,6 +221,14 @@ describe('the Owner’s review of a carried opening (docs/63)', () => {
         expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'opening_cash_unknown' });
         expect(db.openingDecision.create).not.toHaveBeenCalled();
       }
+    });
+
+    it('keeping a drawer tracked below zero is refused in the review too — opening_cash_negative — and nothing is written (2026-10-08)', async () => {
+      const { svc, db } = build({ owner: true, opening: { ...carried, cashAmount: null }, previous: -1231250 });
+      const refusal = await svc.reviewOpening({ clientUuid: KEY, decision: 'keep' }).catch((e: unknown) => e);
+      expect(refusal).toBeInstanceOf(BadRequestException);
+      expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'opening_cash_negative', trackedCash: -1231250 });
+      expect(db.openingDecision.create).not.toHaveBeenCalled();
     });
 
     it('a day opened without any decision (an older phone) and still unknown: the Owner sets it, and the review stands on its own', async () => {

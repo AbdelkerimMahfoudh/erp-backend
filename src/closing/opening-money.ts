@@ -42,7 +42,13 @@ export type OpeningVerdict =
   | {
       ok: false;
       status: 400 | 403;
-      code: 'opening_amounts_required' | 'opening_amounts_owner_only' | 'amount_invalid' | 'amount_not_expected' | 'opening_cash_unknown';
+      code:
+        | 'opening_amounts_required'
+        | 'opening_amounts_owner_only'
+        | 'amount_invalid'
+        | 'amount_not_expected'
+        | 'opening_cash_unknown'
+        | 'opening_cash_negative';
     };
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -93,6 +99,25 @@ export function reviewDecisionFor(input: OpeningMoneyInput | undefined): Opening
 export function withDrawerKnown(verdict: OpeningVerdict, drawerKnown: boolean): OpeningVerdict {
   if (verdict.ok && verdict.decision === 'keep' && !drawerKnown) return { ok: false, status: 400, code: 'opening_cash_unknown' };
   return verdict;
+}
+
+/**
+ * Keep needs something that can be kept (the owner's brief of 2026-10-08). A
+ * drawer the app tracks **below zero** — more cash recorded out than in since
+ * its last known amount — is a figure to correct, not one to open a day on: a
+ * decision cannot record a negative amount (`ck_opening_decisions_amount`),
+ * and until now the database refused it as a 500 instead of the server saying
+ * why. The refusal is deliberate and by name, before anything is written; the
+ * negative amount is never read as zero — the Owner sets what the drawer
+ * actually holds (0 included) and the day opens on that. A carried opening
+ * passes through as before, awaiting the Owner's review, where the same rule
+ * applies. Unknown is still refused first, as unknown.
+ */
+export function withDrawerKeepable(verdict: OpeningVerdict, drawer: { known: boolean; previous: number | null }): OpeningVerdict {
+  const known = withDrawerKnown(verdict, drawer.known);
+  if (!known.ok) return known;
+  if (known.decision === 'keep' && drawer.previous !== null && drawer.previous < 0) return { ok: false, status: 400, code: 'opening_cash_negative' };
+  return known;
 }
 
 /**
@@ -181,6 +206,17 @@ export interface OpeningMethodRecord {
  * confirming. Cash takes the decision; every account carries its tracked
  * position. The total exists only when every method is known.
  */
+/**
+ * The tracked amount a day can carry or keep: zero or more. A drawer tracked
+ * below zero (2026-10-08) is a figure to correct, never an opening amount — a
+ * keep is refused by name (`withDrawerKeepable`), and a carried opening records
+ * no amount for the cash, awaiting the Owner, who sets what the drawer holds.
+ * The negative figure itself stays what Money tracks; nothing reads it as zero.
+ */
+export function carriableCash(previous: number | null): number | null {
+  return previous !== null && previous >= 0 ? previous : null;
+}
+
 export function openingMethods(
   methods: readonly Pick<TrackedMethod, 'key' | 'channel' | 'accountId' | 'label' | 'scope' | 'position'>[],
   cash: { decision: OpeningDecisionValue; amount: number | null },
@@ -189,7 +225,7 @@ export function openingMethods(
     const previous = m.position === null ? null : round2(m.position);
     if (m.channel === 'cash') {
       const set = cash.decision === 'set';
-      return { key: m.key, channel: 'cash', accountId: null, label: m.label, scope: 'branch', previous, amount: set ? cash.amount : previous, set };
+      return { key: m.key, channel: 'cash', accountId: null, label: m.label, scope: 'branch', previous, amount: set ? cash.amount : carriableCash(previous), set };
     }
     return { key: m.key, channel: 'account', accountId: m.accountId, label: m.label, scope: 'company', previous, amount: previous, set: false };
   });

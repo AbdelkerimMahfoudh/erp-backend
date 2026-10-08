@@ -32,7 +32,8 @@ import { ReviewOpeningDto } from './dto/review-opening.dto';
 import {
   openingDecisionFor,
   reviewableOpening,
-  withDrawerKnown,
+  carriableCash,
+  withDrawerKeepable,
   openingFingerprint,
   openingFromSet,
   openingMethods,
@@ -197,7 +198,7 @@ function drawerDecisionOf(row: Prisma.OpeningDecisionGetPayload<{ select: typeof
 
 /** The cash a decision records: the Owner's amount, or the drawer as it was shown — null when that was unknown. */
 function decidedCash(verdict: { decision: OpeningDecisionValue; cashAmount: number | null }, position: { previous: number | null }): number | null {
-  return verdict.decision === 'set' ? verdict.cashAmount : position.previous;
+  return verdict.decision === 'set' ? verdict.cashAmount : carriableCash(position.previous);
 }
 
 /** The decision anchoring the drawer, as Money's position reads it. */
@@ -1489,7 +1490,7 @@ export class ClosingService {
     const eventId = newUuidV7Bin();
     // Read before the transaction: the day is locked, so nothing moves the drawer in between.
     const position = await this.drawerNow(companyId, branchId, day);
-    this.requireKnownForKeep(verdict, position);
+    this.requireKeepable(verdict, position);
     const cashAmount = decidedCash(verdict, position);
     try {
       await this.db.$transaction(async (tx) => {
@@ -1580,7 +1581,7 @@ export class ClosingService {
       { opened: opening ? true : await this.isOpened(branchId, day), drawerKnown: position.known },
     );
     if (!target) throw nothingToReview();
-    this.requireKnownForKeep(verdict, position);
+    this.requireKeepable(verdict, position);
     try {
       await this.db.$transaction(async (tx) => {
         await this.recordDecisionTx(tx, {
@@ -1624,6 +1625,7 @@ export class ClosingService {
       amount_invalid: 'Enter the cash in the drawer: zero or more, with at most two decimals.',
       amount_not_expected: 'Keeping the tracked amounts takes no amount.',
       opening_cash_unknown: 'No previous amount is known for this drawer. Enter the cash in the drawer now — 0 if it is empty.',
+      opening_cash_negative: 'The app tracks this drawer below zero, so there is no amount to keep. Enter the cash in the drawer now — 0 if it is empty.',
     }[verdict.code];
     throw verdict.status === 403
       ? new ForbiddenException({ code: verdict.code, message })
@@ -1634,16 +1636,24 @@ export class ClosingService {
    * Keep needs something to keep (the user's brief of 2026-10-06): while the drawer's amount is unknown, keeping it
    * would open the boutique on a figure nobody has. Refused by name, before anything is written; the Owner sets the
    * cash instead — 0 when the drawer is empty. A carried opening still carries an unknown drawer, marked for the
-   * Owner's review, where the same rule then applies.
+   * Owner's review, where the same rule then applies. Since 2026-10-08 a drawer tracked **below zero** is refused
+   * the same way (`opening_cash_negative`, with the tracked amount): a decision cannot record a negative amount, and
+   * the database's own check used to answer that as a 500. Nothing reads the negative figure as zero.
    */
-  private requireKnownForKeep(verdict: Extract<OpeningVerdict, { ok: true }>, position: { known: boolean }): void {
-    const checked = withDrawerKnown(verdict, position.known);
-    if (!checked.ok) {
+  private requireKeepable(verdict: Extract<OpeningVerdict, { ok: true }>, position: { known: boolean; previous: number | null }): void {
+    const checked = withDrawerKeepable(verdict, position);
+    if (checked.ok) return;
+    if (checked.code === 'opening_cash_negative') {
       throw new BadRequestException({
         code: checked.code,
-        message: 'No previous amount is known for this drawer. Enter the cash in the drawer now — 0 if it is empty.',
+        message: 'The app tracks this drawer below zero, so there is no amount to keep. Enter the cash in the drawer now — 0 if it is empty — and correct the earlier records.',
+        trackedCash: position.previous,
       });
     }
+    throw new BadRequestException({
+      code: checked.code,
+      message: 'No previous amount is known for this drawer. Enter the cash in the drawer now — 0 if it is empty.',
+    });
   }
 
   /** The key an opening request is bound to — the phone's, or one of the server's for an older phone that sent none. */
@@ -1932,7 +1942,7 @@ export class ClosingService {
     // Read before the transaction: until the day is opened the counter takes no money — and a day about to be started
     // early has nothing recorded on it yet, whatever the transaction then decides.
     const position = await this.drawerNow(companyId, branchId, day);
-    this.requireKnownForKeep(verdict, position);
+    this.requireKeepable(verdict, position);
     const cashAmount = decidedCash(verdict, position);
     try {
       await this.db.$transaction(async (tx) => {

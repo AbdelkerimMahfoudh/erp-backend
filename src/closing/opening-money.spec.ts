@@ -8,6 +8,7 @@ import {
   reviewDecisionFor,
   setAdjustment,
   reviewableOpening,
+  withDrawerKeepable,
   withDrawerKnown,
 } from './opening-money';
 
@@ -191,5 +192,26 @@ describe('a request key is bound to its request', () => {
     expect(openingFingerprint({ ...base, decision: 'keep', cashAmount: null })).not.toBe(openingFingerprint(base));
     expect(openingFingerprint({ ...base, mode: 'start_new' })).not.toBe(openingFingerprint(base));
     expect(openingFingerprint({ ...base, op: 'review' })).not.toBe(openingFingerprint(base));
+  });
+});
+
+describe('keep needs something that can be kept: a drawer tracked below zero (2026-10-08)', () => {
+  const keep = { ok: true as const, decision: 'keep' as const, cashAmount: null };
+  const set = { ok: true as const, decision: 'set' as const, cashAmount: 0 };
+  const carried = { ok: true as const, decision: 'carried' as const, cashAmount: null };
+
+  it('a negative tracked drawer refuses keep by name — opening_cash_negative — never read as zero', () => {
+    expect(withDrawerKeepable(keep, { known: true, previous: -1231250 })).toEqual({ ok: false, status: 400, code: 'opening_cash_negative' });
+    expect(withDrawerKeepable(keep, { known: true, previous: -0.01 })).toEqual({ ok: false, status: 400, code: 'opening_cash_negative' });
+  });
+
+  it('unknown is still refused first, as unknown; a known drawer at zero or above keeps; set and carried pass', () => {
+    expect(withDrawerKeepable(keep, { known: false, previous: null })).toEqual({ ok: false, status: 400, code: 'opening_cash_unknown' });
+    expect(withDrawerKeepable(keep, { known: true, previous: 0 })).toBe(keep);
+    expect(withDrawerKeepable(keep, { known: true, previous: 3400 })).toBe(keep);
+    expect(withDrawerKeepable(set, { known: true, previous: -500 })).toBe(set);
+    expect(withDrawerKeepable(carried, { known: true, previous: -500 })).toBe(carried);
+    const refusal = { ok: false as const, status: 400 as const, code: 'amount_invalid' as const };
+    expect(withDrawerKeepable(refusal, { known: true, previous: -500 })).toBe(refusal);
   });
 });

@@ -93,6 +93,8 @@ const DETAIL_KEYS = [
   'resendAvailableAt',
   'delivery',
   'challengeId',
+  // The drawer's tracked amount when an opening refuses to keep it (`opening_cash_negative`, 2026-10-08).
+  'trackedCash',
 ] as const;
 
 /**
