@@ -91,6 +91,16 @@ export const PUBLISHED_AFTER_CATALOGUE: ReadonlyMap<string, string> = new Map([
   ['closing.start_early', '0076_business_day_and_reopen'],
   // 0082: the Owner recording what a receiving account holds.
   ['money.anchor.record', '0082_money_anchors'],
+  // 0090: the nine keys of the Money Services Agent activity (docs/73 §7).
+  ['agent.transaction.record', '0090_agent_permissions'],
+  ['agent.transaction.view', '0090_agent_permissions'],
+  ['agent.customer.reveal', '0090_agent_permissions'],
+  ['agent.mistake.report', '0090_agent_permissions'],
+  ['agent.transaction.reverse', '0090_agent_permissions'],
+  ['agent.rebalance', '0090_agent_permissions'],
+  ['agent.position.set', '0090_agent_permissions'],
+  ['agent.report.view', '0090_agent_permissions'],
+  ['agent.provider.manage', '0090_agent_permissions'],
 ]);
 
 function committedSql(): string {

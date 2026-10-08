@@ -166,6 +166,8 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     // 4a: `customer.manage` to owner, store_manager and administrator. Added
     // here as part of writing the migration, exactly as the note above requires.
     sqlOf('0068_customer_manage_permission'),
+    // 0090: the nine agent keys (docs/73 §7) — seven to the Store Manager, three to the Store Employee.
+    sqlOf('0090_agent_permissions'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from

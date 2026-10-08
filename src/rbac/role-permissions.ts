@@ -108,6 +108,22 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    */
   { key: 'money.anchor.record', label: 'Record the amount an account holds' },
   /**
+   * The Money Services Agent activity (docs/73 §7, D154–D157, 2026-10-08).
+   * The person at the counter records and reports, like `refund.report`; a
+   * Store Manager reverses once, rebalances and reads the reports; the Owner
+   * alone sets a float's position and configures a provider — outside the
+   * Administrator's grant, like `money.anchor.record`. Mirrored in 0090.
+   */
+  { key: 'agent.transaction.record',  label: 'Record a cash / digital-credit exchange at the counter' },
+  { key: 'agent.transaction.view',    label: "View the agent counter's exchanges" },
+  { key: 'agent.customer.reveal',     label: "See a customer's full number on an exchange" },
+  { key: 'agent.mistake.report',      label: 'Report a mistake on a recorded exchange' },
+  { key: 'agent.transaction.reverse', label: 'Reverse a recorded exchange (audited, once)' },
+  { key: 'agent.rebalance',           label: 'Move money between cash and provider floats' },
+  { key: 'agent.position.set',        label: 'Set what a provider float holds now' },
+  { key: 'agent.report.view',         label: "View the agent counter's reports" },
+  { key: 'agent.provider.manage',     label: 'Configure providers, their rates and settlement' },
+  /**
    * Deliberately NOT folded into `closing.perform`, which a delegate holds.
    * Deciding that a named person owes the business money, or writing that debt
    * off, is the Owner's call and nobody else's.
@@ -213,6 +229,8 @@ const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
     k !== 'closing.start_early' &&
     // 0082: so is recording what an account holds.
     k !== 'money.anchor.record' &&
+    // D154 (e): the Administrator holds no agent key by default — the counter's money is the shop's.
+    !k.startsWith('agent.') &&
     // 0078: closing authority is the Owner and at most two named delegates —
     // never a role that happens to exist (docs/51 §12.5).
     k !== 'closing.perform',
@@ -318,6 +336,10 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     // attribute a sale to one, and may not create one — the same shape as the
     // catalog split above.
     'customer.manage',
+    // The agent counter (D154–D157): records and reports, reads the full number, reverses once,
+    // rebalances, reads the reports. Never sets a float's position; never configures a provider.
+    'agent.transaction.record', 'agent.transaction.view', 'agent.customer.reveal', 'agent.mistake.report',
+    'agent.transaction.reverse', 'agent.rebalance', 'agent.report.view',
   ],
 
   /**
@@ -396,7 +418,9 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'return.view', 'return.request',
     // I3: an employee reports the payout. Confirming it is somebody else's job,
     // which is the whole reason the settlement has two steps.
-    'refund.report'
+    'refund.report',
+    // The agent counter (D154–D157): record, see the masked list, report a mistake — nothing that moves money twice.
+    'agent.transaction.record', 'agent.transaction.view', 'agent.mistake.report',
   ],
 
   administrator: ADMIN_KEYS,

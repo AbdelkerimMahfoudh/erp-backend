@@ -81,7 +81,12 @@ enum SubscriptionEventKind {
   /// 0086: a seat request was refused or withdrawn, or a held seat was released.
   seat_closed
   /// 0086: an additional store was requested; its charge awaits payment.
-  store_requested
+  store_requested  /// D154: a branch's activity change asked for, applied, or scheduled for the renewal; a
+  /// renewal that opened a new billing period.
+  activity_requested
+  activity_changed
+  activity_scheduled
+  renewed
 }
 
 /// Where a subscription sits in its lifecycle (0056).
@@ -112,6 +117,21 @@ enum SubscriptionPaymentChannel {
 enum ContactChannel {
   email
   phone
+}
+
+/// D154 (2026-10-08): what a branch is subscribed to do — the electronics store, the money
+/// services agent counter, or both. Priced per branch (500 / 300 / 700 MRU per month).
+enum BranchActivity {
+  electronics
+  money_agent
+  both
+}
+
+/// D154: when a requested activity change takes effect — an upgrade at once, a downgrade
+/// at the next renewal.
+enum ActivityChangeEffective {
+  now
+  renewal
 }
 
 enum BranchType {
@@ -340,6 +360,14 @@ model Company {
   financialCorrectionLegs        FinancialCorrectionLeg[]
   moneyAnchors                   MoneyAnchor[]
   openingDecisions               OpeningDecision[]
+  agentProviders                 AgentProvider[]
+  agentProviderConfigs           AgentProviderConfig[]
+  agentPositions                 AgentPosition[]
+  agentTransactions              AgentTransaction[]
+  agentMovements                 AgentMovement[]
+  agentRebalancings              AgentRebalancing[]
+  agentMistakeReports            AgentMistakeReport[]
+  agentFloatCounts               AgentFloatCount[]
   returnRequests                 ReturnRequest[]
   returnAdjustments              ReturnAdjustment[]
   returnReversals                ReturnReversal[]
@@ -415,6 +443,11 @@ model Branch {
   companyId         Bytes              @map("company_id") @db.Binary(16)
   name              String             @db.VarChar(160)
   type              BranchType         @default(store)
+  /// D154: the activity the branch is subscribed to; every branch before 0088 is `electronics`.
+  activity          BranchActivity     @default(electronics)
+  /// D154: a downgrade waiting for the next renewal; NULL when none is scheduled.
+  activityNext      BranchActivity?    @map("activity_next")
+  activityChangedAt DateTime?          @map("activity_changed_at") @db.DateTime(6)
   address           String?            @db.VarChar(255)
   phone             String?            @db.VarChar(40)
   isActive          Boolean            @default(true) @map("is_active")
@@ -446,6 +479,12 @@ model Branch {
   closingEvents        ClosingEvent[]
   moneyAnchorsRecorded MoneyAnchor[]
   openingDecisions     OpeningDecision[]
+  agentPositions       AgentPosition[]
+  agentTransactions    AgentTransaction[]
+  agentMovements       AgentMovement[]
+  agentRebalancings    AgentRebalancing[]
+  agentMistakeReports  AgentMistakeReport[]
+  agentFloatCounts     AgentFloatCount[]
   employeeDebtEntries  EmployeeDebtEntry[]
   dailyDigests         DailyDigest[]
   notifications        Notification[]
@@ -572,6 +611,14 @@ model User {
   closingEvents         ClosingEvent[]         @relation("ClosingEventActor")
   moneyAnchorsRecorded  MoneyAnchor[]          @relation("MoneyAnchorRecordedBy")
   openingDecisions      OpeningDecision[]      @relation("OpeningDecisionRecordedBy")
+  agentProviderConfigsRecorded AgentProviderConfig[] @relation("AgentProviderConfigRecordedBy")
+  agentPositionsRecorded       AgentPosition[]       @relation("AgentPositionRecordedBy")
+  agentTransactionsRecorded    AgentTransaction[]    @relation("AgentTransactionRecordedBy")
+  agentTransactionsReversed    AgentTransaction[]    @relation("AgentTransactionReversedBy")
+  agentRebalancingsRecorded    AgentRebalancing[]    @relation("AgentRebalancingRecordedBy")
+  agentMistakesReported        AgentMistakeReport[]  @relation("AgentMistakeReportedBy")
+  agentMistakesDecided         AgentMistakeReport[]  @relation("AgentMistakeDecidedBy")
+  agentFloatCountsCounted      AgentFloatCount[]     @relation("AgentFloatCountedBy")
   branchPricesSet       BranchVariantPrice[]   @relation("BranchPriceSetBy")
   unitPricesSet         UnitPriceOverride[]    @relation("UnitPriceSetBy")
   priceChanges          PriceChangeEvent[]     @relation("PriceChangeActor")
@@ -1835,6 +1882,8 @@ model DailyClosing {
   discrepancies ClosingDiscrepancy[]
   events        ClosingEvent[]
 
+  agentFloatCounts AgentFloatCount[]
+
   @@unique([branchId, closingDate])
   @@index([companyId])
   @@index([closedById])
@@ -1889,6 +1938,9 @@ model ClosingChannelCount {
   correctionsIn  Decimal @default(0) @map("corrections_in") @db.Decimal(14, 2)
   /// Money a correction moved OUT of this channel — a payment reclassified to another one (0078).
   correctionsOut Decimal @default(0) @map("corrections_out") @db.Decimal(14, 2)
+  /// D154: the agent counter's cash legs on the day — the same drawer, two more components of its equation.
+  agentIn        Decimal @default(0) @map("agent_in") @db.Decimal(14, 2)
+  agentOut       Decimal @default(0) @map("agent_out") @db.Decimal(14, 2)
   /// Cash only (0076): what the drawer held at the start of the business day —
   /// the counted cash at the last locked close plus the net cash movement of
   /// any unclosed day between. Carried forward as a balance, never as income.
@@ -1957,6 +2009,8 @@ model ClosingDiscrepancy {
   closingId      Bytes  @map("closing_id") @db.Binary(16)
   /// Which channel was out. NULL only for a legacy cash-only closing.
   channelCountId Bytes? @map("channel_count_id") @db.Binary(16)
+  /// D154: a provider float counted at this closing, when the difference is a float's rather than a channel's.
+  agentFloatCountId Bytes? @map("agent_float_count_id") @db.Binary(16)
 
   /// Signed: negative is a shortage, positive is a surplus. A surplus is
   /// investigated too — unexplained extra money is a mis-recorded sale until
@@ -1979,6 +2033,7 @@ model ClosingDiscrepancy {
   branch          Branch               @relation(fields: [branchId], references: [id])
   closing         DailyClosing         @relation(fields: [closingId], references: [id])
   channelCount    ClosingChannelCount? @relation(fields: [channelCountId], references: [id])
+  agentFloatCount AgentFloatCount?     @relation(fields: [agentFloatCountId], references: [id], map: "fk_closing_discrepancies_float_count")
   responsibleUser User?                @relation("DiscrepancyResponsible", fields: [responsibleUserId], references: [id])
   resolvedBy      User?                @relation("DiscrepancyResolvedBy", fields: [resolvedById], references: [id])
   debtEntries     EmployeeDebtEntry[]
@@ -1987,6 +2042,7 @@ model ClosingDiscrepancy {
   @@index([closingId])
   @@index([responsibleUserId])
   @@index([channelCountId])
+  @@index([agentFloatCountId], map: "ix_closing_discrepancies_float_count")
   @@index([resolvedById])
   @@map("closing_discrepancies")
 }
@@ -2687,6 +2743,9 @@ model DailyRollup {
   /// cash and liability only.
   correctionsTotal Decimal  @default(0) @map("corrections_total") @db.Decimal(14, 2)
   correctionsCash  Decimal  @default(0) @map("corrections_cash") @db.Decimal(14, 2)
+  /// D154: cash that entered and left the drawer at the agent counter on this day — movement, never revenue.
+  agentCashIn      Decimal  @default(0) @map("agent_cash_in") @db.Decimal(14, 2)
+  agentCashOut     Decimal  @default(0) @map("agent_cash_out") @db.Decimal(14, 2)
   correctionsCount Int      @default(0) @map("corrections_count")
   refreshedAt      DateTime @map("refreshed_at") @db.DateTime(6)
 
@@ -4480,6 +4539,9 @@ enum SeatAllocationKind {
   seat
   /// One additional store for the company.
   store
+  /// D154: a branch's activity change — an upgrade charged for the difference at once, a
+  /// downgrade scheduled for the next renewal (nothing to pay).
+  activity
 }
 
 /// Where a seat or store request sits (0086).
@@ -4519,6 +4581,12 @@ model SeatAllocation {
 
   /// The requested store's name, for a store request. Null for a seat.
   label String? @db.VarChar(160)
+
+  /// D154: kind `activity` — the branch's activity change; a store request records the new
+  /// store's activity in `activityTo`.
+  activityFrom      BranchActivity?          @map("activity_from")
+  activityTo        BranchActivity?          @map("activity_to")
+  activityEffective ActivityChangeEffective? @map("activity_effective")
 
   /// Integer MRU per month, copied from the plan when requested. Zero for a grant.
   monthlyAmount Int    @map("monthly_amount") @db.UnsignedInt
@@ -4666,6 +4734,10 @@ model PlanVersion {
 
   /// Integer MRU. No float ever touches an amount.
   branchMonthly          Int @map("branch_monthly") @db.UnsignedInt
+  /// D154: the money-agent branch price, and the price of a branch doing both (never the sum).
+  /// Rows before 0088 carry the approved figures as their default.
+  agentMonthly           Int @default(300) @map("agent_monthly") @db.UnsignedInt
+  bothMonthly            Int @default(700) @map("both_monthly") @db.UnsignedInt
   includedStaffPerBranch Int @map("included_staff_per_branch") @db.UnsignedInt
   extraStaffMonthly      Int @map("extra_staff_monthly") @db.UnsignedInt
 
@@ -4706,8 +4778,14 @@ model BillingPeriod {
 
   /// The unit prices in force for THIS period. Copied, never looked up.
   branchMonthly          Int @map("branch_monthly") @db.UnsignedInt
+  /// D154: copied with the other unit prices when the period opens.
+  agentMonthly           Int @default(300) @map("agent_monthly") @db.UnsignedInt
+  bothMonthly            Int @default(700) @map("both_monthly") @db.UnsignedInt
   includedStaffPerBranch Int @map("included_staff_per_branch") @db.UnsignedInt
   extraStaffMonthly      Int @map("extra_staff_monthly") @db.UnsignedInt
+
+  /// D154: the branch fee assessed per branch (`{ "<branchId>": fee }`), so an upgrade's difference is its own.
+  assessedActivityFeeByBranch Json? @map("assessed_activity_fee_by_branch") @db.Json
 
   /// The size that produced the assessment, at the moment it was last raised.
   activeBranchCount    Int @map("active_branch_count") @db.UnsignedInt
@@ -4923,4 +5001,360 @@ model AnomalyDismissal {
   @@index([companyId, anomalyKey, suppressedUntil])
   @@index([dismissedAt])
   @@map("anomaly_dismissals")
+}
+// ─── The Money Services Agent activity (docs/73, D154–D157; migration 0089) ───────────────────
+
+enum AgentProviderKind {
+  bankily
+  sedad
+  other
+}
+
+/// Where a provider's commission lands when it is earned (docs/73 §1.2 — configured, never guessed).
+enum AgentCommissionDestination {
+  cash
+  provider_float
+  held_separately
+}
+
+/// Whether the provider nets its fee into the exchanged principal, or settles it apart.
+enum AgentPrincipalFeeMode {
+  separate
+  deducted
+}
+
+enum AgentReferenceRule {
+  required
+  optional
+  none
+}
+
+/// The two directions, from the agent's side: cash in and credit out, or cash out and credit in.
+enum AgentDirection {
+  cash_in_credit_out
+  cash_out_credit_in
+}
+
+enum AgentTransactionStatus {
+  completed
+  reversed
+}
+
+/// The accounts an agent branch's money sits in: the drawer, a provider's float, the commission a
+/// provider holds for the agent, or the outside world (an owner's capital, a provider's settlement).
+enum AgentAccountKind {
+  cash
+  provider
+  commission_held
+  external
+}
+
+enum AgentMovementDirection {
+  inflow
+  outflow
+}
+
+enum AgentMovementKind {
+  principal
+  commission
+  reversal
+  rebalancing
+}
+
+enum AgentExternalCounterparty {
+  owner_capital
+  provider_settlement
+  other
+}
+
+/// How a position came to be known: the Owner set it, confirmed it at an opening, or a locked closing counted it.
+enum AgentPositionSource {
+  set
+  confirmed
+  counted_close
+}
+
+enum AgentMistakeKind {
+  wrong_amount
+  wrong_direction
+  wrong_provider
+  wrong_number
+  wrong_reference
+  other
+}
+
+enum AgentMistakeStatus {
+  open
+  reversed
+  dismissed
+}
+
+/// A provider the company's agent counters exchange credit with. Company-wide by definition; never deleted.
+model AgentProvider {
+  id        Bytes             @id @db.Binary(16)
+  companyId Bytes             @map("company_id") @db.Binary(16)
+  kind      AgentProviderKind
+  label     String            @db.VarChar(80)
+  isActive  Boolean           @default(true) @map("is_active")
+  sortOrder Int               @default(0) @map("sort_order")
+  createdAt DateTime          @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt DateTime          @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company      Company               @relation(fields: [companyId], references: [id], map: "fk_agent_providers_company")
+  configs      AgentProviderConfig[]
+  positions    AgentPosition[]
+  transactions AgentTransaction[]
+  movements    AgentMovement[]
+  floatCounts  AgentFloatCount[]
+
+  @@unique([companyId, label], map: "ux_agent_providers_label")
+  @@map("agent_providers")
+}
+
+/// A provider's configuration, versioned and append-only: the rates in basis points (NULL = not
+/// supplied), where the commission lands, whether the fee is netted into the principal, and the
+/// reference rule. A provider posts nothing while any required field of its version in force is NULL.
+model AgentProviderConfig {
+  id                     Bytes                       @id @db.Binary(16)
+  companyId              Bytes                       @map("company_id") @db.Binary(16)
+  providerId             Bytes                       @map("provider_id") @db.Binary(16)
+  rateInBp               Int?                        @map("rate_in_bp") @db.UnsignedInt
+  rateOutBp              Int?                        @map("rate_out_bp") @db.UnsignedInt
+  sameRateBothDirections Boolean                     @default(true) @map("same_rate_both_directions")
+  commissionDestination  AgentCommissionDestination? @map("commission_destination")
+  principalFeeMode       AgentPrincipalFeeMode?      @map("principal_fee_mode")
+  referenceRule          AgentReferenceRule?         @map("reference_rule")
+  effectiveFrom          DateTime                    @map("effective_from") @db.DateTime(6)
+  recordedById           Bytes                       @map("recorded_by_id") @db.Binary(16)
+  recordedByName         String                      @map("recorded_by_name") @db.VarChar(160)
+  reason                 String                      @db.VarChar(255)
+  createdAt              DateTime                    @default(now()) @map("created_at") @db.DateTime(6)
+
+  company      Company            @relation(fields: [companyId], references: [id], map: "fk_agent_provider_configs_company")
+  provider     AgentProvider      @relation(fields: [providerId], references: [id], map: "fk_agent_provider_configs_provider")
+  recordedBy   User               @relation("AgentProviderConfigRecordedBy", fields: [recordedById], references: [id], map: "fk_agent_provider_configs_recorded_by")
+  transactions AgentTransaction[]
+
+  @@index([providerId, effectiveFrom], map: "ix_agent_provider_configs_provider")
+  @@index([companyId], map: "ix_agent_provider_configs_company")
+  @@index([recordedById], map: "ix_agent_provider_configs_recorded_by")
+  @@map("agent_provider_configs")
+}
+
+/// What a provider float (or the commission a provider holds) held at one moment, per branch — the
+/// anchor every later figure counts from. Cash has no row here: the drawer is anchored by the
+/// opening decision or the counted close, as for the electronics store. Append-only.
+model AgentPosition {
+  id                Bytes               @id @db.Binary(16)
+  companyId         Bytes               @map("company_id") @db.Binary(16)
+  branchId          Bytes               @map("branch_id") @db.Binary(16)
+  accountKind       AgentAccountKind    @map("account_kind")
+  providerId        Bytes               @map("provider_id") @db.Binary(16)
+  amount            Decimal             @db.Decimal(14, 2)
+  /// The server clock when the amount was true; never typed.
+  at                DateTime            @db.DateTime(6)
+  businessDate      DateTime            @map("business_date") @db.Date
+  source            AgentPositionSource
+  trackedBefore     Decimal?            @map("tracked_before") @db.Decimal(14, 2)
+  difference        Decimal?            @db.Decimal(14, 2)
+  note              String?             @db.VarChar(255)
+  recordedById      Bytes               @map("recorded_by_id") @db.Binary(16)
+  recordedByName    String              @map("recorded_by_name") @db.VarChar(160)
+  clientUuid        Bytes               @map("client_uuid") @db.Binary(16)
+  clientRequestHash String              @map("client_request_hash") @db.Char(64)
+  createdAt         DateTime            @default(now()) @map("created_at") @db.DateTime(6)
+
+  company    Company       @relation(fields: [companyId], references: [id], map: "fk_agent_positions_company")
+  branch     Branch        @relation(fields: [branchId], references: [id], map: "fk_agent_positions_branch")
+  provider   AgentProvider @relation(fields: [providerId], references: [id], map: "fk_agent_positions_provider")
+  recordedBy User          @relation("AgentPositionRecordedBy", fields: [recordedById], references: [id], map: "fk_agent_positions_recorded_by")
+
+  @@unique([companyId, clientUuid], map: "ux_agent_positions_client_uuid")
+  @@index([branchId, accountKind, providerId, at], map: "ix_agent_positions_account_at")
+  @@index([providerId], map: "ix_agent_positions_provider")
+  @@index([recordedById], map: "ix_agent_positions_recorded_by")
+  @@map("agent_positions")
+}
+
+/// One customer exchange at the counter. The money it moved lives in `agent_movements`; the row
+/// itself is never edited beyond its reversal fields, and never deleted.
+model AgentTransaction {
+  id                  Bytes                  @id @db.Binary(16)
+  companyId           Bytes                  @map("company_id") @db.Binary(16)
+  branchId            Bytes                  @map("branch_id") @db.Binary(16)
+  providerId          Bytes                  @map("provider_id") @db.Binary(16)
+  direction           AgentDirection
+  amount              Decimal                @db.Decimal(14, 2)
+  /// Normalized digits with an optional leading `+`; shown in full only to `agent.customer.reveal`.
+  customerNumber      String                 @map("customer_number") @db.VarChar(40)
+  customerNumberLast4 String                 @map("customer_number_last4") @db.Char(4)
+  providerReference   String?                @map("provider_reference") @db.VarChar(120)
+  commissionAmount    Decimal                @map("commission_amount") @db.Decimal(14, 2)
+  commissionRateBp    Int                    @map("commission_rate_bp") @db.UnsignedInt
+  configVersionId     Bytes                  @map("config_version_id") @db.Binary(16)
+  configSnapshot      Json                   @map("config_snapshot") @db.Json
+  businessDate        DateTime               @map("business_date") @db.Date
+  /// The server clock at posting; the business day is assigned from it (D155).
+  recordedAt          DateTime               @map("recorded_at") @db.DateTime(6)
+  /// What the phone claimed when it recorded the exchange, kept as a claim.
+  deviceRecordedAt    DateTime?              @map("device_recorded_at") @db.DateTime(6)
+  recordedById        Bytes                  @map("recorded_by_id") @db.Binary(16)
+  recordedByName      String                 @map("recorded_by_name") @db.VarChar(160)
+  clientUuid          Bytes                  @map("client_uuid") @db.Binary(16)
+  clientRequestHash   String                 @map("client_request_hash") @db.Char(64)
+  status              AgentTransactionStatus @default(completed)
+  reversedById        Bytes?                 @map("reversed_by_id") @db.Binary(16)
+  reversedByName      String?                @map("reversed_by_name") @db.VarChar(160)
+  reversedAt          DateTime?              @map("reversed_at") @db.DateTime(6)
+  reversalReason      String?                @map("reversal_reason") @db.VarChar(255)
+  reversalClientUuid  Bytes?                 @map("reversal_client_uuid") @db.Binary(16)
+  createdAt           DateTime               @default(now()) @map("created_at") @db.DateTime(6)
+
+  company        Company             @relation(fields: [companyId], references: [id], map: "fk_agent_transactions_company")
+  branch         Branch              @relation(fields: [branchId], references: [id], map: "fk_agent_transactions_branch")
+  provider       AgentProvider       @relation(fields: [providerId], references: [id], map: "fk_agent_transactions_provider")
+  config         AgentProviderConfig @relation(fields: [configVersionId], references: [id], map: "fk_agent_transactions_config")
+  recordedBy     User                @relation("AgentTransactionRecordedBy", fields: [recordedById], references: [id], map: "fk_agent_transactions_recorded_by")
+  reversedBy     User?               @relation("AgentTransactionReversedBy", fields: [reversedById], references: [id], map: "fk_agent_transactions_reversed_by")
+  movements      AgentMovement[]
+  mistakeReports AgentMistakeReport[]
+
+  @@unique([companyId, clientUuid], map: "ux_agent_transactions_client_uuid")
+  @@index([branchId, businessDate, recordedAt], map: "ix_agent_transactions_branch_day")
+  @@index([providerId], map: "ix_agent_transactions_provider")
+  @@index([configVersionId], map: "ix_agent_transactions_config")
+  @@index([companyId, customerNumberLast4], map: "ix_agent_transactions_last4")
+  @@index([recordedById], map: "ix_agent_transactions_recorded_by")
+  @@index([reversedById], map: "ix_agent_transactions_reversed_by")
+  @@map("agent_transactions")
+}
+
+/// The immutable legs: the only thing positions, the drawer's equation and the reports read.
+model AgentMovement {
+  id            Bytes                  @id @db.Binary(16)
+  companyId     Bytes                  @map("company_id") @db.Binary(16)
+  branchId      Bytes                  @map("branch_id") @db.Binary(16)
+  accountKind   AgentAccountKind       @map("account_kind")
+  providerId    Bytes?                 @map("provider_id") @db.Binary(16)
+  direction     AgentMovementDirection
+  amount        Decimal                @db.Decimal(14, 2)
+  kind          AgentMovementKind
+  transactionId Bytes?                 @map("transaction_id") @db.Binary(16)
+  rebalancingId Bytes?                 @map("rebalancing_id") @db.Binary(16)
+  businessDate  DateTime               @map("business_date") @db.Date
+  recordedAt    DateTime               @map("recorded_at") @db.DateTime(6)
+  createdAt     DateTime               @default(now()) @map("created_at") @db.DateTime(6)
+
+  company     Company           @relation(fields: [companyId], references: [id], map: "fk_agent_movements_company")
+  branch      Branch            @relation(fields: [branchId], references: [id], map: "fk_agent_movements_branch")
+  provider    AgentProvider?    @relation(fields: [providerId], references: [id], map: "fk_agent_movements_provider")
+  transaction AgentTransaction? @relation(fields: [transactionId], references: [id], map: "fk_agent_movements_transaction")
+  rebalancing AgentRebalancing? @relation(fields: [rebalancingId], references: [id], map: "fk_agent_movements_rebalancing")
+
+  @@index([branchId, businessDate], map: "ix_agent_movements_branch_day")
+  @@index([branchId, accountKind, providerId, recordedAt], map: "ix_agent_movements_account_at")
+  @@index([companyId], map: "ix_agent_movements_company")
+  @@index([providerId], map: "ix_agent_movements_provider")
+  @@index([transactionId], map: "ix_agent_movements_transaction")
+  @@index([rebalancingId], map: "ix_agent_movements_rebalancing")
+  @@map("agent_movements")
+}
+
+/// Money moved between the branch's own accounts, or brought in from / sent to the outside — never
+/// a customer transaction: no count, no volume, no commission.
+model AgentRebalancing {
+  id                   Bytes                      @id @db.Binary(16)
+  companyId            Bytes                      @map("company_id") @db.Binary(16)
+  branchId             Bytes                      @map("branch_id") @db.Binary(16)
+  reason               String                     @db.VarChar(255)
+  note                 String?                    @db.VarChar(500)
+  externalCounterparty AgentExternalCounterparty? @map("external_counterparty")
+  /// Signed: positive when money came in from outside, negative when it went out. NULL when the legs net to zero.
+  externalAmount       Decimal?                   @map("external_amount") @db.Decimal(14, 2)
+  businessDate         DateTime                   @map("business_date") @db.Date
+  recordedAt           DateTime                   @map("recorded_at") @db.DateTime(6)
+  recordedById         Bytes                      @map("recorded_by_id") @db.Binary(16)
+  recordedByName       String                     @map("recorded_by_name") @db.VarChar(160)
+  clientUuid           Bytes                      @map("client_uuid") @db.Binary(16)
+  clientRequestHash    String                     @map("client_request_hash") @db.Char(64)
+  createdAt            DateTime                   @default(now()) @map("created_at") @db.DateTime(6)
+
+  company    Company         @relation(fields: [companyId], references: [id], map: "fk_agent_rebalancings_company")
+  branch     Branch          @relation(fields: [branchId], references: [id], map: "fk_agent_rebalancings_branch")
+  recordedBy User            @relation("AgentRebalancingRecordedBy", fields: [recordedById], references: [id], map: "fk_agent_rebalancings_recorded_by")
+  legs       AgentMovement[]
+
+  @@unique([companyId, clientUuid], map: "ux_agent_rebalancings_client_uuid")
+  @@index([branchId, businessDate], map: "ix_agent_rebalancings_branch_day")
+  @@index([recordedById], map: "ix_agent_rebalancings_recorded_by")
+  @@map("agent_rebalancings")
+}
+
+/// An Employee's claim that a recorded exchange is wrong. It moves nothing; the Owner or a Manager
+/// reverses the exchange (once) or dismisses the claim.
+model AgentMistakeReport {
+  id                Bytes              @id @db.Binary(16)
+  companyId         Bytes              @map("company_id") @db.Binary(16)
+  branchId          Bytes              @map("branch_id") @db.Binary(16)
+  transactionId     Bytes              @map("transaction_id") @db.Binary(16)
+  kind              AgentMistakeKind
+  note              String?            @db.VarChar(500)
+  status            AgentMistakeStatus @default(open)
+  reportedById      Bytes              @map("reported_by_id") @db.Binary(16)
+  reportedByName    String             @map("reported_by_name") @db.VarChar(160)
+  reportedAt        DateTime           @map("reported_at") @db.DateTime(6)
+  decidedById       Bytes?             @map("decided_by_id") @db.Binary(16)
+  decidedByName     String?            @map("decided_by_name") @db.VarChar(160)
+  decidedAt         DateTime?          @map("decided_at") @db.DateTime(6)
+  decisionNote      String?            @map("decision_note") @db.VarChar(255)
+  clientUuid        Bytes              @map("client_uuid") @db.Binary(16)
+  clientRequestHash String             @map("client_request_hash") @db.Char(64)
+  createdAt         DateTime           @default(now()) @map("created_at") @db.DateTime(6)
+
+  company     Company          @relation(fields: [companyId], references: [id], map: "fk_agent_mistake_reports_company")
+  branch      Branch           @relation(fields: [branchId], references: [id], map: "fk_agent_mistake_reports_branch")
+  transaction AgentTransaction @relation(fields: [transactionId], references: [id], map: "fk_agent_mistake_reports_transaction")
+  reportedBy  User             @relation("AgentMistakeReportedBy", fields: [reportedById], references: [id], map: "fk_agent_mistake_reports_reported_by")
+  decidedBy   User?            @relation("AgentMistakeDecidedBy", fields: [decidedById], references: [id], map: "fk_agent_mistake_reports_decided_by")
+
+  @@unique([companyId, clientUuid], map: "ux_agent_mistake_reports_client_uuid")
+  @@index([transactionId], map: "ix_agent_mistake_reports_transaction")
+  @@index([branchId, status], map: "ix_agent_mistake_reports_branch_status")
+  @@index([reportedById], map: "ix_agent_mistake_reports_reported_by")
+  @@index([decidedById], map: "ix_agent_mistake_reports_decided_by")
+  @@map("agent_mistake_reports")
+}
+
+/// A provider float counted at the daily closing — expected (NULL when unknown) against counted,
+/// in the same closing as the drawer and the receiving-account channels.
+model AgentFloatCount {
+  id          Bytes     @id @db.Binary(16)
+  companyId   Bytes     @map("company_id") @db.Binary(16)
+  closingId   Bytes     @map("closing_id") @db.Binary(16)
+  branchId    Bytes     @map("branch_id") @db.Binary(16)
+  providerId  Bytes     @map("provider_id") @db.Binary(16)
+  expected    Decimal?  @db.Decimal(14, 2)
+  counted     Decimal?  @db.Decimal(14, 2)
+  difference  Decimal?  @db.Decimal(14, 2)
+  explanation String?   @db.VarChar(255)
+  isSkipped   Boolean   @default(false) @map("is_skipped")
+  skipReason  String?   @map("skip_reason") @db.VarChar(255)
+  countedById Bytes?    @map("counted_by_id") @db.Binary(16)
+  countedAt   DateTime? @map("counted_at") @db.DateTime(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company       Company              @relation(fields: [companyId], references: [id], map: "fk_agent_float_counts_company")
+  closing       DailyClosing         @relation(fields: [closingId], references: [id], map: "fk_agent_float_counts_closing")
+  branch        Branch               @relation(fields: [branchId], references: [id], map: "fk_agent_float_counts_branch")
+  provider      AgentProvider        @relation(fields: [providerId], references: [id], map: "fk_agent_float_counts_provider")
+  countedBy     User?                @relation("AgentFloatCountedBy", fields: [countedById], references: [id], map: "fk_agent_float_counts_counted_by")
+  discrepancies ClosingDiscrepancy[]
+
+  @@unique([closingId, providerId], map: "ux_agent_float_counts_closing_provider")
+  @@index([companyId], map: "ix_agent_float_counts_company")
+  @@index([branchId], map: "ix_agent_float_counts_branch")
+  @@index([providerId], map: "ix_agent_float_counts_provider")
+  @@index([countedById], map: "ix_agent_float_counts_counted_by")
+  @@map("agent_float_counts")
 }
