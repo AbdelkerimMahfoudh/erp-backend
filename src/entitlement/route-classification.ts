@@ -67,6 +67,11 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
   allow('POST', 'platform/my-subscription/seat-requests', 'Asking for a seat is asking to pay; nothing is granted until the platform confirms the payment'),
   allow('POST', 'platform/my-subscription/store-requests', 'Asking for a store is asking to pay; the store exists only once the payment is confirmed'),
   allow('POST', 'platform/my-subscription/seat-requests/:rid/withdraw', 'Withdrawing an unpaid request writes no business truth'),
+  allow(
+    'POST',
+    'platform/my-subscription/activity-requests',
+    'Asking for another activity is asking to pay the difference (an upgrade) or to pay less from the renewal (a downgrade); the branch changes only when the platform confirms the payment or the renewal comes (D154)',
+  ),
   allow('DELETE', 'devices/users/:userId/:deviceId', 'The Owner revoking a member device after a loss or a departure: the same security action, never a business record'),
   allow(
     'POST',

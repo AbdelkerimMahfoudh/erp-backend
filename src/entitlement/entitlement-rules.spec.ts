@@ -203,6 +203,26 @@ describe('seats belong to a store (docs/21, 2026-10-05)', () => {
     expect(mayConsumeSeatIn(m, 'b0')).toBe(false);
   });
 
+  it('carries each store\'s activity and the change scheduled for the renewal; a store that says nothing is an electronics store (D156)', () => {
+    /*
+     * The app learns from `seatsByStore[].activity` which money routes a branch
+     * may write — a flag, never a price. An older server omits it, and the app
+     * reads that as electronics, which keeps today's app exactly as it is.
+     */
+    const lines = stores({ name: 'Shop', used: 0 }, { name: 'Counter', used: 0 });
+    const m = seatMath(sub({ subscribedBranchCount: 2 }), {
+      seatsUsed: 0,
+      activeBranchCount: 2,
+      branches: [lines[0], { ...lines[1], activity: 'money_agent', activityNext: 'electronics' }],
+    });
+    expect(m.branches.map((b) => [b.name, b.activity, b.activityNext])).toEqual([
+      ['Shop', 'electronics', null],
+      ['Counter', 'money_agent', 'electronics'],
+    ]);
+    const e = buildEntitlement(sub({ subscribedBranchCount: 2 }), { seatsUsed: 0, activeBranchCount: 2, branches: [{ ...lines[0], activity: 'both' }] }, AUG_18);
+    expect(e.seatsByStore[0]).toMatchObject({ name: 'Shop', activity: 'both', activityNext: null });
+  });
+
   it('without per-store detail it reads company-wide, one seat per subscribed store', () => {
     const m = seatMath(sub({ subscribedBranchCount: 2, additionalSeats: 1 }), { seatsUsed: 2, activeBranchCount: 2 });
     expect(m.includedSeats).toBe(2);
@@ -343,6 +363,9 @@ describe('route classification fails closed', () => {
       'POST auth/logout-all',
       'POST auth/refresh',
       'POST notifications/:id/read',
+      // D154 (2026-10-08): asking for another activity for a branch is asking to pay (an
+      // upgrade) or to pay less from the renewal (a downgrade); nothing changes by asking.
+      'POST platform/my-subscription/activity-requests',
       'POST platform/my-subscription/seat-requests',
       'POST platform/my-subscription/seat-requests/:rid/withdraw',
       'POST platform/my-subscription/store-requests',
@@ -393,12 +416,14 @@ describe('route classification fails closed', () => {
 
   it('and the handoff is the only platform route allowed through', () => {
     const platform = ALWAYS_ALLOWED.filter((r) => r.path.startsWith('platform/'));
-    // The handoff, and asking to pay for a seat or a store (docs/21, 2026-10-05):
-    // nothing is granted by asking, and a lapsed shop must be able to ask.
+    // The handoff, and asking to pay for a seat, a store or another activity for a
+    // branch (docs/21, 2026-10-05; D154, 2026-10-08): nothing is granted by asking,
+    // and a lapsed shop must be able to ask.
     expect(platform.map((r) => r.path)).toEqual([
       'platform/my-subscription/seat-requests',
       'platform/my-subscription/store-requests',
       'platform/my-subscription/seat-requests/:rid/withdraw',
+      'platform/my-subscription/activity-requests',
       'platform/portal-handoff',
     ]);
     // Minting a ticket is not spending one, and neither moves money.

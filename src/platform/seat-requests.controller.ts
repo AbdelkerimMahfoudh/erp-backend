@@ -35,12 +35,13 @@ import { uuidToBin, isUuid } from '../common/utils/uuid.util';
 import { PlatformAdminGuard, type AdminRequest } from './platform-admin.guard';
 import { PlatformAdminService } from './platform-admin.service';
 import { BillingService, ESTIMATE_MAX_STORES } from '../billing/billing.service';
+import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { SeatAllocationService } from './seat-allocation.service';
 import { StaffActivationService } from './staff-activation.service';
 
 const PUBLIC_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
-class QuoteDto {
+export class QuoteDto {
   /** Non-Owner employees at each store. */
   @IsArray()
   @ArrayMinSize(1)
@@ -48,14 +49,29 @@ class QuoteDto {
   @IsInt({ each: true })
   @Min(0, { each: true })
   stores: number[];
+
+  /** What each store does, one per store (D154). Left out, every store is an electronics store. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(ESTIMATE_MAX_STORES)
+  @IsIn(ACTIVITIES, { each: true })
+  activities?: Activity[];
 }
 
-class SeatRequestDto {
+export class SeatRequestDto {
   @IsUUID() branchId: string;
 }
 
-class StoreRequestDto {
+export class StoreRequestDto {
   @IsString() @MinLength(1) @MaxLength(160) name: string;
+  /** The new store's activity (D154). Electronics when not said. */
+  @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
+}
+
+/** Another activity for a branch the company already has (D154). The server prices it; nothing here is an amount. */
+export class ActivityRequestDto {
+  @IsUUID() branchId: string;
+  @IsIn(ACTIVITIES) activity: Activity;
 }
 
 class ConfirmSeatPaymentDto {
@@ -94,7 +110,8 @@ function idOf(value: string, what: string): Buffer {
  *  - **anybody**: the plan in force and a stateless estimate — prices, never a
  *    business;
  *  - **the Owner**, on their tenant session: their own requests, asking for a
- *    seat or a store, withdrawing an unpaid request;
+ *    seat, a store or another activity for a branch, withdrawing an unpaid or
+ *    scheduled request;
  *  - **a platform administrator**, on the cookie realm with step-up: the queue,
  *    confirming a payment with a reference, refusing, releasing.
  *
@@ -127,7 +144,7 @@ export class SeatRequestsController {
   @Post('quote')
   @HttpCode(HttpStatus.OK)
   quote(@Body() dto: QuoteDto) {
-    return this.billing.estimate(dto.stores);
+    return this.billing.estimate(dto.stores, dto.activities ?? []);
   }
 
   // ── The Owner's own requests ─────────────────────────────────────────────
@@ -156,6 +173,28 @@ export class SeatRequestsController {
     const companyId = this.tenant.companyId();
     return this.allocations.requestStore(companyId, {
       name: dto.name,
+      activity: dto.activity ?? null,
+      requestedBy: await this.actorLabel(),
+    });
+  }
+
+  /**
+   * Another activity for one of the company's branches (D154, docs/73 §3).
+   *
+   * An upgrade waits for payment of the difference, like a seat; a downgrade
+   * costs nothing and is scheduled for the renewal at once. Allowed in every
+   * subscription state like the other requests: asking is not a business
+   * write, and nothing changes until the platform confirms a payment or the
+   * renewal comes.
+   */
+  @Post('my-subscription/activity-requests')
+  @RequirePermissions('settings.manage')
+  @HttpCode(HttpStatus.CREATED)
+  async requestActivity(@Body() dto: ActivityRequestDto) {
+    const companyId = this.tenant.companyId();
+    return this.allocations.requestActivityChange(companyId, {
+      branchId: uuidToBin(dto.branchId),
+      activity: dto.activity,
       requestedBy: await this.actorLabel(),
     });
   }

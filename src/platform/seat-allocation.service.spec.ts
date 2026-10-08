@@ -2,16 +2,22 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { SeatAllocationService } from './seat-allocation.service';
 import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import type { Activity } from '../entitlement/activity';
 
 /**
  * Seats beyond the included one (docs/21, 2026-10-05): nothing is granted by
  * asking; a payment needs a reference; two confirmations of one request
  * produce one payment and one refusal; a store request opens the store only
  * when its payment is confirmed.
+ *
+ * And a branch's activity (D154, docs/73 §3): an upgrade waits for payment of
+ * the difference and applies at confirmation; a downgrade is scheduled for
+ * the renewal at once and costs nothing; one open request per branch.
  */
 
 const COMPANY = uuidToBin('018f0000-0000-7000-8000-00000000c001');
 const BRANCH = uuidToBin('018f0000-0000-7000-8000-00000000b001');
+const DEPOT = uuidToBin('018f0000-0000-7000-8000-00000000b002');
 const USER = uuidToBin('018f0000-0000-7000-8000-00000000a002');
 const ADMIN = { id: newUuidV7Bin(), email: 'ops@example.test', name: 'Ops' };
 const CTX = { admin: ADMIN, ip: '127.0.0.1' };
@@ -23,9 +29,12 @@ interface Row {
   subscriptionId: Buffer;
   branchId: Buffer | null;
   userId: Buffer | null;
-  kind: 'seat' | 'store';
+  kind: 'seat' | 'store' | 'activity';
   status: 'pending_payment' | 'paid' | 'granted' | 'released' | 'refused';
   label: string | null;
+  activityFrom: Activity | null;
+  activityTo: Activity | null;
+  activityEffective: 'now' | 'renewal' | null;
   monthlyAmount: number;
   currency: string;
   requestedBy: string;
@@ -39,7 +48,7 @@ interface Row {
   version: number;
 }
 
-function makeWorld() {
+function makeWorld(main: { activity?: Activity; activityNext?: Activity | null } = {}) {
   const sub = {
     id: newUuidV7Bin(),
     companyId: COMPANY,
@@ -49,7 +58,30 @@ function makeWorld() {
     version: 2,
     company: { name: 'Shop', publicStoreId: 'ABCDEF1234' },
   };
-  const branches = [{ id: BRANCH, companyId: COMPANY, name: 'Main', isActive: true, deletedAt: null }];
+  const branches: any[] = [
+    {
+      id: BRANCH,
+      companyId: COMPANY,
+      name: 'Main',
+      type: 'store',
+      activity: main.activity ?? 'electronics',
+      activityNext: main.activityNext ?? null,
+      activityChangedAt: null,
+      isActive: true,
+      deletedAt: null,
+    },
+    {
+      id: DEPOT,
+      companyId: COMPANY,
+      name: 'Depot',
+      type: 'warehouse',
+      activity: 'electronics',
+      activityNext: null,
+      activityChangedAt: null,
+      isActive: true,
+      deletedAt: null,
+    },
+  ];
   const rows: Row[] = [];
   const payments: any[] = [];
   const events: any[] = [];
@@ -70,7 +102,9 @@ function makeWorld() {
   };
   const hydrate = (row: Row) => ({
     ...row,
-    branch: row.branchId ? { id: row.branchId, name: 'Main' } : null,
+    branch: row.branchId
+      ? { id: row.branchId, name: branches.find((b) => b.id.equals(row.branchId))?.name ?? 'Main' }
+      : null,
     user: row.userId ? { id: row.userId, name: 'Fatima' } : null,
     payment: row.paymentId ? (payments.find((p) => p.id.equals(row.paymentId)) ?? null) : null,
     company: sub.company,
@@ -102,6 +136,9 @@ function makeWorld() {
         requestedAt: NOW,
         branchId: null,
         userId: null,
+        activityFrom: null,
+        activityTo: null,
+        activityEffective: null,
         ...data,
       };
       rows.push(row);
@@ -131,13 +168,28 @@ function makeWorld() {
         if (branches.some((b) => b.name === data.name)) {
           throw new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'test' });
         }
-        branches.push({ ...data, isActive: true, deletedAt: null });
+        branches.push({ activityNext: null, activityChangedAt: null, ...data, isActive: true, deletedAt: null });
         return { id: data.id };
       },
       findFirst: async ({ where }: any) =>
         branches.find(
           (b) => (where.id ? b.id.equals(where.id) : true) && (where.name ? b.name === where.name : true),
         ) ?? null,
+      update: async ({ where, data }: any) => {
+        const b = branches.find((x) => x.id.equals(where.id))!;
+        Object.assign(b, data);
+        return { ...b };
+      },
+      updateMany: async ({ where, data }: any) => {
+        const hits = branches.filter(
+          (b) =>
+            b.id.equals(where.id) &&
+            (where.companyId ? b.companyId.equals(where.companyId) : true) &&
+            (where.activityNext !== undefined ? b.activityNext === where.activityNext : true),
+        );
+        for (const b of hits) Object.assign(b, data);
+        return { count: hits.length };
+      },
     },
     userBranch: {
       findMany: async () => [{ userId: USER, roleId: newUuidV7Bin() }],
@@ -156,7 +208,10 @@ function makeWorld() {
   const prisma = { ...tx, $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx) };
   const audit = { record: async (e: unknown) => void audits.push(e) };
   const billing = {
-    planAt: async () => ({ current: { extraStaffMonthly: 100, branchMonthly: 500 }, upcoming: null }),
+    planAt: async () => ({
+      current: { extraStaffMonthly: 100, branchMonthly: 500, agentMonthly: 300, bothMonthly: 700 },
+      upcoming: null,
+    }),
     assessNow: async (id: Buffer) => void assessed.push(id),
   };
   const clock = { now: () => NOW };
@@ -295,7 +350,8 @@ describe('a store request', () => {
       label: 'Market',
       monthlyAmount: 500,
     });
-    expect(w.branches).toHaveLength(1);
+    // Main and the Depot warehouse the world starts with (D154 c needs one); nothing was added.
+    expect(w.branches).toHaveLength(2);
     expect(w.sub.subscribedBranchCount).toBe(1);
   });
 
@@ -304,7 +360,7 @@ describe('a store request', () => {
     const { allocation } = await w.service.requestStore(COMPANY, { name: 'Market', requestedBy: 'owner' });
     const r = await w.service.confirmPayment(uuidToBin(allocation.id), { ...PAYMENT, amount: '500' }, CTX);
     expect(r.applied).toBe(true);
-    expect(w.branches.map((b) => b.name)).toEqual(['Main', 'Market']);
+    expect(w.branches.map((b) => b.name)).toEqual(['Main', 'Depot', 'Market']);
     expect(w.userBranches).toHaveLength(1);
     expect(w.sub.subscribedBranchCount).toBe(2);
     expect(w.events.map((e) => e.kind)).toEqual(['store_requested', 'branches_changed', 'seat_paid']);
@@ -316,6 +372,18 @@ describe('a store request', () => {
     await expect(w.service.requestStore(COMPANY, { name: 'Main', requestedBy: 'owner' })).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+
+  it('is priced for the activity it will have, and the store opens as what was paid for (D154)', async () => {
+    const w = makeWorld();
+    const r = await w.service.requestStore(COMPANY, { name: 'Counter', activity: 'money_agent', requestedBy: 'owner' });
+    expect(r.allocation).toMatchObject({ kind: 'store', monthlyAmount: 300, activityTo: 'money_agent', activityFrom: null, activityEffective: null });
+    await w.service.confirmPayment(uuidToBin(r.allocation.id), { ...PAYMENT, amount: '300' }, CTX);
+    expect(w.branches.find((b) => b.name === 'Counter')).toMatchObject({ type: 'store', activity: 'money_agent' });
+    expect(w.events.find((e) => e.kind === 'branches_changed').note).toMatch(/money_agent/);
+    // Said nothing → an electronics store, priced as one.
+    const plain = await w.service.requestStore(COMPANY, { name: 'Market', requestedBy: 'owner' });
+    expect(plain.allocation).toMatchObject({ monthlyAmount: 500, activityTo: 'electronics' });
   });
 });
 
@@ -334,5 +402,202 @@ describe('the Owner withdrawing', () => {
     await expect(w.service.confirmPayment(uuidToBin(allocation.id), PAYMENT, CTX)).rejects.toBeInstanceOf(
       BadRequestException,
     );
+  });
+});
+
+describe('another activity for a branch (D154, docs/73 §3)', () => {
+  const owner = 'owner@shop.test';
+
+  it('an upgrade waits for payment of exactly the difference, applies nothing by asking, and names the branch', async () => {
+    const w = makeWorld({ activity: 'electronics' });
+    const r = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    expect(r.created).toBe(true);
+    expect(r.allocation).toMatchObject({
+      kind: 'activity',
+      status: 'pending_payment',
+      monthlyAmount: 200,
+      activityFrom: 'electronics',
+      activityTo: 'both',
+      activityEffective: 'now',
+      branchId: '018f0000-0000-7000-8000-00000000b001',
+      branchName: 'Main',
+      store: { name: 'Main' },
+      providerVerified: false,
+    });
+    expect(w.branches[0]).toMatchObject({ activity: 'electronics', activityNext: null });
+    expect(w.events.map((e) => e.kind)).toEqual(['activity_requested']);
+    expect(w.events[0].note).toMatch(/electronics → both, 200 MRU/);
+    expect(w.payments).toHaveLength(0);
+    expect(w.assessed).toHaveLength(0);
+  });
+
+  it('a downgrade costs nothing: granted at once, scheduled on the branch for the renewal', async () => {
+    const w = makeWorld({ activity: 'both' });
+    const r = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    expect(r.created).toBe(true);
+    expect(r.allocation).toMatchObject({
+      kind: 'activity',
+      status: 'granted',
+      monthlyAmount: 0,
+      activityFrom: 'both',
+      activityTo: 'money_agent',
+      activityEffective: 'renewal',
+      confirmedAt: null,
+    });
+    // The branch keeps what it has this period; only the renewal applies the change.
+    expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: 'money_agent' });
+    expect(w.events.map((e) => e.kind)).toEqual(['activity_scheduled']);
+    expect(w.assessed).toHaveLength(0);
+  });
+
+  it('the sideways change is priced, not named: electronics → agent waits; agent → electronics is 200 now', async () => {
+    const down = makeWorld({ activity: 'electronics' });
+    const d = await down.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    expect(d.allocation).toMatchObject({ status: 'granted', monthlyAmount: 0, activityEffective: 'renewal' });
+    const up = makeWorld({ activity: 'money_agent' });
+    const u = await up.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'electronics', requestedBy: owner });
+    expect(u.allocation).toMatchObject({ status: 'pending_payment', monthlyAmount: 200, activityEffective: 'now' });
+  });
+
+  it('the same activity is refused by name — and names the scheduled change to withdraw, when there is one', async () => {
+    const w = makeWorld({ activity: 'both', activityNext: 'money_agent' });
+    const refusal = await w.service
+      .requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner })
+      .catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(BadRequestException);
+    expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'activity_unchanged' });
+    expect(JSON.stringify((refusal as BadRequestException).getResponse())).toMatch(/money_agent.*withdraw/);
+    expect(w.rows).toHaveLength(0);
+  });
+
+  it('a warehouse stays electronics and cannot be asked (D154 c)', async () => {
+    const w = makeWorld();
+    const refusal = await w.service
+      .requestActivityChange(COMPANY, { branchId: DEPOT, activity: 'money_agent', requestedBy: owner })
+      .catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(BadRequestException);
+    expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'activity_not_for_warehouse' });
+    expect(w.rows).toHaveLength(0);
+  });
+
+  it('one open request per branch: the same target again is the request that exists; a different one waits for a withdrawal', async () => {
+    const w = makeWorld({ activity: 'electronics' });
+    const first = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    const again = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    expect(again.created).toBe(false);
+    expect(again.allocation.id).toBe(first.allocation.id);
+
+    const other = await w.service
+      .requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner })
+      .catch((e: unknown) => e);
+    expect(other).toBeInstanceOf(ConflictException);
+    expect((other as ConflictException).getResponse()).toMatchObject({ code: 'activity_request_pending' });
+    expect(w.rows).toHaveLength(1);
+
+    // Withdrawn, the way is clear.
+    await w.service.withdraw(COMPANY, uuidToBin(first.allocation.id), owner);
+    const next = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    expect(next.created).toBe(true);
+    expect(next.allocation.status).toBe('granted');
+  });
+
+  it('a scheduled downgrade blocks a different downgrade, and answers the same one with itself', async () => {
+    const w = makeWorld({ activity: 'both' });
+    const first = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    const same = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    expect(same).toMatchObject({ created: false, allocation: { id: first.allocation.id } });
+    await expect(
+      w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'electronics', requestedBy: owner }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(w.branches[0].activityNext).toBe('money_agent');
+  });
+
+  it('a later upgrade cancels the downgrade waiting for the renewal (D154 d): released with a reason, nothing refunded', async () => {
+    const w = makeWorld({ activity: 'electronics' });
+    const down = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    expect(w.branches[0].activityNext).toBe('money_agent');
+
+    const up = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    expect(up.created).toBe(true);
+    expect(up.allocation).toMatchObject({ status: 'pending_payment', monthlyAmount: 200, activityFrom: 'electronics', activityTo: 'both' });
+    expect(w.rows.find((r) => r.id.equals(uuidToBin(down.allocation.id)))).toMatchObject({
+      status: 'released',
+      reason: 'Cancelled by a later upgrade request.',
+      closedBy: owner,
+    });
+    expect(w.branches[0]).toMatchObject({ activity: 'electronics', activityNext: null });
+    expect(w.events.map((e) => e.kind)).toEqual(['activity_scheduled', 'seat_closed', 'activity_requested']);
+  });
+
+  it('confirming the payment applies the upgrade: the branch changes, the period is assessed, the trail says so', async () => {
+    const w = makeWorld({ activity: 'money_agent' });
+    const { allocation } = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    expect(allocation.monthlyAmount).toBe(400);
+    const r = await w.service.confirmPayment(uuidToBin(allocation.id), { ...PAYMENT, amount: '400' }, CTX);
+    expect(r.applied).toBe(true);
+    expect(r.allocation).toMatchObject({ status: 'paid', activityTo: 'both', confirmedBy: ADMIN.email });
+    expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: null, activityChangedAt: NOW });
+    expect(w.payments).toHaveLength(1);
+    expect(w.events.map((e) => e.kind)).toEqual(['activity_requested', 'activity_changed', 'seat_paid']);
+    expect(w.events[1].note).toMatch(/money_agent → both after payment BK-7781/);
+    expect(w.audits).toHaveLength(1);
+    expect(w.audits[0]).toMatchObject({
+      action: 'activity.payment_confirm',
+      before: { activity: 'money_agent' },
+      after: { activity: 'both', store: 'Main', reference: 'BK-7781', providerVerified: false },
+    });
+    // The difference is charged to this period at once.
+    expect(w.assessed).toEqual([COMPANY]);
+    // A second confirmation changes nothing more.
+    const again = await w.service.confirmPayment(uuidToBin(allocation.id), { ...PAYMENT, amount: '400' }, CTX);
+    expect(again.applied).toBe(false);
+    expect(w.events.filter((e) => e.kind === 'activity_changed')).toHaveLength(1);
+  });
+
+  it('refusing an upgrade leaves the branch exactly as it was', async () => {
+    const w = makeWorld({ activity: 'electronics' });
+    const { allocation } = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    const r = await w.service.refuse(uuidToBin(allocation.id), { reason: 'No such transfer' }, CTX);
+    expect(r.allocation.status).toBe('refused');
+    expect(w.branches[0]).toMatchObject({ activity: 'electronics', activityNext: null });
+    expect(w.events.map((e) => e.kind)).toEqual(['activity_requested', 'seat_closed']);
+    expect(w.events[1].note).toMatch(/Activity change at Main \(electronics → both\) refused/);
+    await expect(w.service.confirmPayment(uuidToBin(allocation.id), PAYMENT, CTX)).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('releasing a scheduled downgrade clears the branch\'s scheduled change; a change already in force is not released', async () => {
+    const w = makeWorld({ activity: 'both' });
+    const { allocation } = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    const r = await w.service.release(uuidToBin(allocation.id), { reason: 'The Owner called: keep both' }, CTX);
+    expect(r.allocation.status).toBe('released');
+    expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: null });
+    expect(w.audits[0]).toMatchObject({ action: 'seat.release', before: { activityFrom: 'both', activityTo: 'money_agent' } });
+
+    const paid = makeWorld({ activity: 'electronics' });
+    const up = await paid.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    await paid.service.confirmPayment(uuidToBin(up.allocation.id), { ...PAYMENT, amount: '200' }, CTX);
+    await expect(paid.service.release(uuidToBin(up.allocation.id), { reason: 'x' }, CTX)).rejects.toBeInstanceOf(BadRequestException);
+    expect(paid.branches[0].activity).toBe('both');
+  });
+
+  it('the Owner withdraws a scheduled downgrade as freely as an unpaid upgrade — and only their own', async () => {
+    const w = makeWorld({ activity: 'both' });
+    const { allocation } = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    const other = uuidToBin('018f0000-0000-7000-8000-00000000c009');
+    await expect(w.service.withdraw(other, uuidToBin(allocation.id), owner)).rejects.toThrow('Unknown request');
+    const r = await w.service.withdraw(COMPANY, uuidToBin(allocation.id), owner);
+    expect(r.allocation).toMatchObject({ status: 'released', reason: 'Withdrawn by the business before the renewal.' });
+    expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: null });
+    // Withdrawn once; a second withdrawal is a no-op.
+    await expect(w.service.withdraw(COMPANY, uuidToBin(allocation.id), owner)).resolves.toMatchObject({ applied: false });
+  });
+
+  it('the view says the same things on every row, so a seat and an activity read alike', async () => {
+    const w = makeWorld();
+    const seat = await w.service.requestSeat(COMPANY, { branchId: BRANCH, userId: USER, requestedBy: owner });
+    expect(seat.allocation).toMatchObject({ branchId: '018f0000-0000-7000-8000-00000000b001', branchName: 'Main', activityFrom: null, activityTo: null, activityEffective: null });
+    const list = await w.service.listForCompany(COMPANY);
+    expect(list).toHaveLength(1);
+    expect(Object.keys(list[0])).toEqual(expect.arrayContaining(['activityFrom', 'activityTo', 'activityEffective', 'branchId', 'branchName']));
   });
 });

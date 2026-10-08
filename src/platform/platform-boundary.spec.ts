@@ -391,11 +391,14 @@ describe('a closed business stays closed on the server', () => {
     const allowedWrites = ALWAYS_ALLOWED.map((r) => r.path).filter((p) => p.startsWith('platform/'));
     const allowedReads = ALWAYS_READABLE.filter((p) => p.startsWith('platform/'));
     // Asking to pay for a seat or a store is the one thing a lapsed or pending shop most needs
-    // to be allowed (docs/21, 2026-10-05); nothing is granted by asking.
+    // to be allowed (docs/21, 2026-10-05); nothing is granted by asking. Asking for another
+    // activity for a branch (D154, 2026-10-08) is the same kind of request: an upgrade waits for
+    // its payment, a downgrade waits for the renewal, and nothing changes by asking.
     expect(allowedWrites).toEqual([
       'platform/my-subscription/seat-requests',
       'platform/my-subscription/store-requests',
       'platform/my-subscription/seat-requests/:rid/withdraw',
+      'platform/my-subscription/activity-requests',
       'platform/portal-handoff',
     ]);
     expect(allowedReads).toEqual(['platform/my-subscription', 'platform/payment-instructions']);
@@ -404,7 +407,9 @@ describe('a closed business stays closed on the server', () => {
 
 describe('the seat-requests controller keeps the same three realms (docs/21, 2026-10-05)', () => {
   const PUBLIC_UNGUARDED = new Set(['plan', 'quote']);
-  const TENANT = new Set(['mySeatRequests', 'requestSeat', 'requestStore', 'withdrawSeatRequest']);
+  // `requestActivity` (D154, 2026-10-08): the Owner asks for another activity for a branch —
+  // a tenant route like the seat and store requests, priced by the server, never an amount.
+  const TENANT = new Set(['mySeatRequests', 'requestSeat', 'requestStore', 'requestActivity', 'withdrawSeatRequest']);
   const SOURCE = readFileSync('src/platform/seat-requests.controller.ts', 'utf8');
 
   const proto = SeatRequestsController.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
@@ -470,7 +475,8 @@ describe('the seat-requests controller keeps the same three realms (docs/21, 202
 
   it('the public routes answer with prices and an estimate only — never a business', () => {
     expect(bodyOf('plan')).toMatch(/publicPlan\(\)/);
-    expect(bodyOf('quote')).toMatch(/estimate\(dto\.stores\)/);
+    // The estimate takes one activity per store since D154; still the stores and nothing about a business.
+    expect(bodyOf('quote')).toMatch(/estimate\(dto\.stores, dto\.activities \?\? \[\]\)/);
     for (const name of PUBLIC_UNGUARDED) expect(bodyOf(name)).not.toMatch(/companyId|business/);
   });
 });
