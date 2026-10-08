@@ -1,3 +1,5 @@
+import type { Activity } from './activity';
+
 /**
  * What a shop is entitled to (Milestone K).
  *
@@ -70,6 +72,10 @@ export interface SubscriptionRecord {
 export interface BranchSeatUsage {
   branchId: string;
   name: string;
+  /** What the branch is subscribed to (D154). Absent reads as `electronics` — what every branch before 0088 is. */
+  activity?: Activity;
+  /** A downgrade waiting for the next renewal, when one is scheduled. */
+  activityNext?: Activity | null;
   /** Distinct active non-Owner people assigned to this store. */
   seatsUsed: number;
   /** Seats bought and confirmed for this store. */
@@ -205,6 +211,13 @@ export function graceHoursRemaining(sub: SubscriptionRecord, now: Date): number 
 }
 
 export interface BranchSeatMath extends BranchSeatUsage {
+  /**
+   * Said explicitly on every line (D156): the app learns from this which money
+   * routes the branch may write — a flag, never a price. An older server that
+   * omits it reads as `electronics`, which keeps today's app exactly as it is.
+   */
+  activity: Activity;
+  activityNext: Activity | null;
   includedSeats: number;
   /** Included + paid + granted: how many people may work at this store. */
   seatLimit: number;
@@ -267,6 +280,8 @@ export function seatMath(sub: SubscriptionRecord, usage: SeatUsage): SeatMath {
     return {
       branchId: b.branchId,
       name: b.name,
+      activity: b.activity ?? 'electronics',
+      activityNext: b.activityNext ?? null,
       seatsUsed,
       paidSeats,
       grantedSeats,

@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { HashingService } from '../common/security/hashing.service';
+import type { Activity } from '../entitlement/activity';
 import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { provisionDefaultRoles } from '../rbac/role-provisioning';
 import {
@@ -42,6 +43,12 @@ export interface RegistrationInput {
   ownerName: string;
   businessName: string;
   branchName: string;
+  /**
+   * What the first branch does (D154): the electronics store, the money
+   * services agent counter, or both. Electronics when not said — the default
+   * every branch carried before activities existed.
+   */
+  activity?: Activity;
   city?: string;
   email?: string;
   phone?: string;
@@ -61,6 +68,8 @@ export interface RegistrationResult {
   /** Generated, never chosen. Shown afterwards as a support reference only. */
   publicStoreId: string;
   branchId: string;
+  /** The first branch's activity, as recorded — on a retry, what the winner recorded. */
+  activity: Activity;
   ownerUserId: string;
   status: 'pending_activation';
   /** True when this call did the work; false when it recognised a retry. */
@@ -177,6 +186,7 @@ export class RegistrationService {
             // it — a business with one shop still knows what to call it.
             name: input.branchName?.trim()?.slice(0, 160) || 'Main Store',
             type: 'store',
+            activity: input.activity ?? 'electronics',
           },
         });
 
@@ -331,7 +341,7 @@ export class RegistrationService {
     });
     const branch = await this.prisma.branch.findFirstOrThrow({
       where: { companyId },
-      select: { id: true },
+      select: { id: true, activity: true },
       orderBy: { createdAt: 'asc' },
     });
     const owner = await this.prisma.user.findFirstOrThrow({
@@ -344,6 +354,7 @@ export class RegistrationService {
       companyId: binToUuid(company.id),
       publicStoreId: company.publicStoreId,
       branchId: binToUuid(branch.id),
+      activity: branch.activity ?? 'electronics',
       ownerUserId: binToUuid(owner.id),
       status: 'pending_activation',
       created,

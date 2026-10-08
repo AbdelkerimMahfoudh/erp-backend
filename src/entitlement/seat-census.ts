@@ -35,7 +35,9 @@ export interface SeatCensus {
 export async function seatCensus(db: CensusClient, companyId: Buffer): Promise<SeatCensus> {
   const branches = await db.branch.findMany({
     where: { companyId, isActive: true, deletedAt: null },
-    select: { id: true, name: true },
+    // The activity rides along (D154): billing prices each branch by it, and
+    // entitlement tells the app about it — one read, one answer.
+    select: { id: true, name: true, activity: true, activityNext: true },
     orderBy: { createdAt: 'asc' },
   });
 
@@ -75,6 +77,8 @@ export async function seatCensus(db: CensusClient, companyId: Buffer): Promise<S
     return {
       branchId: binToUuid(b.id),
       name: b.name,
+      activity: b.activity ?? 'electronics',
+      activityNext: b.activityNext ?? null,
       seatsUsed: staffBy.get(hex) ?? 0,
       paidSeats: paidBy.get(hex) ?? 0,
       grantedSeats: grantedBy.get(hex) ?? 0,

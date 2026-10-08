@@ -52,6 +52,7 @@ import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
 import { OwnerInvitationService, OWNER_PASSWORD_MIN_LENGTH } from './owner-invitation.service';
 import { BillingService } from '../billing/billing.service';
+import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { ContactVerificationService } from './contact-verification.service';
 import { ContactDeliveryProvider } from './contact-delivery';
 import { EntitlementService } from '../entitlement/entitlement.service';
@@ -84,13 +85,15 @@ import { randomBytes } from 'node:crypto';
 /** Registration and admin sign-in are both unauthenticated. Both are throttled. */
 const PUBLIC_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
-class RegisterDto {
+export class RegisterDto {
   /** The client's own key, so a retry cannot create a second business. */
   @IsString() @IsNotEmptyish() @MaxLength(80) idempotencyKey: string;
 
   @IsString() @MinLength(1) @MaxLength(160) ownerName: string;
   @IsString() @MinLength(1) @MaxLength(160) businessName: string;
   @IsString() @MinLength(1) @MaxLength(160) branchName: string;
+  /** What the first branch does (D154): electronics when not said. */
+  @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
 
   @IsOptional() @IsString() @MaxLength(120) city?: string;
   @IsOptional() @IsString() @MaxLength(160) email?: string;
@@ -148,12 +151,14 @@ class PeriodDto {
  * A business created by an administrator for a shop — the same record public
  * registration leaves behind, minus the password, which nobody chooses here.
  */
-class CreateBusinessDto {
+export class CreateBusinessDto {
   /** The administrator's own key, so a retry cannot create a second business. */
   @IsString() @IsNotEmptyish() @MaxLength(80) idempotencyKey: string;
   @IsString() @MinLength(1) @MaxLength(160) ownerName: string;
   @IsString() @MinLength(1) @MaxLength(160) businessName: string;
   @IsOptional() @IsString() @MaxLength(160) branchName?: string;
+  /** What the first branch does (D154): electronics when not said. */
+  @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
   @IsOptional() @IsString() @MaxLength(120) city?: string;
   /** At least one of `email` and `phone`: it is what the Owner signs in with. */
   @IsOptional() @IsString() @MaxLength(160) email?: string;
@@ -209,8 +214,12 @@ class VerifyConfirmDto {
   @IsString() @MinLength(1) @MaxLength(12) code: string;
 }
 
-class PlanVersionDto {
+export class PlanVersionDto {
+  /** The electronics store price. */
   @IsInt() @Min(0) branchMonthly: number;
+  /** The money services agent price, and the price of a branch doing both (D154). All three are required: a version prices every activity. */
+  @IsInt() @Min(0) agentMonthly: number;
+  @IsInt() @Min(0) bothMonthly: number;
   @IsInt() @Min(0) includedStaffPerBranch: number;
   @IsInt() @Min(0) extraStaffMonthly: number;
   /** ISO date. Must be in the future — a past price would rewrite history. */
@@ -273,6 +282,7 @@ export class PlatformController {
       ownerName: dto.ownerName,
       businessName: dto.businessName,
       branchName: dto.branchName,
+      activity: dto.activity,
       city: dto.city,
       email: dto.email,
       phone: dto.phone,
@@ -302,6 +312,8 @@ export class PlatformController {
       status: result.status,
       created: result.created,
       publicStoreId: result.publicStoreId,
+      /** The first branch's activity as recorded (D154) — on a retry, what the winner recorded. */
+      activity: result.activity,
       /** Where the code will go. From the OWNER RECORD, not from the request. */
       verification: owner ? { destination: owner.destinationMasked, channel: owner.channel } : null,
       continuation: continuation
@@ -632,7 +644,7 @@ export class PlatformController {
         city: true,
         createdAt: true,
         subscription: true,
-        branches: { select: { id: true, name: true, type: true } },
+        branches: { select: { id: true, name: true, type: true, activity: true, activityNext: true } },
         /*
          * Owner CONTACT and verification state only.
          *
@@ -678,6 +690,9 @@ export class PlatformController {
         id: binToUuid(b.id),
         name: b.name,
         type: b.type,
+        activity: b.activity,
+        /** A downgrade waiting for the next renewal (D154), or null. */
+        activityNext: b.activityNext,
       })),
       people: company.users.map((u) => ({
         id: binToUuid(u.id),
@@ -758,6 +773,7 @@ export class PlatformController {
       ownerName: dto.ownerName,
       businessName: dto.businessName,
       branchName: dto.branchName ?? '',
+      activity: dto.activity,
       city: dto.city,
       email: dto.email,
       phone: dto.phone,
@@ -784,6 +800,7 @@ export class PlatformController {
         ownerName: dto.ownerName,
         city: dto.city ?? null,
         language: dto.language,
+        activity: result.activity,
         status: result.status,
       },
       ip: req.ip ?? null,
@@ -1034,7 +1051,11 @@ export class PlatformController {
           name: true,
           city: true,
           createdAt: true,
-          branches: { where: { isActive: true }, select: { name: true, type: true } },
+          branches: {
+            where: { isActive: true },
+            select: { id: true, name: true, type: true, activity: true, activityNext: true, activityChangedAt: true },
+            orderBy: { createdAt: 'asc' },
+          },
         },
       }),
       this.entitlement.forCompany(companyId),
@@ -1054,8 +1075,16 @@ export class PlatformController {
         name: company.name,
         city: company.city,
         createdAt: company.createdAt.toISOString(),
-        // Names and types only. No internal binary id reaches the client.
-        branches: company.branches.map((b) => ({ name: b.name, type: b.type })),
+        // The id is the UUID the Owner names a branch by when asking for
+        // another activity (D154); never a binary id. No operational data.
+        branches: company.branches.map((b) => ({
+          id: binToUuid(b.id),
+          name: b.name,
+          type: b.type,
+          activity: b.activity,
+          activityNext: b.activityNext,
+          activityChangedAt: b.activityChangedAt?.toISOString() ?? null,
+        })),
       },
       owner: owner
         ? {
@@ -1214,6 +1243,8 @@ export class PlatformController {
       id: binToUuid(r.id),
       version: r.version,
       branchMonthly: r.branchMonthly,
+      agentMonthly: r.agentMonthly,
+      bothMonthly: r.bothMonthly,
       includedStaffPerBranch: r.includedStaffPerBranch,
       extraStaffMonthly: r.extraStaffMonthly,
       effectiveFrom: r.effectiveFrom.toISOString(),
@@ -1233,6 +1264,8 @@ export class PlatformController {
 
     const created = await this.billing.schedulePlanVersion({
       branchMonthly: dto.branchMonthly,
+      agentMonthly: dto.agentMonthly,
+      bothMonthly: dto.bothMonthly,
       includedStaffPerBranch: dto.includedStaffPerBranch,
       extraStaffMonthly: dto.extraStaffMonthly,
       effectiveFrom: new Date(dto.effectiveFrom),
