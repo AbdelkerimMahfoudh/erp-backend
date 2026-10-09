@@ -7,6 +7,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { Prisma, type ClosingEventKind } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -25,8 +26,13 @@ import { fromCents, sharesBySale } from '../sales/sale-shares';
 import { openReceivables } from '../sales/open-receivables';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
+import { RecordFloatCountDto } from './dto/record-float-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
 import { cashDayRows } from './money-positions';
+import { activityNotSubscribed, agentActivityAllowed, branchActivityOf } from '../agent/agent-access';
+import { floatPosition } from '../agent/agent-rules';
+import { readFloatInputs } from '../agent/float-positions';
+import { floatDifference, floatsToCount, listedFloats, type FloatCountState, type FloatProviderRow } from './float-counts';
 import { OpenDayDto } from './dto/open-day.dto';
 import { ReviewOpeningDto } from './dto/review-opening.dto';
 import {
@@ -82,7 +88,7 @@ import {
 import { reclosedNotice, reopenedNotice, saleNotice, type Notice } from './closing-notices';
 import { ClosingNoticeService, type NoticeOutcome } from './closing-notice.service';
 import { MoneyAnchorsService } from './money-anchors.service';
-import type { OpenedAnchor } from './money-positions';
+import type { OpenedAnchor, TrackedMethod } from './money-positions';
 import {
   assembleReport,
   gateReport,
@@ -92,6 +98,7 @@ import {
   type ClosingReport,
   type OpeningCash,
   type ReportCashSet,
+  type ReportFloatInput,
   type ReportPermissions,
 } from './closing-report';
 import {
@@ -117,17 +124,19 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 /** The row key the counting screen and the lifecycle rules share. */
 const keyOf = (c: { channel: string; accountId: string | null }) => `${c.channel}:${c.accountId ?? 'NONE'}`;
 
-/** What moves money through the counter, and so waits while the day is closed. */
-type CounterOperation = 'sale' | 'receipt' | 'payment';
+/** What moves money through the counter, and so waits while the day is closed. An agent exchange is one (D154). */
+export type CounterOperation = 'sale' | 'receipt' | 'payment' | 'agent_exchange';
 
 /**
- * The refusal a sale, a receipt or a later payment on a debt meets while the
- * current business day is closed, or not opened yet (docs/63): nothing was
- * written, nothing opens by itself — the store is opened first, deliberately
- * (docs/61). `reason` says which, so a phone offers the reopen or the opening.
+ * The refusal a sale, a receipt, a later payment on a debt or an agent exchange
+ * meets while the current business day is closed, or not opened yet (docs/63):
+ * nothing was written, nothing opens by itself — the store is opened first,
+ * deliberately (docs/61). `reason` says which, so a phone offers the reopen or
+ * the opening.
  */
 function storeClosed(day: string, operation: CounterOperation, reason: CounterRefusal): ConflictException {
-  const nothing = operation === 'sale' ? 'Nothing was sold' : operation === 'receipt' ? 'Nothing was received' : 'Nothing was recorded';
+  const nothing =
+    operation === 'sale' ? 'Nothing was sold' : operation === 'receipt' ? 'Nothing was received' : operation === 'agent_exchange' ? 'Nothing was exchanged' : 'Nothing was recorded';
   return new ConflictException({
     code: 'store_closed',
     closedReason: reason,
@@ -460,6 +469,14 @@ export class ClosingService {
     const correctedCash = round2((cashChannel?.correctionsIn ?? 0) - (cashChannel?.correctionsOut ?? 0));
     const expensesCash = round2(num(rollup?.expensesCash ?? 0));
     /**
+     * The agent counter's cash on the day (D154, docs/73 §4.5), read apart from the report as every other term
+     * is: cash received for credit sent and given for credit received, a commission paid in cash, a reversal's
+     * counter-legs and a rebalancing's cash — the drawer is one, so they enter the one equation.
+     */
+    const agentCash = await this.agentCashOn(branchId, dayDate);
+    const agentCashIn = agentCash.in;
+    const agentCashOut = agentCash.out;
+    /**
      * What the drawer held when the day began (0076, D4): the counted cash at the
      * last close whose drawer was counted, plus the net cash movement since.
      * A balance carried forward, never income — it appears in no profit figure.
@@ -479,11 +496,12 @@ export class ClosingService {
      *            + corrections returned in cash (net of payments reclassified out)
      *            + the set amount's adjustment, when the Owner set the drawer today
      *              (the amount − the day's net at that instant − the opening balance)
+     *            + the agent counter's cash in − its cash out (D154)
      *
      * Pending reports appear nowhere — only confirmed movements are here.
      */
     const expectedCash = round2(
-      openingCash + num(cash._sum.amount) - refundedCash - supplierPaid.cash - expensesCash + correctedCash + setCash,
+      openingCash + num(cash._sum.amount) - refundedCash - supplierPaid.cash - expensesCash + correctedCash + setCash + agentCashIn - agentCashOut,
     );
     if (Math.abs(expectedCash - built.report.expected.cash.expected) >= 0.005) {
       throw new ConflictException({
@@ -536,6 +554,19 @@ export class ClosingService {
     const attested = dto.attestChecked === true ? unchecked : [];
     const unverified = dto.attestChecked === true ? [] : unchecked;
     const reason = dto.reason?.trim() ?? '';
+    /**
+     * The floats of an agent branch (D154, docs/73 §4.5): an active provider's float is counted, or skipped with a
+     * reason, before the day locks — there is no closing it on somebody's word, as there is no counting it later.
+     * An electronics-only branch lists no float and meets nothing here.
+     */
+    const floatsOutstanding = floatsToCount(built.floats.providers, built.floats.counts);
+    if (floatsOutstanding.length > 0) {
+      throw new ConflictException({
+        code: 'float_count_required',
+        message: 'Every provider float is counted, or skipped with a reason, before the day is closed.',
+        providers: floatsOutstanding.map((p) => ({ providerId: p.providerId, label: p.label })),
+      });
+    }
     if (unverified.length > 0 && (dto.acknowledgeUnverified !== true || reason.length === 0)) {
       throw new BadRequestException({
         code: 'acknowledgement_required',
@@ -571,6 +602,8 @@ export class ClosingService {
       expected: {
         cash: closedAs('cash:NONE') ? { ...r.expected.cash, verification: closedAs('cash:NONE')! } : r.expected.cash,
         accounts: r.expected.accounts.map((a) => (closedAs(a.key) ? { ...a, verification: closedAs(a.key)! } : a)),
+        // A float is counted or skipped before the lock (D154), so the close leaves each as its count row stands.
+        floats: r.expected.floats,
       },
       close: { ...r.close, unverified, attested, requiresAcknowledgement: unverified.length > 0 },
       // The verification warnings say what the close recorded, not what the live report read a moment before:
@@ -695,6 +728,8 @@ export class ClosingService {
             expensesOut: ch.expensesOut,
             correctionsIn: ch.correctionsIn,
             correctionsOut: ch.correctionsOut,
+            agentIn: ch.agentIn,
+            agentOut: ch.agentOut,
             openingBalance: ch.openingBalance,
             expected: ch.expected,
             counted,
@@ -763,6 +798,13 @@ export class ClosingService {
             });
           }
         }
+
+        /**
+         * A counted float anchors its position at the count instant (D154, docs/73 §4.5): the next day starts from
+         * what the provider's app showed, exactly as the drawer starts from its counted close. Recorded by the
+         * locker; a reclose that re-locks the same count writes nothing new.
+         */
+        await this.anchorCountedFloatsTx(tx, { companyId, branchId, closingId, day, counted: built.floats.counted });
 
         // The digest: one per closing. A reclose rewrites it from the same lines;
         // each close's own report is kept whole in its event below.
@@ -1371,7 +1413,7 @@ export class ClosingService {
     });
     const drawer = await this.dayChannels(companyId, branchId, day);
     const opening = drawer.opening;
-    const [channels, splits, sales, returns, cancellations, collected, expenses, expenseReversals, pending, discrepancies, active] = await Promise.all([
+    const [channels, splits, sales, returns, cancellations, collected, expenses, expenseReversals, pending, discrepancies, active, floats] = await Promise.all([
       Promise.resolve(drawer.channels),
       channelSplits(this.db, companyId, branchId, day),
       salesFigures(this.db, companyId, branchId, day),
@@ -1383,6 +1425,8 @@ export class ClosingService {
       day === today ? pendingReports(this.db, companyId, branchId) : Promise.resolve(null),
       openDiscrepancies(this.db, companyId, branchId),
       closing ? Promise.resolve(true) : day < today ? dayActivity(this.db, companyId, branchId, day) : Promise.resolve(true),
+      // The provider floats of an agent branch (D154); none for an electronics-only one.
+      this.floatCountsFor(branchId, closing?.id ?? null, day, today),
     ]);
     const reopenedAt = closing?.status === 'reopened' ? closing.reopenedAt : null;
     const counts = new Map<string, ChannelCountState>();
@@ -1426,6 +1470,7 @@ export class ClosingService {
       counts,
       opening,
       cashSet: drawer.declaredToday ? cashSetOf(drawer.declaredToday, drawer.adjustment, timezone) : null,
+      floats: floats.rows,
       pending,
       openDiscrepancies: discrepancies,
       previousDay,
@@ -1435,7 +1480,7 @@ export class ClosingService {
     if (invariantFailures.length > 0) {
       this.logger.error(`Daily closing report for ${day} does not reconcile: ${invariantFailures.join('; ')}`);
     }
-    return { report, version: reportVersion(report), invariantFailures, channels, closing, opening, cashAdjustment: drawer.adjustment };
+    return { report, version: reportVersion(report), invariantFailures, channels, closing, opening, cashAdjustment: drawer.adjustment, floats };
   }
 
   // ── Reopening ───────────────────────────────────────────────────────────
@@ -2194,8 +2239,9 @@ export class ClosingService {
         accountId: ch.accountId,
         label: ch.labelSnapshot,
         isUnattributed: ch.isUnattributed,
-        moneyIn: round2(ch.salesIn + ch.correctionsIn),
-        moneyOut: round2(ch.refundsOut + ch.supplierOut + ch.expensesOut + ch.correctionsOut),
+        // The drawer's in and out carry the agent counter's cash (D154); an account's agent legs are always 0.
+        moneyIn: round2(ch.salesIn + ch.correctionsIn + ch.agentIn),
+        moneyOut: round2(ch.refundsOut + ch.supplierOut + ch.expensesOut + ch.correctionsOut + ch.agentOut),
         net: ch.expected,
       })),
     };
@@ -2336,6 +2382,26 @@ export class ClosingService {
   }
 
   /**
+   * The drawer as Money's card reads it, for this branch alone (the agent's cash, docs/73 §4.5): the same opening
+   * chain, the same expected figure and the same anchor `overview` hands to `trackedMoney`, so the agent screens and
+   * Money cannot disagree about the drawer. The accounts are not read: they are the company's, and not asked for.
+   */
+  async drawerMethod(): Promise<TrackedMethod> {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const today = await this.businessDay.today(branchId);
+    const drawer = await this.dayChannels(companyId, branchId, today);
+    const cash = drawer.channels.find((c) => c.channel === 'cash');
+    const money = await this.moneyAnchors.trackedMoney(
+      branchId,
+      today,
+      { opening: drawer.opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom), dayRows: cashDayRows(cash) },
+      false,
+    );
+    return money.methods.find((m) => m.channel === 'cash') as TrackedMethod;
+  }
+
+  /**
    * The business day as it stands right now (E-CP1, extended in 0076): the
    * live per-channel figures, where the day is in its lifecycle, whether a
    * reopen is possible and with which choices, and the day's history — every
@@ -2388,6 +2454,9 @@ export class ClosingService {
     );
     const cashRow = rows.find((r) => r.channel === 'cash');
     const savedCash = recorded.get('cash:NONE');
+    // The provider floats of an agent branch (D154): listed beside the channels, counted or skipped before the lock.
+    const floats = await this.floatCountsFor(branchId, closing?.id ?? null, day, today);
+    const floatsOutstanding = floatsToCount(floats.providers, floats.counts).length;
     // A day behind the boundary with no closing row needs review if anything happened on it, and is inactive if nothing did (D8).
     const active = closing ? true : day < today ? await dayActivity(this.db, companyId, branchId, day) : true;
     const standing: DayStanding = standingOf(closing ? { status: closing.status, businessDate: day } : null, today, active, day);
@@ -2405,8 +2474,10 @@ export class ClosingService {
       status: closing?.status ?? 'counting',
       isLocked: closing?.isLocked ?? false,
       channels: rows,
-      outstanding: rows.filter((r) => r.countable && r.counted === null && !r.isSkipped).length,
-      complete: countingComplete(rows) && fresh.complete,
+      /** The floats of an agent branch, each with its difference; empty for an electronics-only branch. */
+      floats: floats.rows.map((f) => ({ ...f, difference: floatDifference(f.expected, f.counted) })),
+      outstanding: rows.filter((r) => r.countable && r.counted === null && !r.isSkipped).length + floatsOutstanding,
+      complete: countingComplete(rows) && fresh.complete && floatsOutstanding === 0,
       freshCountRequired: closing?.status === 'reopened' && !fresh.complete,
       stale: fresh.stale,
       expectedCash: round2(cashRow?.expected ?? 0),
@@ -2686,6 +2757,8 @@ export class ClosingService {
       expensesOut: target.expensesOut,
       correctionsIn: target.correctionsIn,
       correctionsOut: target.correctionsOut,
+      agentIn: target.agentIn,
+      agentOut: target.agentOut,
       openingBalance: target.openingBalance,
       expected: target.expected,
       counted,
@@ -2772,7 +2845,322 @@ export class ClosingService {
     return { ...(await this.openView(day)), status: nextStatus };
   }
 
+  /**
+   * Record one provider float's count at the closing of an agent branch (D154, docs/73 §4.5) — the float's own
+   * `recordCount`, on the same `closing.count` authority: the day stays open and correctable until somebody signs
+   * it off. Expected is what the app tracked at this instant — unknown stays null, nothing is fabricated — and a
+   * difference, when both figures exist, becomes a question through the same rule as a channel's.
+   */
+  async recordFloatCount(date: string, dto: RecordFloatCountDto) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const today = await this.businessDay.today(branchId);
+    const day = this.requireDate(date, today);
+    if (day > today) throw new BadRequestException('That business day has not begun');
+    const dayDate = dateValue(day);
+    const now = new Date();
+
+    if (dto.skip) {
+      if (dto.counted != null) throw new BadRequestException('A float is either counted or skipped, never both');
+      if (!dto.skipReason?.trim()) throw new BadRequestException('Skipping a float requires a reason');
+      if (isMachineSkipReason(dto.skipReason)) {
+        throw new BadRequestException({ code: 'reserved_reason', message: 'That reason is reserved for the close itself' });
+      }
+    } else if (dto.counted == null) {
+      throw new BadRequestException('Provide the float as the provider’s app shows it, or skip it with a reason');
+    }
+    // Only an agent branch counts floats: an electronics-only one is told so by name, never shown a count to take.
+    const activity = await branchActivityOf(this.db, branchId);
+    if (!agentActivityAllowed(activity)) throw activityNotSubscribed(activity);
+    const providerId = uuidToBin(dto.providerId);
+    const provider = await this.db.agentProvider.findFirst({ where: { id: providerId }, select: { id: true, label: true } });
+    if (!provider) throw new NotFoundException({ code: 'provider_not_found', message: 'That provider does not exist' });
+
+    const existing = await this.db.dailyClosing.findUnique({ where: { branchId_closingDate: { branchId, closingDate: dayDate } } });
+    // A locked day is signed off: reopening it is an explicit act (0076), never a count's side effect.
+    if (existing?.status === 'locked') throw new ConflictException(`Day ${day} is already closed for this branch`);
+
+    /**
+     * The float as the app tracks it at the count instant — or, for a day behind the boundary, at that day's end,
+     * as the drawer's figure is the day's — from the same read the Money card and the reports use.
+     */
+    const asOf = day === today ? now : (await this.businessDay.windowOf(day)).end;
+    const inputs = await readFloatInputs(this.db, { branchId, providerId, accountKind: 'provider', businessDate: day, asOf });
+    const expected = floatPosition(inputs.anchor, inputs.sinceAnchor).position;
+    const counted = dto.counted == null ? null : round2(dto.counted);
+    const difference = floatDifference(expected, counted);
+    const userId = this.tenant.userId() ?? null;
+
+    const closingId = existing
+      ? existing.id
+      : await this.db.dailyClosing
+          .create({
+            data: {
+              id: newUuidV7Bin(),
+              companyId,
+              branchId,
+              closingDate: dayDate,
+              // Nothing is counted until somebody counts (0078): NULL, never a placeholder zero.
+              expectedCash: 0,
+              countedCash: null,
+              difference: null,
+              totalSales: 0,
+              totalProfit: 0,
+              status: 'counting',
+              isLocked: false,
+            },
+          })
+          .then((c) => c.id);
+
+    const prior = await this.db.agentFloatCount.findFirst({ where: { closingId, providerId }, select: { id: true } });
+    const rowId = prior?.id ?? newUuidV7Bin();
+    const payload = {
+      expected,
+      counted,
+      difference,
+      explanation: dto.explanation?.trim() || null,
+      isSkipped: dto.skip ?? false,
+      skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
+      countedById: userId,
+      countedAt: now,
+    };
+    try {
+      await this.db.$transaction(async (tx) => {
+        if (prior) await tx.agentFloatCount.update({ where: { id: prior.id }, data: payload });
+        else await tx.agentFloatCount.create({ data: { id: rowId, companyId, closingId, branchId, providerId, ...payload } });
+        /**
+         * A difference becomes a question, not a number (E-CP2), through the one rule a channel's difference
+         * follows: opened for the remainder, moved by a recount, closed by a recount that shows none. A count
+         * against an unknown float claims no difference and answers nothing.
+         */
+        const existingQuestions = await tx.closingDiscrepancy.findMany({ where: { closingId, agentFloatCountId: rowId }, orderBy: { openedAt: 'asc' } });
+        const action = reconcileDiscrepancy(
+          existingQuestions.map((d) => ({ status: d.status, amount: num(d.amount) })),
+          difference,
+        );
+        const pending = existingQuestions.find((d) => d.status === 'pending_investigation') ?? null;
+        if (action.kind === 'open') {
+          await tx.closingDiscrepancy.create({ data: { id: newUuidV7Bin(), companyId, branchId, closingId, agentFloatCountId: rowId, amount: action.amount } });
+        } else if (action.kind === 'update' && pending) {
+          await tx.closingDiscrepancy.update({ where: { id: pending.id }, data: { amount: action.amount, version: { increment: 1 } } });
+        } else if (action.kind === 'resolve_no_difference' && pending) {
+          await tx.closingDiscrepancy.update({
+            where: { id: pending.id },
+            data: {
+              status: 'resolved',
+              resolution: 'error_corrected',
+              resolutionReason: 'Recounted: no difference remains',
+              resolvedById: userId,
+              resolvedAt: now,
+              version: { increment: 1 },
+            },
+          });
+        }
+      });
+    } catch (e) {
+      // Two people counting the same float at the same moment: one row, and the other is sent back to the day.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException({ code: 'refresh_required', message: 'This float was counted a moment ago; review the day again' });
+      }
+      throw e;
+    }
+
+    // `counted` once nothing countable is outstanding — the floats included — a signal to the sign-off, never a lock.
+    const view = await this.openView(day);
+    const nextStatus = existing?.status === 'reopened' ? 'reopened' : view.complete ? 'counted' : 'counting';
+    await this.db.dailyClosing.update({
+      where: { id: closingId },
+      data: { status: nextStatus, countedById: userId, countedAt: now, version: { increment: 1 } },
+    });
+
+    await this.db.closingEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId,
+        branchId,
+        businessDate: dayDate,
+        closingId,
+        kind: 'count_saved',
+        at: now,
+        actorId: userId,
+        payload: {
+          channel: 'float',
+          accountId: null,
+          providerId: dto.providerId,
+          label: provider.label,
+          counted,
+          expected,
+          difference,
+          skipped: dto.skip ?? false,
+          skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    await this.audit.record({
+      entityType: 'AgentFloatCount',
+      entityId: rowId,
+      action: prior ? 'update' : 'create',
+      after: {
+        day,
+        providerId: dto.providerId,
+        label: provider.label,
+        counted,
+        expected,
+        difference,
+        explanation: payload.explanation,
+        skipped: dto.skip ?? false,
+        skipReason: payload.skipReason,
+      },
+      branchId,
+    });
+
+    const after = await this.openView(day);
+    return { ...after, status: nextStatus, float: after.floats.find((f) => f.providerId === dto.providerId) ?? null };
+  }
+
   // --- helpers --------------------------------------------------------------
+
+  /**
+   * The provider floats at a closing of this branch (D154, docs/73 §4.5): none for an electronics-only branch;
+   * for an agent branch every active provider and any provider already counted or skipped at this closing — each
+   * as its count row left it, or, uncounted, as the app tracks it now (for a day behind the boundary, at that
+   * day's end). Read once per report, view or close; the close locks on the same reading it reports.
+   */
+  private async floatCountsFor(
+    branchId: Buffer,
+    closingId: Buffer | null,
+    day: string,
+    today: string,
+  ): Promise<{
+    providers: FloatProviderRow[];
+    counts: Map<string, FloatCountState>;
+    rows: ReportFloatInput[];
+    counted: { providerId: Buffer; counted: number; expected: number | null; countedAt: Date }[];
+  }> {
+    const none = { providers: [], counts: new Map<string, FloatCountState>(), rows: [], counted: [] };
+    if (!agentActivityAllowed(await branchActivityOf(this.db, branchId))) return none;
+    const [providers, saved] = await Promise.all([
+      this.db.agentProvider.findMany({ select: { id: true, label: true, isActive: true }, orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }] }),
+      closingId
+        ? this.db.agentFloatCount.findMany({
+            where: { closingId },
+            select: {
+              providerId: true,
+              expected: true,
+              counted: true,
+              explanation: true,
+              isSkipped: true,
+              skipReason: true,
+              countedAt: true,
+              countedBy: { select: { name: true } },
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+    const rowsByProvider = new Map(saved.map((s) => [binToUuid(s.providerId), s]));
+    const counts = new Map<string, FloatCountState>(
+      saved.map((s) => [binToUuid(s.providerId), { providerId: binToUuid(s.providerId), counted: s.counted == null ? null : round2(num(s.counted)), isSkipped: s.isSkipped }]),
+    );
+    const listed = listedFloats(
+      providers.map((p) => ({ providerId: binToUuid(p.id), label: p.label, isActive: p.isActive })),
+      counts,
+    );
+    const asOf = day === today ? new Date() : (await this.businessDay.windowOf(day)).end;
+    const rows: ReportFloatInput[] = await Promise.all(
+      listed.map(async (p) => {
+        const row = rowsByProvider.get(p.providerId);
+        if (row) {
+          return {
+            providerId: p.providerId,
+            label: p.label,
+            expected: row.expected == null ? null : round2(num(row.expected)),
+            counted: row.counted == null ? null : round2(num(row.counted)),
+            explanation: row.explanation,
+            isSkipped: row.isSkipped,
+            skipReason: row.skipReason,
+            countedAt: row.countedAt?.toISOString() ?? null,
+            countedByName: row.countedBy?.name ?? null,
+          };
+        }
+        const inputs = await readFloatInputs(this.db, { branchId, providerId: uuidToBin(p.providerId), accountKind: 'provider', businessDate: day, asOf });
+        return {
+          providerId: p.providerId,
+          label: p.label,
+          expected: floatPosition(inputs.anchor, inputs.sinceAnchor).position,
+          counted: null,
+          explanation: null,
+          isSkipped: false,
+          skipReason: null,
+          countedAt: null,
+          countedByName: null,
+        };
+      }),
+    );
+    const counted = saved
+      .filter((s) => s.counted != null && s.countedAt !== null)
+      .map((s) => ({ providerId: s.providerId, counted: round2(num(s.counted)), expected: s.expected == null ? null : round2(num(s.expected)), countedAt: s.countedAt as Date }));
+    return { providers: listed, counts, rows, counted };
+  }
+
+  /**
+   * The anchors a locked close leaves on its counted floats (D154): one `agent_positions` row per count, at the
+   * count instant, amount = what the provider's app showed, what the app tracked and the difference beside it,
+   * recorded by the locker. Keyed on the closing, the provider and the count instant, so a reclose that re-locks
+   * an unchanged count writes nothing new and a fresh count after a reopen anchors again.
+   */
+  private async anchorCountedFloatsTx(
+    tx: Pick<TenantPrisma, 'agentPosition' | 'user'>,
+    args: { companyId: Buffer; branchId: Buffer; closingId: Buffer; day: string; counted: { providerId: Buffer; counted: number; expected: number | null; countedAt: Date }[] },
+  ): Promise<void> {
+    if (args.counted.length === 0) return;
+    const userId = this.tenant.requireUserId();
+    const locker = await tx.user.findFirst({ where: { id: userId }, select: { name: true } });
+    for (const f of args.counted) {
+      const key = `counted_close:${args.closingId.toString('hex')}:${f.providerId.toString('hex')}:${f.countedAt.getTime()}`;
+      const clientUuid = createHash('sha256').update(key).digest().subarray(0, 16);
+      const already = await tx.agentPosition.findFirst({ where: { clientUuid }, select: { id: true } });
+      if (already) continue;
+      await tx.agentPosition.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: args.companyId,
+          branchId: args.branchId,
+          accountKind: 'provider',
+          providerId: f.providerId,
+          amount: f.counted,
+          at: f.countedAt,
+          businessDate: dateValue(args.day),
+          source: 'counted_close',
+          trackedBefore: f.expected,
+          difference: floatDifference(f.expected, f.counted),
+          note: null,
+          recordedById: userId,
+          recordedByName: locker?.name ?? '',
+          clientUuid,
+          clientRequestHash: createHash('sha256').update(`${key}:${f.counted.toFixed(2)}`).digest('hex'),
+        },
+      });
+    }
+  }
+
+  /**
+   * The agent counter's cash on one business day (D154, docs/73 §4.5): every cash leg of `agent_movements` — an
+   * exchange's principal, a commission paid in cash, a reversal's counter-leg, a rebalancing's cash — by its
+   * STORED business date, in and out apart. The close's independent check of the drawer reads it here; the
+   * report's channel row reads the same legs through `channelMovements`.
+   */
+  private async agentCashOn(branchId: Buffer, dayDate: Date): Promise<{ in: number; out: number }> {
+    const companyId = this.tenant.companyId();
+    const rows = await this.db.$queryRaw<{ direction: string; total: Prisma.Decimal }[]>(Prisma.sql`
+      SELECT direction, COALESCE(SUM(amount), 0) AS total
+        FROM agent_movements
+       WHERE company_id = ${companyId} AND branch_id = ${branchId}
+         AND account_kind = 'cash' AND business_date = ${dayDate}
+       GROUP BY direction`);
+    const of = (direction: string) => round2(rows.filter((r) => r.direction === direction).reduce((a, r) => a + num(r.total), 0));
+    return { in: of('inflow'), out: of('outflow') };
+  }
 
   /**
    * Every channel this branch has to account for, with the components behind
@@ -3027,6 +3415,16 @@ export class ClosingService {
       WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}
         AND fc.status = 'approved' AND fc.correction_date BETWEEN ${fromDay} AND ${toDay}
       GROUP BY l.method, l.receiving_account_id, l.direction
+
+      UNION ALL
+      -- The agent counter's cash legs (D154, docs/73 §4.5): the drawer is one, so an exchange's cash, a commission
+      -- paid in cash, a reversal's counter-leg and a rebalancing's cash enter the drawer's own row — by the STORED
+      -- business date each leg was posted under. A float leg never reaches a channel: floats are counted apart.
+      SELECT 'cash', NULL, IF(m.direction = 'inflow', 'agentIn', 'agentOut'), SUM(m.amount)
+      FROM agent_movements m
+      WHERE m.company_id = ${companyId} AND m.branch_id = ${branchId}
+        AND m.account_kind = 'cash' AND m.business_date BETWEEN ${fromDay} AND ${toDay}
+      GROUP BY m.direction
     `);
 
     return rows
@@ -3126,9 +3524,10 @@ function snapshotReport(payload: unknown): {
   if (!p.report || typeof p.report !== 'object' || typeof p.reportVersion !== 'string') return null;
   const v = (p.verification ?? {}) as Record<string, unknown>;
   const report = p.report as ClosingReport;
+  const withAttested = report.close && !Array.isArray(report.close.attested) ? { ...report, close: { ...report.close, attested: [] } } : report;
   return {
-    // A close stored before the attestation existed has no `close.attested`.
-    report: report.close && !Array.isArray(report.close.attested) ? { ...report, close: { ...report.close, attested: [] } } : report,
+    // A close stored before the attestation existed has no `close.attested`; one stored before the floats (D154) has none of those either.
+    report: withAttested.expected && !Array.isArray(withAttested.expected.floats) ? { ...withAttested, expected: { ...withAttested.expected, floats: [] } } : withAttested,
     version: p.reportVersion,
     verification: {
       verified: Array.isArray(v.verified) ? (v.verified as string[]) : [],

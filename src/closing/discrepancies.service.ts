@@ -40,6 +40,7 @@ export class DiscrepanciesService {
       include: {
         closing: { select: { closingDate: true } },
         channelCount: { select: { channel: true, labelSnapshot: true, expected: true, counted: true } },
+        agentFloatCount: { select: { providerId: true, provider: { select: { label: true } }, expected: true, counted: true } },
       },
       orderBy: { openedAt: 'desc' },
       take: 100,
@@ -54,6 +55,7 @@ export class DiscrepanciesService {
       include: {
         closing: { select: { closingDate: true } },
         channelCount: { select: { channel: true, labelSnapshot: true, expected: true, counted: true } },
+        agentFloatCount: { select: { providerId: true, provider: { select: { label: true } }, expected: true, counted: true } },
         debtEntries: { orderBy: { createdAt: 'asc' } },
       },
     });
@@ -276,6 +278,8 @@ export class DiscrepanciesService {
     version: number;
     closing: { closingDate: Date };
     channelCount: { channel: string; labelSnapshot: string; expected: Prisma.Decimal; counted: Prisma.Decimal | null } | null;
+    /** A provider float's question (D154): the float it was counted against, when the difference is a float's. */
+    agentFloatCount?: { providerId: Buffer; provider: { label: string }; expected: Prisma.Decimal | null; counted: Prisma.Decimal | null } | null;
   }) {
     return {
       id: binToUuid(r.id),
@@ -289,6 +293,14 @@ export class DiscrepanciesService {
             label: r.channelCount.labelSnapshot,
             expected: round2(num(r.channelCount.expected)),
             counted: r.channelCount.counted == null ? null : round2(num(r.channelCount.counted)),
+          }
+        : null,
+      float: r.agentFloatCount
+        ? {
+            providerId: binToUuid(r.agentFloatCount.providerId),
+            label: r.agentFloatCount.provider.label,
+            expected: r.agentFloatCount.expected == null ? null : round2(num(r.agentFloatCount.expected)),
+            counted: r.agentFloatCount.counted == null ? null : round2(num(r.agentFloatCount.counted)),
           }
         : null,
       status: r.status,

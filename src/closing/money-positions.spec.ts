@@ -557,14 +557,18 @@ describe('what moved on the day, beside the position (the user’s brief of 2026
   });
 
   it('the drawer’s day comes from its closing row, with the closing’s signs; a row that moved nothing yields no rows', () => {
-    const row = { salesIn: 10000, refundsOut: 500, supplierOut: 2000, expensesOut: 300, correctionsIn: 50, correctionsOut: 25 };
+    // The row carries the agent counter's two cash components since D154 (docs/73 §4.5): cash received for credit is an
+    // inflow of the drawer, cash given for credit an outflow — the same signs the Daily closing gives them.
+    const row = { salesIn: 10000, refundsOut: 500, supplierOut: 2000, expensesOut: 300, correctionsIn: 50, correctionsOut: 25, agentIn: 20000, agentOut: 15000 };
     const rows = cashDayRows(row);
     expect(rows.every((r) => r.channel === 'cash' && r.accountId === null)).toBe(true);
-    expect(movementOf('2026-09-26', rows)).toEqual({ businessDate: '2026-09-26', inflows: 10050, outflows: 2825, net: 7225 });
-    expect(cashDayRows({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0, correctionsOut: 0 })).toEqual([]);
+    expect(movementOf('2026-09-26', rows)).toEqual({ businessDate: '2026-09-26', inflows: 30050, outflows: 17825, net: 12225 });
+    expect(cashDayRows({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0, correctionsOut: 0, agentIn: 0, agentOut: 0 })).toEqual([]);
     expect(cashDayRows(null)).toEqual([]);
     const c = card({ drawer: { dayRows: rows } } as never);
-    expect(c.methods[0].movement).toEqual({ businessDate: '2026-09-26', inflows: 10050, outflows: 2825, net: 7225 });
+    expect(c.methods[0].movement).toEqual({ businessDate: '2026-09-26', inflows: 30050, outflows: 17825, net: 12225 });
+    // An electronics-only drawer carries no agent legs: its day is what it was before.
+    expect(movementOf('2026-09-26', cashDayRows({ ...row, agentIn: 0, agentOut: 0 }))).toEqual({ businessDate: '2026-09-26', inflows: 10050, outflows: 2825, net: 7225 });
   });
 
   it('rounds to the cent and keeps a method’s day apart from another’s', () => {

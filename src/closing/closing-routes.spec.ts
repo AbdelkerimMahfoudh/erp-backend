@@ -62,6 +62,11 @@ describe('closing routes and authority (0076)', () => {
     expect(perms(ClosingController, 'recordCount')).toEqual(['closing.count']);
   });
 
+  it('a provider float is counted on the same authority as a channel (D154); locking stays the closing authority', () => {
+    expect(perms(ClosingController, 'recordFloatCount')).toEqual(['closing.count']);
+    expect(perms(ClosingController, 'close')).toEqual(['closing.perform']);
+  });
+
   it('Home carries no route permission — every section is gated inside', () => {
     expect(perms(DashboardController, 'home')).toBeUndefined();
     expect(perms(DashboardController, 'full')).toEqual(['report.view']);

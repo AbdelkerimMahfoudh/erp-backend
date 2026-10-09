@@ -38,7 +38,8 @@ export type UnknownReason = 'no_counted_close' | 'no_anchor';
  * still shows the money the records hold for it, and a known one shows the
  * same day figure the Daily closing will. An unknown opening is never turned
  * into a balance by a movement: the position stays null; the movement is its
- * own figure.
+ * own figure. The drawer's day carries the agent counter's cash legs (D154):
+ * cash received for credit is an inflow, cash given for credit an outflow.
  *
  * Scope follows the method: the drawer's day is this branch's; an account is
  * the company's, so its day is every shop's movement on that account, keyed by
@@ -54,7 +55,7 @@ export interface MethodMovement {
   net: number;
 }
 
-const INFLOW: ReadonlySet<MovementRow['component']> = new Set(['salesIn', 'correctionsIn']);
+const INFLOW: ReadonlySet<MovementRow['component']> = new Set(['salesIn', 'correctionsIn', 'agentIn']);
 
 /** The day's movement of one method from its component rows, with the closing's signs. */
 export function movementOf(businessDate: string, rows: readonly Pick<MovementRow, 'component' | 'amount'>[]): MethodMovement {
@@ -70,7 +71,9 @@ export function movementOf(businessDate: string, rows: readonly Pick<MovementRow
 }
 
 /** The drawer's day rows from its closing channel row — the same sums the Daily closing shows. */
-export function cashDayRows(row: Pick<ChannelRow, 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut'> | null | undefined): MovementRow[] {
+export function cashDayRows(
+  row: Pick<ChannelRow, 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut' | 'agentIn' | 'agentOut'> | null | undefined,
+): MovementRow[] {
   if (!row) return [];
   const parts: [MovementRow['component'], number][] = [
     ['salesIn', row.salesIn],
@@ -79,6 +82,8 @@ export function cashDayRows(row: Pick<ChannelRow, 'salesIn' | 'refundsOut' | 'su
     ['expensesOut', row.expensesOut],
     ['correctionsIn', row.correctionsIn],
     ['correctionsOut', row.correctionsOut],
+    ['agentIn', row.agentIn],
+    ['agentOut', row.agentOut],
   ];
   return parts.filter(([, amount]) => amount !== 0).map(([component, amount]) => ({ channel: 'cash', accountId: null, component, amount }));
 }
