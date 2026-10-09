@@ -82,7 +82,7 @@ import {
 import { reclosedNotice, reopenedNotice, saleNotice, type Notice } from './closing-notices';
 import { ClosingNoticeService, type NoticeOutcome } from './closing-notice.service';
 import { MoneyAnchorsService } from './money-anchors.service';
-import type { OpenedAnchor } from './money-positions';
+import type { OpenedAnchor, TrackedMethod } from './money-positions';
 import {
   assembleReport,
   gateReport,
@@ -117,17 +117,19 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 /** The row key the counting screen and the lifecycle rules share. */
 const keyOf = (c: { channel: string; accountId: string | null }) => `${c.channel}:${c.accountId ?? 'NONE'}`;
 
-/** What moves money through the counter, and so waits while the day is closed. */
-type CounterOperation = 'sale' | 'receipt' | 'payment';
+/** What moves money through the counter, and so waits while the day is closed. An agent exchange is one (D154). */
+export type CounterOperation = 'sale' | 'receipt' | 'payment' | 'agent_exchange';
 
 /**
- * The refusal a sale, a receipt or a later payment on a debt meets while the
- * current business day is closed, or not opened yet (docs/63): nothing was
- * written, nothing opens by itself — the store is opened first, deliberately
- * (docs/61). `reason` says which, so a phone offers the reopen or the opening.
+ * The refusal a sale, a receipt, a later payment on a debt or an agent exchange
+ * meets while the current business day is closed, or not opened yet (docs/63):
+ * nothing was written, nothing opens by itself — the store is opened first,
+ * deliberately (docs/61). `reason` says which, so a phone offers the reopen or
+ * the opening.
  */
 function storeClosed(day: string, operation: CounterOperation, reason: CounterRefusal): ConflictException {
-  const nothing = operation === 'sale' ? 'Nothing was sold' : operation === 'receipt' ? 'Nothing was received' : 'Nothing was recorded';
+  const nothing =
+    operation === 'sale' ? 'Nothing was sold' : operation === 'receipt' ? 'Nothing was received' : operation === 'agent_exchange' ? 'Nothing was exchanged' : 'Nothing was recorded';
   return new ConflictException({
     code: 'store_closed',
     closedReason: reason,
@@ -2333,6 +2335,26 @@ export class ClosingService {
        */
       trackedMoney,
     };
+  }
+
+  /**
+   * The drawer as Money's card reads it, for this branch alone (the agent's cash, docs/73 §4.5): the same opening
+   * chain, the same expected figure and the same anchor `overview` hands to `trackedMoney`, so the agent screens and
+   * Money cannot disagree about the drawer. The accounts are not read: they are the company's, and not asked for.
+   */
+  async drawerMethod(): Promise<TrackedMethod> {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const today = await this.businessDay.today(branchId);
+    const drawer = await this.dayChannels(companyId, branchId, today);
+    const cash = drawer.channels.find((c) => c.channel === 'cash');
+    const money = await this.moneyAnchors.trackedMoney(
+      branchId,
+      today,
+      { opening: drawer.opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom), dayRows: cashDayRows(cash) },
+      false,
+    );
+    return money.methods.find((m) => m.channel === 'cash') as TrackedMethod;
   }
 
   /**

@@ -37,6 +37,13 @@ interface ErrorBody {
   resendAvailableAt?: unknown;
   delivery?: unknown;
   challengeId?: unknown;
+  trackedCash?: unknown;
+  missing?: unknown;
+  expectedConfigVersionId?: unknown;
+  currentConfigVersionId?: unknown;
+  providers?: unknown;
+  activity?: unknown;
+  required?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -95,6 +102,18 @@ const DETAIL_KEYS = [
   'challengeId',
   // The drawer's tracked amount when an opening refuses to keep it (`opening_cash_negative`, 2026-10-08).
   'trackedCash',
+  /*
+   * The Money Services Agent activity (docs/73, D154–D156). `provider_not_configured` names the blank fields
+   * (`missing`) so the Owner knows what to fill; `stale_configuration` names the version the phone showed and the
+   * one in force; `float_count_required` lists the providers still to count; `activity_not_subscribed` says which
+   * activity the branch has and which it needs — a flag the website turns into a request, never a price.
+   */
+  'missing',
+  'expectedConfigVersionId',
+  'currentConfigVersionId',
+  'providers',
+  'activity',
+  'required',
 ] as const;
 
 /**
