@@ -9,7 +9,12 @@ import type { AgentDirection, LegAccount, LegDirection } from './agent-rules';
  *
  * Every row is keyed by the business date it was STORED with (the company's
  * zone and the 06:00 rule applied when it was written), so a report and the
- * Daily closing cannot disagree about which day an exchange belongs to.
+ * Daily closing cannot disagree about which day an exchange belongs to — and a
+ * reversal belongs to the day it was made on, as its counter-legs do (docs/73
+ * §4.3): an exchange stands in its own period's figures unless it was reversed
+ * within that same period; a later reversal appears in the later period, on
+ * the reversals line, and its commission comes off that period's commission.
+ * A period that is over never changes afterwards.
  */
 
 export type ReportPeriod = 'day' | 'week' | 'month' | 'year';
@@ -42,10 +47,12 @@ export interface ReportTransaction {
   direction: AgentDirection;
   amount: number;
   commission: number;
-  status: 'completed' | 'reversed';
   recordedById: string;
   recordedByName: string;
+  /** The business date the exchange was recorded on. */
   businessDate: string;
+  /** The business date its reversal was posted on (its counter-legs' day); null while it stands, or reversed after the period. */
+  reversalDate: string | null;
 }
 
 export interface ReportRebalancingLeg {
@@ -57,15 +64,16 @@ export interface ReportRebalancingLeg {
 }
 
 export interface ExchangeTotals {
-  /** Completed, unreversed exchanges of the period. */
+  /** Exchanges recorded in the period and still standing at its end. */
   count: number;
   volume: number;
   cashReceived: number;
   cashPaid: number;
   creditSent: number;
   creditReceived: number;
+  /** Earned in the period: its standing exchanges' commission, less that of earlier exchanges reversed in it. */
   commission: number;
-  /** Exchanges of the period that were reversed, apart: never in the figures above. */
+  /** Reversals made in the period, whatever day their exchange was recorded on: never in the figures above. */
   reversals: { count: number; volume: number; commission: number };
 }
 
@@ -116,11 +124,29 @@ const emptyExchanges = (): ExchangeTotals => ({
   reversals: { count: 0, volume: 0, commission: 0 },
 });
 
-function addExchange(into: ExchangeTotals, t: ReportTransaction): void {
-  if (t.status === 'reversed') {
+/** A window of business dates, both ends included. */
+interface Window {
+  from: string;
+  to: string;
+}
+
+const within = (date: string | null, w: Window): boolean => date !== null && date >= w.from && date <= w.to;
+
+/** How one exchange counts in a window: standing in its figures, reversed in it, or not there at all. */
+function placeOf(t: ReportTransaction, w: Window): 'standing' | 'reversed_here' | 'reversed_from_earlier' | 'absent' {
+  if (within(t.reversalDate, w)) return within(t.businessDate, w) ? 'reversed_here' : 'reversed_from_earlier';
+  return within(t.businessDate, w) ? 'standing' : 'absent';
+}
+
+function addExchange(into: ExchangeTotals, t: ReportTransaction, w: Window): void {
+  const place = placeOf(t, w);
+  if (place === 'absent') return;
+  if (place !== 'standing') {
     into.reversals.count += 1;
     into.reversals.volume = round2(into.reversals.volume + t.amount);
     into.reversals.commission = round2(into.reversals.commission + t.commission);
+    // Earned in an earlier period, which keeps it: it comes off this one, where it was given back.
+    if (place === 'reversed_from_earlier') into.commission = round2(into.commission - t.commission);
     return;
   }
   into.count += 1;
@@ -147,16 +173,17 @@ function rebalancingTotals(legs: readonly ReportRebalancingLeg[]): ReportTotals[
   };
 }
 
-function totalsOf(transactions: readonly ReportTransaction[], legs: readonly ReportRebalancingLeg[]): ReportTotals {
+function totalsOf(transactions: readonly ReportTransaction[], legs: readonly ReportRebalancingLeg[], w: Window): ReportTotals {
   const totals = emptyExchanges();
-  for (const t of transactions) addExchange(totals, t);
-  return { ...totals, rebalancings: rebalancingTotals(legs) };
+  for (const t of transactions) addExchange(totals, t, w);
+  return { ...totals, rebalancings: rebalancingTotals(legs.filter((l) => within(l.businessDate, w))) };
 }
 
 /**
- * The report of a period from its rows. Completed exchanges make the figures;
- * reversed ones are counted apart (a reversal undid both the money and the
- * commission); a rebalancing is neither.
+ * The report of a period from its rows: the exchanges recorded in it, and the
+ * earlier ones reversed in it. Standing exchanges make the figures; reversals
+ * are counted apart, on the day they were made (a reversal undid both the money
+ * and the commission); a rebalancing is neither.
  */
 export function aggregateAgentReport(input: {
   period: ReportPeriod;
@@ -165,18 +192,24 @@ export function aggregateAgentReport(input: {
   transactions: readonly ReportTransaction[];
   rebalancingLegs: readonly ReportRebalancingLeg[];
 }): AgentReport {
+  const period: Window = { from: input.from, to: input.to };
   const byProvider = new Map<string, ProviderTotals>();
   const byEmployee = new Map<string, EmployeeTotals>();
   for (const t of input.transactions) {
+    const place = placeOf(t, period);
+    if (place === 'absent') continue;
     const provider = byProvider.get(t.providerId) ?? { providerId: t.providerId, label: t.providerLabel, ...emptyExchanges() };
-    addExchange(provider, t);
+    addExchange(provider, t, period);
     byProvider.set(t.providerId, provider);
+    // The employee who recorded it: their reversed exchanges are counted in the period the reversal was made.
     const employee = byEmployee.get(t.recordedById) ?? { userId: t.recordedById, name: t.recordedByName, count: 0, volume: 0, commission: 0, reversals: { count: 0 } };
-    if (t.status === 'reversed') employee.reversals.count += 1;
-    else {
+    if (place === 'standing') {
       employee.count += 1;
       employee.volume = round2(employee.volume + t.amount);
       employee.commission = round2(employee.commission + t.commission);
+    } else {
+      employee.reversals.count += 1;
+      if (place === 'reversed_from_earlier') employee.commission = round2(employee.commission - t.commission);
     }
     byEmployee.set(t.recordedById, employee);
   }
@@ -184,21 +217,15 @@ export function aggregateAgentReport(input: {
     period: input.period,
     from: input.from,
     to: input.to,
-    totals: totalsOf(input.transactions, input.rebalancingLegs),
+    totals: totalsOf(input.transactions, input.rebalancingLegs, period),
     byProvider: [...byProvider.values()].sort((a, b) => b.volume - a.volume || a.label.localeCompare(b.label)),
     byEmployee: [...byEmployee.values()].sort((a, b) => b.volume - a.volume || a.name.localeCompare(b.name)),
   };
   if (input.period === 'year') {
-    const months = new Set<string>([...input.transactions.map((t) => t.businessDate.slice(0, 7)), ...input.rebalancingLegs.map((l) => l.businessDate.slice(0, 7))]);
-    report.byMonth = [...months]
-      .sort()
-      .map((month) => ({
-        month,
-        ...totalsOf(
-          input.transactions.filter((t) => t.businessDate.startsWith(month)),
-          input.rebalancingLegs.filter((l) => l.businessDate.startsWith(month)),
-        ),
-      }));
+    // Each month that recorded, reversed or rebalanced something in the year, by the same rules as the year itself.
+    const dates = [...input.transactions.flatMap((t) => [t.businessDate, t.reversalDate]), ...input.rebalancingLegs.map((l) => l.businessDate)];
+    const months = new Set(dates.filter((d): d is string => within(d, period)).map((d) => d.slice(0, 7)));
+    report.byMonth = [...months].sort().map((month) => ({ month, ...totalsOf(input.transactions, input.rebalancingLegs, periodRangeOf('month', `${month}-01`)) }));
   }
   return report;
 }

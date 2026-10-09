@@ -384,7 +384,7 @@ describe('the worked example of docs/73 §4.7, event by event', () => {
   it('1 — Receive cash 20 000 / send Bankily credit: drawer 30 000, Bankily 30 200, commission 200, 1 / 20 000', () => {
     const commission = commissionOf(20_000, rateFor('cash_in_credit_out', fixture)!);
     post(exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission, providerId: BANKILY, commissionDestination: 'provider_float', principalFeeMode: 'separate' }), t('09:00'));
-    transactions.push({ providerId: BANKILY, providerLabel: 'Bankily', direction: 'cash_in_credit_out', amount: 20_000, commission, status: 'completed', recordedById: 'u1', recordedByName: 'Aicha', businessDate: DAY });
+    transactions.push({ providerId: BANKILY, providerLabel: 'Bankily', direction: 'cash_in_credit_out', amount: 20_000, commission, recordedById: 'u1', recordedByName: 'Aicha', businessDate: DAY, reversalDate: null });
     expect(commission).toBe(200);
     expect(drawer()).toBe(30_000);
     expect(float(BANKILY).position).toBe(30_200);
@@ -395,7 +395,7 @@ describe('the worked example of docs/73 §4.7, event by event', () => {
   it('2 — Give cash 15 000 / receive Sedad credit: drawer 15 000, Bankily 30 200, Sedad unknown with 15 150 moved today, commission 350, 2 / 35 000', () => {
     const commission = commissionOf(15_000, rateFor('cash_out_credit_in', fixture)!);
     post(exchangeLegs({ direction: 'cash_out_credit_in', amount: 15_000, commission, providerId: SEDAD, commissionDestination: 'provider_float', principalFeeMode: 'separate' }), t('10:00'));
-    transactions.push({ providerId: SEDAD, providerLabel: 'Sedad', direction: 'cash_out_credit_in', amount: 15_000, commission, status: 'completed', recordedById: 'u1', recordedByName: 'Aicha', businessDate: DAY });
+    transactions.push({ providerId: SEDAD, providerLabel: 'Sedad', direction: 'cash_out_credit_in', amount: 15_000, commission, recordedById: 'u1', recordedByName: 'Aicha', businessDate: DAY, reversalDate: null });
     expect(drawer()).toBe(15_000);
     expect(float(BANKILY).position).toBe(30_200);
     expect(float(SEDAD)).toMatchObject({ known: false, position: null });
@@ -413,7 +413,7 @@ describe('the worked example of docs/73 §4.7, event by event', () => {
   it('3 — reversal of #1 (wrong direction): the drawer gives the 20 000 back (−5 000, shown as negative), Bankily 50 000, commission 150, 1 completed and 1 reversed / 15 000', () => {
     const original = ledger.filter((l) => l.recordedAt.getTime() === t('09:00').getTime());
     post(reversalLegs(original), t('11:00'));
-    transactions[0] = { ...transactions[0], status: 'reversed' };
+    transactions[0] = { ...transactions[0], reversalDate: DAY };
     expect(drawer()).toBe(-5_000);
     expect(float(BANKILY).position).toBe(50_000);
     expect(float(SEDAD).position).toBeNull();

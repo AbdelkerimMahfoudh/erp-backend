@@ -2,7 +2,8 @@ import { aggregateAgentReport, periodRangeOf, REPORT_PERIODS, type ReportRebalan
 
 /**
  * The agent reports (D157), pure: the period's business dates, and the
- * figures from the period's rows — completed, reversed and rebalanced apart.
+ * figures from the period's rows — standing, reversed and rebalanced apart,
+ * a reversal on the day it was made.
  */
 
 const BANKILY = 'b0000000-0000-7000-8000-000000000001';
@@ -14,10 +15,10 @@ const tx = (over: Partial<ReportTransaction> = {}): ReportTransaction => ({
   direction: 'cash_in_credit_out',
   amount: 10_000,
   commission: 100,
-  status: 'completed',
   recordedById: 'u1',
   recordedByName: 'Aicha',
   businessDate: '2026-10-08',
+  reversalDate: null,
   ...over,
 });
 
@@ -41,7 +42,7 @@ describe('the figures of a period', () => {
   const rows = [
     tx({ amount: 20_000, commission: 200 }),
     tx({ direction: 'cash_out_credit_in', amount: 15_000, commission: 150, providerId: SEDAD, providerLabel: 'Sedad', recordedById: 'u2', recordedByName: 'Moussa' }),
-    tx({ amount: 5_000, commission: 50, status: 'reversed' }),
+    tx({ amount: 5_000, commission: 50, reversalDate: '2026-10-08' }),
     tx({ direction: 'cash_out_credit_in', amount: 0.1, commission: 0, businessDate: '2026-10-09' }),
     tx({ direction: 'cash_out_credit_in', amount: 0.2, commission: 0, businessDate: '2026-10-09' }),
   ];
@@ -55,7 +56,7 @@ describe('the figures of a period', () => {
   ];
   const report = aggregateAgentReport({ period: 'week', from: '2026-10-05', to: '2026-10-11', transactions: rows, rebalancingLegs: legs });
 
-  it('count, volume and commission are the completed exchanges only; the reversed one is counted apart', () => {
+  it('count, volume and commission are the standing exchanges only; the one reversed in the period is counted apart', () => {
     expect(report.totals).toEqual({
       count: 4,
       volume: 35_000.3,
@@ -112,7 +113,7 @@ describe('the figures of a period', () => {
       period: 'year',
       from: '2026-01-01',
       to: '2026-12-31',
-      transactions: [tx({ businessDate: '2026-03-02', amount: 100, commission: 1 }), tx({ businessDate: '2026-01-15', amount: 50, commission: 0.5 }), tx({ businessDate: '2026-03-30', amount: 7, commission: 0.07, status: 'reversed' })],
+      transactions: [tx({ businessDate: '2026-03-02', amount: 100, commission: 1 }), tx({ businessDate: '2026-01-15', amount: 50, commission: 0.5 }), tx({ businessDate: '2026-03-30', amount: 7, commission: 0.07, reversalDate: '2026-03-30' })],
       rebalancingLegs: [{ rebalancingId: 'r9', account: 'cash', direction: 'inflow', amount: 10, businessDate: '2026-07-01' }, { rebalancingId: 'r9', account: 'external', direction: 'outflow', amount: 10, businessDate: '2026-07-01' }],
     });
     expect(year.byMonth!.map((m) => m.month)).toEqual(['2026-01', '2026-03', '2026-07']);
@@ -121,5 +122,44 @@ describe('the figures of a period', () => {
     expect(year.byMonth![2]).toMatchObject({ month: '2026-07', count: 0, rebalancings: { count: 1, cashIn: 10 } });
     expect(year.byMonth!.reduce((n, m) => n + m.volume, 0)).toBe(year.totals.volume);
     expect(year.byMonth!.reduce((n, m) => n + m.commission, 0)).toBe(year.totals.commission);
+  });
+});
+
+describe('a reversal belongs to the day it was made (docs/73 §4.3)', () => {
+  // Recorded 30 September, reversed 1 October: the counter-legs, and the closing's agentOut, are dated 1 October.
+  const late = tx({ amount: 20_000, commission: 200, businessDate: '2026-09-30', reversalDate: '2026-10-01' });
+  const report = (period: 'day' | 'month' | 'year', date: string) => {
+    const { from, to } = periodRangeOf(period, date);
+    return aggregateAgentReport({ period, from, to, transactions: [late], rebalancingLegs: [] });
+  };
+
+  it('the day it was recorded keeps it: the figures a locked closing showed never change afterwards', () => {
+    const sep30 = report('day', '2026-09-30').totals;
+    expect([sep30.count, sep30.cashReceived, sep30.commission]).toEqual([1, 20_000, 200]);
+    expect(sep30.reversals).toEqual({ count: 0, volume: 0, commission: 0 });
+    expect(report('month', '2026-09-15').totals).toMatchObject({ count: 1, volume: 20_000, commission: 200 });
+  });
+
+  it('the day it was reversed shows it on the reversals line, and gives the commission back there', () => {
+    const oct1 = report('day', '2026-10-01');
+    expect(oct1.totals).toMatchObject({ count: 0, volume: 0, cashReceived: 0, commission: -200, reversals: { count: 1, volume: 20_000, commission: 200 } });
+    expect(oct1.byProvider).toEqual([expect.objectContaining({ label: 'Bankily', count: 0, commission: -200, reversals: { count: 1, volume: 20_000, commission: 200 } })]);
+    expect(oct1.byEmployee).toEqual([{ userId: 'u1', name: 'Aicha', count: 0, volume: 0, commission: -200, reversals: { count: 1 } }]);
+  });
+
+  it('within one period it is simply reversed; the months add up to the year', () => {
+    const year = report('year', '2026-06-01');
+    expect(year.totals).toMatchObject({ count: 0, volume: 0, commission: 0, reversals: { count: 1, volume: 20_000, commission: 200 } });
+    expect(year.byMonth!.map((m) => [m.month, m.count, m.commission, m.reversals.count])).toEqual([
+      ['2026-09', 1, 200, 0],
+      ['2026-10', 0, -200, 1],
+    ]);
+    expect(year.byMonth!.reduce((n, m) => n + m.commission, 0)).toBe(year.totals.commission);
+  });
+
+  it('reversed after the period ends: it stood throughout, and stands in its figures', () => {
+    const later = tx({ amount: 5_000, commission: 50, businessDate: '2026-10-08', reversalDate: null });
+    const day = aggregateAgentReport({ period: 'day', from: '2026-10-08', to: '2026-10-08', transactions: [later], rebalancingLegs: [] });
+    expect(day.totals).toMatchObject({ count: 1, volume: 5_000, commission: 50, reversals: { count: 0 } });
   });
 });

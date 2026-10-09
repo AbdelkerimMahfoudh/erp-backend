@@ -19,12 +19,13 @@ const WINDOW_END = new Date('2026-10-02T06:00:00Z');
 
 type Row = Record<string, any>;
 
-function harness(opts: { activity?: string; transactions?: Row[]; legs?: Row[]; anchors?: Row[]; counts?: Row[] } = {}) {
+function harness(opts: { activity?: string; transactions?: Row[]; legs?: Row[]; reversals?: Row[]; anchors?: Row[]; counts?: Row[] } = {}) {
   const db = {
     branch: { findFirst: jest.fn(async () => ({ activity: opts.activity ?? 'both' })) },
     agentTransaction: { findMany: jest.fn(async (_args: Row) => opts.transactions ?? []) },
     agentMovement: {
-      findMany: jest.fn(async (_args: Row) => opts.legs ?? []),
+      // The period's reversal legs (one per reversed exchange), or its rebalancing legs.
+      findMany: jest.fn(async (args: Row) => (args.where.kind === 'reversal' ? (opts.reversals ?? []) : (opts.legs ?? []))),
       groupBy: jest.fn(async ({ by }: { by: string[] }) => (by.includes('direction') ? [] : [])),
     },
     agentProvider: {
@@ -46,6 +47,7 @@ function harness(opts: { activity?: string; transactions?: Row[]; legs?: Row[]; 
 }
 
 const tx = (over: Row = {}): Row => ({
+  id: Buffer.alloc(16, 9),
   providerId: uuidToBin(BANKILY),
   provider: { label: 'Bankily' },
   direction: 'cash_in_credit_out',
@@ -61,13 +63,21 @@ const tx = (over: Row = {}): Row => ({
 describe('GET agent/reports', () => {
   it('a day: the rows of that business date, aggregated; floats as of now; the drawer never read here', async () => {
     const h = harness({
-      transactions: [tx(), tx({ direction: 'cash_out_credit_in', amount: new Prisma.Decimal(15_000), commissionAmount: new Prisma.Decimal(150), providerId: uuidToBin(SEDAD), provider: { label: 'Sedad' } }), tx({ status: 'reversed' })],
+      transactions: [
+        tx({ id: Buffer.alloc(16, 0x11) }),
+        tx({ id: Buffer.alloc(16, 0x12), direction: 'cash_out_credit_in', amount: new Prisma.Decimal(15_000), commissionAmount: new Prisma.Decimal(150), providerId: uuidToBin(SEDAD), provider: { label: 'Sedad' } }),
+        tx({ id: Buffer.alloc(16, 0x13), status: 'reversed' }),
+      ],
+      reversals: [{ transactionId: Buffer.alloc(16, 0x13), businessDate: dateValue(TODAY) }],
       legs: [{ rebalancingId: Buffer.alloc(16, 8), accountKind: 'cash', direction: 'outflow', amount: new Prisma.Decimal(100_000), businessDate: dateValue(TODAY) }, { rebalancingId: Buffer.alloc(16, 8), accountKind: 'provider', direction: 'inflow', amount: new Prisma.Decimal(100_000), businessDate: dateValue(TODAY) }],
       anchors: [{ providerId: uuidToBin(BANKILY), amount: new Prisma.Decimal(50_000), at: new Date('2026-10-08T08:00:00Z'), businessDate: dateValue(TODAY), source: 'set', recordedByName: 'Owner' }],
     });
     const report = await h.svc.report({ period: 'day' });
-    expect(h.db.agentTransaction.findMany.mock.calls[0][0].where).toEqual({ branchId: BRANCH, businessDate: { gte: dateValue(TODAY), lte: dateValue(TODAY) } });
-    expect(h.db.agentMovement.findMany.mock.calls[0][0].where).toEqual({ branchId: BRANCH, kind: 'rebalancing', businessDate: { gte: dateValue(TODAY), lte: dateValue(TODAY) } });
+    const day = { gte: dateValue(TODAY), lte: dateValue(TODAY) };
+    // The day's reversals by their counter-legs' day; then its exchanges, and any earlier one reversed today.
+    expect(h.db.agentMovement.findMany.mock.calls[0][0]).toMatchObject({ where: { branchId: BRANCH, kind: 'reversal', businessDate: day, transactionId: { not: null } }, distinct: ['transactionId'] });
+    expect(h.db.agentTransaction.findMany.mock.calls[0][0].where).toEqual({ branchId: BRANCH, OR: [{ businessDate: day }, { id: { in: [Buffer.alloc(16, 0x13)] } }] });
+    expect(h.db.agentMovement.findMany.mock.calls[1][0].where).toEqual({ branchId: BRANCH, kind: 'rebalancing', businessDate: day });
     expect(report).toMatchObject({
       period: 'day',
       from: TODAY,
@@ -95,11 +105,22 @@ describe('GET agent/reports', () => {
   it('a week, a month and a year: the stored business dates of the period; the year by month', async () => {
     const week = harness();
     await week.svc.report({ period: 'week', date: '2026-10-08' });
-    expect(week.db.agentTransaction.findMany.mock.calls[0][0].where.businessDate).toEqual({ gte: dateValue('2026-10-05'), lte: dateValue('2026-10-11') });
+    expect(week.db.agentTransaction.findMany.mock.calls[0][0].where.OR[0].businessDate).toEqual({ gte: dateValue('2026-10-05'), lte: dateValue('2026-10-11') });
     const year = harness({ transactions: [tx({ businessDate: dateValue('2026-03-02') })] });
     const report = await year.svc.report({ period: 'year', date: '2026-10-08' });
-    expect(year.db.agentTransaction.findMany.mock.calls[0][0].where.businessDate).toEqual({ gte: dateValue('2026-01-01'), lte: dateValue('2026-12-31') });
+    expect(year.db.agentTransaction.findMany.mock.calls[0][0].where.OR[0].businessDate).toEqual({ gte: dateValue('2026-01-01'), lte: dateValue('2026-12-31') });
     expect(report.byMonth).toEqual([expect.objectContaining({ month: '2026-03', count: 1, volume: 20_000 })]);
+  });
+
+  it('an exchange reversed on a later day: that day reports the reversal; the day it was recorded keeps it', async () => {
+    const late = tx({ id: Buffer.alloc(16, 0x21), status: 'reversed', businessDate: dateValue('2026-10-07') });
+    const reversalDay = harness({ transactions: [late], reversals: [{ transactionId: Buffer.alloc(16, 0x21), businessDate: dateValue(TODAY) }] });
+    const today = await reversalDay.svc.report({ period: 'day' });
+    expect(today.totals).toMatchObject({ count: 0, cashReceived: 0, commission: -200, reversals: { count: 1, volume: 20_000, commission: 200 } });
+    // Its own day: the reversal leg is not that day's, so the exchange stands there as the locked closing showed it.
+    const recordedDay = harness({ transactions: [late], reversals: [] });
+    const before = await recordedDay.svc.report({ period: 'day', date: '2026-10-07' });
+    expect(before.totals).toMatchObject({ count: 1, cashReceived: 20_000, commission: 200, reversals: { count: 0 } });
   });
 
   it('the float counts of the period whose difference is not zero, with the question’s status', async () => {

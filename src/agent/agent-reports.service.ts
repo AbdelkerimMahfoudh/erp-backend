@@ -17,7 +17,8 @@ const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Numb
  * rules, the floats as they stood at the period's end, and the float counts
  * whose difference opened a question at a closing of the period. Business-day
  * semantics throughout: the rows carry the business date they were stored
- * with, and a past period ends at its last day's 06:00 boundary.
+ * with — a reversal its counter-legs' — and a past period ends at its last
+ * day's 06:00 boundary.
  */
 @Injectable()
 export class AgentReportsService {
@@ -39,10 +40,18 @@ export class AgentReportsService {
     const { from, to } = periodRangeOf(query.period, date);
     const range = { gte: dateValue(from), lte: dateValue(to) };
 
+    // The reversals made in the period, by their counter-legs' day: they belong here whatever day their exchange was.
+    const reversalLegs = await this.db.agentMovement.findMany({
+      where: { branchId, kind: 'reversal', businessDate: range, transactionId: { not: null } },
+      select: { transactionId: true, businessDate: true },
+      distinct: ['transactionId'],
+    });
+    const reversedOn = new Map(reversalLegs.map((l) => [(l.transactionId as Buffer).toString('hex'), dateKey(l.businessDate)]));
+
     const [transactions, legs, providers, withMoney, counts] = await Promise.all([
       this.db.agentTransaction.findMany({
-        where: { branchId, businessDate: range },
-        select: { providerId: true, provider: { select: { label: true } }, direction: true, amount: true, commissionAmount: true, status: true, recordedById: true, recordedByName: true, businessDate: true },
+        where: { branchId, OR: [{ businessDate: range }, { id: { in: reversalLegs.map((l) => l.transactionId as Buffer) } }] },
+        select: { id: true, providerId: true, provider: { select: { label: true } }, direction: true, amount: true, commissionAmount: true, status: true, recordedById: true, recordedByName: true, businessDate: true },
       }),
       this.db.agentMovement.findMany({
         where: { branchId, kind: 'rebalancing', businessDate: range },
@@ -72,10 +81,11 @@ export class AgentReportsService {
       direction: t.direction,
       amount: num(t.amount),
       commission: num(t.commissionAmount),
-      status: t.status,
       recordedById: binToUuid(t.recordedById),
       recordedByName: t.recordedByName,
       businessDate: dateKey(t.businessDate),
+      // Reversed after the period ends: it stood throughout the period, and stands in its figures.
+      reversalDate: t.status === 'reversed' ? (reversedOn.get(t.id.toString('hex')) ?? null) : null,
     }));
     const rebalancingLegs: ReportRebalancingLeg[] = legs
       .filter((l) => l.rebalancingId !== null)
