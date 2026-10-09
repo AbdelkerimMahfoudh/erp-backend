@@ -81,6 +81,31 @@ export interface PublicPlan {
   } | null;
 }
 
+/** The service's client, or a transaction's: the period helpers run inside the renewal's transaction. */
+export type BillingDb = Prisma.TransactionClient;
+
+/** The latest billing period of a company, as the renewal and the requests need it. */
+export interface PeriodState {
+  id: Buffer;
+  periodStart: Date;
+  periodEnd: Date | null;
+  branchMonthly: number;
+  agentMonthly: number;
+  bothMonthly: number;
+  includedStaffPerBranch: number;
+  extraStaffMonthly: number;
+}
+
+/**
+ * Is this period a paid month still running at `now`? (D154, refined
+ * 2026-10-09.) An upgrade's difference is charged only against one; a period
+ * that ended — lapsed, in grace, or waiting for its prepaid successor to roll —
+ * charges nothing more, and the change waits for the next period instead.
+ */
+export function periodRunning(period: Pick<PeriodState, 'periodEnd'> | null, now: Date): boolean {
+  return period !== null && (period.periodEnd === null || period.periodEnd.getTime() > now.getTime());
+}
+
 /** An applicant may describe at most this many stores in one estimate. */
 export const ESTIMATE_MAX_STORES = 50;
 export const ESTIMATE_MAX_STAFF_PER_STORE = 500;
@@ -118,8 +143,8 @@ export class BillingService {
    * `is_active = 0` until the server activates it, so it cannot be counted by
    * construction.
    */
-  async sizeOf(companyId: Buffer): Promise<CompanySize> {
-    const census = await seatCensus(this.prisma, companyId);
+  async sizeOf(companyId: Buffer, db: BillingDb = this.prisma): Promise<CompanySize> {
+    const census = await seatCensus(db, companyId);
     return {
       activeBranchCount: census.activeBranchCount,
       activeStaffCount: census.seatsUsed,
@@ -136,8 +161,8 @@ export class BillingService {
   }
 
   /** The plan version in force at a moment, and the next one if scheduled. */
-  async planAt(when: Date): Promise<{ current: PlanVersionView; upcoming: PlanVersionView | null }> {
-    const rows = await this.prisma.planVersion.findMany({
+  async planAt(when: Date, db: BillingDb = this.prisma): Promise<{ current: PlanVersionView; upcoming: PlanVersionView | null }> {
+    const rows = await db.planVersion.findMany({
       where: { planKey: 'standard' },
       orderBy: { effectiveFrom: 'asc' },
     });
@@ -165,6 +190,49 @@ export class BillingService {
       current: view(past[past.length - 1] ?? rows[0]),
       upcoming: future.length ? view(future[0]) : null,
     };
+  }
+
+  /** The latest billing period, or null for a business never billed. */
+  async latestPeriod(companyId: Buffer, db: BillingDb = this.prisma): Promise<PeriodState | null> {
+    return db.billingPeriod.findFirst({
+      where: { companyId },
+      orderBy: { periodStart: 'desc' },
+      select: {
+        id: true,
+        periodStart: true,
+        periodEnd: true,
+        branchMonthly: true,
+        agentMonthly: true,
+        bothMonthly: true,
+        includedStaffPerBranch: true,
+        extraStaffMonthly: true,
+      },
+    });
+  }
+
+  /**
+   * The unit prices a change made now is charged at: the running period's own
+   * copied prices when a paid month is running — so the request and the
+   * period's assessment can never disagree, whatever plan version was
+   * scheduled since (D154) — and today's plan otherwise.
+   */
+  async chargeablePricing(companyId: Buffer, db: BillingDb = this.prisma): Promise<{ pricing: PlanPricing; running: boolean }> {
+    const now = this.clock.now();
+    const period = await this.latestPeriod(companyId, db);
+    if (period && periodRunning(period, now)) {
+      return {
+        running: true,
+        pricing: {
+          branchMonthly: period.branchMonthly,
+          agentMonthly: period.agentMonthly,
+          bothMonthly: period.bothMonthly,
+          includedStaffPerBranch: period.includedStaffPerBranch,
+          extraStaffMonthly: period.extraStaffMonthly,
+        },
+      };
+    }
+    const plans = await this.planAt(now, db);
+    return { running: false, pricing: this.pricingOf(plans.current) };
   }
 
   private pricingOf(v: PlanVersionView): PlanPricing {
@@ -336,14 +404,17 @@ export class BillingService {
    * fee. Never lowers anything: there is no prorating, so a release reduces
    * the next renewal and nothing else.
    */
-  async assessNow(companyId: Buffer): Promise<void> {
-    const period = await this.prisma.billingPeriod.findFirst({
+  async assessNow(companyId: Buffer, db: BillingDb = this.prisma): Promise<void> {
+    const period = await db.billingPeriod.findFirst({
       where: { companyId },
       orderBy: { periodStart: 'desc' },
     });
     if (!period) return;
+    // A period that already ended is history: nothing is ever added to it. A change confirmed after it ended is
+    // priced in full by the next period instead (D154, reviewed 2026-10-09).
+    if (!periodRunning(period, this.clock.now())) return;
 
-    const size = await this.sizeOf(companyId);
+    const size = await this.sizeOf(companyId, db);
     const stored = feesFrom(period.assessedActivityFeeByBranch);
     const assessment = assessPeriod(
       size,
@@ -366,14 +437,14 @@ export class BillingService {
       // still learns its branches' fees here, so the next upgrade can be
       // priced as that branch's own difference.
       if (sameFees(stored, assessment.assessedActivityFeeByBranch)) return;
-      await this.prisma.billingPeriod.update({
+      await db.billingPeriod.update({
         where: { id: period.id },
         data: { assessedActivityFeeByBranch: assessment.assessedActivityFeeByBranch },
       });
       return;
     }
 
-    await this.prisma.billingPeriod.update({
+    await db.billingPeriod.update({
       where: { id: period.id },
       data: {
         activeBranchCount: size.activeBranchCount,
@@ -397,9 +468,16 @@ export class BillingService {
    * fee is written down beside them, so an upgrade later in the period is
    * charged as that branch's own difference.
    */
-  async openPeriod(companyId: Buffer, subscriptionId: Buffer, endsAt: Date | null): Promise<void> {
-    const now = this.clock.now();
-    const [size, plans] = await Promise.all([this.sizeOf(companyId), this.planAt(now)]);
+  async openPeriod(
+    companyId: Buffer,
+    subscriptionId: Buffer,
+    endsAt: Date | null,
+    opts: { db?: BillingDb; startsAt?: Date } = {},
+  ): Promise<void> {
+    const db = opts.db ?? this.prisma;
+    // A period rolled at the end of a prepaid one starts where that one ended, priced by the plan in force then.
+    const now = opts.startsAt ?? this.clock.now();
+    const [size, plans] = await Promise.all([this.sizeOf(companyId, db), this.planAt(now, db)]);
     const plan = this.pricingOf(plans.current);
     const q = quoteFor(size, plan);
 
@@ -408,7 +486,7 @@ export class BillingService {
       if (line.branchId !== null) assessedActivityFeeByBranch[line.branchId] = line.activityFee;
     }
 
-    await this.prisma.billingPeriod.create({
+    await db.billingPeriod.create({
       data: {
         id: newUuidV7Bin(),
         companyId,
@@ -444,16 +522,28 @@ export class BillingService {
    * subscribed in between, and the snapshot must not say it was. Answers
    * whether there was a period to close, so the caller can say which it did.
    */
-  async closeCurrentPeriod(companyId: Buffer, at: Date): Promise<boolean> {
-    const period = await this.prisma.billingPeriod.findFirst({
+  async closeCurrentPeriod(companyId: Buffer, at: Date, db: BillingDb = this.prisma): Promise<boolean> {
+    const period = await db.billingPeriod.findFirst({
       where: { companyId },
       orderBy: { periodStart: 'desc' },
       select: { id: true, periodEnd: true },
     });
     if (!period) return false;
     if (period.periodEnd === null || period.periodEnd.getTime() > at.getTime()) {
-      await this.prisma.billingPeriod.update({ where: { id: period.id }, data: { periodEnd: at } });
+      await db.billingPeriod.update({ where: { id: period.id }, data: { periodEnd: at } });
     }
+    return true;
+  }
+
+  /**
+   * Move the running period's end with a corrected subscription end (D154,
+   * reviewed 2026-10-09): a correction is the same period, re-dated — never a
+   * new one. Only the latest period, and only while it runs.
+   */
+  async redateRunningPeriod(companyId: Buffer, end: Date, db: BillingDb = this.prisma): Promise<boolean> {
+    const period = await this.latestPeriod(companyId, db);
+    if (!period || !periodRunning(period, this.clock.now())) return false;
+    await db.billingPeriod.update({ where: { id: period.id }, data: { periodEnd: end } });
     return true;
   }
 

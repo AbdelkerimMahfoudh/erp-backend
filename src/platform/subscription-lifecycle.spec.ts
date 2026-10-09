@@ -9,10 +9,14 @@ import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
  * that behaves like the row — including the optimistic `version` check that
  * turns two administrators into one winner and one refusal.
  *
- * And the renewal (D154 a, 2026-10-08): whenever the period end moves forward,
- * the downgrades scheduled for it are applied, the billing period is closed
- * and the next one opened at the new size — so the event lists below carry a
- * `renewed` entry after every approval, extension and lengthening.
+ * And the renewal (D154 a, refined after review on 2026-10-09): the moment the
+ * next paid period begins. An approval, a grant, or an extension or correction
+ * of a business whose period has ENDED rolls at once — the downgrades scheduled
+ * for it applied, the old period closed, the next opened at the new size. An
+ * extension of a period still RUNNING only moves the end: the roll is due at the
+ * old end (billing/renewal.ts applies it then), so a shop never loses an
+ * activity it paid for before its month is over; a correction while running
+ * re-dates the running period and renews nothing.
  */
 
 const COMPANY = '018f0000-0000-7000-8000-00000000c001';
@@ -50,13 +54,14 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
   const audits: any[] = [];
   const periods: (Date | null)[] = [];
   const closes: Date[] = [];
+  const redates: Date[] = [];
   /** What happened in which order: a renewal must apply downgrades, close, then open. */
   const order: string[] = [];
   const allocations: any[] = [];
-  // A running business has a period to close; a pending one has nothing yet.
-  let hasPeriod = status === 'activated';
+  // A running business has a period, ending where its subscription ends; a pending one has nothing yet.
+  let latest: { periodEnd: Date | null } | null = status === 'activated' ? { periodEnd: (sub.currentPeriodEnd as Date | null) ?? null } : null;
 
-  const prisma = {
+  const prisma: Record<string, any> = {
     branch: {
       findMany: async () => branches.filter((b) => b.activityNext !== null).map((b) => ({ ...b })),
       update: async ({ where, data }: any) => {
@@ -102,26 +107,37 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
       },
     },
   };
+  // The renewal runs in one transaction that first locks the subscription row.
+  prisma.$transaction = async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma);
+  prisma.$queryRaw = async () => [];
   const audit = {
     record: async (e: unknown) => {
       audits.push(e);
     },
   };
   const billing = {
+    latestPeriod: async () => (latest ? { ...latest } : null),
     openPeriod: async (_c: Buffer, _s: Buffer, end: Date | null) => {
       periods.push(end);
       order.push('open');
-      hasPeriod = true;
+      latest = { periodEnd: end };
     },
     closeCurrentPeriod: async (_c: Buffer, at: Date) => {
       closes.push(at);
       order.push('close');
-      const had = hasPeriod;
+      const had = latest !== null;
+      if (latest && (latest.periodEnd === null || latest.periodEnd.getTime() > at.getTime())) latest.periodEnd = at;
       return had;
+    },
+    redateRunningPeriod: async (_c: Buffer, end: Date) => {
+      redates.push(end);
+      order.push('redate');
+      if (latest) latest.periodEnd = end;
+      return true;
     },
   };
   const service = new SubscriptionLifecycleService(prisma as never, audit as never, billing as never);
-  return { service, sub, events, audits, periods, closes, order, branches, allocations };
+  return { service, sub, events, audits, periods, closes, redates, order, branches, allocations, latest: () => latest };
 }
 
 describe('approving a pending registration', () => {
@@ -239,9 +255,9 @@ describe('correcting the period end', () => {
 
     const later = new Date(Date.now() + 90 * DAY);
     await service.setPeriodEnd(COMPANY, { periodEnd: later }, CTX);
-    expect(audits[1]).toMatchObject({ after: { direction: 'lengthened' } });
-    // Lengthening renews (D154 a); shortening is a correction and does not — hence one `renewed`, after the second.
-    expect(events.map((e) => e.kind)).toEqual(['period_corrected', 'period_corrected', 'renewed']);
+    expect(audits[1]).toMatchObject({ after: { direction: 'lengthened', redated: true, renewal: null } });
+    // A correction of a running period re-dates it, either way; neither renews (reviewed 2026-10-09).
+    expect(events.map((e) => e.kind)).toEqual(['period_corrected', 'period_corrected']);
   });
 
   it('is a no-op when the date is already the one asked for', async () => {
@@ -296,14 +312,30 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
     version: 0,
   });
 
-  it('extending applies the downgrade scheduled for it, closes the period and opens the next — in that order', async () => {
-    const w = makeWorld('activated', { currentPeriodEnd: in30() }, [scheduledDowngrade()]);
+  const ago20 = () => new Date(Date.now() - 20 * DAY);
+
+  it('extending a period still RUNNING moves the end and nothing else: the paid activity is kept to the end of its month (reviewed 2026-10-09)', async () => {
+    const oldEnd = in30();
+    const w = makeWorld('activated', { currentPeriodEnd: oldEnd }, [scheduledDowngrade()]);
+    w.allocations.push(scheduledRow());
+    const r = await w.service.extend(COMPANY, { months: 1, reason: 'Paid November early' }, CTX);
+    expect(r.applied).toBe(true);
+    expect((w.sub.currentPeriodEnd as Date).getTime()).toBeGreaterThan(oldEnd.getTime());
+    // Nothing applied, closed or opened: the shop keeps `both` until the period it paid for ends.
+    expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: 'money_agent' });
+    expect(w.allocations[0]).toMatchObject({ confirmedAt: null });
+    expect(w.order).toEqual([]);
+    expect(w.events.map((e) => e.kind)).toEqual(['extended']);
+    // The audit says when the renewal falls due: at the running period's end.
+    expect(w.audits[0]).toMatchObject({ action: 'subscription.extend', after: { renewal: null, renewalDueAt: oldEnd.toISOString() } });
+  });
+
+  it('extending a period that has ENDED renews now: the downgrade applies, the old period is kept as it was, the next opens — in that order', async () => {
+    const w = makeWorld('activated', { currentPeriodEnd: ago20() }, [scheduledDowngrade()]);
     w.allocations.push(scheduledRow());
     const before = Date.now();
-    const r = await w.service.extend(COMPANY, { months: 1, reason: 'Paid for October' }, CTX);
-    expect(r.applied).toBe(true);
+    await w.service.extend(COMPANY, { months: 1, reason: 'Paid for October' }, CTX);
 
-    // The branch takes what it asked for, and the request that scheduled it is marked applied.
     expect(w.branches[0]).toMatchObject({ activity: 'money_agent', activityNext: null });
     expect(w.branches[0].activityChangedAt!.getTime()).toBeGreaterThanOrEqual(before);
     expect(w.allocations[0]).toMatchObject({ status: 'granted', confirmedBy: ADMIN.email, reason: 'Applied at the renewal.', version: 1 });
@@ -311,10 +343,7 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
 
     // Downgrades first, then the close, then the new period — so the new period is sized after the change.
     expect(w.order).toEqual(['branch.update:Main', 'close', 'open']);
-    expect(w.closes).toHaveLength(1);
-    expect(w.closes[0].getTime()).toBeGreaterThanOrEqual(before);
     expect(w.periods).toEqual([w.sub.currentPeriodEnd]);
-
     expect(w.events.map((e) => e.kind)).toEqual(['extended', 'activity_changed', 'renewed']);
     expect(w.events[1].note).toMatch(/Main.*both → money_agent/);
     expect(w.events[2].note).toMatch(/Renewed/);
@@ -324,25 +353,37 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
     });
   });
 
-  it('a renewal with nothing scheduled still closes and reopens the period, and says it applied nothing', async () => {
-    const w = makeWorld('activated', { currentPeriodEnd: in30() }, [{ ...scheduledDowngrade(), activityNext: null }]);
+  it('a renewal with nothing scheduled still opens the next period, and says it applied nothing', async () => {
+    const w = makeWorld('activated', { currentPeriodEnd: ago20() }, [{ ...scheduledDowngrade(), activityNext: null }]);
     await w.service.extend(COMPANY, { months: 2 }, CTX);
     expect(w.order).toEqual(['close', 'open']);
     expect(w.events.map((e) => e.kind)).toEqual(['extended', 'renewed']);
-    expect(w.audits[0].after.renewal).toEqual({ closedPeriod: true, activityChanges: [] });
+    expect(w.audits[0].after.renewal).toMatchObject({ closedPeriod: true, activityChanges: [] });
   });
 
-  it('shortening is a correction, never a renewal: nothing applied, nothing closed, nothing opened', async () => {
+  it('shortening is a correction, never a renewal: the running period is re-dated, nothing applied, nothing opened', async () => {
     const w = makeWorld('activated', { currentPeriodEnd: in30() }, [scheduledDowngrade()]);
-    await w.service.setPeriodEnd(COMPANY, { periodEnd: new Date(Date.now() + 10 * DAY), reason: 'Mistyped' }, CTX);
+    const sooner = new Date(Date.now() + 10 * DAY);
+    await w.service.setPeriodEnd(COMPANY, { periodEnd: sooner, reason: 'Mistyped' }, CTX);
     expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: 'money_agent' });
-    expect(w.order).toEqual([]);
+    expect(w.order).toEqual(['redate']);
+    expect(w.redates).toEqual([sooner]);
     expect(w.events.map((e) => e.kind)).toEqual(['period_corrected']);
     expect(w.audits[0].after.renewal).toBeNull();
   });
 
-  it('lengthening by a direct correction renews exactly as an extension does', async () => {
+  it('a correction that lengthens a running period re-dates it — a typo fix never opens a one-day period or applies a downgrade early', async () => {
     const w = makeWorld('activated', { currentPeriodEnd: in30() }, [scheduledDowngrade()]);
+    const later = new Date(Date.now() + 31 * DAY);
+    await w.service.setPeriodEnd(COMPANY, { periodEnd: later }, CTX);
+    expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: 'money_agent' });
+    expect(w.order).toEqual(['redate']);
+    expect(w.latest()).toEqual({ periodEnd: later });
+    expect(w.events.map((e) => e.kind)).toEqual(['period_corrected']);
+  });
+
+  it('a new end in the future for a business whose period ENDED renews now', async () => {
+    const w = makeWorld('activated', { currentPeriodEnd: ago20() }, [scheduledDowngrade()]);
     const later = new Date(Date.now() + 90 * DAY);
     await w.service.setPeriodEnd(COMPANY, { periodEnd: later }, CTX);
     expect(w.branches[0]).toMatchObject({ activity: 'money_agent', activityNext: null });
@@ -351,8 +392,17 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
     expect(w.events.map((e) => e.kind)).toEqual(['period_corrected', 'activity_changed', 'renewed']);
   });
 
+  it('a grant is a renewal: the running period closes at the grant, the scheduled downgrade applies, the grant period opens — never two overlapping periods', async () => {
+    const w = makeWorld('activated', { currentPeriodEnd: in30() }, [scheduledDowngrade()]);
+    await w.service.activateByGrant(COMPANY, { days: 30, reason: 'Pilot partner' }, CTX);
+    expect(w.order).toEqual(['branch.update:Main', 'close', 'open']);
+    expect(w.closes).toHaveLength(1);
+    expect(w.periods).toEqual([w.sub.complimentaryUntil]);
+    expect(w.events.map((e) => e.kind)).toEqual(['administrative_grant', 'activity_changed', 'renewed']);
+  });
+
   it('a lapsed shop that renews opens its new period from now, for the new end', async () => {
-    const w = makeWorld('activated', { currentPeriodEnd: new Date(Date.now() - 20 * DAY) });
+    const w = makeWorld('activated', { currentPeriodEnd: ago20() });
     const before = Date.now();
     await w.service.extend(COMPANY, { months: 1 }, CTX);
     const end = w.sub.currentPeriodEnd as Date;

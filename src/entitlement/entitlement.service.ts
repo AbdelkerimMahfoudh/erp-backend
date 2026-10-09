@@ -1,9 +1,11 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { CLOCK, type Clock } from './clock';
 import { seatCensus } from './seat-census';
 import { binToUuid } from '../common/utils/uuid.util';
+import { BillingService } from '../billing/billing.service';
+import { SubscriptionRenewal } from '../billing/renewal';
 import {
   buildEntitlement,
   canWrite,
@@ -34,13 +36,49 @@ import {
  * a feature whose boundaries can only be tested by waiting three days is a
  * feature nobody tests.
  */
+/** How long a company's "is a renewal due?" answer is trusted before it is asked again. */
+const ROLL_CHECK_TTL_MS = 60_000;
+
 @Injectable()
 export class EntitlementService {
+  private readonly logger = new Logger(EntitlementService.name);
+  /** The renewal a prepaid period is owed at its end (D154, billing/renewal.ts): applied by the first evaluation after it. */
+  private readonly renewal: SubscriptionRenewal;
+  /** company → when it was last checked: at most one cheap query a minute per company. */
+  private readonly rollCheckedAt = new Map<string, number>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly tenant: TenantContext,
     @Inject(CLOCK) private readonly clock: Clock,
-  ) {}
+  ) {
+    this.renewal = new SubscriptionRenewal(prisma, new BillingService(prisma, clock), clock);
+  }
+
+  /**
+   * Apply a renewal that fell due at the end of a prepaid period — the
+   * downgrades scheduled for it and the next billing period — before anything
+   * reads the company's state (D154, reviewed 2026-10-09). Every authenticated
+   * request passes here, so the shop's activities change within a minute of
+   * the old period's end, and the route gate reads them after this.
+   *
+   * Never blocks the request: a failure is logged and retried on the next
+   * check. The roll itself is locked and idempotent.
+   */
+  private async rollIfDue(companyId: Buffer): Promise<void> {
+    const key = companyId.toString('hex');
+    const now = this.clock.now().getTime();
+    const last = this.rollCheckedAt.get(key);
+    if (last !== undefined && now - last < ROLL_CHECK_TTL_MS) return;
+    this.rollCheckedAt.set(key, now);
+    try {
+      const rolled = await this.renewal.rollIfDue(companyId);
+      if (rolled) this.logger.log(`Renewal applied for company ${binToUuid(companyId)} at ${rolled.at}`);
+    } catch (e) {
+      this.rollCheckedAt.delete(key);
+      this.logger.warn(`Renewal check failed for company ${binToUuid(companyId)}: ${(e as Error).message}`);
+    }
+  }
 
   /**
    * The subscription row, or a synthetic never-subscribed one.
@@ -51,6 +89,7 @@ export class EntitlementService {
    * than crash on every request.
    */
   private async recordFor(companyId: Buffer): Promise<SubscriptionRecord> {
+    await this.rollIfDue(companyId);
     const row = await this.prisma.subscription.findFirst({ where: { companyId } });
     if (!row) {
       return {

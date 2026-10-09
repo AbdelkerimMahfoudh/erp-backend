@@ -3,8 +3,9 @@ import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin, uuidToBin, binToUuid, isUuid } from '../common/utils/uuid.util';
 import { PlatformAuditService } from './platform-audit.service';
-import { BillingService } from '../billing/billing.service';
-import type { Activity } from '../entitlement/activity';
+import { BillingService, periodRunning } from '../billing/billing.service';
+import { SubscriptionRenewal, type RenewalOutcome } from '../billing/renewal';
+import { systemClock } from '../entitlement/clock';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
 /**
@@ -59,28 +60,29 @@ interface ActorContext {
   ip?: string | null;
 }
 
-/** A downgrade a renewal applied: said in the event and the audit trail. */
-export interface AppliedActivityChange {
-  branchId: string;
-  name: string;
-  from: Activity;
-  to: Activity;
-}
-
-/** What a renewal did, for the audit trail of the action that caused it. */
-export interface RenewalOutcome {
-  /** False the first time: there was no period to close, only one to open. */
-  closedPeriod: boolean;
-  activityChanges: AppliedActivityChange[];
-}
-
 @Injectable()
 export class SubscriptionLifecycleService {
+  /** The one renewal routine, shared with the lazy roll the entitlement check applies (billing/renewal.ts). */
+  private readonly renewal: SubscriptionRenewal;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: PlatformAuditService,
     private readonly billing: BillingService,
-  ) {}
+  ) {
+    this.renewal = new SubscriptionRenewal(prisma, billing, systemClock);
+  }
+
+  /**
+   * Whether the latest billing period is a paid month still running (D154,
+   * reviewed 2026-10-09). While it runs, extending or re-dating the
+   * subscription moves its end and nothing else: the renewal is due at the
+   * period's end, so a downgrade never takes away an activity the shop has
+   * paid for before its month is over.
+   */
+  private async periodStillRunning(companyId: Buffer): Promise<boolean> {
+    return periodRunning(await this.billing.latestPeriod(companyId), new Date());
+  }
 
   private companyIdOf(companyId: string): Buffer {
     if (!isUuid(companyId)) throw new BadRequestException('Unknown business');
@@ -239,13 +241,14 @@ export class SubscriptionLifecycleService {
     });
 
     /*
-     * Open a billing period, freezing today's unit prices into it.
-     *
-     * Done here rather than at registration: a pending business has never been
-     * billed, and a period snapshot for one would be a billing history it does
-     * not have.
+     * A grant is a renewal (D154, reviewed 2026-10-09): the period running now
+     * closes at this instant, the downgrades scheduled for it apply, and the
+     * grant's period opens at today's size and prices — never a second period
+     * overlapping the first. Done here rather than at registration: a pending
+     * business has never been billed, and a period snapshot for one would be a
+     * billing history it does not have.
      */
-    await this.billing.openPeriod(id, before.id, after.complimentaryUntil);
+    await this.renewal.rollNow(id, before.id, after.complimentaryUntil, ctx.admin.email);
 
     return { subscription: after, applied: true };
   }
@@ -317,7 +320,7 @@ export class SubscriptionLifecycleService {
     // The first billing period, at today's prices — see `activateByGrant`.
     // Through the renewal routine, so a refused-then-approved shop that
     // scheduled a downgrade meanwhile starts at the size it asked for.
-    const renewal = await this.renew(id, before.id, end, ctx);
+    const renewal = await this.renewal.rollNow(id, before.id, end, ctx.admin.email);
 
     await this.audit.record({
       admin: ctx.admin,
@@ -456,8 +459,20 @@ export class SubscriptionLifecycleService {
       },
     });
 
-    // Lengthening is a renewal (D154 a); shortening is a correction and never is.
-    const renewal = shortened ? null : await this.renew(id, before.id, input.periodEnd, ctx);
+    /*
+     * A correction re-dates the period it corrects (D154, reviewed 2026-10-09):
+     * while a paid month runs, its billing period ends where the subscription
+     * now ends, and nothing renews — fixing a typo must not open a one-day
+     * period or apply a downgrade early. A business whose period had already
+     * ended and is given a new end in the future starts a new period now.
+     */
+    const running = await this.periodStillRunning(id);
+    let renewal: RenewalOutcome | null = null;
+    if (running) {
+      await this.billing.redateRunningPeriod(id, input.periodEnd);
+    } else if (!shortened && input.periodEnd.getTime() > Date.now()) {
+      renewal = await this.renewal.rollNow(id, before.id, input.periodEnd, ctx.admin.email);
+    }
 
     await this.audit.record({
       admin: ctx.admin,
@@ -467,14 +482,21 @@ export class SubscriptionLifecycleService {
       targetLabel: before.company.name,
       reason: input.reason ?? null,
       before: this.snapshot(before),
-      after: { ...this.snapshot(after), direction: shortened ? 'shortened' : 'lengthened', renewal },
+      after: { ...this.snapshot(after), direction: shortened ? 'shortened' : 'lengthened', redated: running, renewal },
       ip: ctx.ip ?? null,
     });
 
     return { subscription: after, applied: true };
   }
 
-  /** Extend a paid period — a renewal (D154 a). Never touches the grant fields. */
+  /**
+   * Extend a paid period. Never touches the grant fields.
+   *
+   * A renewal (D154 a) begins when the next paid period does: at once for a
+   * business whose period has ended, at the old end for one still running —
+   * the Owner who pays November on the 20th of October keeps October's
+   * activities until the 31st, and the roll is applied then (billing/renewal.ts).
+   */
   async extend(
     companyId: string,
     input: { months: number; reason?: string; expectedVersion?: number },
@@ -515,8 +537,7 @@ export class SubscriptionLifecycleService {
       },
     });
 
-    // The end always moves forward here, so every extension is a renewal.
-    const renewal = await this.renew(id, before.id, end, ctx);
+    const renewal = (await this.periodStillRunning(id)) ? null : await this.renewal.rollNow(id, before.id, end, ctx.admin.email);
 
     await this.audit.record({
       admin: ctx.admin,
@@ -526,117 +547,11 @@ export class SubscriptionLifecycleService {
       targetLabel: before.company.name,
       reason: input.reason ?? null,
       before: this.snapshot(before),
-      after: { ...this.snapshot(after), months: input.months, renewal },
+      after: { ...this.snapshot(after), months: input.months, renewal, renewalDueAt: renewal ? null : before.currentPeriodEnd?.toISOString() ?? null },
       ip: ctx.ip ?? null,
     });
 
     return { subscription: after, applied: true };
-  }
-
-  /**
-   * A renewal (D154 a): the period end moved forward.
-   *
-   * Three things, in this order, because each depends on the one before:
-   *
-   *  1. every downgrade scheduled for this renewal takes effect —
-   *     `activity_next` becomes the branch's activity — so the size the next
-   *     period opens at is the size the shop asked for;
-   *  2. the current billing period is closed at this instant, keeping what it
-   *     was assessed at: nothing is refunded, nothing is re-priced;
-   *  3. a new period opens at today's prices and today's size, so its
-   *     assessment starts fresh — the old period's high-water mark does not
-   *     follow the shop into the new one, which is how a released seat or a
-   *     downgrade finally leaves the invoice.
-   *
-   * `extend` used to move the date and nothing else, which meant no reduction
-   * could ever take effect. Shortening a period is a correction, not a
-   * renewal, and runs none of this.
-   */
-  private async renew(
-    companyId: Buffer,
-    subscriptionId: Buffer,
-    periodEnd: Date | null,
-    ctx: ActorContext,
-  ): Promise<RenewalOutcome> {
-    const now = new Date();
-    const activityChanges = await this.applyScheduledActivityChanges(companyId, subscriptionId, now, ctx);
-    const closedPeriod = await this.billing.closeCurrentPeriod(companyId, now);
-    await this.billing.openPeriod(companyId, subscriptionId, periodEnd);
-
-    await this.prisma.subscriptionEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        subscriptionId,
-        kind: 'renewed',
-        note: (closedPeriod
-          ? 'Renewed: the billing period closed and a new one opened at today\'s size and prices.'
-          : 'First billing period opened at today\'s size and prices.'
-        ).slice(0, 255),
-        periodEndAfter: periodEnd,
-        actor: ctx.admin.email,
-      },
-    });
-
-    return { closedPeriod, activityChanges };
-  }
-
-  /**
-   * Every downgrade waiting for this renewal, applied branch by branch.
-   *
-   * The branch takes `activity_next`; the request that scheduled it is marked
-   * applied (it stays `granted` — it cost nothing and it happened — with the
-   * renewal's actor and instant on it); one `activity_changed` event per
-   * branch says so in the timeline.
-   */
-  private async applyScheduledActivityChanges(
-    companyId: Buffer,
-    subscriptionId: Buffer,
-    now: Date,
-    ctx: ActorContext,
-  ): Promise<AppliedActivityChange[]> {
-    const due = await this.prisma.branch.findMany({
-      where: { companyId, activityNext: { not: null } },
-      select: { id: true, name: true, activity: true, activityNext: true },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    const applied: AppliedActivityChange[] = [];
-    for (const b of due) {
-      if (!b.activityNext) continue;
-      await this.prisma.branch.update({
-        where: { id: b.id },
-        data: { activity: b.activityNext, activityNext: null, activityChangedAt: now },
-      });
-      await this.prisma.seatAllocation.updateMany({
-        where: {
-          companyId,
-          kind: 'activity',
-          branchId: b.id,
-          status: 'granted',
-          activityTo: b.activityNext,
-          confirmedAt: null,
-        },
-        data: {
-          confirmedBy: ctx.admin.email,
-          confirmedAt: now,
-          reason: 'Applied at the renewal.',
-          version: { increment: 1 },
-        },
-      });
-      await this.prisma.subscriptionEvent.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId,
-          subscriptionId,
-          kind: 'activity_changed',
-          note: `Store "${b.name}": ${b.activity} → ${b.activityNext} at the renewal.`.slice(0, 255),
-          actor: ctx.admin.email,
-        },
-      });
-      applied.push({ branchId: binToUuid(b.id), name: b.name, from: b.activity, to: b.activityNext });
-    }
-    return applied;
   }
 
   /** Stop a business, with a reason. High impact — the controller steps up first. */
