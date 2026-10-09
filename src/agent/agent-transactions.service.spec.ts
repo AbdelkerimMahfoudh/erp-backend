@@ -8,6 +8,7 @@ import { ClosingService } from '../closing/closing.service';
 import { AgentTransactionsService } from './agent-transactions.service';
 import { exchangeFingerprint } from './agent-rules';
 import { CreateAgentTransactionDto } from './dto/transaction.dto';
+import { CreateAgentRebalancingDto } from './dto/rebalancing.dto';
 
 /**
  * The counter's exchanges (A5–A8, docs/73 §4), driven through the real service
@@ -51,6 +52,10 @@ interface Options {
   closedInside?: boolean;
   permissions?: string[];
   race?: () => boolean;
+  /** The drawer as Money shows it now; null (the default) while unknown. */
+  drawer?: number | null;
+  /** Bankily's float anchor; none (unknown) by default. */
+  floatAnchor?: number | null;
 }
 
 function harness(opts: Options = {}) {
@@ -76,7 +81,12 @@ function harness(opts: Options = {}) {
     branch: { findFirst: jest.fn(async () => ({ activity: opts.activity ?? 'money_agent' })) },
     user: { findFirst: jest.fn(async () => ({ name: 'Aicha' })) },
     agentProviderConfig: { findFirst: jest.fn(async () => config) },
-    agentProvider: { findMany: jest.fn(async ({ where }: { where: { id: { in: Buffer[] } } }) => where.id.in.filter((b) => b.equals(uuidToBin(BANKILY))).map((id) => ({ id }))) },
+    agentProvider: { findMany: jest.fn(async ({ where }: { where: { id: { in: Buffer[] } } }) => where.id.in.filter((b) => b.equals(uuidToBin(BANKILY))).map((id) => ({ id, label: 'Bankily' }))) },
+    agentPosition: {
+      findFirst: jest.fn(async () =>
+        opts.floatAnchor == null ? null : { amount: opts.floatAnchor, at: new Date('2026-10-08T08:00:00Z'), businessDate: dateValue(DAY), source: 'owner_set', recordedByName: 'Owner' },
+      ),
+    },
     agentTransaction: {
       findFirst: jest.fn(async ({ where, select }: { where: Row; select?: Row }) => {
         const hit = where.clientUuid
@@ -104,6 +114,7 @@ function harness(opts: Options = {}) {
         return { count: data.length };
       }),
       findMany: jest.fn(async ({ where }: { where: Row }) => movements.filter((m) => m.transactionId?.equals(where.transactionId) && (!where.kind || where.kind.in.includes(m.kind)))),
+      groupBy: jest.fn(async () => []),
     },
     agentMistakeReport: {
       findFirst: jest.fn(async ({ where }: { where: Row }) => {
@@ -152,6 +163,7 @@ function harness(opts: Options = {}) {
   const closing = {
     assertCounterOpen: jest.fn(async () => (opts.closed ? closed() : undefined)),
     assertCounterOpenTx: jest.fn(async () => (opts.closedInside ? closed() : undefined)),
+    drawerPosition: jest.fn(async () => opts.drawer ?? null),
   };
   const audit = { record: jest.fn(async (_entry: Row) => undefined), recordTx: jest.fn(async (_tx: unknown, _entry: Row) => undefined) };
   const businessDay = { assign: jest.fn(async () => DAY), today: jest.fn(async () => DAY) };
@@ -494,6 +506,47 @@ describe('reversing an exchange (A7)', () => {
     expect(h.db.$transaction).toHaveBeenCalledTimes(2);
   });
 
+  it('a retry of the same reversal that read the row before the first committed is answered with it, not refused', async () => {
+    const h = harness();
+    const recorded = await h.svc.record(exchange());
+    // The retry passed the plain read while the row was still completed; under the lock it finds its own key.
+    h.db.$queryRaw.mockImplementationOnce(async () => [{ status: 'reversed', reversal_client_uuid: new Uint8Array(uuidToBin(KEY2)) }]);
+    const answered = await h.svc.reverse(recorded.id, { clientUuid: KEY2, reason: 'wrong direction' });
+    expect(answered.id).toBe(recorded.id);
+    expect(h.db.agentMovement.createMany).toHaveBeenCalledTimes(1);
+    expect(h.db.agentTransaction.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('open first, like the exchange: a closed day refuses before the row is locked; a day closing meanwhile refuses under the lock; nothing written', async () => {
+    const h = harness();
+    const recorded = await h.svc.record(exchange());
+    h.closing.assertCounterOpen.mockImplementationOnce(async () => {
+      throw new ConflictException({ code: 'store_closed', closedReason: 'closed', businessDate: DAY, message: 'closed' });
+    });
+    const before = await refusal(h.svc.reverse(recorded.id, { clientUuid: KEY2, reason: 'wrong direction' }));
+    expect(before.body?.code).toBe('store_closed');
+    expect(h.closing.assertCounterOpen).toHaveBeenLastCalledWith(BRANCH, 'agent_reversal');
+    expect(h.db.$transaction).toHaveBeenCalledTimes(1);
+
+    h.closing.assertCounterOpenTx.mockImplementationOnce(async () => {
+      throw new ConflictException({ code: 'store_closed', closedReason: 'closed', businessDate: DAY, message: 'closed' });
+    });
+    const inside = await refusal(h.svc.reverse(recorded.id, { clientUuid: KEY2, reason: 'wrong direction' }));
+    expect(inside.body?.code).toBe('store_closed');
+    expect(h.closing.assertCounterOpenTx).toHaveBeenLastCalledWith(h.db, { branchId: BRANCH, businessDate: DAY, operation: 'agent_reversal' });
+    expect(h.db.agentMovement.createMany).toHaveBeenCalledTimes(1);
+    expect(h.transactions[0].status).toBe('completed');
+  });
+
+  it('a blank reason is no reason: refused before anything is read', async () => {
+    const h = harness();
+    const recorded = await h.svc.record(exchange());
+    const { error, body } = await refusal(h.svc.reverse(recorded.id, { clientUuid: KEY2, reason: '   ' }));
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect(body?.code).toBe('reason_required');
+    expect(h.db.agentMovement.createMany).toHaveBeenCalledTimes(1);
+  });
+
   it('a reversal that loses the lock race is refused too, and an electronics-only branch cannot reverse', async () => {
     const h = harness();
     const recorded = await h.svc.record(exchange());
@@ -580,5 +633,71 @@ describe('rebalancing (A8)', () => {
     const again = await h.svc.rebalance(body);
     expect(again.rebalancing.id).toBe(first.rebalancing.id);
     expect(h.db.agentRebalancing.create).toHaveBeenCalledTimes(1);
+    const blank = await refusal(h.svc.rebalance({ ...body, clientUuid: KEY2, reason: ' ' }));
+    expect(blank.body?.code).toBe('reason_required');
+  });
+
+  it('open first: a closed day moves nothing — before the write, and under the day’s lock', async () => {
+    const buy = { clientUuid: KEY, reason: 'Bought float', legs: [{ account: 'cash' as const, direction: 'outflow' as const, amount: 100 }, { account: 'provider' as const, providerId: BANKILY, direction: 'inflow' as const, amount: 100 }] };
+    const closedDay = harness({ closed: true });
+    const before = await refusal(closedDay.svc.rebalance(buy));
+    expect(before.body?.code).toBe('store_closed');
+    expect(closedDay.closing.assertCounterOpen).toHaveBeenCalledWith(BRANCH, 'agent_rebalancing');
+    expect(closedDay.db.agentRebalancing.create).not.toHaveBeenCalled();
+    const closing = harness({ closedInside: true });
+    const inside = await refusal(closing.svc.rebalance(buy));
+    expect(inside.body?.code).toBe('store_closed');
+    expect(closing.closing.assertCounterOpenTx).toHaveBeenCalledWith(closing.db, { branchId: BRANCH, businessDate: DAY, operation: 'agent_rebalancing' });
+    expect(closing.db.agentRebalancing.create).not.toHaveBeenCalled();
+    expect(closing.db.agentMovement.createMany).not.toHaveBeenCalled();
+  });
+
+  describe('a position going below zero (docs/73 §4.7 row 4)', () => {
+    const buy = (over: Partial<CreateAgentRebalancingDto> = {}): CreateAgentRebalancingDto => ({
+      clientUuid: KEY,
+      reason: 'Bought float',
+      legs: [{ account: 'cash', direction: 'outflow', amount: 100_000 }, { account: 'provider', providerId: BANKILY, direction: 'inflow', amount: 100_000 }],
+      ...over,
+    });
+
+    it('cash at 35 000, buying 100 000 of float: refused with what cash would read, nothing written', async () => {
+      const h = harness({ drawer: 35_000, permissions: ['agent.rebalance'] });
+      const { error, body } = await refusal(h.svc.rebalance(buy()));
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(body).toMatchObject({ code: 'rebalancing_negative', problems: [{ account: 'cash', providerId: null, position: 35_000, after: -65_000 }] });
+      expect(String(body?.message)).toMatch(/Cash would go to -65000 MRU.*Nothing was moved\. Only the Owner can confirm/);
+      expect(h.db.agentRebalancing.create).not.toHaveBeenCalled();
+    });
+
+    it('a Manager’s confirmation is not the Owner’s: still refused', async () => {
+      const h = harness({ drawer: 35_000, permissions: ['agent.rebalance'] });
+      const { body } = await refusal(h.svc.rebalance(buy({ confirmNegative: true })));
+      expect(body?.code).toBe('rebalancing_negative');
+      expect(h.db.agentRebalancing.create).not.toHaveBeenCalled();
+    });
+
+    it('the Owner is told, then confirms: recorded, and the position will read as negative', async () => {
+      const h = harness({ drawer: 35_000, permissions: ['agent.rebalance', 'agent.position.set'] });
+      const told = await refusal(h.svc.rebalance(buy()));
+      expect(String(told.body?.message)).toMatch(/Confirm to record it anyway/);
+      const { rebalancing } = await h.svc.rebalance(buy({ confirmNegative: true }));
+      expect(rebalancing.legs).toHaveLength(2);
+      expect(h.db.agentRebalancing.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('an unknown drawer is never taken for zero: nothing to refuse', async () => {
+      const h = harness({ drawer: null });
+      await h.svc.rebalance(buy());
+      expect(h.db.agentRebalancing.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('a float sold for more than it holds is refused the same way; one that is only filled is never read', async () => {
+      const h = harness({ floatAnchor: 5_000, drawer: 1_000 });
+      const sell = { clientUuid: KEY, reason: 'Sold float', legs: [{ account: 'provider' as const, providerId: BANKILY, direction: 'outflow' as const, amount: 10_000 }, { account: 'cash' as const, direction: 'inflow' as const, amount: 10_000 }] };
+      const { body } = await refusal(h.svc.rebalance(sell));
+      expect(body).toMatchObject({ code: 'rebalancing_negative', problems: [{ account: 'provider', providerId: BANKILY, position: 5_000, after: -5_000 }] });
+      expect(String(body?.message)).toMatch(/^Bankily would go to -5000 MRU/);
+      expect(h.closing.drawerPosition).not.toHaveBeenCalled();
+    });
   });
 });

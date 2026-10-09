@@ -359,6 +359,46 @@ export function positionFingerprint(input: { providerId: string; accountKind: 'p
   return fingerprint({ providerId: input.providerId.toLowerCase(), accountKind: input.accountKind, amount: money(input.amount), note: text(input.note) });
 }
 
+/** A reason the record keeps (A7, §4.1): trimmed, and refused when nothing is left — a blank is not a why. */
+export function reasonGiven(reason: string): string {
+  const trimmed = reason.trim();
+  if (trimmed.length === 0) throw new BadRequestException({ code: 'reason_required', message: 'Say why: the reason is kept with this record.' });
+  return trimmed;
+}
+
+/** An account a rebalancing would leave below zero, as far as the app knows it (docs/73 §4.7 row 4). */
+export interface NegativeAfter {
+  account: LegAccount;
+  providerId: string | null;
+  position: number;
+  after: number;
+}
+
+/**
+ * The accounts a rebalancing's legs would take below zero: each account's net change applied to what the app tracks
+ * for it now. An unknown position (null) is never taken for zero, so it refuses nothing; an account the legs leave
+ * level or fill cannot go down; the outside world has no position.
+ */
+export function negativesAfter(legs: readonly Leg[], positionOf: (account: LegAccount, providerId: string | null) => number | null): NegativeAfter[] {
+  const nets = new Map<string, { account: LegAccount; providerId: string | null; net: number }>();
+  for (const leg of legs) {
+    if (leg.account === 'external') continue;
+    const key = `${leg.account}:${leg.providerId ?? ''}`;
+    const entry = nets.get(key) ?? { account: leg.account, providerId: leg.providerId, net: 0 };
+    entry.net = round2(entry.net + (leg.direction === 'inflow' ? leg.amount : -leg.amount));
+    nets.set(key, entry);
+  }
+  const found: NegativeAfter[] = [];
+  for (const { account, providerId, net } of nets.values()) {
+    if (net >= 0) continue;
+    const position = positionOf(account, providerId);
+    if (position === null) continue;
+    const after = round2(position + net);
+    if (after < 0) found.push({ account, providerId, position, after });
+  }
+  return found;
+}
+
 export function rebalancingFingerprint(input: RebalancingInput & { reason: string; note?: string | null }): string {
   return fingerprint({
     reason: input.reason.trim(),

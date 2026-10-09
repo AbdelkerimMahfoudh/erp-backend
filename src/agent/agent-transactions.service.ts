@@ -17,15 +17,20 @@ import {
   customerNumberFor,
   exchangeFingerprint,
   exchangeLegs,
+  floatPosition,
   maskedCustomerNumber,
   mistakeFingerprint,
   missingConfigFields,
+  negativesAfter,
   rateFor,
+  reasonGiven,
   rebalancingFingerprint,
   rebalancingLegs,
   reversalLegs,
   type Leg,
+  type LegAccount,
 } from './agent-rules';
+import { readFloatInputs } from './float-positions';
 import { CreateAgentTransactionDto, ListAgentTransactionsDto, ReverseAgentTransactionDto } from './dto/transaction.dto';
 import { DismissAgentMistakeDto, ListAgentMistakesDto, ReportAgentMistakeDto } from './dto/mistake.dto';
 import { CreateAgentRebalancingDto, ListAgentRebalancingsDto } from './dto/rebalancing.dto';
@@ -367,26 +372,34 @@ export class AgentTransactionsService {
     const userId = this.tenant.requireUserId();
     const transactionId = uuidToBin(id);
     const clientUuid = uuidToBin(dto.clientUuid);
+    const reason = reasonGiven(dto.reason);
     await requireAgentActivity(this.db, branchId);
     const found = await this.db.agentTransaction.findFirst({ where: { id: transactionId, branchId }, select: { id: true, status: true, reversalClientUuid: true } });
     if (!found) throw new NotFoundException({ code: 'transaction_not_found', message: 'No such exchange at this branch' });
     if (found.status === 'reversed') return this.reversedAnswer(found, clientUuid);
+    // Open first, like the exchange itself: the counter-legs carry the day they are posted on, never a locked one.
+    await this.closing.assertCounterOpen(branchId, 'agent_reversal');
 
     await this.db.$transaction(async (tx) => {
       // The row, locked: two people reversing one exchange produce one reversal and one 409.
-      const [locked] = await tx.$queryRaw<{ status: string; reversal_client_uuid: Buffer | null }[]>(Prisma.sql`
+      const [locked] = await tx.$queryRaw<{ status: string; reversal_client_uuid: Uint8Array | null }[]>(Prisma.sql`
         SELECT status, reversal_client_uuid FROM agent_transactions WHERE id = ${transactionId} AND company_id = ${companyId} FOR UPDATE`);
       if (!locked) throw new NotFoundException({ code: 'transaction_not_found', message: 'No such exchange at this branch' });
-      if (locked.status === 'reversed') throw alreadyReversed();
+      if (locked.status === 'reversed') {
+        // A retry of this very reversal that read the row before the first one committed: it is answered with it.
+        if (locked.reversal_client_uuid && Buffer.from(locked.reversal_client_uuid).equals(clientUuid)) return;
+        throw alreadyReversed();
+      }
       const original = await tx.agentMovement.findMany({ where: { transactionId, kind: { in: ['principal', 'commission'] } }, select: legSelect, orderBy: { createdAt: 'asc' } });
       const now = new Date();
       const businessDate = await this.businessDay.assign(branchId, now, tx as unknown as Prisma.TransactionClient);
+      await this.closing.assertCounterOpenTx(tx, { branchId, businessDate, operation: 'agent_reversal' });
       const actor = await tx.user.findFirst({ where: { id: userId }, select: { name: true } });
       const legs = reversalLegs(original.map((l) => ({ account: l.accountKind, providerId: l.providerId ? binToUuid(l.providerId) : null, direction: l.direction, amount: num(l.amount) })));
       await this.writeLegs(tx, { branchId, legs, businessDate, recordedAt: now, transactionId });
       const won = await tx.agentTransaction.updateMany({
         where: { id: transactionId, status: 'completed' },
-        data: { status: 'reversed', reversedById: userId, reversedByName: actor?.name ?? '', reversedAt: now, reversalReason: dto.reason.trim(), reversalClientUuid: clientUuid },
+        data: { status: 'reversed', reversedById: userId, reversedByName: actor?.name ?? '', reversedAt: now, reversalReason: reason, reversalClientUuid: clientUuid },
       });
       if (won.count === 0) throw new ConflictException({ code: 'already_reversed', message: 'That exchange was reversed a moment ago.' });
       await tx.agentMistakeReport.updateMany({
@@ -397,7 +410,7 @@ export class AgentTransactionsService {
         entityType: 'AgentTransaction',
         entityId: transactionId,
         action: 'status_change',
-        reason: dto.reason.trim().slice(0, 255),
+        reason: reason.slice(0, 255),
         before: { status: 'completed' },
         after: { status: 'reversed', businessDate, legs: legs.map((l) => [l.account, l.direction, l.amount, l.kind]) },
         branchId,
@@ -502,6 +515,7 @@ export class AgentTransactionsService {
     const branchId = this.tenant.requireBranchId();
     const userId = this.tenant.requireUserId();
     const clientUuid = uuidToBin(dto.clientUuid);
+    const reason = reasonGiven(dto.reason);
     const hash = rebalancingFingerprint(dto);
     const replay = await this.replayRebalancing(clientUuid, hash);
     if (replay) return replay;
@@ -509,22 +523,28 @@ export class AgentTransactionsService {
     const verdict = rebalancingLegs(dto);
     if (!verdict.ok) throw new BadRequestException({ code: verdict.code, message: verdict.message });
     const providerIds = [...new Set(verdict.legs.map((l) => l.providerId).filter((p): p is string => p !== null))];
+    const labels = new Map<string, string>();
     if (providerIds.length > 0) {
-      const known = await this.db.agentProvider.findMany({ where: { id: { in: providerIds.map(uuidToBin) } }, select: { id: true } });
+      const known = await this.db.agentProvider.findMany({ where: { id: { in: providerIds.map(uuidToBin) } }, select: { id: true, label: true } });
       if (known.length !== providerIds.length) throw new NotFoundException({ code: 'provider_not_found', message: 'A provider named in the legs does not exist' });
+      for (const p of known) labels.set(binToUuid(p.id), p.label);
     }
+    // Open first, like an exchange: a cash leg posted on a locked day would never reach the next opening.
+    await this.closing.assertCounterOpen(branchId, 'agent_rebalancing');
+    await this.refuseNegative(branchId, verdict.legs, labels, dto.confirmNegative === true);
     const id = newUuidV7Bin();
     try {
       await this.db.$transaction(async (tx) => {
         const now = new Date();
         const businessDate = await this.businessDay.assign(branchId, now, tx as unknown as Prisma.TransactionClient);
+        await this.closing.assertCounterOpenTx(tx, { branchId, businessDate, operation: 'agent_rebalancing' });
         const actor = await tx.user.findFirst({ where: { id: userId }, select: { name: true } });
         await tx.agentRebalancing.create({
           data: {
             id,
             companyId: this.tenant.companyId(),
             branchId,
-            reason: dto.reason.trim(),
+            reason,
             note: dto.note?.trim() || null,
             externalCounterparty: dto.externalCounterparty ?? null,
             externalAmount: dto.externalCounterparty ? verdict.net : null,
@@ -541,7 +561,7 @@ export class AgentTransactionsService {
           entityType: 'AgentRebalancing',
           entityId: id,
           action: 'create',
-          reason: dto.reason.trim().slice(0, 255),
+          reason: reason.slice(0, 255),
           after: { businessDate, externalCounterparty: dto.externalCounterparty ?? null, externalAmount: dto.externalCounterparty ? verdict.net : null, legs: verdict.legs.map((l) => [l.account, l.providerId, l.direction, l.amount]) },
           branchId,
         });
@@ -554,6 +574,44 @@ export class AgentTransactionsService {
       throw e;
     }
     return this.rebalancingOf(id);
+  }
+
+  /**
+   * Cash or a float that a rebalancing would take below zero, as far as the app knows it (docs/73 §4.7 row 4): refused,
+   * naming each account and what it would read, unless the Owner confirms it — then recorded, and shown as negative
+   * like any other position. An unknown position refuses nothing: it is not taken for zero.
+   */
+  private async refuseNegative(branchId: Buffer, legs: Leg[], labels: Map<string, string>, confirmed: boolean): Promise<void> {
+    const positions = new Map<string, number | null>();
+    const keyOf = (account: LegAccount, providerId: string | null) => `${account}:${providerId ?? ''}`;
+    const today = await this.businessDay.today(branchId);
+    for (const leg of legs) {
+      const key = keyOf(leg.account, leg.providerId);
+      if (leg.direction !== 'outflow' || leg.account === 'external' || positions.has(key)) continue;
+      if (leg.account === 'cash') {
+        positions.set(key, await this.closing.drawerPosition(branchId));
+        continue;
+      }
+      const inputs = await readFloatInputs(this.db, { branchId, providerId: uuidToBin(leg.providerId as string), accountKind: leg.account, businessDate: today });
+      positions.set(key, floatPosition(inputs.anchor, inputs.sinceAnchor).position);
+    }
+    const negatives = negativesAfter(legs, (account, providerId) => positions.get(keyOf(account, providerId)) ?? null);
+    if (negatives.length === 0) return;
+    const owner = this.cls.get('permissions')?.has('agent.position.set') ?? false;
+    if (confirmed && owner) return;
+    const named = negatives
+      .map((n) => {
+        const label = n.account === 'cash' ? 'Cash' : `${labels.get(n.providerId as string) ?? 'A provider'}${n.account === 'commission_held' ? ' (held commission)' : ''}`;
+        return `${label} would go to ${n.after} MRU`;
+      })
+      .join('; ');
+    throw new ConflictException({
+      code: 'rebalancing_negative',
+      message: `${named}: more would be recorded out than the app tracks in it. Nothing was moved. ${
+        owner ? 'Confirm to record it anyway; it will be shown as negative.' : 'Only the Owner can confirm a negative position.'
+      }`,
+      problems: negatives.map((n) => ({ account: n.account, providerId: n.providerId, position: n.position, after: n.after })),
+    });
   }
 
   private async replayRebalancing(clientUuid: Buffer, hash: string) {

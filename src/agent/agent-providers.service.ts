@@ -9,7 +9,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { AccessService } from '../rbac/access.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { hasAnyAgentPermission } from './agent-access';
-import { configRefusal, missingConfigFields, readyForTransactions, withSameRate } from './agent-rules';
+import { configRefusal, missingConfigFields, readyForTransactions, reasonGiven, withSameRate } from './agent-rules';
 import { CreateAgentProviderConfigDto, CreateAgentProviderDto, UpdateAgentProviderDto } from './dto/provider.dto';
 
 /** A configuration version as the phone and the transaction snapshot read it. */
@@ -153,6 +153,7 @@ export class AgentProvidersService {
   async addConfig(id: string, dto: CreateAgentProviderConfigDto) {
     const providerId = uuidToBin(id);
     const userId = this.tenant.requireUserId();
+    const reason = reasonGiven(dto.reason);
     const provider = await this.db.agentProvider.findFirst({ where: { id: providerId }, select: providerSelect });
     if (!provider) throw providerNotFound();
     const fields = withSameRate({
@@ -184,14 +185,14 @@ export class AgentProvidersService {
           effectiveFrom: new Date(),
           recordedById: userId,
           recordedByName: actor?.name ?? '',
-          reason: dto.reason.trim(),
+          reason,
         },
       });
       await this.audit.recordTx(tx, {
         entityType: 'AgentProviderConfig',
         entityId: configId,
         action: 'create',
-        reason: dto.reason.trim().slice(0, 255),
+        reason: reason.slice(0, 255),
         after: { providerId: id, label: provider.label, ...fields, missing: missingConfigFields(fields) },
       });
     });

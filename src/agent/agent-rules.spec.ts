@@ -10,6 +10,7 @@ import {
   floatPosition,
   maskedCustomerNumber,
   missingConfigFields,
+  negativesAfter,
   parseCustomerNumber,
   rateFor,
   readyForTransactions,
@@ -97,6 +98,36 @@ describe('commission: the whole amount at the direction’s rate, to the cent (A
     expect(commissionOf(0.01, 100)).toBe(0);
     expect(commissionOf(50_000, 0)).toBe(0);
     expect(commissionOf(50_000, 10_000)).toBe(50_000);
+  });
+});
+
+describe('a rebalancing taking a known position below zero (docs/73 §4.7 row 4)', () => {
+  const buy: Leg[] = [
+    { account: 'cash', providerId: null, direction: 'outflow', amount: 100_000, kind: 'rebalancing' },
+    { account: 'provider', providerId: 'bankily', direction: 'inflow', amount: 100_000, kind: 'rebalancing' },
+  ];
+
+  it('cash at 35 000 buying 100 000 of float reads −65 000; the float it fills is never asked', () => {
+    const asked: string[] = [];
+    const found = negativesAfter(buy, (account, providerId) => {
+      asked.push(`${account}:${providerId}`);
+      return account === 'cash' ? 35_000 : 50_000;
+    });
+    expect(found).toEqual([{ account: 'cash', providerId: null, position: 35_000, after: -65_000 }]);
+    expect(asked).toEqual(['cash:null']);
+  });
+
+  it('an unknown position refuses nothing; exactly zero is not below it; nets per account across legs', () => {
+    expect(negativesAfter(buy, () => null)).toEqual([]);
+    expect(negativesAfter(buy, () => 100_000)).toEqual([]);
+    const split: Leg[] = [
+      { account: 'provider', providerId: 'bankily', direction: 'outflow', amount: 30_000, kind: 'rebalancing' },
+      { account: 'provider', providerId: 'bankily', direction: 'outflow', amount: 30_000, kind: 'rebalancing' },
+      { account: 'cash', providerId: null, direction: 'inflow', amount: 60_000, kind: 'rebalancing' },
+    ];
+    expect(negativesAfter(split, (a) => (a === 'provider' ? 50_000 : 0))).toEqual([{ account: 'provider', providerId: 'bankily', position: 50_000, after: -10_000 }]);
+    const owner: Leg[] = [{ account: 'external', providerId: null, direction: 'outflow', amount: 5_000, kind: 'rebalancing' }, { account: 'cash', providerId: null, direction: 'inflow', amount: 5_000, kind: 'rebalancing' }];
+    expect(negativesAfter(owner, () => 0)).toEqual([]);
   });
 });
 

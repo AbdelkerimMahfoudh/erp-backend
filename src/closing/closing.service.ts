@@ -124,8 +124,21 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 /** The row key the counting screen and the lifecycle rules share. */
 const keyOf = (c: { channel: string; accountId: string | null }) => `${c.channel}:${c.accountId ?? 'NONE'}`;
 
-/** What moves money through the counter, and so waits while the day is closed. An agent exchange is one (D154). */
-export type CounterOperation = 'sale' | 'receipt' | 'payment' | 'agent_exchange';
+/**
+ * What moves money through the counter, and so waits while the day is closed. An agent exchange is one (D154), and so
+ * are its reversal and a rebalancing: their legs carry the day they are posted on, and a cash leg posted on a locked day
+ * would never reach the next opening (the chain starts from the locked count).
+ */
+export type CounterOperation = 'sale' | 'receipt' | 'payment' | 'agent_exchange' | 'agent_reversal' | 'agent_rebalancing';
+
+const NOTHING_DONE: Record<CounterOperation, string> = {
+  sale: 'Nothing was sold',
+  receipt: 'Nothing was received',
+  payment: 'Nothing was recorded',
+  agent_exchange: 'Nothing was exchanged',
+  agent_reversal: 'Nothing was reversed',
+  agent_rebalancing: 'Nothing was moved',
+};
 
 /**
  * The refusal a sale, a receipt, a later payment on a debt or an agent exchange
@@ -135,8 +148,7 @@ export type CounterOperation = 'sale' | 'receipt' | 'payment' | 'agent_exchange'
  * the opening.
  */
 function storeClosed(day: string, operation: CounterOperation, reason: CounterRefusal): ConflictException {
-  const nothing =
-    operation === 'sale' ? 'Nothing was sold' : operation === 'receipt' ? 'Nothing was received' : operation === 'agent_exchange' ? 'Nothing was exchanged' : 'Nothing was recorded';
+  const nothing = NOTHING_DONE[operation];
   return new ConflictException({
     code: 'store_closed',
     closedReason: reason,
@@ -2085,6 +2097,16 @@ export class ClosingService {
       ).length > 0;
     const refusal = counterRefusal(row?.status, opened);
     if (refusal) throw storeClosed(args.businessDate, args.operation, refusal);
+  }
+
+  /**
+   * The drawer as Money shows it right now — null while the app does not know it (no count, no set amount behind it).
+   * A rebalancing reads it to say, before anything is written, that cash would go below zero (docs/73 §4.7 row 4).
+   */
+  async drawerPosition(branchId: Buffer): Promise<number | null> {
+    const day = await this.businessDay.today(branchId);
+    const drawer = await this.drawerNow(this.tenant.companyId(), branchId, day);
+    return drawer.known ? drawer.previous : null;
   }
 
   /** Whether anybody opened this business day — an explicit opening or a reopen, the door's own events. */

@@ -1,7 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { AgentExternalCounterparty } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { ArrayMinSize, IsArray, IsEnum, IsIn, IsNumber, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { ArrayMinSize, IsArray, IsBoolean, IsEnum, IsIn, IsNumber, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import { IsMoney } from '../../common/money/is-money.decorator';
 
 /** One leg of a rebalancing, over the branch's own accounts (docs/73 §4.3). */
@@ -66,6 +66,12 @@ export class CreateAgentRebalancingDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @IsMoney()
   externalAmount?: number;
+
+  /** The Owner's confirmation that cash or a float may go below zero (docs/73 §4.7 row 4); ignored for anybody else. */
+  @ApiPropertyOptional({ description: 'Owner only: record it although a known position would go below zero' })
+  @IsOptional()
+  @IsBoolean()
+  confirmNegative?: boolean;
 }
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
