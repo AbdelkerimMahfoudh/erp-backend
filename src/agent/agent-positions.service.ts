@@ -52,10 +52,16 @@ export class AgentPositionsService {
     private readonly closing: ClosingService,
   ) {}
 
-  /** Every position at this branch now, and their total when all are known. */
+  /**
+   * Every position at this branch now, and their total when all are known.
+   *
+   * A read, so never refused for the branch's activity (D156): a branch moved
+   * from `both` to `electronics` keeps seeing the floats it still holds — the
+   * money did not vanish with the subscription. Setting one is a write and is
+   * refused below.
+   */
   async view() {
     const branchId = this.tenant.requireBranchId();
-    await requireAgentActivity(this.db, branchId);
     const businessDate = await this.businessDay.today(branchId);
     const asOf = new Date();
     const [cash, providers, withMoney] = await Promise.all([

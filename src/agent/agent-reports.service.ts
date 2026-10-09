@@ -6,7 +6,6 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { binToUuid } from '../common/utils/uuid.util';
 import { isDateString } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
-import { requireAgentActivity } from './agent-access';
 import { aggregateAgentReport, periodRangeOf, type ReportRebalancingLeg, type ReportTransaction } from './agent-report-rules';
 import { accountsWithMoney, floatKey, readFloat, type FloatProvider, type FloatView } from './float-positions';
 import { AgentReportQueryDto } from './dto/report.dto';
@@ -28,9 +27,12 @@ export class AgentReportsService {
     private readonly businessDay: BusinessDayService,
   ) {}
 
+  /**
+   * A read, so never refused for the branch's activity (D156): a branch that
+   * was an agent counter keeps its history and reports after a downgrade.
+   */
   async report(query: AgentReportQueryDto) {
     const branchId = this.tenant.requireBranchId();
-    await requireAgentActivity(this.db, branchId);
     const today = await this.businessDay.today(branchId);
     const date = query.date ?? today;
     if (!isDateString(date)) throw new BadRequestException('date must be YYYY-MM-DD');

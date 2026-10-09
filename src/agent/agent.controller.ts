@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { AgentPositionsService } from './agent-positions.service';
@@ -126,6 +126,7 @@ export class AgentController {
   }
 
   @Post('mistakes/:id/dismiss')
+  @HttpCode(HttpStatus.OK)
   @RequirePermissions('agent.transaction.reverse')
   @ApiOperation({ summary: 'Dismiss a mistake report: the exchange stands' })
   dismissMistake(@Param('id') id: string, @Body() dto: DismissAgentMistakeDto) {

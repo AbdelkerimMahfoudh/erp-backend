@@ -208,12 +208,11 @@ describe('GET agent/positions — the money of the branch', () => {
     expect(view.unknownKeys).toEqual([`provider:${BANKILY}`, `commission_held:${BANKILY}`, `commission_held:${OLD}`]);
   });
 
-  it('an electronics-only branch is refused by name, before any money is read', async () => {
+  it('a read is never refused for the activity (D156): a branch moved to electronics still sees the floats it holds', async () => {
     const h = harness({ activity: 'electronics' });
-    const { error, body } = await refusal(h.svc.view());
-    expect(error).toBeInstanceOf(ForbiddenException);
-    expect(body).toMatchObject({ code: 'activity_not_subscribed', activity: 'electronics', required: 'money_agent' });
-    expect(h.closing.drawerMethod).not.toHaveBeenCalled();
+    const view = await h.svc.view();
+    expect(h.closing.drawerMethod).toHaveBeenCalled();
+    expect(Array.isArray(view.floats)).toBe(true);
   });
 });
 

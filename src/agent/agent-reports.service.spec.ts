@@ -116,9 +116,10 @@ describe('GET agent/reports', () => {
     ]);
   });
 
-  it('an electronics-only branch is refused by name', async () => {
+  it('a read is never refused for the activity (D156): a branch moved to electronics keeps its agent history and reports', async () => {
     const h = harness({ activity: 'electronics' });
-    await expect(h.svc.report({ period: 'day' })).rejects.toBeInstanceOf(ForbiddenException);
-    expect(h.db.agentTransaction.findMany).not.toHaveBeenCalled();
+    const report = await h.svc.report({ period: 'day' });
+    expect(h.db.agentTransaction.findMany).toHaveBeenCalled();
+    expect(report.totals.count).toBeGreaterThanOrEqual(0);
   });
 });
