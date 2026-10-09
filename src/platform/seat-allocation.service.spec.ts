@@ -48,11 +48,11 @@ interface Row {
   version: number;
 }
 
-function makeWorld(main: { activity?: Activity; activityNext?: Activity | null } = {}) {
+function makeWorld(main: { activity?: Activity; activityNext?: Activity | null } = {}, opts: { running?: boolean; status?: string } = {}) {
   const sub = {
     id: newUuidV7Bin(),
     companyId: COMPANY,
-    status: 'activated',
+    status: opts.status ?? 'activated',
     subscribedBranchCount: 1,
     additionalSeats: 0,
     version: 2,
@@ -94,6 +94,9 @@ function makeWorld(main: { activity?: Activity; activityNext?: Activity | null }
       const current = (row as any)[k];
       if (v && typeof v === 'object' && !Buffer.isBuffer(v) && 'in' in v) {
         if (!(v as any).in.includes(current)) return false;
+      } else if (v && typeof v === 'object' && !Buffer.isBuffer(v) && 'not' in v) {
+        const not = (v as any).not;
+        if (Buffer.isBuffer(not) ? Buffer.isBuffer(current) && current.equals(not) : current === not) return false;
       } else if (Buffer.isBuffer(v)) {
         if (!current || !Buffer.isBuffer(current) || !current.equals(v)) return false;
       } else if (current !== v) return false;
@@ -204,6 +207,8 @@ function makeWorld(main: { activity?: Activity; activityNext?: Activity | null }
       },
     },
     company: { findUnique: async () => ({ name: 'Shop' }) },
+    // The per-branch lock of a request (SELECT … FOR UPDATE): one request at a time per branch, by the database.
+    $queryRaw: async () => [],
   };
   const prisma = { ...tx, $transaction: async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx) };
   const audit = { record: async (e: unknown) => void audits.push(e) };
@@ -213,6 +218,13 @@ function makeWorld(main: { activity?: Activity; activityNext?: Activity | null }
       upcoming: null,
     }),
     assessNow: async (id: Buffer) => void assessed.push(id),
+    /** A paid month running at the period's own copied prices — or, with `running: false`, no paid month at all. */
+    chargeablePricing: async () => ({
+      running: opts.running ?? true,
+      pricing: { extraStaffMonthly: 100, branchMonthly: 500, agentMonthly: 300, bothMonthly: 700, includedStaffPerBranch: 1 },
+    }),
+    // No renewal is ever due in this world: the latest period is not modelled here (billing/renewal.ts has its own spec).
+    latestPeriod: async () => null,
   };
   const clock = { now: () => NOW };
   const service = new SeatAllocationService(prisma as never, audit as never, billing as never, clock as never);
@@ -459,15 +471,56 @@ describe('another activity for a branch (D154, docs/73 §3)', () => {
     expect(u.allocation).toMatchObject({ status: 'pending_payment', monthlyAmount: 200, activityEffective: 'now' });
   });
 
-  it('the same activity is refused by name — and names the scheduled change to withdraw, when there is one', async () => {
-    const w = makeWorld({ activity: 'both', activityNext: 'money_agent' });
+  it('the same activity, with nothing scheduled, is refused by name and writes nothing', async () => {
+    const w = makeWorld({ activity: 'both' });
     const refusal = await w.service
       .requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner })
       .catch((e: unknown) => e);
     expect(refusal).toBeInstanceOf(BadRequestException);
     expect((refusal as BadRequestException).getResponse()).toMatchObject({ code: 'activity_unchanged' });
-    expect(JSON.stringify((refusal as BadRequestException).getResponse())).toMatch(/money_agent.*withdraw/);
     expect(w.rows).toHaveLength(0);
+  });
+
+  it('asking to KEEP the current activity while a downgrade is scheduled withdraws it: nothing charged, nothing refunded (docs/73 §3.3, corrected 2026-10-09)', async () => {
+    const w = makeWorld({ activity: 'both' });
+    const down = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+    expect(w.branches[0].activityNext).toBe('money_agent');
+    const keep = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    expect(keep.created).toBe(false);
+    expect(keep.allocation).toMatchObject({ id: down.allocation.id, status: 'released', reason: 'Withdrawn by a later request to keep both.', monthlyAmount: 0 });
+    expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: null });
+    expect(w.rows).toHaveLength(1);
+    expect(w.payments).toHaveLength(0);
+    expect(w.events.map((e) => e.kind)).toEqual(['activity_scheduled', 'seat_closed']);
+  });
+
+  it('an upgrade with no paid month running is scheduled like a downgrade — never a difference charged against nothing (reviewed 2026-10-09)', async () => {
+    for (const opts of [{ running: false }, { running: true, status: 'pending_activation' }]) {
+      const w = makeWorld({ activity: 'money_agent' }, opts);
+      const r = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+      expect(r.allocation).toMatchObject({ kind: 'activity', status: 'granted', activityEffective: 'renewal', monthlyAmount: 0, activityFrom: 'money_agent', activityTo: 'both' });
+      expect(w.branches[0]).toMatchObject({ activity: 'money_agent', activityNext: 'both' });
+      expect(w.events.map((e) => e.kind)).toEqual(['activity_scheduled']);
+      expect(w.events[0].note).toMatch(/priced in full then/);
+    }
+  });
+
+  it('a paid upgrade supersedes whatever else was open for the branch: no stale scheduled row survives (reviewed 2026-10-09)', async () => {
+    const w = makeWorld({ activity: 'electronics' });
+    const up = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    // A row the request path could never write beside it — the concurrency the per-branch lock now prevents — is still cleaned up.
+    w.rows.push({ ...w.rows[0], id: newUuidV7Bin(), status: 'granted', activityTo: 'money_agent', activityEffective: 'renewal', monthlyAmount: 0, confirmedAt: null });
+    await w.service.confirmPayment(uuidToBin(up.allocation.id), { ...PAYMENT, amount: '200' }, CTX);
+    expect(w.rows.map((r) => r.status)).toEqual(['paid', 'released']);
+    expect(w.rows[1].reason).toBe('Superseded by the paid upgrade.');
+    expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: null });
+  });
+
+  it('a refusal and a release of an activity change are audited as what they are', async () => {
+    const w = makeWorld({ activity: 'electronics' });
+    const up = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });
+    await w.service.refuse(uuidToBin(up.allocation.id), { reason: 'No such transfer arrived' }, CTX);
+    expect(w.audits[0]).toMatchObject({ action: 'activity.refuse' });
   });
 
   it('a warehouse stays electronics and cannot be asked (D154 c)', async () => {
@@ -571,7 +624,7 @@ describe('another activity for a branch (D154, docs/73 §3)', () => {
     const r = await w.service.release(uuidToBin(allocation.id), { reason: 'The Owner called: keep both' }, CTX);
     expect(r.allocation.status).toBe('released');
     expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: null });
-    expect(w.audits[0]).toMatchObject({ action: 'seat.release', before: { activityFrom: 'both', activityTo: 'money_agent' } });
+    expect(w.audits[0]).toMatchObject({ action: 'activity.release', before: { activityFrom: 'both', activityTo: 'money_agent' } });
 
     const paid = makeWorld({ activity: 'electronics' });
     const up = await paid.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'both', requestedBy: owner });

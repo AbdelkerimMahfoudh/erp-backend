@@ -2,7 +2,8 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { Prisma, type SeatAllocationKind, type SeatAllocationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlatformAuditService } from './platform-audit.service';
-import { BillingService } from '../billing/billing.service';
+import { BillingService, type BillingDb } from '../billing/billing.service';
+import { SubscriptionRenewal } from '../billing/renewal';
 import { activityChange, activityFee } from '../billing/pricing-rules';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import type { Activity } from '../entitlement/activity';
@@ -121,14 +122,23 @@ function requestLabel(row: Pick<Row, 'kind' | 'label' | 'branch' | 'activityFrom
   return `Seat at ${row.branch?.name ?? 'a store'}`;
 }
 
+/** The audit action of a decision on a request, named after what the request is. */
+const actionOf = (kind: SeatAllocationKind, verb: 'refuse' | 'release'): string =>
+  `${kind === 'store' ? 'store' : kind === 'activity' ? 'activity' : 'seat'}.${verb}`;
+
 @Injectable()
 export class SeatAllocationService {
+  /** The renewal due at the end of a prepaid period (billing/renewal.ts), applied before a request is priced. */
+  private readonly renewal: SubscriptionRenewal;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: PlatformAuditService,
     private readonly billing: BillingService,
     @Inject(CLOCK) private readonly clock: Clock,
-  ) {}
+  ) {
+    this.renewal = new SubscriptionRenewal(prisma, billing, clock);
+  }
 
   view(row: Row): SeatAllocationView {
     return {
@@ -305,7 +315,8 @@ export class SeatAllocationService {
     });
     if (pendingSame) return { allocation: this.view(pendingSame), created: false };
 
-    const plan = await this.billing.planAt(this.clock.now());
+    // The running period's own prices when a paid month runs, so the request and the period's assessment agree.
+    const { pricing } = await this.billing.chargeablePricing(companyId);
     const row = await this.prisma.seatAllocation.create({
       data: {
         id: newUuidV7Bin(),
@@ -315,7 +326,7 @@ export class SeatAllocationService {
         status: 'pending_payment',
         label: name,
         activityTo: activity,
-        monthlyAmount: activityFee(activity, plan.current),
+        monthlyAmount: activityFee(activity, pricing),
         requestedBy: input.requestedBy.slice(0, 160),
       },
       include: INCLUDE,
@@ -337,152 +348,158 @@ export class SeatAllocationService {
   }
 
   /**
-   * Another activity for a branch (D154, docs/73 §3).
+   * Another activity for a branch (D154, docs/73 §3; reviewed 2026-10-09).
    *
-   * Priced by today's plan as the difference between what the branch pays and
-   * what it would pay:
+   * Priced as the difference between what the branch pays and what it would
+   * pay, at the running period's own prices:
    *
-   *  - **higher** — an upgrade: a `pending_payment` request for exactly the
-   *    difference, applied to the branch when the payment is confirmed and
-   *    charged to this period at once. It cancels a downgrade still waiting
-   *    for the renewal, because the Owner has changed their mind.
-   *  - **lower** — a downgrade: nothing to pay, so it is `granted` at once,
-   *    written on the branch as `activity_next`, and applied by the next
-   *    renewal. Nothing is refunded this period.
+   *  - **higher, while a paid month runs** — an upgrade: a `pending_payment`
+   *    request for exactly the difference, applied to the branch when the
+   *    payment is confirmed and charged to this period at once. It cancels a
+   *    change still waiting for the renewal: the Owner changed their mind.
+   *  - **higher, with no paid month running** (pending, lapsed, in grace,
+   *    suspended) — there is no month to charge a difference against, so it is
+   *    scheduled like a downgrade and the next period is priced in full.
+   *  - **lower** — a downgrade: nothing to pay, `granted` at once, written on
+   *    the branch as `activity_next`, applied by the next renewal; nothing is
+   *    refunded this period.
+   *  - **the activity the branch already has, while a change is scheduled** —
+   *    the Owner keeps it: the scheduled change is withdrawn, nothing charged.
    *
-   * One open request per branch. The same target again answers with the
-   * request that exists; a different one is refused until the Owner withdraws
-   * the first — two open requests for one branch would be two prices for one
-   * thing. A warehouse stays `electronics` (D154 c) and cannot be asked.
+   * One open request per branch, serialised on the branch row, so two devices
+   * asking at once get one request. The same target again answers with the
+   * request that exists; a different one is refused until the first is
+   * withdrawn. A warehouse stays `electronics` (D154 c) and cannot be asked.
    */
   async requestActivityChange(
     companyId: Buffer,
     input: { branchId: Buffer; activity: Activity; requestedBy: string },
   ): Promise<{ allocation: SeatAllocationView; created: boolean }> {
     const sub = await this.subscriptionOf(companyId);
-    const branch = await this.prisma.branch.findFirst({
-      where: { id: input.branchId, companyId, isActive: true, deletedAt: null },
-      select: { id: true, name: true, type: true, activity: true, activityNext: true },
-    });
-    if (!branch) throw new NotFoundException('Unknown store');
-    if (branch.type === 'warehouse') {
-      throw new BadRequestException({
-        code: 'activity_not_for_warehouse',
-        message: 'A warehouse holds stock for the electronics stores; it cannot be a money services agent.',
+    // A renewal that fell due at the end of a prepaid period comes first: the branch and the period are then today's.
+    await this.renewal.rollIfDue(companyId);
+    const actor = input.requestedBy.slice(0, 160);
+
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM branches WHERE id = ${input.branchId} AND company_id = ${companyId} FOR UPDATE`);
+      const branch = await tx.branch.findFirst({
+        where: { id: input.branchId, companyId, isActive: true, deletedAt: null },
+        select: { id: true, name: true, type: true, activity: true, activityNext: true },
       });
-    }
-    if (branch.activity === input.activity) {
-      throw new BadRequestException({
-        code: 'activity_unchanged',
-        message: branch.activityNext
-          ? `${branch.name} is already ${input.activity}. A change to ${branch.activityNext} is scheduled for the renewal; withdraw that request to keep ${input.activity}.`
-          : `${branch.name} is already ${input.activity}.`,
-      });
-    }
-
-    const open = await this.prisma.seatAllocation.findMany({
-      where: {
-        companyId,
-        kind: 'activity',
-        branchId: branch.id,
-        status: { in: ['pending_payment', 'granted'] },
-      },
-      include: INCLUDE,
-      orderBy: { requestedAt: 'desc' },
-    });
-    const pending = open.filter((r) => r.status === 'pending_payment' || isScheduledActivityChange(r));
-    const same = pending.find((r) => r.activityTo === input.activity);
-    if (same) return { allocation: this.view(same), created: false };
-
-    const plan = await this.billing.planAt(this.clock.now());
-    const change = activityChange(branch.activity, input.activity, plan.current);
-    const scheduled = pending.find((r) => isScheduledActivityChange(r));
-    const unpaid = pending.find((r) => r.status === 'pending_payment');
-
-    // An unpaid upgrade to something else is a price already on the table;
-    // a scheduled downgrade to something else survives only a new downgrade.
-    const blocking = unpaid ?? (change.kind === 'downgrade' ? scheduled : undefined);
-    if (blocking) {
-      throw new ConflictException({
-        code: 'activity_request_pending',
-        message: `${branch.name} already has a request to become ${blocking.activityTo}. Withdraw it first.`,
-      });
-    }
-
-    if (change.kind === 'upgrade') {
-      // The Owner changed their mind: the downgrade waiting for the renewal is cancelled, free.
-      if (scheduled) {
-        await this.close(scheduled, 'released', 'Cancelled by a later upgrade request.', input.requestedBy, null);
+      if (!branch) throw new NotFoundException('Unknown store');
+      if (branch.type === 'warehouse') {
+        throw new BadRequestException({
+          code: 'activity_not_for_warehouse',
+          message: 'A warehouse holds stock for the electronics stores; it cannot be a money services agent.',
+        });
       }
-      const row = await this.prisma.seatAllocation.create({
+
+      const open = await tx.seatAllocation.findMany({
+        where: { companyId, kind: 'activity', branchId: branch.id, status: { in: ['pending_payment', 'granted'] } },
+        include: INCLUDE,
+        orderBy: { requestedAt: 'desc' },
+      });
+      const scheduled = open.find((r) => isScheduledActivityChange(r));
+      const unpaid = open.find((r) => r.status === 'pending_payment');
+
+      if (branch.activity === input.activity) {
+        // Keeping the activity the branch has: a change waiting for the renewal is withdrawn, free.
+        if (scheduled) {
+          await this.closeTx(tx, scheduled, 'released', `Withdrawn by a later request to keep ${input.activity}.`, actor);
+          return { rowId: scheduled.id, created: false };
+        }
+        throw new BadRequestException({
+          code: 'activity_unchanged',
+          message: unpaid
+            ? `${branch.name} is already ${input.activity}. A change to ${unpaid.activityTo} is awaiting payment; withdraw that request to keep ${input.activity}.`
+            : `${branch.name} is already ${input.activity}.`,
+        });
+      }
+
+      const same = [unpaid, scheduled].find((r) => r?.activityTo === input.activity);
+      if (same) return { rowId: same.id, created: false };
+
+      const { pricing, running } = await this.billing.chargeablePricing(companyId, tx);
+      const change = activityChange(branch.activity, input.activity, pricing);
+      const payNow = change.kind === 'upgrade' && running && sub.status === 'activated';
+
+      // An unpaid upgrade is a price already on the table; a scheduled change survives only an upgrade paid now.
+      const blocking = unpaid ?? (payNow ? undefined : scheduled);
+      if (blocking) {
+        throw new ConflictException({
+          code: 'activity_request_pending',
+          message: `${branch.name} already has a request to become ${blocking.activityTo}. Withdraw it first.`,
+        });
+      }
+
+      if (payNow) {
+        if (scheduled) await this.closeTx(tx, scheduled, 'released', 'Cancelled by a later upgrade request.', actor);
+        const id = newUuidV7Bin();
+        await tx.seatAllocation.create({
+          data: {
+            id,
+            companyId,
+            subscriptionId: sub.id,
+            branchId: branch.id,
+            kind: 'activity',
+            status: 'pending_payment',
+            activityFrom: change.from,
+            activityTo: change.to,
+            activityEffective: 'now',
+            monthlyAmount: change.amountNow,
+            requestedBy: actor,
+          },
+        });
+        await tx.subscriptionEvent.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            subscriptionId: sub.id,
+            kind: 'activity_requested',
+            note: `Activity change at ${branch.name}: ${change.from} → ${change.to}, ${change.amountNow} MRU for this period (the difference), awaiting payment.`.slice(0, 255),
+            branchesAfter: sub.subscribedBranchCount,
+            actor: actor.slice(0, 120),
+          },
+        });
+        return { rowId: id, created: true };
+      }
+
+      // Scheduled for the renewal: a downgrade, or an upgrade with no paid month to charge a difference against.
+      const id = newUuidV7Bin();
+      await tx.seatAllocation.create({
         data: {
-          id: newUuidV7Bin(),
+          id,
           companyId,
           subscriptionId: sub.id,
           branchId: branch.id,
           kind: 'activity',
-          status: 'pending_payment',
+          status: 'granted',
           activityFrom: change.from,
           activityTo: change.to,
-          activityEffective: 'now',
-          monthlyAmount: change.amountNow,
-          requestedBy: input.requestedBy.slice(0, 160),
+          activityEffective: 'renewal',
+          monthlyAmount: 0,
+          requestedBy: actor,
         },
-        include: INCLUDE,
       });
-      await this.prisma.subscriptionEvent.create({
+      await tx.branch.update({ where: { id: branch.id }, data: { activityNext: change.to } });
+      await tx.subscriptionEvent.create({
         data: {
           id: newUuidV7Bin(),
           companyId,
           subscriptionId: sub.id,
-          kind: 'activity_requested',
-          note: `Activity change at ${branch.name}: ${change.from} → ${change.to}, ${change.amountNow} MRU for this period (the difference), awaiting payment.`.slice(
-            0,
-            255,
-          ),
+          kind: 'activity_scheduled',
+          note: (change.kind === 'upgrade'
+            ? `Activity change at ${branch.name}: ${change.from} → ${change.to} when the next paid period begins, priced in full then; no paid month is running to charge a difference against.`
+            : `Activity change at ${branch.name}: ${change.from} → ${change.to} at the next renewal; nothing to pay, nothing refunded this period.`
+          ).slice(0, 255),
           branchesAfter: sub.subscribedBranchCount,
-          actor: input.requestedBy.slice(0, 120),
+          actor: actor.slice(0, 120),
         },
       });
-      return { allocation: this.view(row), created: true };
-    }
+      return { rowId: id, created: true };
+    });
 
-    // A downgrade: recorded now, applied by the renewal, nothing to pay.
-    const row = await this.prisma.seatAllocation.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        subscriptionId: sub.id,
-        branchId: branch.id,
-        kind: 'activity',
-        status: 'granted',
-        activityFrom: change.from,
-        activityTo: change.to,
-        activityEffective: 'renewal',
-        monthlyAmount: 0,
-        requestedBy: input.requestedBy.slice(0, 160),
-      },
-      include: INCLUDE,
-    });
-    await this.prisma.branch.update({
-      where: { id: branch.id },
-      data: { activityNext: change.to },
-    });
-    await this.prisma.subscriptionEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        subscriptionId: sub.id,
-        kind: 'activity_scheduled',
-        note: `Activity change at ${branch.name}: ${change.from} → ${change.to} at the next renewal; nothing to pay, nothing refunded this period.`.slice(
-          0,
-          255,
-        ),
-        branchesAfter: sub.subscribedBranchCount,
-        actor: input.requestedBy.slice(0, 120),
-      },
-    });
-    return { allocation: this.view(row), created: true };
+    return { allocation: this.view(await this.load(outcome.rowId)), created: outcome.created };
   }
 
   // ── deciding ─────────────────────────────────────────────────────────────
@@ -668,6 +685,18 @@ export class SeatAllocationService {
           data: { activity: before.activityTo, activityNext: null, activityChangedAt: now },
         });
         if (changed.count !== 1) throw new NotFoundException('Unknown store');
+        // Whatever else was open for this branch is superseded by what was paid for: no stale "scheduled" row survives.
+        await tx.seatAllocation.updateMany({
+          where: {
+            companyId: before.companyId,
+            kind: 'activity',
+            branchId: before.branchId,
+            id: { not: before.id },
+            status: { in: ['pending_payment', 'granted'] },
+            confirmedAt: null,
+          },
+          data: { status: 'released', closedAt: now, closedBy: ctx.admin.email.slice(0, 160), reason: 'Superseded by the paid upgrade.', version: { increment: 1 } },
+        });
         await tx.subscriptionEvent.create({
           data: {
             id: newUuidV7Bin(),
@@ -692,6 +721,10 @@ export class SeatAllocationService {
           actor: ctx.admin.email,
         },
       });
+
+      // A seat, a store or an activity upgrade added mid-period costs the whole month, now — in this transaction, so the
+      // payment, the change and the assessment commit together. A period that already ended is never raised.
+      await this.billing.assessNow(before.companyId, tx);
 
       return { payment, storeName };
     });
@@ -733,9 +766,6 @@ export class SeatAllocationService {
       ip: ctx.ip ?? null,
     });
 
-    // A seat, a store or an activity upgrade added mid-period costs the whole month, now.
-    await this.billing.assessNow(before.companyId);
-
     const after = await this.load(allocationId);
     return {
       allocation: this.view(after),
@@ -761,7 +791,7 @@ export class SeatAllocationService {
     }
     return this.close(before, 'refused', input.reason, ctx.admin.email, {
       admin: ctx.admin,
-      action: 'seat.refuse',
+      action: actionOf(before.kind, 'refuse'),
       ip: ctx.ip ?? null,
     });
   }
@@ -797,7 +827,7 @@ export class SeatAllocationService {
     }
     return this.close(before, 'released', input.reason, ctx.admin.email, {
       admin: ctx.admin,
-      action: 'seat.release',
+      action: actionOf(before.kind, 'release'),
       ip: ctx.ip ?? null,
     });
   }
@@ -824,6 +854,32 @@ export class SeatAllocationService {
       );
     }
     return this.close(before, 'released', 'Withdrawn by the business before payment.', actor, null);
+  }
+
+  /** Close a request inside the caller's transaction: the status move, the cleared `activity_next`, the event. */
+  private async closeTx(tx: BillingDb, before: Row, status: 'refused' | 'released', reason: string, closedBy: string): Promise<void> {
+    const now = this.clock.now();
+    const moved = await tx.seatAllocation.updateMany({
+      where: { id: before.id, status: before.status, version: before.version },
+      data: { status, closedAt: now, closedBy: closedBy.slice(0, 160), reason: reason.slice(0, 500), version: { increment: 1 } },
+    });
+    if (moved.count !== 1) throw CHANGED();
+    if (isScheduledActivityChange(before) && before.branchId && before.activityTo) {
+      await tx.branch.updateMany({
+        where: { id: before.branchId, companyId: before.companyId, activityNext: before.activityTo },
+        data: { activityNext: null },
+      });
+    }
+    await tx.subscriptionEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId: before.companyId,
+        subscriptionId: before.subscriptionId,
+        kind: 'seat_closed',
+        note: `${requestLabel(before)} ${status}: ${reason}`.slice(0, 255),
+        actor: closedBy.slice(0, 120),
+      },
+    });
   }
 
   private async close(
