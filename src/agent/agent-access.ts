@@ -42,12 +42,18 @@ export function activityNotSubscribed(activity: BranchActivity): ForbiddenExcept
 
 type BranchReader = Pick<TenantPrisma, 'branch'>;
 
-/** The branch's activity, or the refusal. A branch outside the company reads as no access, like the guard says it. */
-export async function requireAgentActivity(db: BranchReader, branchId: Buffer): Promise<BranchActivity> {
+/** The branch's activity, as stored. A branch outside the company reads as no access, like the guard says it. */
+export async function branchActivityOf(db: BranchReader, branchId: Buffer): Promise<BranchActivity> {
   const branch = await db.branch.findFirst({ where: { id: branchId }, select: { activity: true } });
   if (!branch) throw new ForbiddenException('No access to the requested branch');
-  if (!agentActivityAllowed(branch.activity)) throw activityNotSubscribed(branch.activity);
   return branch.activity;
+}
+
+/** The branch's activity, or the refusal. */
+export async function requireAgentActivity(db: BranchReader, branchId: Buffer): Promise<BranchActivity> {
+  const activity = await branchActivityOf(db, branchId);
+  if (!agentActivityAllowed(activity)) throw activityNotSubscribed(activity);
+  return activity;
 }
 
 export function hasAnyAgentPermission(held: ReadonlySet<string> | undefined): boolean {

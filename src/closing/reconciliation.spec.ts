@@ -12,6 +12,7 @@ import { join } from 'node:path';
  *   B   corrections returned in cash  — money came back and nothing said so
  *   D   expenses paid in cash         — a day the shop bought electricity looked short
  *   0083 the Owner's set amount       — a day whose drawer the Owner set could not be closed
+ *   D154 the agent counter's cash     — an agent branch's exchanges move the same drawer (docs/73 §4.5)
  *
  * That history is the reason this file exists. Each addition was individually
  * correct and nobody was ever looking at the whole equation, so the next
@@ -23,6 +24,7 @@ import { join } from 'node:path';
  *            − refunds(cash) − supplier(cash) − expenses(cash)
  *            + corrections(cash)
  *            + the set amount's adjustment (docs/63)
+ *            + the agent counter's cash in − its cash out (D154)
  *
  * Two properties are asserted, and both matter:
  *
@@ -67,6 +69,14 @@ const TERMS = [
     sign: '+',
     why: 'the Owner’s amount set during the day (docs/63): the amount − the day’s net at that instant − the opening balance, so the drawer starts from it',
   },
+  // The agent counter's cash (D154, docs/73 §4.5): the drawer is one, so an exchange's cash enters this equation
+  // and no second one — in and out apart, because a reversal's counter-leg and a rebalancing move it both ways.
+  {
+    name: 'agentCashIn',
+    sign: '+',
+    why: 'cash received for digital credit sent, a commission paid in cash, and the cash a reversal or a rebalancing brought back to the drawer',
+  },
+  { name: 'agentCashOut', sign: '-', why: 'cash given for digital credit received, and the cash a reversal or a rebalancing took out of the drawer' },
 ] as const;
 
 describe('the reconciliation equation', () => {
@@ -211,7 +221,8 @@ describe('the per-channel path is the same equation, not a second one', () => {
     // which moves that start. The cash equation's `correctedCash` is the cash
     // channel's NET correction — money coming back in minus a payment
     // reclassified out (0078) — so the channel table signs one more component
-    // than the equation has movement terms.
+    // than the equation has movement terms. The agent counter's cash (D154) is
+    // two terms on both sides: agentIn and agentOut, in and out apart.
     const movements = TERMS.filter((t) => t.name !== 'openingCash' && t.name !== 'setCash');
     expect(channels.match(/COMPONENT_SIGN\.\w+/g) ?? []).toHaveLength(movements.length + 1);
   });
@@ -225,7 +236,7 @@ describe('the per-channel path is the same equation, not a second one', () => {
   });
 
   it('every cash term has a per-channel counterpart', () => {
-    for (const component of ['salesIn', 'refundsOut', 'supplierOut', 'expensesOut', 'correctionsIn', 'correctionsOut']) {
+    for (const component of ['salesIn', 'refundsOut', 'supplierOut', 'expensesOut', 'correctionsIn', 'correctionsOut', 'agentIn', 'agentOut']) {
       expect(channels).toContain(`${component}:`);
       expect(closing).toContain(`'${component}'`);
     }
@@ -238,5 +249,50 @@ describe('the per-channel path is the same equation, not a second one', () => {
      * same movement without any test noticing.
      */
     expect(closing).toMatch(/return buildChannels\(/);
+  });
+});
+
+describe('the agent counter’s cash is the drawer’s, on every path (D154, docs/73 §4.5)', () => {
+  const agentCash = closing.slice(closing.indexOf('private async agentCashOn('), closing.indexOf('private async stockPaidOn('));
+
+  it('the equation’s terms are the cash legs of agent_movements on the STORED business date, in and out apart', () => {
+    expect(agentCash).toMatch(/FROM agent_movements[\s\S]*account_kind = 'cash' AND business_date = \$\{dayDate\}[\s\S]*GROUP BY direction/);
+    expect(agentCash).toMatch(/in: of\('inflow'\), out: of\('outflow'\)/);
+    expect(closing).toMatch(/const agentCashIn = agentCash\.in;\s*const agentCashOut = agentCash\.out;/);
+  });
+
+  it('the report’s channel row reads the same legs through the one movement query, as the drawer’s own components', () => {
+    const movements = closing.slice(closing.indexOf('private async channelMovements('), closing.indexOf('private async buildDigestLines('));
+    expect(movements).toMatch(/SELECT 'cash', NULL, IF\(m\.direction = 'inflow', 'agentIn', 'agentOut'\), SUM\(m\.amount\)\s+FROM agent_movements m/);
+    expect(movements).toMatch(/m\.account_kind = 'cash' AND m\.business_date BETWEEN \$\{fromDay\} AND \$\{toDay\}\s+GROUP BY m\.direction/);
+  });
+
+  it('a close freezes the two lines on the drawer’s row, a count records them, and the rollup keeps them beside the other cash figures', () => {
+    expect((closing.match(/agentIn: ch\.agentIn,\s*agentOut: ch\.agentOut,/g) ?? []).length).toBe(1);
+    expect(closing).toMatch(/agentIn: target\.agentIn,\s*agentOut: target\.agentOut,/);
+    const block = rollup.slice(rollup.indexOf('FROM agent_movements'), rollup.indexOf('FROM agent_movements') + 200);
+    expect(block).toMatch(/account_kind = 'cash'/);
+    expect(block).toMatch(/business_date = \$\{day\}/);
+    expect(rollup).toMatch(/CASE WHEN direction = 'inflow' THEN amount END\), 0\)\s+AS agent_in/);
+    expect((rollup.match(/agentCashIn,\s*agentCashOut,/g) ?? []).length).toBe(2);
+  });
+
+  it('an exchange posted while the day is being closed is caught like a sale: the fingerprint and the day’s activity see agent_movements', () => {
+    const queries = readFileSync(join(SRC, 'closing-report.queries.ts'), 'utf8');
+    const fingerprint = queries.slice(queries.indexOf('export async function movementFingerprint('));
+    expect(fingerprint).toMatch(/FROM agent_movements\s+WHERE company_id = \$\{companyId\} AND branch_id = \$\{branchId\} AND business_date = \$\{date\}\) AS a/);
+    const activity = queries.slice(queries.indexOf('export async function dayActivity('), queries.indexOf('export async function movementFingerprint('));
+    expect(activity).toMatch(/EXISTS \(SELECT 1 FROM agent_movements WHERE company_id = \$\{companyId\} AND branch_id = \$\{branchId\} AND business_date = \$\{date\}\)/);
+  });
+
+  it('the lock waits for every active provider’s float, before the day’s transaction, with the providers named', () => {
+    const close = closing.slice(closing.indexOf('async close('), closing.indexOf('private gatedFor('));
+    const refusal = close.indexOf("code: 'float_count_required'");
+    expect(refusal).toBeGreaterThan(0);
+    expect(refusal).toBeLessThan(close.indexOf('await this.db.$transaction('));
+    expect(close.slice(refusal, refusal + 400)).toMatch(/providers: floatsOutstanding\.map\(\(p\) => \(\{ providerId: p\.providerId, label: p\.label \}\)\)/);
+    expect(close).toMatch(/const floatsOutstanding = floatsToCount\(built\.floats\.providers, built\.floats\.counts\);/);
+    // And a counted float anchors its position inside the same transaction as the lock.
+    expect(close.indexOf('await this.anchorCountedFloatsTx(tx,')).toBeGreaterThan(close.indexOf('await this.db.$transaction('));
   });
 });

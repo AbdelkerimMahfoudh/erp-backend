@@ -10,21 +10,22 @@
  * it — so it is testable without a database.
  *
  * **It does not fork the reconciliation equation.** Every channel uses the same
- * five movements with the same signs that `reconciliation.spec.ts` pins for
- * cash:
+ * movements with the same signs that `reconciliation.spec.ts` pins for cash:
  *
- *   expected = salesIn − refundsOut − supplierOut − expensesOut + correctionsIn − correctionsOut
+ *   expected = salesIn − refundsOut − supplierOut − expensesOut + correctionsIn − correctionsOut + agentIn − agentOut
  *
  * Cash is simply the channel whose account is NULL. `correctionsOut` (0078) is
  * the other leg of a payment reclassified to another channel: the money leaves
  * the channel it was wrongly recorded in and enters the one it really reached, so
- * the total across channels is unchanged.
+ * the total across channels is unchanged. `agentIn` / `agentOut` (D154, docs/73
+ * §4.5) are the agent counter's cash legs: the drawer is one, so an exchange's
+ * cash enters the same equation as a sale's, never a second one.
  */
 
 export type Channel = 'cash' | 'account';
 
-/** The five movements, named exactly as the cash equation names them. */
-export type Component = 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut';
+/** The movements, named exactly as the cash equation names them. */
+export type Component = 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut' | 'agentIn' | 'agentOut';
 
 /** How each component enters `expected`. The single source of the signs. */
 export const COMPONENT_SIGN: Record<Component, 1 | -1> = {
@@ -34,6 +35,8 @@ export const COMPONENT_SIGN: Record<Component, 1 | -1> = {
   expensesOut: -1,
   correctionsIn: 1,
   correctionsOut: -1,
+  agentIn: 1,
+  agentOut: -1,
 };
 
 /**
@@ -82,6 +85,14 @@ export interface ChannelRow {
   /** A reclassified payment leaving this channel (0078). */
   correctionsOut: number;
   /**
+   * Cash only (D154, docs/73 §4.5): the agent counter's cash legs on the day. In: cash received for digital credit
+   * sent, a commission paid in cash, and the cash a reversal or a rebalancing brought back to the drawer. Out: cash
+   * given for credit received, and the cash a reversal or a rebalancing took out. Zero for accounts: an exchange
+   * moves the drawer and a provider float, never a receiving account.
+   */
+  agentIn: number;
+  agentOut: number;
+  /**
    * Cash only (0076): what the drawer held when the business day began — the
    * counted cash at the last locked close plus the net cash movement of any
    * unclosed day between. A balance carried forward, never income; zero for
@@ -98,7 +109,7 @@ export interface ChannelRow {
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
-const empty = () => ({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0, correctionsOut: 0 });
+const empty = () => ({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0, correctionsOut: 0, agentIn: 0, agentOut: 0 });
 
 /**
  * Which channels this branch has to account for today, and what each is
@@ -167,7 +178,9 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
         COMPONENT_SIGN.supplierOut * sums.supplierOut +
         COMPONENT_SIGN.expensesOut * sums.expensesOut +
         COMPONENT_SIGN.correctionsIn * sums.correctionsIn +
-        COMPONENT_SIGN.correctionsOut * sums.correctionsOut,
+        COMPONENT_SIGN.correctionsOut * sums.correctionsOut +
+        COMPONENT_SIGN.agentIn * sums.agentIn +
+        COMPONENT_SIGN.agentOut * sums.agentOut,
     );
 
     rows.push({
@@ -193,6 +206,8 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
       expensesOut: round2(sums.expensesOut),
       correctionsIn: round2(sums.correctionsIn),
       correctionsOut: round2(sums.correctionsOut),
+      agentIn: round2(sums.agentIn),
+      agentOut: round2(sums.agentOut),
       openingBalance,
       setAdjustment,
       expected,
@@ -252,8 +267,8 @@ export interface MethodMoney {
  */
 export function moneyByMethod(channels: ChannelRow[]): { channels: MethodMoney[]; total: { moneyIn: number; moneyOut: number; net: number } } {
   const rows = channels.map((c) => {
-    const moneyIn = round2(c.salesIn + c.correctionsIn);
-    const moneyOut = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut);
+    const moneyIn = round2(c.salesIn + c.correctionsIn + c.agentIn);
+    const moneyOut = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut + c.agentOut);
     return { channel: c.channel, accountId: c.accountId, label: c.labelSnapshot, isUnattributed: c.isUnattributed, moneyIn, moneyOut, net: round2(moneyIn - moneyOut) };
   });
   return {

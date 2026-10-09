@@ -196,6 +196,26 @@ export class RollupService {
     const expensesCount = toNum(expRows[0].expenses_count);
 
     /**
+     * The agent counter's cash on this day (D154, docs/73 §4.5): cash received
+     * for digital credit sent and given for credit received, a commission paid
+     * in cash, a reversal's counter-legs and a rebalancing's cash — every cash
+     * leg of `agent_movements`, keyed on its STORED business date. Movement of
+     * the drawer, never revenue: it enters no profit figure, only the two
+     * columns the closing's equation reads back.
+     */
+    const agentRows = await this.prisma.$queryRaw<{ agent_in: unknown; agent_out: unknown }[]>(Prisma.sql`
+      SELECT COALESCE(SUM(CASE WHEN direction = 'inflow' THEN amount END), 0)  AS agent_in,
+             COALESCE(SUM(CASE WHEN direction = 'outflow' THEN amount END), 0) AS agent_out
+      FROM agent_movements
+      WHERE company_id = ${companyId}
+        AND branch_id = ${branchId}
+        AND account_kind = 'cash'
+        AND business_date = ${day}
+    `);
+    const agentCashIn = round2(toNum(agentRows[0].agent_in));
+    const agentCashOut = round2(toNum(agentRows[0].agent_out));
+
+    /**
      * Returns approved ON THIS DAY (I2).
      *
      * Keyed on `approval_date`, never on the sale's day — that is precisely what
@@ -417,6 +437,8 @@ export class RollupService {
           cancelledCount,
           cancelledQty,
           expenseReversals,
+          agentCashIn,
+          agentCashOut,
           refreshedAt: now,
         },
         update: {
@@ -447,6 +469,8 @@ export class RollupService {
           cancelledCount,
           cancelledQty,
           expenseReversals,
+          agentCashIn,
+          agentCashOut,
           refreshedAt: now,
         },
       });

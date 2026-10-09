@@ -4,6 +4,7 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { ClosingService } from './closing.service';
 import { CreateClosingDto } from './dto/create-closing.dto';
 import { RecordCountDto } from './dto/record-count.dto';
+import { RecordFloatCountDto } from './dto/record-float-count.dto';
 import { ReopenClosingDto } from './dto/reopen-closing.dto';
 import { OpenDayDto } from './dto/open-day.dto';
 import { ReviewOpeningDto } from './dto/review-opening.dto';
@@ -146,6 +147,17 @@ export class ClosingController {
   @ApiOperation({ summary: 'Record one channel count; the day stays open and correctable' })
   recordCount(@Body() dto: RecordCountDto) {
     return this.closing.recordCount(dto);
+  }
+
+  /**
+   * One provider float's count at the closing of an agent branch (D154, docs/73 §4.5): the same act, the same
+   * authority and the same open day as a channel's count — the drawer is counted once, the floats beside it.
+   */
+  @Post('closings/:date/float-counts')
+  @RequirePermissions('closing.count')
+  @ApiOperation({ summary: 'Record one provider float’s count for a business day; the day stays open and correctable' })
+  recordFloatCount(@Param('date') date: string, @Body() dto: RecordFloatCountDto) {
+    return this.closing.recordFloatCount(date, dto);
   }
 
   @Post('closings')

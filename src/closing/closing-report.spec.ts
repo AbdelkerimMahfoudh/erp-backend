@@ -7,7 +7,9 @@ import {
   reportVersion,
   type ChannelCountState,
   type ChannelSplit,
+  type ClosingReport,
   type ExpenseLine,
+  type ReportFloatInput,
   type ReportInputs,
 } from './closing-report';
 
@@ -130,15 +132,17 @@ describe('a worked day, recomputed independently', () => {
   });
 
   it('money by channel: in, out and net, with the older debt apart from today’s sales', () => {
+    // Every row carries the agent counter's two lines since D154 (docs/73 §4.5): 0 on an electronics-only day, and the
+    // version of such a day is unchanged by them (proved below).
     const c = report.money.channels.find((x) => x.key === 'cash:NONE')!;
-    expect(c.in).toEqual({ todaysSales: 15_000, olderDebts: 4_000, correctionsIn: 0, total: of((r) => isCash(r) && IN(r)) });
+    expect(c.in).toEqual({ todaysSales: 15_000, olderDebts: 4_000, correctionsIn: 0, agentIn: 0, total: of((r) => isCash(r) && IN(r)) });
     expect(c.out.total).toBe(of((r) => isCash(r) && !IN(r)));
-    expect(c.out).toEqual({ refunds: 6_000, stockPurchases: 0, expenses: 1_200, correctionsOut: 3_000, total: 10_200 });
+    expect(c.out).toEqual({ refunds: 6_000, stockPurchases: 0, expenses: 1_200, correctionsOut: 3_000, agentOut: 0, total: 10_200 });
     expect(c.net).toBe(19_000 - 10_200);
 
     const b = report.money.channels.find((x) => x.accountId === BANKILY)!;
-    expect(b.in).toEqual({ todaysSales: 10_500, olderDebts: 0, correctionsIn: 3_000, total: 13_500 });
-    expect(b.out).toEqual({ refunds: 0, stockPurchases: 12_000, expenses: 0, correctionsOut: 0, total: 12_000 });
+    expect(b.in).toEqual({ todaysSales: 10_500, olderDebts: 0, correctionsIn: 3_000, agentIn: 0, total: 13_500 });
+    expect(b.out).toEqual({ refunds: 0, stockPurchases: 12_000, expenses: 0, correctionsOut: 0, agentOut: 0, total: 12_000 });
     expect(b.net).toBe(1_500);
 
     const m = report.money.channels.find((x) => x.accountId === MASRIVI)!;
@@ -465,5 +469,114 @@ describe('an amount the Owner set for the drawer on the day (docs/63)', () => {
     const unanchored = inputs({ opening: { amount: 0, anchorDate: null, anchorVerified: false, carriedDays: 0 } });
     expect(assembleReport(unanchored).warnings.map((w) => w.code)).toContain('no_counted_opening');
     expect(assembleReport({ ...unanchored, cashSet: set }).warnings.map((w) => w.code)).not.toContain('no_counted_opening');
+  });
+});
+
+/**
+ * The same day at a combined branch (D154, docs/73 §4.5, §4.7), recomputed by hand. The agent counter's cash is the
+ * drawer's: Receive cash 20 000 / send Bankily credit — cash in 20 000, with its 200 commission paid in cash — and
+ * Give cash 15 000 / receive Sedad credit — cash out 15 000. The float legs never reach a channel.
+ *
+ *   drawer in   = 19 000 + 20 200                           = 39 200
+ *   drawer out  = 10 200 + 15 000                           = 25 200
+ *   drawer      = 20 000 + 39 200 − 25 200                  = 34 000
+ *   principal is never revenue: sales, expenses and the result are the electronics day's, unchanged
+ */
+describe('the agent counter in the one closing (D154)', () => {
+  const agentDay: MovementRow[] = [...movements, cash('agentIn', 20_000), cash('agentIn', 200), cash('agentOut', 15_000)];
+  const channels = buildChannels(agentDay, accounts, OPENING);
+  const report = assembleReport(inputs({ channels }));
+  const plain = assembleReport(inputs());
+
+  it('reconciles: every total equals the sum of its own lines', () => {
+    expect(reportInvariants(report, channels, splits)).toEqual([]);
+  });
+
+  it('the drawer’s row carries the two agent lines; its in, out, net and expected figure include them; an account’s never do', () => {
+    const c = report.money.channels.find((x) => x.key === 'cash:NONE')!;
+    expect(c.in).toEqual({ todaysSales: 15_000, olderDebts: 4_000, correctionsIn: 0, agentIn: 20_200, total: 39_200 });
+    expect(c.out).toEqual({ refunds: 6_000, stockPurchases: 0, expenses: 1_200, correctionsOut: 3_000, agentOut: 15_000, total: 25_200 });
+    expect(c.net).toBe(14_000);
+    expect(report.expected.cash).toMatchObject({ in: 39_200, out: 25_200, expected: 34_000 });
+    for (const a of report.money.channels.filter((x) => x.channel === 'account')) expect([a.in.agentIn, a.out.agentOut]).toEqual([0, 0]);
+    expect(report.money.totals).toMatchObject({ in: 39_200 + 13_500 + 7_000, out: 25_200 + 12_000 + 15_000 });
+  });
+
+  it('exchanged principal is never revenue: sales, expenses and the result are untouched, and the version moves with the drawer', () => {
+    expect(report.sales).toEqual(plain.sales);
+    expect(report.expenses).toEqual(plain.expenses);
+    expect(report.result).toEqual(plain.result);
+    expect(reportVersion(report)).not.toBe(reportVersion(plain));
+  });
+});
+
+describe('every closing made before the agent counter keeps its version (D154)', () => {
+  /** A report exactly as a close stored it before the agent lines and the floats existed. */
+  function asStoredBefore(r: ClosingReport): ClosingReport {
+    const strip = <T extends object>(o: T, key: string): T => {
+      const copy = { ...o } as Record<string, unknown>;
+      delete copy[key];
+      return copy as T;
+    };
+    return {
+      ...r,
+      money: { ...r.money, channels: r.money.channels.map((c) => ({ ...c, in: strip(c.in, 'agentIn'), out: strip(c.out, 'agentOut') })) },
+      expected: strip(r.expected, 'floats'),
+    };
+  }
+
+  it('an electronics-only day hashes exactly as it did: the zero agent lines and the empty floats are outside the version', () => {
+    const now = assembleReport(inputs());
+    const before = asStoredBefore(now);
+    expect(JSON.stringify(before)).not.toContain('agentIn');
+    expect(reportVersion(before)).toBe(reportVersion(now));
+    // The day with corrections of 0079, likewise.
+    const corrected = assembleReport(inputs({ channels: buildChannels([...movements, cash('correctionsOut', 4_000)], accounts, OPENING) }));
+    expect(reportVersion(asStoredBefore(corrected))).toBe(reportVersion(corrected));
+  });
+
+  it('a day with agent money, or an agent branch’s floats, is hashed on them', () => {
+    const withMoney = assembleReport(inputs({ channels: buildChannels([...movements, cash('agentIn', 100)], accounts, OPENING) }));
+    expect(reportVersion(asStoredBefore(withMoney))).not.toBe(reportVersion(withMoney));
+    const float: ReportFloatInput = { providerId: 'p1', label: 'Bankily', expected: 150_000, counted: null, explanation: null, isSkipped: false, skipReason: null, countedAt: null, countedByName: null };
+    const withFloat = assembleReport(inputs({ floats: [float] }));
+    expect(reportVersion(withFloat)).not.toBe(reportVersion(assembleReport(inputs())));
+    expect(reportVersion(assembleReport(inputs({ floats: [{ ...float, expected: 150_100 }] })))).not.toBe(reportVersion(withFloat));
+    expect(reportVersion(assembleReport(inputs({ floats: [{ ...float, counted: 150_000 }] })))).not.toBe(reportVersion(withFloat));
+  });
+});
+
+describe('the floats of an agent branch at the closing (D154, docs/73 §4.5)', () => {
+  const at = '2026-09-24T21:05:00.000Z';
+  const floats: ReportFloatInput[] = [
+    { providerId: 'p1', label: 'Bankily', expected: 150_000, counted: 149_900, explanation: 'a fee', isSkipped: false, skipReason: null, countedAt: at, countedByName: 'Aicha' },
+    { providerId: 'p2', label: 'Sedad', expected: null, counted: 40_000, explanation: null, isSkipped: false, skipReason: null, countedAt: at, countedByName: 'Aicha' },
+    { providerId: 'p3', label: 'Other', expected: 1_000, counted: null, explanation: null, isSkipped: true, skipReason: 'App down', countedAt: at, countedByName: 'Aicha' },
+  ];
+
+  it('each float is held against what the app tracked at the count instant; unknown stays unknown and claims no difference', () => {
+    const r = assembleReport(inputs({ floats }));
+    expect(r.expected.floats.map((f) => [f.label, f.expected, f.counted, f.difference, f.isSkipped])).toEqual([
+      ['Bankily', 150_000, 149_900, -100, false],
+      ['Sedad', null, 40_000, null, false],
+      ['Other', 1_000, null, null, true],
+    ]);
+    expect(r.expected.floats[0]).toMatchObject({ explanation: 'a fee', countedAt: at, countedByName: 'Aicha' });
+    expect(reportInvariants(r, buildChannels(movements, accounts, OPENING), splits)).toEqual([]);
+  });
+
+  it('an electronics-only branch lists none, and nothing else about its report changes', () => {
+    const r = assembleReport(inputs());
+    expect(r.expected.floats).toEqual([]);
+    expect({ ...r, expected: { ...r.expected, floats: undefined } }).toEqual({ ...assembleReport(inputs({ floats: [] })), expected: { ...r.expected, floats: undefined } });
+  });
+
+  it('the invariants catch a difference claimed without both figures, or one that is not counted − expected', () => {
+    const r = assembleReport(inputs({ floats }));
+    const channels = buildChannels(movements, accounts, OPENING);
+    const claimed = { ...r, expected: { ...r.expected, floats: r.expected.floats.map((f) => (f.label === 'Sedad' ? { ...f, difference: 0 } : f)) } };
+    expect(reportInvariants(claimed, channels, splits)).toEqual(['float p2: no difference without both figures']);
+    const wrong = { ...r, expected: { ...r.expected, floats: r.expected.floats.map((f) => (f.label === 'Bankily' ? { ...f, difference: -99 } : f)) } };
+    expect(reportInvariants(wrong, channels, splits)).toEqual(['float p1: difference = counted − expected']);
   });
 });

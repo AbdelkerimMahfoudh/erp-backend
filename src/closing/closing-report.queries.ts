@@ -241,8 +241,9 @@ export async function openDiscrepancies(db: RawRunner, companyId: Buffer, branch
  * count, a close, a reopen, an early start stored under this date); a sale; a
  * payment dated here, including one collecting an older debt; a return approved,
  * a refund confirmed, a purchase paid, a supplier settlement confirmed, an expense
- * confirmed (a fixed one on its due date), a correction approved. A pending report
- * is not activity: it has no date.
+ * confirmed (a fixed one on its due date), a correction approved, an agent
+ * exchange, reversal or rebalancing posted (D154). A pending report is not
+ * activity: it has no date.
  */
 export async function dayActivity(db: RawRunner, companyId: Buffer, branchId: Buffer, date: string): Promise<boolean> {
   const [r] = await db.$queryRaw<{ active: bigint | number }[]>(Prisma.sql`
@@ -263,6 +264,7 @@ export async function dayActivity(db: RawRunner, companyId: Buffer, branchId: Bu
                   AND IF(expense_class = 'fixed', due_date, confirmation_date) = ${date})
       OR EXISTS (SELECT 1 FROM financial_corrections WHERE company_id = ${companyId} AND branch_id = ${branchId}
                   AND status = 'approved' AND correction_date = ${date})
+      OR EXISTS (SELECT 1 FROM agent_movements WHERE company_id = ${companyId} AND branch_id = ${branchId} AND business_date = ${date})
     ) AS active`);
   return Number(r?.active ?? 0) === 1;
 }
@@ -293,6 +295,8 @@ export async function movementFingerprint(db: RawRunner, companyId: Buffer, bran
         WHERE company_id = ${companyId} AND branch_id = ${branchId} AND approval_date = ${date}) AS rr,
       (SELECT CONCAT(COUNT(*), '/', COALESCE(SUM(l.amount), 0)) FROM financial_correction_legs l
          JOIN financial_corrections fc ON fc.id = l.correction_id
-        WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId} AND fc.status = 'approved' AND fc.correction_date = ${date}) AS l`);
+        WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId} AND fc.status = 'approved' AND fc.correction_date = ${date}) AS l,
+      (SELECT CONCAT(COUNT(*), '/', COALESCE(SUM(amount), 0)) FROM agent_movements
+        WHERE company_id = ${companyId} AND branch_id = ${branchId} AND business_date = ${date}) AS a`);
   return JSON.stringify(r ?? {});
 }

@@ -20,15 +20,18 @@ import { closeVerification } from './closing-lifecycle';
  *             collected for these sales = Σ payments on D's sales with payments.business_date ≤ D
  *                                         + Σ legs of those payments posted by corrections ≤ D (in − out)
  *             still owed on these sales = value − collected − D's own sales cancelled by the end of D
- *   Money     per channel, from the one channel builder (channels.ts): in = payments + corrections in;
- *             out = confirmed refunds + stock paid + confirmed expenses + corrections out;
+ *   Money     per channel, from the one channel builder (channels.ts): in = payments + corrections in + the agent
+ *             counter's cash in; out = confirmed refunds + stock paid + confirmed expenses + corrections out + the
+ *             agent counter's cash out (D154: the drawer is one, so an exchange's cash is a line of the same row);
  *             payments split by whether the sale is D's (today's sales) or earlier (older debts)
  *   Expenses  recorded = confirmed, a variable one on its confirmation date, a fixed one on its due date;
  *             reversed = expense reversals approved on D;  total = recorded − reversed
  *   Result    net sales = value − returns − cancelled;
  *             cost of units sold = Σ sales.total_cost − Σ return line_cost − Σ cancelled sales' total_cost;
  *             gross profit = net sales − cost of units sold;  result after expenses = gross profit − expenses total
- *   Expected  cash = opening + cash in − cash out;  each account: recorded movement (in − out), never a balance
+ *   Expected  cash = opening + cash in − cash out;  each account: recorded movement (in − out), never a balance;
+ *             each provider float of an agent branch (D154): the position the app tracked at the count instant
+ *             (null while unknown — nothing fabricated) against what the provider's app showed
  */
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -120,6 +123,29 @@ export interface ChannelCountState {
   skipReason: string | null;
 }
 
+/**
+ * A provider float at the closing of an agent branch (D154, docs/73 §4.5): what the app tracked at the count
+ * instant — or, while nobody counted it, as the day stands — against what the provider's app showed. `expected`
+ * is null while the float is unknown (no anchor): a count then records a figure to compare nothing against, and
+ * no difference is invented. Never listed for an electronics-only branch.
+ */
+export interface ReportFloatInput {
+  providerId: string;
+  label: string;
+  expected: number | null;
+  counted: number | null;
+  explanation: string | null;
+  isSkipped: boolean;
+  skipReason: string | null;
+  countedAt: string | null;
+  countedByName: string | null;
+}
+
+export interface ReportFloat extends ReportFloatInput {
+  /** counted − expected, only when both are known. */
+  difference: number | null;
+}
+
 export interface OpeningCash {
   amount: number;
   /** The last close whose cash was actually counted, or null: no counted opening yet. */
@@ -171,6 +197,8 @@ export interface ReportInputs {
   opening: OpeningCash;
   /** The latest amount the Owner set for the drawer on this day, or null (docs/63). */
   cashSet?: ReportCashSet | null;
+  /** The provider floats of an agent branch (D154); absent or empty for an electronics-only branch. */
+  floats?: ReportFloatInput[];
   pending: { refundReports: { count: number; amount: number }; expenseReports: { count: number; amount: number } } | null;
   openDiscrepancies: number;
   previousDay: { businessDate: string; standing: DayStanding; needsReview: boolean } | null;
@@ -230,8 +258,9 @@ export interface ReportChannel {
   label: string;
   isUnattributed: boolean;
   countable: boolean;
-  in: { todaysSales: number; olderDebts: number; correctionsIn: number; total: number };
-  out: { refunds: number; stockPurchases: number; expenses: number; correctionsOut: number; total: number };
+  /** `agentIn` / `agentOut` (D154): the agent counter's cash on the drawer's row; always 0 on an account. */
+  in: { todaysSales: number; olderDebts: number; correctionsIn: number; agentIn: number; total: number };
+  out: { refunds: number; stockPurchases: number; expenses: number; correctionsOut: number; agentOut: number; total: number };
   net: number;
 }
 
@@ -326,6 +355,8 @@ export interface ClosingReport {
       /** What the backend knows: the movement staff recorded, never the provider's balance. */
       basis: 'recorded_movement_not_balance';
     }[];
+    /** The provider floats of an agent branch (D154); empty for an electronics-only branch. */
+    floats: ReportFloat[];
   };
   warnings: ReportWarning[];
   close: {
@@ -351,8 +382,8 @@ export function assembleReport(i: ReportInputs): ClosingReport {
   const channels: ReportChannel[] = i.channels.map((c) => {
     const key = keyOfChannel(c);
     const split = i.splits.get(key) ?? { todaysSales: 0, olderDebts: 0 };
-    const inTotal = round2(c.salesIn + c.correctionsIn);
-    const outTotal = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut);
+    const inTotal = round2(c.salesIn + c.correctionsIn + c.agentIn);
+    const outTotal = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut + c.agentOut);
     return {
       key,
       channel: c.channel,
@@ -360,8 +391,8 @@ export function assembleReport(i: ReportInputs): ClosingReport {
       label: c.labelSnapshot,
       isUnattributed: c.isUnattributed,
       countable: isCountable(c),
-      in: { todaysSales: round2(split.todaysSales), olderDebts: round2(split.olderDebts), correctionsIn: c.correctionsIn, total: inTotal },
-      out: { refunds: c.refundsOut, stockPurchases: c.supplierOut, expenses: c.expensesOut, correctionsOut: c.correctionsOut, total: outTotal },
+      in: { todaysSales: round2(split.todaysSales), olderDebts: round2(split.olderDebts), correctionsIn: c.correctionsIn, agentIn: c.agentIn, total: inTotal },
+      out: { refunds: c.refundsOut, stockPurchases: c.supplierOut, expenses: c.expensesOut, correctionsOut: c.correctionsOut, agentOut: c.agentOut, total: outTotal },
       net: round2(inTotal - outTotal),
     };
   });
@@ -452,6 +483,11 @@ export function assembleReport(i: ReportInputs): ClosingReport {
         basis: 'recorded_movement_not_balance' as const,
       };
     });
+  // The floats of an agent branch (D154): a difference only when both figures are known; unknown stays unknown.
+  const floats: ReportFloat[] = (i.floats ?? []).map((f) => ({
+    ...f,
+    difference: f.counted === null || f.expected === null ? null : round2(f.counted - f.expected),
+  }));
 
   // ── The close (D2) ──
   const verificationByKey = (c: ReportChannel): Verification =>
@@ -542,6 +578,7 @@ export function assembleReport(i: ReportInputs): ClosingReport {
         countedAt: cashVerification === 'counted' && cashCount?.countedAt ? cashCount.countedAt.toISOString() : null,
       },
       accounts,
+      floats,
     },
     warnings,
     close: { kind: i.closeKind, requiresAcknowledgement: verdict.requiresAcknowledgement, unverified: verdict.unverified, verified: verdict.verified, attested: verdict.attested },
@@ -591,6 +628,12 @@ export function reportInvariants(
     if (!eq(r.result.grossProfit!, r.sales.netSalesValue - r.result.costOfUnitsSold!)) fail.push('gross profit = net sales − cost');
     if (!eq(r.result.resultAfterExpenses!, r.result.grossProfit! - r.expenses.total)) fail.push('result = gross profit − expenses');
   }
+  // A float's difference is counted − expected, and exists only when both are known: unknown is never read as zero.
+  for (const f of r.expected.floats ?? []) {
+    if (f.counted === null || f.expected === null) {
+      if (f.difference !== null) fail.push(`float ${f.providerId}: no difference without both figures`);
+    } else if (f.difference === null || !eq(f.difference, f.counted - f.expected)) fail.push(`float ${f.providerId}: difference = counted − expected`);
+  }
   return fail;
 }
 
@@ -602,15 +645,27 @@ export function reportInvariants(
  * report rather than signing off figures nobody looked at.
  */
 export function reportVersion(r: ClosingReport): string {
+  const floats = r.expected.floats ?? [];
   const figures = {
     // The defined count and units are derived from fields already here; leaving them out keeps every stored version valid.
     s: { ...r.sales, salesCount: undefined, unitsSold: undefined },
-    m: r.money.channels.map((c) => [c.key, c.in, c.out, c.net]),
+    // The agent lines (D154) are hashed only when they carry money: a closing made before they existed, and every
+    // electronics-only day, keeps the version it was closed on.
+    m: r.money.channels.map((c) => [c.key, withoutZero(c.in, 'agentIn'), withoutZero(c.out, 'agentOut'), c.net]),
     e: [r.expenses.total, r.expenses.lines.map((l) => [l.id, l.amount]), r.expenses.reversals.map((l) => [l.correctionId, l.amount])],
     x: [r.expected.cash.opening.amount, r.expected.cash.expected, r.expected.cash.verification, r.expected.accounts.map((a) => [a.key, a.expectedMovement, a.verification])],
     r: [r.result.status, r.result.costOfUnitsSold, r.result.grossProfit],
+    // The floats of an agent branch, when there are any: the figure each is held against, and whether it was counted.
+    ...(floats.length > 0 ? { f: floats.map((f) => [f.providerId, f.expected, f.counted === null ? (f.isSkipped ? 'skipped' : 'not_counted') : 'counted']) } : {}),
   };
   return createHash('sha256').update(JSON.stringify(figures)).digest('hex').slice(0, 16);
+}
+
+/** The side of a money line without its agent field while that field holds nothing — the shape every earlier closing was hashed on. */
+function withoutZero<T extends Record<string, number>>(side: T, key: 'agentIn' | 'agentOut'): Record<string, number> {
+  if (side[key]) return side;
+  const { [key]: _zero, ...rest } = side;
+  return rest;
 }
 
 // ── Gating (D6) ──────────────────────────────────────────────────────────────

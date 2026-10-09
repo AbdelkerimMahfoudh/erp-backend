@@ -48,7 +48,29 @@ describe('the signs match the cash equation exactly', () => {
       expensesOut: -1,
       correctionsIn: 1,
       correctionsOut: -1,
+      // D154 (docs/73 §4.5): the agent counter's cash is the drawer's — received for credit sent it is added,
+      // given for credit received it is subtracted, in the one table every path reads.
+      agentIn: 1,
+      agentOut: -1,
     });
+  });
+
+  it('the agent counter’s cash enters the drawer’s expected figure, and only the drawer’s (D154)', () => {
+    const rows = buildChannels(
+      [
+        move('cash', null, 'salesIn', 10000),
+        move('cash', null, 'agentIn', 20200),
+        move('cash', null, 'agentOut', 15000),
+        move('account', 'bankily', 'salesIn', 4000),
+      ],
+      [{ id: 'bankily', label: 'Bankily', isActive: true, sortOrder: 1 }],
+      1000,
+    );
+    const cash = rows.find((r) => r.channel === 'cash')!;
+    expect(cash).toMatchObject({ agentIn: 20200, agentOut: 15000, expected: 1000 + 10000 + 20200 - 15000 });
+    expect(rows.find((r) => r.accountId === 'bankily')).toMatchObject({ agentIn: 0, agentOut: 0, expected: 4000 });
+    // Money by method counts them as the drawer's in and out, on the same basis as a sale's cash.
+    expect(moneyByMethod(rows).channels[0]).toMatchObject({ moneyIn: 30200, moneyOut: 15000, net: 15200 });
   });
 
   it('a payment reclassified to another channel moves between channels and leaves the total alone (0078)', () => {
