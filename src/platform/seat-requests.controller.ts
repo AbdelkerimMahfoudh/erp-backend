@@ -199,6 +199,16 @@ export class SeatRequestsController {
     });
   }
 
+  /**
+   * What asking for each other activity would do at each store now, and what a new store would be charged — the
+   * request's own decision and prices, so the Owner's page never prices a change by itself (D154).
+   */
+  @Get('my-subscription/activity-options')
+  @RequirePermissions('settings.manage')
+  activityOptions() {
+    return this.allocations.activityOptions(this.tenant.companyId());
+  }
+
   @Post('my-subscription/seat-requests/:rid/withdraw')
   @RequirePermissions('settings.manage')
   @HttpCode(HttpStatus.OK)

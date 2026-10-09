@@ -4,9 +4,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PlatformAuditService } from './platform-audit.service';
 import { BillingService, type BillingDb } from '../billing/billing.service';
 import { SubscriptionRenewal } from '../billing/renewal';
-import { activityChange, activityFee } from '../billing/pricing-rules';
+import { activityFee } from '../billing/pricing-rules';
 import { CLOCK, type Clock } from '../entitlement/clock';
-import type { Activity } from '../entitlement/activity';
+import { ACTIVITIES, type Activity } from '../entitlement/activity';
+import { decideActivityChange } from './activity-decision';
 import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
@@ -102,6 +103,18 @@ const INCLUDE = {
 } satisfies Prisma.SeatAllocationInclude;
 
 type Row = Prisma.SeatAllocationGetPayload<{ include: typeof INCLUDE }>;
+
+/** One activity a store could be asked to take, as the server would answer the request now. */
+export type ActivityOption =
+  | { activity: Activity; outcome: 'now' | 'renewal' | 'keep' | 'requested'; dueNow: number; monthlyAfter: number }
+  | { activity: Activity; outcome: 'refused'; code: 'activity_request_pending'; blockedBy: Activity; dueNow: 0; monthlyAfter: null };
+
+export interface ActivityOptionsView {
+  /** A paid month is running: an upgrade's difference is due now. */
+  running: boolean;
+  stores: { branchId: string; name: string; activity: Activity; activityNext: Activity | null; options: ActivityOption[] }[];
+  newStore: { activity: Activity; monthly: number }[];
+}
 
 const CHANGED = () =>
   new ConflictException({
@@ -401,38 +414,41 @@ export class SeatAllocationService {
       });
       const scheduled = open.find((r) => isScheduledActivityChange(r));
       const unpaid = open.find((r) => r.status === 'pending_payment');
-
-      if (branch.activity === input.activity) {
-        // Keeping the activity the branch has: a change waiting for the renewal is withdrawn, free.
-        if (scheduled) {
-          await this.closeTx(tx, scheduled, 'released', `Withdrawn by a later request to keep ${input.activity}.`, actor);
-          return { rowId: scheduled.id, created: false };
-        }
-        throw new BadRequestException({
-          code: 'activity_unchanged',
-          message: unpaid
-            ? `${branch.name} is already ${input.activity}. A change to ${unpaid.activityTo} is awaiting payment; withdraw that request to keep ${input.activity}.`
-            : `${branch.name} is already ${input.activity}.`,
-        });
-      }
-
-      const same = [unpaid, scheduled].find((r) => r?.activityTo === input.activity);
-      if (same) return { rowId: same.id, created: false };
-
       const { pricing, running } = await this.billing.chargeablePricing(companyId, tx);
-      const change = activityChange(branch.activity, input.activity, pricing);
-      const payNow = change.kind === 'upgrade' && running && sub.status === 'activated';
+      const decision = decideActivityChange({
+        from: branch.activity,
+        to: input.activity,
+        unpaidTo: unpaid?.activityTo ?? null,
+        scheduledTo: scheduled?.activityTo ?? null,
+        pricing,
+        running,
+        activated: sub.status === 'activated',
+      });
 
-      // An unpaid upgrade is a price already on the table; a scheduled change survives only an upgrade paid now.
-      const blocking = unpaid ?? (payNow ? undefined : scheduled);
-      if (blocking) {
-        throw new ConflictException({
-          code: 'activity_request_pending',
-          message: `${branch.name} already has a request to become ${blocking.activityTo}. Withdraw it first.`,
-        });
+      switch (decision.kind) {
+        case 'keep':
+          // Keeping the activity the branch has: the change waiting for the renewal is withdrawn, free.
+          await this.closeTx(tx, scheduled as Row, 'released', `Withdrawn by a later request to keep ${input.activity}.`, actor);
+          return { rowId: (scheduled as Row).id, created: false };
+        case 'unchanged':
+          throw new BadRequestException({
+            code: 'activity_unchanged',
+            message: unpaid
+              ? `${branch.name} is already ${input.activity}. A change to ${unpaid.activityTo} is awaiting payment; withdraw that request to keep ${input.activity}.`
+              : `${branch.name} is already ${input.activity}.`,
+          });
+        case 'requested':
+          return { rowId: (decision.status === 'pending_payment' ? (unpaid as Row) : (scheduled as Row)).id, created: false };
+        case 'blocked':
+          // An unpaid upgrade is a price already on the table; a scheduled change survives only an upgrade paid now.
+          throw new ConflictException({
+            code: 'activity_request_pending',
+            message: `${branch.name} already has a request to become ${decision.by}. Withdraw it first.`,
+          });
       }
+      const change = decision.change;
 
-      if (payNow) {
+      if (decision.kind === 'charge_now') {
         if (scheduled) await this.closeTx(tx, scheduled, 'released', 'Cancelled by a later upgrade request.', actor);
         const id = newUuidV7Bin();
         await tx.seatAllocation.create({
@@ -500,6 +516,69 @@ export class SeatAllocationService {
     });
 
     return { allocation: this.view(await this.load(outcome.rowId)), created: outcome.created };
+  }
+
+  /**
+   * What asking for each other activity would do at each store right now, and what a new store would be charged
+   * (D154): the request's own decision and prices, written nowhere — so the Owner's page explains a change with the
+   * server's figures, never its own arithmetic. `dueNow` is what a request would put awaiting payment;
+   * `monthlyAfter` what the store pays per month once the next paid period opens, at the plan in force then.
+   */
+  async activityOptions(companyId: Buffer): Promise<ActivityOptionsView> {
+    const sub = await this.subscriptionOf(companyId);
+    await this.renewal.rollIfDue(companyId);
+    const [branches, open, { pricing, running }, renewalPricing] = await Promise.all([
+      this.prisma.branch.findMany({
+        where: { companyId, isActive: true, deletedAt: null, type: { not: 'warehouse' } },
+        select: { id: true, name: true, activity: true, activityNext: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+      this.prisma.seatAllocation.findMany({
+        where: { companyId, kind: 'activity', status: { in: ['pending_payment', 'granted'] } },
+        include: INCLUDE,
+        orderBy: { requestedAt: 'desc' },
+      }),
+      this.billing.chargeablePricing(companyId),
+      this.billing.renewalPricing(companyId),
+    ]);
+    const stores = branches.map((branch) => {
+      const here = open.filter((r) => r.branchId?.equals(branch.id));
+      const scheduled = here.find((r) => isScheduledActivityChange(r));
+      const unpaid = here.find((r) => r.status === 'pending_payment');
+      const options = ACTIVITIES.map((to): ActivityOption | null => {
+        const decision = decideActivityChange({
+          from: branch.activity,
+          to,
+          unpaidTo: unpaid?.activityTo ?? null,
+          scheduledTo: scheduled?.activityTo ?? null,
+          pricing,
+          running,
+          activated: sub.status === 'activated',
+        });
+        const after = activityFee(to, renewalPricing);
+        switch (decision.kind) {
+          case 'unchanged':
+            return null;
+          case 'keep':
+            return { activity: to, outcome: 'keep', dueNow: 0, monthlyAfter: after };
+          case 'requested':
+            return { activity: to, outcome: 'requested', dueNow: decision.status === 'pending_payment' ? (unpaid?.monthlyAmount ?? 0) : 0, monthlyAfter: after };
+          case 'blocked':
+            return { activity: to, outcome: 'refused', code: 'activity_request_pending', blockedBy: decision.by, dueNow: 0, monthlyAfter: null };
+          case 'charge_now':
+            return { activity: to, outcome: 'now', dueNow: decision.change.amountNow, monthlyAfter: after };
+          case 'at_renewal':
+            return { activity: to, outcome: 'renewal', dueNow: 0, monthlyAfter: after };
+        }
+      }).filter((o): o is ActivityOption => o !== null);
+      return { branchId: binToUuid(branch.id), name: branch.name, activity: branch.activity, activityNext: branch.activityNext, options };
+    });
+    return {
+      running,
+      stores,
+      // What requestStore charges per month for a new store of each activity: the chargeable prices.
+      newStore: ACTIVITIES.map((activity) => ({ activity, monthly: activityFee(activity, pricing) })),
+    };
   }
 
   // ── deciding ─────────────────────────────────────────────────────────────

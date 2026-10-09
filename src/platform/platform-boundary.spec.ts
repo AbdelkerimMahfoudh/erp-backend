@@ -409,7 +409,7 @@ describe('the seat-requests controller keeps the same three realms (docs/21, 202
   const PUBLIC_UNGUARDED = new Set(['plan', 'quote']);
   // `requestActivity` (D154, 2026-10-08): the Owner asks for another activity for a branch —
   // a tenant route like the seat and store requests, priced by the server, never an amount.
-  const TENANT = new Set(['mySeatRequests', 'requestSeat', 'requestStore', 'requestActivity', 'withdrawSeatRequest']);
+  const TENANT = new Set(['mySeatRequests', 'requestSeat', 'requestStore', 'requestActivity', 'activityOptions', 'withdrawSeatRequest']);
   const SOURCE = readFileSync('src/platform/seat-requests.controller.ts', 'utf8');
 
   const proto = SeatRequestsController.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;

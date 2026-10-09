@@ -48,7 +48,12 @@ interface Row {
   version: number;
 }
 
-function makeWorld(main: { activity?: Activity; activityNext?: Activity | null } = {}, opts: { running?: boolean; status?: string } = {}) {
+type Prices = { branchMonthly: number; agentMonthly: number; bothMonthly: number };
+
+function makeWorld(
+  main: { activity?: Activity; activityNext?: Activity | null } = {},
+  opts: { running?: boolean; status?: string; chargeable?: Prices; renewal?: Prices } = {},
+) {
   const sub = {
     id: newUuidV7Bin(),
     companyId: COMPANY,
@@ -178,6 +183,7 @@ function makeWorld(main: { activity?: Activity; activityNext?: Activity | null }
         branches.find(
           (b) => (where.id ? b.id.equals(where.id) : true) && (where.name ? b.name === where.name : true),
         ) ?? null,
+      findMany: async ({ where }: any) => branches.filter((b) => b.isActive && (where.type?.not ? b.type !== where.type.not : true)),
       update: async ({ where, data }: any) => {
         const b = branches.find((x) => x.id.equals(where.id))!;
         Object.assign(b, data);
@@ -221,8 +227,10 @@ function makeWorld(main: { activity?: Activity; activityNext?: Activity | null }
     /** A paid month running at the period's own copied prices — or, with `running: false`, no paid month at all. */
     chargeablePricing: async () => ({
       running: opts.running ?? true,
-      pricing: { extraStaffMonthly: 100, branchMonthly: 500, agentMonthly: 300, bothMonthly: 700, includedStaffPerBranch: 1 },
+      pricing: { extraStaffMonthly: 100, branchMonthly: 500, agentMonthly: 300, bothMonthly: 700, includedStaffPerBranch: 1, ...opts.chargeable },
     }),
+    /** The plan the next paid period opens at; the same as the period's unless a test schedules another. */
+    renewalPricing: async () => ({ extraStaffMonthly: 100, branchMonthly: 500, agentMonthly: 300, bothMonthly: 700, includedStaffPerBranch: 1, ...opts.renewal }),
     // No renewal is ever due in this world: the latest period is not modelled here (billing/renewal.ts has its own spec).
     latestPeriod: async () => null,
   };
@@ -514,6 +522,80 @@ describe('another activity for a branch (D154, docs/73 §3)', () => {
     expect(w.rows.map((r) => r.status)).toEqual(['paid', 'released']);
     expect(w.rows[1].reason).toBe('Superseded by the paid upgrade.');
     expect(w.branches[0]).toMatchObject({ activity: 'both', activityNext: null });
+  });
+
+  describe('what each change would do, before it is asked (GET my-subscription/activity-options)', () => {
+    it('prices a change now at the running period’s own prices, and the month after at the plan the renewal opens', async () => {
+      const w = makeWorld({ activity: 'electronics' }, { renewal: { branchMonthly: 550, agentMonthly: 330, bothMonthly: 770 } });
+      const view = await w.service.activityOptions(COMPANY);
+      expect(view.running).toBe(true);
+      // The warehouse is never offered an activity (D154 c).
+      expect(view.stores.map((s) => s.name)).toEqual(['Main']);
+      expect(view.stores[0]).toMatchObject({ branchId: '018f0000-0000-7000-8000-00000000b001', activity: 'electronics', activityNext: null });
+      expect(view.stores[0].options).toEqual([
+        { activity: 'money_agent', outcome: 'renewal', dueNow: 0, monthlyAfter: 330 },
+        { activity: 'both', outcome: 'now', dueNow: 200, monthlyAfter: 770 },
+      ]);
+      expect(view.newStore).toEqual([
+        { activity: 'electronics', monthly: 500 },
+        { activity: 'money_agent', monthly: 300 },
+        { activity: 'both', monthly: 700 },
+      ]);
+    });
+
+    it('with a change scheduled: keep it, the same target is the request that exists, anything else is refused', async () => {
+      const w = makeWorld({ activity: 'both' });
+      await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: 'money_agent', requestedBy: owner });
+      const [store] = (await w.service.activityOptions(COMPANY)).stores;
+      expect(store).toMatchObject({ activity: 'both', activityNext: 'money_agent' });
+      expect(store.options).toEqual([
+        { activity: 'electronics', outcome: 'refused', code: 'activity_request_pending', blockedBy: 'money_agent', dueNow: 0, monthlyAfter: null },
+        { activity: 'money_agent', outcome: 'requested', dueNow: 0, monthlyAfter: 300 },
+        { activity: 'both', outcome: 'keep', dueNow: 0, monthlyAfter: 700 },
+      ]);
+    });
+
+    it('never disagrees with the request: every option offered is what asking then does, in every starting state', async () => {
+      const setups: { label: string; activity: Activity; first?: Activity; opts?: { running?: boolean; status?: string } }[] = [];
+      for (const activity of ['electronics', 'money_agent', 'both'] as Activity[]) {
+        for (const opts of [{}, { running: false }, { status: 'pending_activation' }]) {
+          setups.push({ label: `${activity} ${JSON.stringify(opts)}`, activity, opts });
+          for (const first of ['electronics', 'money_agent', 'both'] as Activity[]) {
+            if (first !== activity) setups.push({ label: `${activity} then ${first} ${JSON.stringify(opts)}`, activity, first, opts });
+          }
+        }
+      }
+      const world = async (s: (typeof setups)[number]) => {
+        const w = makeWorld({ activity: s.activity }, s.opts);
+        if (s.first) await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: s.first, requestedBy: owner });
+        return w;
+      };
+      let checked = 0;
+      for (const s of setups) {
+        const [store] = (await (await world(s)).service.activityOptions(COMPANY)).stores;
+        for (const option of store.options) {
+          const w = await world(s);
+          const asked = await w.service.requestActivityChange(COMPANY, { branchId: BRANCH, activity: option.activity, requestedBy: owner }).catch((e: unknown) => e);
+          const label = `${s.label} → ${option.activity} (${option.outcome})`;
+          if (option.outcome === 'refused') {
+            expect({ label, code: ((asked as ConflictException).getResponse?.() as { code?: string })?.code }).toEqual({ label, code: option.code });
+          } else {
+            const r = asked as { allocation: { status: string; monthlyAmount: number; activityEffective: string | null }; created: boolean };
+            const seen =
+              option.outcome === 'now'
+                ? { created: true, status: 'pending_payment', effective: 'now', due: r.allocation.monthlyAmount }
+                : option.outcome === 'renewal'
+                  ? { created: true, status: 'granted', effective: 'renewal', due: 0 }
+                  : option.outcome === 'keep'
+                    ? { created: false, status: 'released', effective: 'renewal', due: 0 }
+                    : { created: false, status: r.allocation.status, effective: r.allocation.activityEffective, due: r.allocation.status === 'pending_payment' ? r.allocation.monthlyAmount : 0 };
+            expect({ label, created: r.created, status: r.allocation.status, effective: r.allocation.activityEffective, due: option.dueNow }).toEqual({ label, ...seen });
+          }
+          checked += 1;
+        }
+      }
+      expect(checked).toBeGreaterThan(40);
+    });
   });
 
   it('a refusal and a release of an activity change are audited as what they are', async () => {

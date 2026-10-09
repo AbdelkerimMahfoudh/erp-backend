@@ -235,6 +235,17 @@ export class BillingService {
     return { running: false, pricing: this.pricingOf(plans.current) };
   }
 
+  /**
+   * The unit prices the next paid period opens at: the plan in force when the running period ends — a renewal opens
+   * its period at that instant (`openPeriod`) — or today's plan when no paid month is running.
+   */
+  async renewalPricing(companyId: Buffer, db: BillingDb = this.prisma): Promise<PlanPricing> {
+    const now = this.clock.now();
+    const period = await this.latestPeriod(companyId, db);
+    const at = period?.periodEnd && periodRunning(period, now) ? period.periodEnd : now;
+    return this.pricingOf((await this.planAt(at, db)).current);
+  }
+
   private pricingOf(v: PlanVersionView): PlanPricing {
     return {
       branchMonthly: v.branchMonthly,
