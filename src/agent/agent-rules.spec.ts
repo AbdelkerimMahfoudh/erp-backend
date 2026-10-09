@@ -99,6 +99,14 @@ describe('commission: the whole amount at the direction’s rate, to the cent (A
     expect(commissionOf(50_000, 0)).toBe(0);
     expect(commissionOf(50_000, 10_000)).toBe(50_000);
   });
+
+  it('a half cent always rounds up, whatever the amount’s binary form, and the largest amounts stay exact', () => {
+    // 837 × 0.50 % = 4.185 and 879 × 0.50 % = 4.395: in floating point the first rounded down and the second up.
+    expect(commissionOf(837, 50)).toBe(4.19);
+    expect(commissionOf(879, 50)).toBe(4.4);
+    expect(commissionOf(0.5, 100)).toBe(0.01);
+    expect(commissionOf(999_999_999_999.99, 9_999)).toBe(999_899_999_999.99);
+  });
 });
 
 describe('a rebalancing taking a known position below zero (docs/73 §4.7 row 4)', () => {

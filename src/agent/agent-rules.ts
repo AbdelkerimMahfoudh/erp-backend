@@ -84,9 +84,16 @@ export function rateFor(direction: AgentDirection, config: Pick<ProviderConfig, 
   return direction === 'cash_in_credit_out' ? config.rateInBp : config.rateOutBp;
 }
 
-/** The whole amount at the rate, never brackets (A4), to the cent. */
+/**
+ * The whole amount at the rate, never brackets (A4), to the cent, a half cent up. Counted in whole cents and basis
+ * points, exactly: in floating point the same half cent rounded up or down with the amount's binary form, and at the
+ * largest amounts the product no longer fits a double's integers.
+ */
 export function commissionOf(amount: number, rateBp: number): number {
-  return round2((amount * rateBp) / 10_000);
+  const scaled = BigInt(Math.round(amount * 100)) * BigInt(rateBp);
+  const whole = scaled / 10_000n;
+  const cents = (scaled % 10_000n) * 2n >= 10_000n ? whole + 1n : whole;
+  return Number(cents) / 100;
 }
 
 // ── Legs ────────────────────────────────────────────────────────────────────
