@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   CallHandler,
   ExecutionContext,
   ForbiddenException,
@@ -26,11 +27,12 @@ import { ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
  * already answered. This one asks a narrower question: is THIS branch
  * subscribed to what THIS route does?
  *
- * One indexed query per gated write, on the branch in context. A write with
- * no branch in context is left to its handler, which answers 400 for the
- * missing header exactly as it does today — there is no branch whose activity
- * could refuse it. The refusal carries the branch's activity and what the
- * route needed, so the app can say "this branch does not sell" in words.
+ * One indexed query per gated write, on the branch in context. A gated write
+ * with no branch in context is refused with the missing-header answer every
+ * branch route gives — never passed through, because a handler that does not
+ * read the header itself would then run unchecked (reviewed 2026-10-09). The
+ * refusal carries the branch's activity and what the route needed, so the app
+ * can say "this branch does not sell" in words.
  */
 @Injectable()
 export class ActivityGateInterceptor implements NestInterceptor {
@@ -61,7 +63,7 @@ export class ActivityGateInterceptor implements NestInterceptor {
       });
     }
     const branchId = this.cls.get('branchId');
-    if (!branchId) return next.handle();
+    if (!branchId) throw new BadRequestException('X-Branch-Id header is required for this operation');
 
     const branch = await this.prisma.branch.findFirst({
       where: { id: branchId, companyId },

@@ -453,9 +453,10 @@ export const PERMISSIONS_BY_ROLE: Record<string, string[]> = {
 
 export function seedBranchesAndPeople(db: Db): void {
   db.branch.push(
-    { id: SOURCE, companyId: COMPANY, name: 'Main Store' },
-    { id: DEST, companyId: COMPANY, name: 'Warehouse' },
-    { id: THIRD, companyId: COMPANY, name: 'Airport Kiosk' },
+    // Every branch of the fixture sells electronics, as every branch did before 0088 (D156: stock goes only where it can be sold).
+    { id: SOURCE, companyId: COMPANY, name: 'Main Store', activity: 'electronics' },
+    { id: DEST, companyId: COMPANY, name: 'Warehouse', activity: 'electronics' },
+    { id: THIRD, companyId: COMPANY, name: 'Airport Kiosk', activity: 'electronics' },
   );
 
   const people: [Buffer, string, string, Buffer[]][] = [

@@ -22,6 +22,7 @@ import { assertTransferTransition } from './transfer-state-machine';
 import { TransferStatus } from '@prisma/client';
 import { computeDiscrepancy, DiscrepancyReport } from './discrepancy.util';
 import { unitIdentifier } from '../inventory/unit-identifier.util';
+import { ACTIVITY_NOT_SUBSCRIBED, activityAllows } from '../entitlement/activity';
 import { computeActions, requestedAtOf, shippedAt } from './transfer-view';
 import {
   CreateTransferDto,
@@ -118,6 +119,20 @@ export class TransfersService {
 
     const toBranch = await this.db.branch.findUnique({ where: { id: toBranchId } });
     if (!toBranch) throw new NotFoundException('Destination branch not found');
+    /*
+     * Stock goes only where it can be sold (D156, reviewed 2026-10-09): a
+     * branch subscribed to money services alone receives none, or the units
+     * would sit in transit with nowhere to land. Sending stock OUT of such a
+     * branch stays open — a branch that changed activity empties itself.
+     */
+    if (!activityAllows(toBranch.activity, 'electronics')) {
+      throw new ForbiddenException({
+        code: ACTIVITY_NOT_SUBSCRIBED,
+        activity: toBranch.activity,
+        required: 'electronics',
+        message: `${toBranch.name} is not subscribed to the electronics store, so it cannot receive stock.`,
+      });
+    }
 
     const identifiers = lines.identifiers;
     const stockPlan = await this.planQuantityLines(lines, companyId, fromBranchId);

@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { lastValueFrom, of } from 'rxjs';
 import {
   ACTIVITIES,
@@ -8,7 +8,7 @@ import {
   isActivity,
   type Activity,
 } from './activity';
-import { AGENT_PREFIX, ELECTRONICS_WRITE_PREFIXES, requiredActivityFor } from './activity-gate';
+import { AGENT_PREFIX, ELECTRONICS_WRITE_ROUTES, requiredActivityFor } from './activity-gate';
 import { ActivityGateInterceptor } from './activity-gate.interceptor';
 import { ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
 
@@ -72,28 +72,47 @@ describe('which routes an activity gates', () => {
     expect(requiredActivityFor('POST', 'agentless/thing')).toBeNull();
   });
 
-  it('the electronics writes need the electronics store', () => {
+  it('acquiring and selling electronics needs the electronics store: a new sale, receiving stock, a new consignment', () => {
     for (const [method, path] of [
       ['POST', 'sales'],
-      ['POST', 'sales/:id/payments'],
-      ['POST', 'sales/:id/returns'],
       ['POST', 'purchases'],
       ['POST', 'purchases/file/parse'],
-      ['POST', 'units/:id/faulty'],
-      ['PATCH', 'units/:id'],
       ['POST', 'imports'],
       ['POST', 'imports/:id/commit'],
+      ['POST', 'consignments'],
+    ] as const) {
+      expect([method, path, requiredActivityFor(method, path)]).toEqual([method, path, 'electronics']);
+    }
+  });
+
+  it('money owed on existing records and stock already held stay recordable at a branch that changed activity (reviewed 2026-10-09)', () => {
+    /*
+     * A branch moved from `both` to `money_agent` at its renewal still has
+     * customers paying the balance of last month's sales, returns inside their
+     * window, units to correct or send away, and partners to settle with. The
+     * drawer is one physical drawer: refusing the record would not stop the
+     * cash, only its record. So none of this is gated.
+     */
+    for (const [method, path] of [
+      ['POST', 'sales/:id/payments'],
+      ['POST', 'sales/:id/payments/:paymentId/payer-number'],
+      ['POST', 'sales/:id/returns'],
       ['POST', 'returns'],
       ['PATCH', 'returns/:id/refund'],
+      ['POST', 'returns/:id/refund/confirm'],
       ['DELETE', 'returns/:id/adjustments/:adjustmentId'],
+      ['POST', 'units/:id/faulty'],
+      ['PATCH', 'units/:id'],
       ['POST', 'transfers'],
+      ['POST', 'transfers/:id/receive/confirm'],
       ['PUT', 'transfers/config/prefix'],
-      ['POST', 'consignments'],
       ['POST', 'consignments/:id/sold'],
+      ['POST', 'consignments/:id/payment'],
+      ['POST', 'consignments/:id/return'],
       ['PUT', 'pricing/products/:productId/branch-price'],
       ['DELETE', 'pricing/units/:identifier/price'],
     ] as const) {
-      expect([method, path, requiredActivityFor(method, path)]).toEqual([method, path, 'electronics']);
+      expect([method, path, requiredActivityFor(method, path)]).toEqual([method, path, null]);
     }
   });
 
@@ -137,17 +156,13 @@ describe('which routes an activity gates', () => {
      * for here as well as written there.
      */
     expect(AGENT_PREFIX).toBe('agent');
-    expect(ELECTRONICS_WRITE_PREFIXES.map((r) => r.prefix)).toEqual([
-      'sales',
-      'purchases',
-      'units',
-      'imports',
-      'returns',
-      'transfers',
-      'consignments',
-      'pricing',
+    expect(ELECTRONICS_WRITE_ROUTES.map((r) => `${r.match}:${r.path}`)).toEqual([
+      'exact:sales',
+      'prefix:purchases',
+      'prefix:imports',
+      'exact:consignments',
     ]);
-    for (const rule of ELECTRONICS_WRITE_PREFIXES) expect(rule.why.length).toBeGreaterThan(20);
+    for (const rule of ELECTRONICS_WRITE_ROUTES) expect(rule.why.length).toBeGreaterThan(20);
   });
 });
 
@@ -235,11 +250,20 @@ describe('the interceptor', () => {
     }
   });
 
-  it('a gated write with no branch in context is left to its handler, which asks for the header as today', async () => {
-    const { context, reflector } = makeContext('POST', '/api/v1/sales');
-    const { int, queries } = interceptorWith('money_agent', { companyId: COMPANY }, reflector);
-    await expect(lastValueFrom(await int.intercept(context, handler))).resolves.toBe('ran');
-    expect(queries).toEqual([]);
+  it('a gated write with no branch in context is refused, never passed through (reviewed 2026-10-09)', async () => {
+    /*
+     * Passing it to the handler assumed every handler reads the header; one
+     * that does not would then run with no activity check at all. The answer
+     * is the one every branch route gives for a missing header.
+     */
+    for (const path of ['/api/v1/sales', '/api/v1/agent/transactions']) {
+      const { context, reflector } = makeContext('POST', path);
+      const { int, queries } = interceptorWith('money_agent', { companyId: COMPANY }, reflector);
+      const refusal = await int.intercept(context, handler).catch((e: unknown) => e);
+      expect(refusal).toBeInstanceOf(BadRequestException);
+      expect((refusal as BadRequestException).message).toBe('X-Branch-Id header is required for this operation');
+      expect(queries).toEqual([]);
+    }
   });
 
   it('fails closed with no company, and on a branch that is not the caller\'s', async () => {
