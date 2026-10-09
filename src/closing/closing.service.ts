@@ -3126,10 +3126,13 @@ export class ClosingService {
   }
 
   /**
-   * The anchors a locked close leaves on its counted floats (D154): one `agent_positions` row per count, at the
-   * count instant, amount = what the provider's app showed, what the app tracked and the difference beside it,
-   * recorded by the locker. Keyed on the closing, the provider and the count instant, so a reclose that re-locks
-   * an unchanged count writes nothing new and a fresh count after a reopen anchors again.
+   * The anchors a locked close leaves on its counted floats (D154): one `agent_positions` row per count, amount =
+   * what the provider's app showed, what the app tracked and the difference beside it, recorded by the locker.
+   * Anchored at the instant the count was compared at: the count instant on the day itself, the day's end for a day
+   * counted behind the boundary — its expected figure was the float at that end, so the legs recorded after it (the
+   * next morning's exchanges) stay after the anchor and are never dropped. Keyed on the closing, the provider and the
+   * count instant, so a reclose that re-locks an unchanged count writes nothing new and a fresh count after a reopen
+   * anchors again.
    */
   private async anchorCountedFloatsTx(
     tx: Pick<TenantPrisma, 'agentPosition' | 'user'>,
@@ -3138,6 +3141,7 @@ export class ClosingService {
     if (args.counted.length === 0) return;
     const userId = this.tenant.requireUserId();
     const locker = await tx.user.findFirst({ where: { id: userId }, select: { name: true } });
+    const dayEnd = (await this.businessDay.windowOf(args.day)).end;
     for (const f of args.counted) {
       const key = `counted_close:${args.closingId.toString('hex')}:${f.providerId.toString('hex')}:${f.countedAt.getTime()}`;
       const clientUuid = createHash('sha256').update(key).digest().subarray(0, 16);
@@ -3151,7 +3155,7 @@ export class ClosingService {
           accountKind: 'provider',
           providerId: f.providerId,
           amount: f.counted,
-          at: f.countedAt,
+          at: f.countedAt.getTime() < dayEnd.getTime() ? f.countedAt : dayEnd,
           businessDate: dateValue(args.day),
           source: 'counted_close',
           trackedBefore: f.expected,

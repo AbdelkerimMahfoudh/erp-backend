@@ -328,6 +328,25 @@ describe('a locked close anchors each counted float (D154)', () => {
     expect(rows[0].clientUuid.equals(rows[1].clientUuid)).toBe(false);
   });
 
+  it('a day counted behind the boundary is anchored at that day’s end — the instant its expected figure was taken — so the next morning’s legs stay after it', async () => {
+    const h = harness();
+    const dayEnd = new Date(new Date(`${DAY}T06:00:00Z`).getTime() + 86_400_000);
+    // Counted at 10:00 the next morning; the expected figure was the float at the day's end (06:00).
+    const nextMorning = new Date(dayEnd.getTime() + 4 * 3_600_000);
+    await (h.svc as unknown as { anchorCountedFloatsTx: (tx: unknown, args: Row) => Promise<void> }).anchorCountedFloatsTx(h.db, {
+      companyId: COMPANY,
+      branchId: BRANCH,
+      closingId: CLOSING,
+      day: DAY,
+      counted: [{ providerId: uuidToBin(BANKILY), counted: 50_000, expected: 50_000, countedAt: nextMorning }],
+    });
+    const [row] = of(h.writes, 'agentPosition', 'create').map((w) => w.args.data);
+    expect(row).toMatchObject({ amount: 50_000, at: dayEnd, businessDate: dateValue(DAY), difference: 0 });
+    // The float now: the anchor plus the legs strictly after it — an exchange at 09:00 the next morning still counts.
+    const at09 = new Date(dayEnd.getTime() + 3 * 3_600_000);
+    expect(at09.getTime()).toBeGreaterThan((row.at as Date).getTime());
+  });
+
   it('a reclose that re-locks the same count writes nothing new; no counted float, nothing read', async () => {
     const again = harness();
     again.db.agentPosition.findFirst.mockImplementation((async () => ({ id: Buffer.alloc(16, 4) })) as unknown as typeof again.db.agentPosition.findFirst);
