@@ -4,15 +4,17 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { seatCensus } from '../entitlement/seat-census';
 import { isActivity, type Activity } from '../entitlement/activity';
-import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
+import { newUuidV7Bin, binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
 import {
   assessPeriod,
   estimateFor,
   nextRenewalEstimate,
   quoteFor,
+  replacementSlotValue,
   type CompanySize,
   type PlanPricing,
   type Quote,
+  type ReplacementCredits,
 } from './pricing-rules';
 
 /**
@@ -94,6 +96,22 @@ export interface PeriodState {
   bothMonthly: number;
   includedStaffPerBranch: number;
   extraStaffMonthly: number;
+}
+
+/**
+ * A place an archived store left in the running paid period, which a new store can take (D158, docs/73 §11.1).
+ */
+export interface ReplacementSlot {
+  /** The archived branch's id: the key of the period's per-branch map. */
+  branchId: string;
+  name: string;
+  activity: Activity;
+  /** What the period assessed the archived branch at. */
+  assessedFee: number;
+  /** The credit it carried as a replacement itself this period; 0 when it was not one. */
+  credit: number;
+  /** What the period already paid for the location: the larger of the two. */
+  value: number;
 }
 
 /**
@@ -386,6 +404,7 @@ export class BillingService {
         includedStaffPerBranch: period.includedStaffPerBranch,
         extraStaffMonthly: period.extraStaffMonthly,
       },
+      await this.creditsOf(period.id),
     );
 
     return {
@@ -412,7 +431,9 @@ export class BillingService {
    * Called when a company grows — a store, a paid seat or an activity upgrade
    * confirmed mid-period costs the whole month at once, and the upgrade costs
    * exactly its branch's difference because the period remembers each branch's
-   * fee. Never lowers anything: there is no prorating, so a release reduces
+   * fee. A replacement store is charged against the credit its slot carried
+   * (D158), so taking an archived store's place adds only the difference, if
+   * any. Never lowers anything: there is no prorating, so a release reduces
    * the next renewal and nothing else.
    */
   async assessNow(companyId: Buffer, db: BillingDb = this.prisma): Promise<void> {
@@ -441,6 +462,8 @@ export class BillingService {
         includedStaffPerBranch: period.includedStaffPerBranch,
         extraStaffMonthly: period.extraStaffMonthly,
       },
+      // A store that took an archived one's place this period is charged only what that location was not paid (D158).
+      await this.creditsOf(period.id, db),
     );
 
     if (assessment.addedThisPeriod === 0) {
@@ -468,6 +491,76 @@ export class BillingService {
         assessedActivityFeeByBranch: assessment.assessedActivityFeeByBranch,
       },
     });
+  }
+
+  /**
+   * The credit each replacement store carries in a period (D158): the value of
+   * the slot it took, by the replacement's branch id. Rows of
+   * `branch_replacements` are append-only, so a credit, once given, is what
+   * every later assessment of that period reads.
+   */
+  private async creditsOf(periodId: Buffer, db: BillingDb = this.prisma): Promise<Record<string, number>> {
+    const made = await db.branchReplacement.findMany({
+      where: { billingPeriodId: periodId },
+      select: { replacementBranchId: true, slotFee: true },
+    });
+    const credits: Record<string, number> = {};
+    for (const r of made) credits[binToUuid(r.replacementBranchId)] = r.slotFee;
+    return credits;
+  }
+
+  /** The credits of the running paid period — none when no paid month runs: the next period prices every branch in full. */
+  async replacementCredits(companyId: Buffer, db: BillingDb = this.prisma): Promise<ReplacementCredits> {
+    const period = await this.latestPeriod(companyId, db);
+    if (!period || !periodRunning(period, this.clock.now())) return {};
+    return this.creditsOf(period.id, db);
+  }
+
+  /**
+   * The running paid period and the places archived stores left in it (D158,
+   * docs/73 §11.1) — null when no paid month runs.
+   *
+   * A branch offers a slot when the period billed it (it is in the period's
+   * per-branch map), it is no longer active, no replacement has taken it this
+   * period, and no store request awaiting payment has reserved it. A store
+   * still running offers nothing: a new store beside it is a second store and
+   * pays in full (B4). The caller holds the subscription lock when it acts on
+   * the answer, so two requests cannot both take one slot.
+   */
+  async replacementSlots(companyId: Buffer, db: BillingDb = this.prisma): Promise<{ period: PeriodState; slots: ReplacementSlot[] } | null> {
+    const period = await db.billingPeriod.findFirst({ where: { companyId }, orderBy: { periodStart: 'desc' } });
+    if (!period || !periodRunning(period, this.clock.now())) return null;
+    const fees = feesFrom(period.assessedActivityFeeByBranch) ?? {};
+    const billed = Object.keys(fees).filter((id) => isUuid(id));
+    if (billed.length === 0) return { period, slots: [] };
+
+    const [archived, made, reserved] = await Promise.all([
+      db.branch.findMany({
+        where: { companyId, id: { in: billed.map((id) => uuidToBin(id)) }, OR: [{ isActive: false }, { deletedAt: { not: null } }] },
+        select: { id: true, name: true, activity: true },
+      }),
+      db.branchReplacement.findMany({
+        where: { billingPeriodId: period.id },
+        select: { archivedBranchId: true, replacementBranchId: true, slotFee: true },
+      }),
+      db.seatAllocation.findMany({
+        where: { companyId, kind: 'store', status: 'pending_payment', replacementPeriodId: period.id },
+        select: { replacesBranchId: true },
+      }),
+    ]);
+    const taken = new Set(made.map((r) => binToUuid(r.archivedBranchId)));
+    const held = new Set(reserved.flatMap((r) => (r.replacesBranchId ? [binToUuid(r.replacesBranchId)] : [])));
+    const credits = new Map(made.map((r) => [binToUuid(r.replacementBranchId), r.slotFee]));
+
+    const slots: ReplacementSlot[] = [];
+    for (const b of archived) {
+      const branchId = binToUuid(b.id);
+      if (taken.has(branchId) || held.has(branchId)) continue;
+      const assessedFee = fees[branchId] ?? 0;
+      const credit = credits.get(branchId) ?? 0;
+      slots.push({ branchId, name: b.name, activity: b.activity, assessedFee, credit, value: replacementSlotValue(assessedFee, credit) });
+    }
+    return { period, slots };
   }
 
   /**

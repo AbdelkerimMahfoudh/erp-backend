@@ -2,13 +2,14 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { Prisma, type SeatAllocationKind, type SeatAllocationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlatformAuditService } from './platform-audit.service';
-import { BillingService, type BillingDb } from '../billing/billing.service';
-import { SubscriptionRenewal } from '../billing/renewal';
-import { activityFee } from '../billing/pricing-rules';
+import { AuditService } from '../common/audit/audit.service';
+import { BillingService, periodRunning, type BillingDb } from '../billing/billing.service';
+import { SubscriptionRenewal, lockSubscription } from '../billing/renewal';
+import { activityFee, chooseReplacementSlot, replacementDue, type ActivityPrices } from '../billing/pricing-rules';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { decideActivityChange } from './activity-decision';
-import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
+import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
 /**
@@ -33,6 +34,13 @@ import type { PlatformAdminIdentity } from './platform-admin.service';
  * so it is recorded at once as `granted` with `effective: renewal`, written on
  * the branch as `activity_next`, and applied by the next renewal; nothing is
  * refunded this period.
+ *
+ * A store that takes the place of one archived during the running paid period
+ * (D158, docs/73 §11.1) is priced against what that period already paid for the
+ * location: nothing when it costs the same or less — it opens at once — and
+ * only the difference when it costs more. Each replacement is written down once
+ * in `branch_replacements`, and every request that can take or price a slot is
+ * decided behind the subscription row's lock.
  *
  * **No provider is integrated.** Every payment row carries `providerVerified:
  * false`, and every confirmation is a named administrator saying they saw the
@@ -71,6 +79,11 @@ export interface SeatAllocationView {
     paidAt: string;
     channel: string;
   } | null;
+  /**
+   * A store request that takes the place of a store archived in the running paid period (D158): that store, and
+   * what the period already paid for its location — the credit the request was priced against.
+   */
+  replaces: { branchId: string; name: string; credit: number } | null;
   version: number;
   /** Always false: no payment provider is integrated. Said on every row. */
   providerVerified: false;
@@ -90,6 +103,7 @@ export const PAYMENT_REFERENCE_MIN_LENGTH = 3;
 
 const INCLUDE = {
   branch: { select: { id: true, name: true } },
+  replaces: { select: { id: true, name: true } },
   user: { select: { id: true, name: true } },
   payment: {
     select: {
@@ -113,7 +127,11 @@ export interface ActivityOptionsView {
   /** A paid month is running: an upgrade's difference is due now. */
   running: boolean;
   stores: { branchId: string; name: string; activity: Activity; activityNext: Activity | null; options: ActivityOption[] }[];
-  newStore: { activity: Activity; monthly: number }[];
+  /**
+   * A new store of each activity: its monthly fee, what asking for it now would put awaiting payment (`dueNow` —
+   * zero when it takes an archived store's place at no charge, D158), and the archived store it would replace.
+   */
+  newStore: { activity: Activity; monthly: number; dueNow: number; replaces: { branchId: string; name: string; credit: number } | null }[];
 }
 
 const CHANGED = () =>
@@ -121,6 +139,36 @@ const CHANGED = () =>
     code: 'seat_request_changed',
     message: 'Somebody else changed this request. Refresh and try again.',
   });
+
+/** A store request priced against a slot that is gone (D158): confirming it would charge a stale figure. */
+const NO_LONGER_APPLIES = () =>
+  new ConflictException({
+    code: 'replacement_no_longer_applies',
+    message:
+      'This store was priced as the replacement of a store archived in the running period, and that no longer holds: the period renewed, the archived store is active again, or another store already took its place. Nothing was charged. Refuse or withdraw this request; asked again, it is priced afresh.',
+  });
+
+/** The audit writer's client: a tenant transaction, which the base transaction is at run time. */
+type AuditClient = Parameters<AuditService['recordTx']>[0];
+
+/** A store request's reserved slot, still standing at its confirmation (D158). */
+interface ReservedSlot {
+  periodId: Buffer;
+  /** The period's own prices: the replacement's fee is written down at them. */
+  prices: ActivityPrices;
+  archived: { id: Buffer; name: string; activity: Activity };
+}
+
+/** What the platform audit says about a replacement confirmed with its payment (D158 B5). */
+interface ReplacementRecord {
+  archivedBranchId: string;
+  archivedStore: string;
+  archivedActivity: Activity;
+  slotFee: number;
+  replacementFee: number;
+  chargedDifference: number;
+  decision: 'difference_charged';
+}
 
 /** A scheduled downgrade still waiting for the renewal: granted, and not yet applied. */
 const isScheduledActivityChange = (row: Pick<Row, 'kind' | 'status' | 'confirmedAt'>): boolean =>
@@ -149,6 +197,8 @@ export class SeatAllocationService {
     private readonly audit: PlatformAuditService,
     private readonly billing: BillingService,
     @Inject(CLOCK) private readonly clock: Clock,
+    /** The tenant's own audit trail: a replacement decided on the Owner's request is written there (D158 B5). */
+    private readonly tenantAudit: AuditService,
   ) {
     this.renewal = new SubscriptionRenewal(prisma, billing, clock);
   }
@@ -183,6 +233,9 @@ export class SeatAllocationService {
             paidAt: row.payment.paidAt.toISOString(),
             channel: row.payment.channel,
           }
+        : null,
+      replaces: row.replaces
+        ? { branchId: binToUuid(row.replaces.id), name: row.replaces.name, credit: row.replacementCredit ?? 0 }
         : null,
       version: row.version,
       providerVerified: false,
@@ -290,12 +343,27 @@ export class SeatAllocationService {
   }
 
   /**
-   * One more store, priced by today's plan for the activity it will have, and
-   * waiting for payment.
+   * One more store, priced for the activity it will have (D154) — and, when it
+   * takes the place of a store archived during the running paid period, priced
+   * against what that period already paid for the location (D158, docs/73
+   * §11.1):
    *
-   * The store itself is created only when the payment is confirmed — asking
-   * creates nothing a shop could sell from. The activity is recorded on the
-   * request (`activityTo`) so the store opens as what was paid for.
+   *  - **no slot** — nothing was archived this period, or the old store still
+   *    runs: a second store, its full monthly fee, awaiting payment (B4);
+   *  - **a slot that covers the fee** — the same activity or a cheaper one:
+   *    nothing to pay, so the store opens at once (`granted`) and the
+   *    replacement is written down for good (B2);
+   *  - **a slot that does not** — a dearer activity: exactly the difference,
+   *    awaiting payment, the slot reserved by the request; the store opens at
+   *    the payment's confirmation, like any store (B3).
+   *
+   * The store a payment is still awaited for is created only when that payment
+   * is confirmed — asking creates nothing a shop could sell from. The activity
+   * is recorded on the request (`activityTo`) so the store opens as what was
+   * asked for. Every request is decided behind the subscription row's lock, the
+   * one the renewal and the confirmations take: the same name again answers
+   * with the request awaiting payment, and a slot taken or reserved by one
+   * request is invisible to the next (B6).
    */
   async requestStore(
     companyId: Buffer,
@@ -306,58 +374,191 @@ export class SeatAllocationService {
     if (!name) throw new BadRequestException('Name the store.');
     if (name.length > 160) throw new BadRequestException('A store name is at most 160 characters.');
     const activity: Activity = input.activity ?? 'electronics';
+    const actor = input.requestedBy.slice(0, 160);
+    // A renewal that fell due at the end of a prepaid period comes first: the slots and the prices are then the
+    // period's that really runs.
+    await this.renewal.rollIfDue(companyId);
 
-    const clash = await this.prisma.branch.findFirst({
-      where: { companyId, name },
-      select: { id: true },
-    });
-    if (clash) {
-      throw new ConflictException({
-        code: 'store_name_in_use',
-        message: 'A store with that name already exists.',
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      await lockSubscription(tx, companyId);
+      const clash = await tx.branch.findFirst({
+        where: { companyId, name },
+        select: { id: true },
       });
-    }
-    const pendingSame = await this.prisma.seatAllocation.findFirst({
-      where: {
-        companyId,
-        kind: 'store',
-        label: name,
-        status: 'pending_payment',
-      },
-      include: INCLUDE,
-    });
-    if (pendingSame) return { allocation: this.view(pendingSame), created: false };
+      if (clash) {
+        throw new ConflictException({
+          code: 'store_name_in_use',
+          message: 'A store with that name already exists.',
+        });
+      }
+      const pendingSame = await tx.seatAllocation.findFirst({
+        where: {
+          companyId,
+          kind: 'store',
+          label: name,
+          status: 'pending_payment',
+        },
+        select: { id: true },
+      });
+      if (pendingSame) return { rowId: pendingSame.id, created: false };
 
-    // The running period's own prices when a paid month runs, so the request and the period's assessment agree.
-    const { pricing } = await this.billing.chargeablePricing(companyId);
-    const row = await this.prisma.seatAllocation.create({
-      data: {
-        id: newUuidV7Bin(),
+      // The running period's own prices when a paid month runs, so the request and the period's assessment agree.
+      const { pricing } = await this.billing.chargeablePricing(companyId, tx);
+      const fee = activityFee(activity, pricing);
+      const found = await this.billing.replacementSlots(companyId, tx);
+      const slot = found ? chooseReplacementSlot(found.slots, fee) : null;
+      const id = newUuidV7Bin();
+
+      if (!found || !slot) {
+        await tx.seatAllocation.create({
+          data: {
+            id,
+            companyId,
+            subscriptionId: sub.id,
+            kind: 'store',
+            status: 'pending_payment',
+            label: name,
+            activityTo: activity,
+            monthlyAmount: fee,
+            requestedBy: actor,
+          },
+        });
+        await tx.subscriptionEvent.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            subscriptionId: sub.id,
+            kind: 'store_requested',
+            note: `Additional store "${name}" (${activity}): ${fee} MRU per month, awaiting payment.`.slice(0, 255),
+            branchesAfter: sub.subscribedBranchCount,
+            actor: actor.slice(0, 120),
+          },
+        });
+        return { rowId: id, created: true };
+      }
+
+      const due = replacementDue(fee, slot.value);
+      // The slot this request takes, written on it: a later request cannot take it, and the confirmation re-checks it.
+      const reserved = {
+        replacesBranchId: uuidToBin(slot.branchId),
+        replacementCredit: slot.value,
+        replacementPeriodId: found.period.id,
+      };
+
+      if (due > 0) {
+        await tx.seatAllocation.create({
+          data: {
+            id,
+            companyId,
+            subscriptionId: sub.id,
+            kind: 'store',
+            status: 'pending_payment',
+            label: name,
+            activityTo: activity,
+            monthlyAmount: due,
+            requestedBy: actor,
+            ...reserved,
+          },
+        });
+        await tx.subscriptionEvent.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            subscriptionId: sub.id,
+            kind: 'store_requested',
+            note: `Store "${name}" (${activity}) replacing "${slot.name}", archived this period: ${due} MRU for this period (the difference; ${slot.value} MRU already paid for that location), awaiting payment.`.slice(0, 255),
+            branchesAfter: sub.subscribedBranchCount,
+            actor: actor.slice(0, 120),
+          },
+        });
+        return { rowId: id, created: true };
+      }
+
+      // Nothing to pay: a confirmation of nothing would only delay the shop. The store opens now, as a paid one does,
+      // and the replacement is written down once, for good, in this same transaction.
+      const now = this.clock.now();
+      await tx.seatAllocation.create({
+        data: {
+          id,
+          companyId,
+          subscriptionId: sub.id,
+          kind: 'store',
+          status: 'granted',
+          label: name,
+          activityTo: activity,
+          monthlyAmount: 0,
+          requestedBy: actor,
+          confirmedBy: actor,
+          confirmedAt: now,
+          reason: `Replaces "${slot.name}", archived this period: nothing to pay.`.slice(0, 500),
+          ...reserved,
+        },
+      });
+      await tx.subscriptionEvent.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId,
+          subscriptionId: sub.id,
+          kind: 'store_requested',
+          note: `Store "${name}" (${activity}) replacing "${slot.name}", archived this period: 0 MRU — the ${slot.value} MRU already paid for that location covers its ${fee}.`.slice(0, 255),
+          branchesAfter: sub.subscribedBranchCount,
+          actor: actor.slice(0, 120),
+        },
+      });
+      const branchId = await this.openStoreTx(tx, {
         companyId,
         subscriptionId: sub.id,
-        kind: 'store',
-        status: 'pending_payment',
-        label: name,
-        activityTo: activity,
-        monthlyAmount: activityFee(activity, pricing),
-        requestedBy: input.requestedBy.slice(0, 160),
-      },
-      include: INCLUDE,
-    });
-
-    await this.prisma.subscriptionEvent.create({
-      data: {
-        id: newUuidV7Bin(),
+        name,
+        activity,
+        actor,
+        note: `Store "${name}" (${activity}) opened at once as the replacement of "${slot.name}"; nothing to pay.`,
+      });
+      const replacementId = newUuidV7Bin();
+      await this.recordReplacementTx(tx, {
+        id: replacementId,
         companyId,
-        subscriptionId: sub.id,
-        kind: 'store_requested',
-        note: `Additional store "${name}" (${activity}): ${row.monthlyAmount} MRU per month, awaiting payment.`.slice(0, 255),
-        branchesAfter: sub.subscribedBranchCount,
-        actor: input.requestedBy.slice(0, 120),
-      },
+        billingPeriodId: found.period.id,
+        archivedBranchId: reserved.replacesBranchId,
+        replacementBranchId: branchId,
+        seatAllocationId: id,
+        archivedActivity: slot.activity,
+        replacementActivity: activity,
+        slotFee: slot.value,
+        replacementFee: fee,
+        chargedDifference: 0,
+        decision: 'no_additional_charge',
+        paymentId: null,
+        decidedBy: actor,
+        decidedAt: now,
+      });
+      await tx.seatAllocation.updateMany({ where: { id }, data: { branchId } });
+      // Adds nothing for the new store — its credit covers it — but writes its fee into the period's map in the same
+      // transaction, so the period, the store and the decision commit together.
+      await this.billing.assessNow(companyId, tx);
+      await this.tenantAudit.recordTx(tx as unknown as AuditClient, {
+        entityType: 'BranchReplacement',
+        entityId: replacementId,
+        action: 'create',
+        branchId,
+        after: {
+          requestId: binToUuid(id),
+          billingPeriodId: binToUuid(found.period.id),
+          archivedBranchId: slot.branchId,
+          archivedStore: slot.name,
+          archivedActivity: slot.activity,
+          replacementBranchId: binToUuid(branchId),
+          replacementStore: name,
+          replacementActivity: activity,
+          slotFee: slot.value,
+          replacementFee: fee,
+          chargedDifference: 0,
+          decision: 'no_additional_charge',
+        },
+      });
+      return { rowId: id, created: true };
     });
 
-    return { allocation: this.view(row), created: true };
+    return { allocation: this.view(await this.load(outcome.rowId)), created: outcome.created };
   }
 
   /**
@@ -378,11 +579,17 @@ export class SeatAllocationService {
    *    refunded this period.
    *  - **the activity the branch already has, while a change is scheduled** —
    *    the Owner keeps it: the scheduled change is withdrawn, nothing charged.
+   *  - **higher, at a branch that replaced an archived store this period** —
+   *    priced against the credit its slot carried (D158): the difference the
+   *    credit does not cover, or, when it covers it all, nothing — applied at
+   *    once, `granted` with `effective: now`, never a request for 0 to confirm.
    *
-   * One open request per branch, serialised on the branch row, so two devices
-   * asking at once get one request. The same target again answers with the
-   * request that exists; a different one is refused until the first is
-   * withdrawn. A warehouse stays `electronics` (D154 c) and cannot be asked.
+   * One open request per branch, serialised on the subscription row and then
+   * the branch row — the subscription first, as every request and confirmation
+   * that prices the period takes it — so two devices asking at once get one
+   * request. The same target again answers with the request that exists; a
+   * different one is refused until the first is withdrawn. A warehouse stays
+   * `electronics` (D154 c) and cannot be asked.
    */
   async requestActivityChange(
     companyId: Buffer,
@@ -394,6 +601,7 @@ export class SeatAllocationService {
     const actor = input.requestedBy.slice(0, 160);
 
     const outcome = await this.prisma.$transaction(async (tx) => {
+      await lockSubscription(tx, companyId);
       await tx.$queryRaw(Prisma.sql`SELECT id FROM branches WHERE id = ${input.branchId} AND company_id = ${companyId} FOR UPDATE`);
       const branch = await tx.branch.findFirst({
         where: { id: input.branchId, companyId, isActive: true, deletedAt: null },
@@ -415,6 +623,7 @@ export class SeatAllocationService {
       const scheduled = open.find((r) => isScheduledActivityChange(r));
       const unpaid = open.find((r) => r.status === 'pending_payment');
       const { pricing, running } = await this.billing.chargeablePricing(companyId, tx);
+      const credit = (await this.billing.replacementCredits(companyId, tx))[binToUuid(branch.id)] ?? 0;
       const decision = decideActivityChange({
         from: branch.activity,
         to: input.activity,
@@ -423,6 +632,7 @@ export class SeatAllocationService {
         pricing,
         running,
         activated: sub.status === 'activated',
+        credit,
       });
 
       switch (decision.kind) {
@@ -480,6 +690,50 @@ export class SeatAllocationService {
         return { rowId: id, created: true };
       }
 
+      if (decision.kind === 'apply_now') {
+        // The credit of the store this branch replaced covers the dearer fee (D158): in force now, nothing to pay. The
+        // period's assessment records the branch's new fee in this transaction and charges nothing for it.
+        if (scheduled) await this.closeTx(tx, scheduled, 'released', 'Cancelled by a later upgrade.', actor);
+        const now = this.clock.now();
+        const id = newUuidV7Bin();
+        await tx.seatAllocation.create({
+          data: {
+            id,
+            companyId,
+            subscriptionId: sub.id,
+            branchId: branch.id,
+            kind: 'activity',
+            status: 'granted',
+            activityFrom: change.from,
+            activityTo: change.to,
+            activityEffective: 'now',
+            monthlyAmount: 0,
+            requestedBy: actor,
+            // Decided and applied at once, so it is never mistaken for a change still waiting for the renewal.
+            confirmedBy: actor,
+            confirmedAt: now,
+            reason: `Covered by the ${credit} MRU this period already paid for the store this one replaced.`,
+          },
+        });
+        await tx.branch.update({
+          where: { id: branch.id },
+          data: { activity: change.to, activityNext: null, activityChangedAt: now },
+        });
+        await tx.subscriptionEvent.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            subscriptionId: sub.id,
+            kind: 'activity_changed',
+            note: `Activity change at ${branch.name}: ${change.from} → ${change.to} now; nothing to pay — this period already paid ${credit} MRU for this location (the store it replaced).`.slice(0, 255),
+            branchesAfter: sub.subscribedBranchCount,
+            actor: actor.slice(0, 120),
+          },
+        });
+        await this.billing.assessNow(companyId, tx);
+        return { rowId: id, created: true };
+      }
+
       // Scheduled for the renewal: a downgrade, or an upgrade with no paid month to charge a difference against.
       const id = newUuidV7Bin();
       await tx.seatAllocation.create({
@@ -520,14 +774,15 @@ export class SeatAllocationService {
 
   /**
    * What asking for each other activity would do at each store right now, and what a new store would be charged
-   * (D154): the request's own decision and prices, written nowhere — so the Owner's page explains a change with the
-   * server's figures, never its own arithmetic. `dueNow` is what a request would put awaiting payment;
-   * `monthlyAfter` what the store pays per month once the next paid period opens, at the plan in force then.
+   * (D154; D158 for a store that would replace an archived one): the request's own decision and prices, written
+   * nowhere — so the Owner's page explains a change with the server's figures, never its own arithmetic. `dueNow` is
+   * what a request would put awaiting payment (zero for a change applied at once); `monthlyAfter` what the store
+   * pays per month once the next paid period opens, at the plan in force then.
    */
   async activityOptions(companyId: Buffer): Promise<ActivityOptionsView> {
     const sub = await this.subscriptionOf(companyId);
     await this.renewal.rollIfDue(companyId);
-    const [branches, open, { pricing, running }, renewalPricing] = await Promise.all([
+    const [branches, open, { pricing, running }, renewalPricing, credits, found] = await Promise.all([
       this.prisma.branch.findMany({
         where: { companyId, isActive: true, deletedAt: null, type: { not: 'warehouse' } },
         select: { id: true, name: true, activity: true, activityNext: true },
@@ -540,6 +795,8 @@ export class SeatAllocationService {
       }),
       this.billing.chargeablePricing(companyId),
       this.billing.renewalPricing(companyId),
+      this.billing.replacementCredits(companyId),
+      this.billing.replacementSlots(companyId),
     ]);
     const stores = branches.map((branch) => {
       const here = open.filter((r) => r.branchId?.equals(branch.id));
@@ -554,6 +811,7 @@ export class SeatAllocationService {
           pricing,
           running,
           activated: sub.status === 'activated',
+          credit: credits[binToUuid(branch.id)] ?? 0,
         });
         const after = activityFee(to, renewalPricing);
         switch (decision.kind) {
@@ -567,6 +825,8 @@ export class SeatAllocationService {
             return { activity: to, outcome: 'refused', code: 'activity_request_pending', blockedBy: decision.by, dueNow: 0, monthlyAfter: null };
           case 'charge_now':
             return { activity: to, outcome: 'now', dueNow: decision.change.amountNow, monthlyAfter: after };
+          case 'apply_now':
+            return { activity: to, outcome: 'now', dueNow: 0, monthlyAfter: after };
           case 'at_renewal':
             return { activity: to, outcome: 'renewal', dueNow: 0, monthlyAfter: after };
         }
@@ -576,8 +836,18 @@ export class SeatAllocationService {
     return {
       running,
       stores,
-      // What requestStore charges per month for a new store of each activity: the chargeable prices.
-      newStore: ACTIVITIES.map((activity) => ({ activity, monthly: activityFee(activity, pricing) })),
+      // What requestStore asks for a new store of each activity: its fee at the chargeable prices, less the slot of an
+      // archived store it would take — chosen exactly as the request chooses it.
+      newStore: ACTIVITIES.map((activity) => {
+        const monthly = activityFee(activity, pricing);
+        const slot = found ? chooseReplacementSlot(found.slots, monthly) : null;
+        return {
+          activity,
+          monthly,
+          dueNow: slot ? replacementDue(monthly, slot.value) : monthly,
+          replaces: slot ? { branchId: slot.branchId, name: slot.name, credit: slot.value } : null,
+        };
+      }),
     };
   }
 
@@ -594,8 +864,13 @@ export class SeatAllocationService {
    * dropped response can be retried safely.
    *
    * For a store request, the store is created here with the activity that was
-   * paid for, the company's subscribed store count rises by one, and every
-   * Owner is assigned to it so the shop can use it at once. For an activity
+   * paid for, the company's subscribed store count rises by one, every Owner
+   * is assigned to it so the shop can use it at once, and the request names the
+   * store it opened. A store priced as the replacement of an archived one
+   * (D158) is confirmed only while its slot still stands — re-read under the
+   * subscription lock — and the replacement is written down with the payment;
+   * a slot that is gone is refused (`replacement_no_longer_applies`) before
+   * anything is written, never charged on a stale figure. For an activity
    * upgrade, the branch takes its new activity here, and the period is
    * assessed for the difference. A seat request grants nothing by itself: the
    * caller then asks the activation service whether the person may now be
@@ -653,6 +928,10 @@ export class SeatAllocationService {
     const now = this.clock.now();
 
     const result = await this.prisma.$transaction(async (tx) => {
+      // One confirmation at a time per company, behind the lock the renewal and the requests take: a reserved slot
+      // is re-read, and the period assessed, against what the previous one committed.
+      await lockSubscription(tx, before.companyId);
+
       const payment = await tx.subscriptionPayment.create({
         data: {
           id: newUuidV7Bin(),
@@ -688,70 +967,54 @@ export class SeatAllocationService {
       });
       if (moved.count !== 1) throw CHANGED();
 
+      // Judged only for the confirmation that won the guard. A slot that is gone throws, and the throw rolls the
+      // payment and the status back with it: nothing is charged on a stale figure.
+      const slot = before.kind === 'store' && before.replacesBranchId ? await this.reservedSlotTx(tx, before) : null;
+
       let storeName: string | null = null;
+      let replacement: ReplacementRecord | null = null;
       if (before.kind === 'store') {
         storeName = before.label ?? 'New store';
-        let branch: { id: Buffer };
-        try {
-          branch = await tx.branch.create({
-            data: {
-              id: newUuidV7Bin(),
-              companyId: before.companyId,
-              name: storeName,
-              type: 'store',
-              // What was paid for. A request made before activities existed has none and opens as electronics.
-              activity: before.activityTo ?? 'electronics',
-            },
-            select: { id: true },
-          });
-        } catch (e) {
-          if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-            throw new ConflictException({
-              code: 'store_name_in_use',
-              message: 'A store with that name already exists.',
-            });
-          }
-          throw e;
-        }
-        // Every Owner works at every store: assign them so the shop can use it at once.
-        const owners = await tx.userBranch.findMany({
-          where: {
-            companyId: before.companyId,
-            role: { key: 'owner' },
-            user: { deletedAt: null },
-          },
-          distinct: ['userId'],
-          select: { userId: true, roleId: true },
+        // What was paid for. A request made before activities existed has none and opens as electronics.
+        const activity = before.activityTo ?? 'electronics';
+        const branchId = await this.openStoreTx(tx, {
+          companyId: before.companyId,
+          subscriptionId: sub.id,
+          name: storeName,
+          activity,
+          actor: ctx.admin.email,
+          note: `Store "${storeName}" (${activity}) opened after payment ${reference}.`,
         });
-        for (const o of owners) {
-          await tx.userBranch.create({
-            data: {
-              id: newUuidV7Bin(),
-              companyId: before.companyId,
-              userId: o.userId,
-              branchId: branch.id,
-              roleId: o.roleId,
-            },
-          });
-        }
-        await tx.subscription.update({
-          where: { id: sub.id },
-          data: {
-            subscribedBranchCount: { increment: 1 },
-            version: { increment: 1 },
-          },
-        });
-        await tx.subscriptionEvent.create({
-          data: {
+        if (slot) {
+          replacement = {
+            archivedBranchId: binToUuid(slot.archived.id),
+            archivedStore: slot.archived.name,
+            archivedActivity: slot.archived.activity,
+            slotFee: before.replacementCredit ?? 0,
+            replacementFee: activityFee(activity, slot.prices),
+            chargedDifference: before.monthlyAmount,
+            decision: 'difference_charged',
+          };
+          await this.recordReplacementTx(tx, {
             id: newUuidV7Bin(),
             companyId: before.companyId,
-            subscriptionId: sub.id,
-            kind: 'branches_changed',
-            note: `Store "${storeName}" (${before.activityTo ?? 'electronics'}) opened after payment ${reference}.`.slice(0, 255),
-            branchesAfter: sub.subscribedBranchCount + 1,
-            actor: ctx.admin.email,
-          },
-        });
+            billingPeriodId: slot.periodId,
+            archivedBranchId: slot.archived.id,
+            replacementBranchId: branchId,
+            seatAllocationId: before.id,
+            archivedActivity: slot.archived.activity,
+            replacementActivity: activity,
+            slotFee: replacement.slotFee,
+            replacementFee: replacement.replacementFee,
+            chargedDifference: replacement.chargedDifference,
+            decision: replacement.decision,
+            paymentId: payment.id,
+            decidedBy: ctx.admin.email.slice(0, 160),
+            decidedAt: now,
+          });
+        }
+        // The request names the store it opened, for good — the link a matching label never was.
+        await tx.seatAllocation.updateMany({ where: { id: before.id }, data: { branchId } });
       }
 
       if (before.kind === 'activity') {
@@ -805,7 +1068,7 @@ export class SeatAllocationService {
       // payment, the change and the assessment commit together. A period that already ended is never raised.
       await this.billing.assessNow(before.companyId, tx);
 
-      return { payment, storeName };
+      return { payment, storeName, replacement };
     });
 
     const action =
@@ -836,6 +1099,8 @@ export class SeatAllocationService {
         channel: result.payment.channel,
         reference,
         ...(result.storeName ? { storeOpened: result.storeName, activity: before.activityTo ?? 'electronics' } : {}),
+        // The archived store this one replaced, the slot it took and what the replacement cost (D158 B5).
+        ...(result.replacement ? { replacement: result.replacement } : {}),
         ...(before.branch ? { store: before.branch.name } : {}),
         ...(before.user ? { person: before.user.name } : {}),
         ...(before.kind === 'activity' ? { activity: before.activityTo } : {}),
@@ -933,6 +1198,123 @@ export class SeatAllocationService {
       );
     }
     return this.close(before, 'released', 'Withdrawn by the business before payment.', actor, null);
+  }
+
+  /**
+   * Open a store: the branch with its activity, every Owner assigned to it so the shop can use it at once, the
+   * subscribed store count raised by one, and the timeline told why. One path for a store paid for and for one that
+   * took an archived store's place at no charge (D158), so the two can never open differently.
+   */
+  private async openStoreTx(
+    tx: BillingDb,
+    input: { companyId: Buffer; subscriptionId: Buffer; name: string; activity: Activity; actor: string; note: string },
+  ): Promise<Buffer> {
+    let branch: { id: Buffer };
+    try {
+      branch = await tx.branch.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: input.companyId,
+          name: input.name,
+          type: 'store',
+          activity: input.activity,
+        },
+        select: { id: true },
+      });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException({
+          code: 'store_name_in_use',
+          message: 'A store with that name already exists.',
+        });
+      }
+      throw e;
+    }
+    // Every Owner works at every store: assign them so the shop can use it at once.
+    const owners = await tx.userBranch.findMany({
+      where: {
+        companyId: input.companyId,
+        role: { key: 'owner' },
+        user: { deletedAt: null },
+      },
+      distinct: ['userId'],
+      select: { userId: true, roleId: true },
+    });
+    for (const o of owners) {
+      await tx.userBranch.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: input.companyId,
+          userId: o.userId,
+          branchId: branch.id,
+          roleId: o.roleId,
+        },
+      });
+    }
+    const counted = await tx.subscription.update({
+      where: { id: input.subscriptionId },
+      data: {
+        subscribedBranchCount: { increment: 1 },
+        version: { increment: 1 },
+      },
+      select: { subscribedBranchCount: true },
+    });
+    await tx.subscriptionEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId: input.companyId,
+        subscriptionId: input.subscriptionId,
+        kind: 'branches_changed',
+        note: input.note.slice(0, 255),
+        branchesAfter: counted.subscribedBranchCount,
+        actor: input.actor.slice(0, 120),
+      },
+    });
+    return branch.id;
+  }
+
+  /**
+   * The slot a store request reserved, re-read at its confirmation under the subscription lock (D158): the period it
+   * was priced in must still be the latest one and still running, the archived store still archived, and its place
+   * still free. Otherwise the difference it was priced at is a stale figure, and nothing is charged on it.
+   */
+  private async reservedSlotTx(tx: BillingDb, before: Row): Promise<ReservedSlot> {
+    const period = await this.billing.latestPeriod(before.companyId, tx);
+    if (
+      !period ||
+      !before.replacementPeriodId ||
+      !period.id.equals(before.replacementPeriodId) ||
+      !periodRunning(period, this.clock.now())
+    ) {
+      throw NO_LONGER_APPLIES();
+    }
+    const archived = before.replacesBranchId
+      ? await tx.branch.findFirst({
+          where: { id: before.replacesBranchId, companyId: before.companyId },
+          select: { id: true, name: true, activity: true, isActive: true, deletedAt: true },
+        })
+      : null;
+    if (!archived || (archived.isActive && archived.deletedAt === null)) throw NO_LONGER_APPLIES();
+    const taken = await tx.branchReplacement.findFirst({
+      where: { billingPeriodId: period.id, archivedBranchId: archived.id },
+      select: { id: true },
+    });
+    if (taken) throw NO_LONGER_APPLIES();
+    return { periodId: period.id, prices: period, archived: { id: archived.id, name: archived.name, activity: archived.activity } };
+  }
+
+  /**
+   * Write a replacement down, once (D158 B5, B6). A slot — the period and the archived branch — and a replacement
+   * branch are each unique in `branch_replacements`, so a second replacement of one slot fails here, inside the
+   * transaction that opened its store, and takes the store and any payment with it.
+   */
+  private async recordReplacementTx(tx: BillingDb, data: Prisma.BranchReplacementUncheckedCreateInput): Promise<void> {
+    try {
+      await tx.branchReplacement.create({ data });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') throw NO_LONGER_APPLIES();
+      throw e;
+    }
   }
 
   /** Close a request inside the caller's transaction: the status move, the cleared `activity_next`, the event. */

@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { SeatAllocationService } from './seat-allocation.service';
-import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import type { Activity } from '../entitlement/activity';
 
 /**
@@ -52,7 +52,8 @@ type Prices = { branchMonthly: number; agentMonthly: number; bothMonthly: number
 
 function makeWorld(
   main: { activity?: Activity; activityNext?: Activity | null } = {},
-  opts: { running?: boolean; status?: string; chargeable?: Prices; renewal?: Prices } = {},
+  /** `credit`: Main replaced a store archived this period, and its slot carried this much (D158). */
+  opts: { running?: boolean; status?: string; chargeable?: Prices; renewal?: Prices; credit?: number } = {},
 ) {
   const sub = {
     id: newUuidV7Bin(),
@@ -233,9 +234,13 @@ function makeWorld(
     renewalPricing: async () => ({ extraStaffMonthly: 100, branchMonthly: 500, agentMonthly: 300, bothMonthly: 700, includedStaffPerBranch: 1, ...opts.renewal }),
     // No renewal is ever due in this world: the latest period is not modelled here (billing/renewal.ts has its own spec).
     latestPeriod: async () => null,
+    // Replacement slots and credits (D158) are modelled end to end in billing-decisions.spec.ts; here only Main's credit.
+    replacementSlots: async () => null,
+    replacementCredits: async () => (opts.credit ? { [binToUuid(BRANCH)]: opts.credit } : {}),
   };
   const clock = { now: () => NOW };
-  const service = new SeatAllocationService(prisma as never, audit as never, billing as never, clock as never);
+  const tenantAudit = { recordTx: async () => undefined };
+  const service = new SeatAllocationService(prisma as never, audit as never, billing as never, clock as never, tenantAudit as never);
   return { service, rows, payments, events, audits, branches, userBranches, assessed, sub };
 }
 
@@ -536,10 +541,11 @@ describe('another activity for a branch (D154, docs/73 §3)', () => {
         { activity: 'money_agent', outcome: 'renewal', dueNow: 0, monthlyAfter: 330 },
         { activity: 'both', outcome: 'now', dueNow: 200, monthlyAfter: 770 },
       ]);
+      // With no store archived this period there is nothing to replace: each new store is due in full (D158 B4).
       expect(view.newStore).toEqual([
-        { activity: 'electronics', monthly: 500 },
-        { activity: 'money_agent', monthly: 300 },
-        { activity: 'both', monthly: 700 },
+        { activity: 'electronics', monthly: 500, dueNow: 500, replaces: null },
+        { activity: 'money_agent', monthly: 300, dueNow: 300, replaces: null },
+        { activity: 'both', monthly: 700, dueNow: 700, replaces: null },
       ]);
     });
 
@@ -556,9 +562,11 @@ describe('another activity for a branch (D154, docs/73 §3)', () => {
     });
 
     it('never disagrees with the request: every option offered is what asking then does, in every starting state', async () => {
-      const setups: { label: string; activity: Activity; first?: Activity; opts?: { running?: boolean; status?: string } }[] = [];
+      const setups: { label: string; activity: Activity; first?: Activity; opts?: { running?: boolean; status?: string; credit?: number } }[] = [];
       for (const activity of ['electronics', 'money_agent', 'both'] as Activity[]) {
-        for (const opts of [{}, { running: false }, { status: 'pending_activation' }]) {
+        // A branch that replaced an archived store this period carries the slot's credit (D158): 300 covers no upgrade
+        // from electronics, 700 covers every one.
+        for (const opts of [{}, { running: false }, { status: 'pending_activation' }, { credit: 300 }, { credit: 700 }, { running: false, credit: 700 }]) {
           setups.push({ label: `${activity} ${JSON.stringify(opts)}`, activity, opts });
           for (const first of ['electronics', 'money_agent', 'both'] as Activity[]) {
             if (first !== activity) setups.push({ label: `${activity} then ${first} ${JSON.stringify(opts)}`, activity, first, opts });
@@ -581,9 +589,10 @@ describe('another activity for a branch (D154, docs/73 §3)', () => {
             expect({ label, code: ((asked as ConflictException).getResponse?.() as { code?: string })?.code }).toEqual({ label, code: option.code });
           } else {
             const r = asked as { allocation: { status: string; monthlyAmount: number; activityEffective: string | null }; created: boolean };
+            // An upgrade the credit covers is applied at once, granted; anything else due now waits for its payment.
             const seen =
               option.outcome === 'now'
-                ? { created: true, status: 'pending_payment', effective: 'now', due: r.allocation.monthlyAmount }
+                ? { created: true, status: option.dueNow > 0 ? 'pending_payment' : 'granted', effective: 'now', due: r.allocation.monthlyAmount }
                 : option.outcome === 'renewal'
                   ? { created: true, status: 'granted', effective: 'renewal', due: 0 }
                   : option.outcome === 'keep'
@@ -594,7 +603,7 @@ describe('another activity for a branch (D154, docs/73 §3)', () => {
           checked += 1;
         }
       }
-      expect(checked).toBeGreaterThan(40);
+      expect(checked).toBeGreaterThan(80);
     });
   });
 

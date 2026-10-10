@@ -129,7 +129,10 @@ export interface ActivityChange {
   /** What the branch pays per month now, and what it would pay at the new activity. */
   feeFrom: number;
   feeTo: number;
-  /** Charged at once for an upgrade — the difference, this period. Zero otherwise. */
+  /**
+   * Charged at once for an upgrade — the difference, this period, less what a replacement's credit already covers
+   * (D158, `upgradeDue`). Zero otherwise.
+   */
   amountNow: number;
   /** When it takes effect: an upgrade now, a downgrade at the next renewal. Null when nothing changes. */
   effective: 'now' | 'renewal' | null;
@@ -145,8 +148,19 @@ export interface ActivityChange {
  * of nothing has nothing to confirm, so it lands at the renewal like any other
  * free change. The approved prices never produce one; a later plan version
  * could.
+ *
+ * `credit` is what this period already paid for the branch's location when the
+ * branch replaced a store archived in it (D158): an upgrade is then charged
+ * only what the credit does not cover, and may cost nothing at all. It is still
+ * an upgrade — a dearer activity, in force now — not a free change waiting for
+ * the renewal.
  */
-export function activityChange(from: Activity, to: Activity, plan: ActivityPrices = CURRENT_PLAN): ActivityChange {
+export function activityChange(
+  from: Activity,
+  to: Activity,
+  plan: ActivityPrices = CURRENT_PLAN,
+  credit = 0,
+): ActivityChange {
   const feeFrom = activityFee(from, plan);
   const feeTo = activityFee(to, plan);
   if (from === to) {
@@ -154,9 +168,69 @@ export function activityChange(from: Activity, to: Activity, plan: ActivityPrice
   }
   const difference = feeTo - feeFrom;
   if (difference > 0) {
-    return { from, to, kind: 'upgrade', feeFrom, feeTo, amountNow: difference, effective: 'now' };
+    return { from, to, kind: 'upgrade', feeFrom, feeTo, amountNow: upgradeDue(feeFrom, feeTo, credit), effective: 'now' };
   }
   return { from, to, kind: 'downgrade', feeFrom, feeTo, amountNow: 0, effective: 'renewal' };
+}
+
+/**
+ * What an upgrade costs this period when the branch carries a credit (D158):
+ * what the branch would be charged at the new fee less what it is charged at
+ * the old one, each `max(0, fee − credit)`. A store that replaced a 700 one as a
+ * 500 store and becomes a 700 one owes nothing — its location was paid for;
+ * with no credit it is the plain difference.
+ */
+export function upgradeDue(feeFrom: number, feeTo: number, credit = 0): number {
+  const c = whole(credit);
+  return Math.max(0, Math.max(0, whole(feeTo) - c) - Math.max(0, whole(feeFrom) - c));
+}
+
+/**
+ * Replacing a store archived during a paid period (D158, docs/73 §11.1).
+ *
+ * The owner's decisions: a store that replaces one archived in the same paid
+ * period costs no second base fee when it is the same activity or a cheaper
+ * one (B2); a dearer one costs only the difference (B3); a store added while
+ * the old one still runs is a second store and pays in full (B4).
+ *
+ * A **slot** is the place an archived store left: a branch billed this period
+ * that is no longer active and that no replacement has taken. Its value is what
+ * the period already paid for that location — the archived branch's own
+ * assessed fee, or, when it was itself a replacement, the credit it carried,
+ * whichever is larger — so a chain of replacements never pays twice for one
+ * location and never forgets what the first store paid.
+ */
+export interface ReplacementSlotChoice {
+  /** The archived branch's id. */
+  branchId: string;
+  /** What this period already paid for its location (`replacementSlotValue`). */
+  value: number;
+}
+
+/** What a slot is worth: the archived branch's assessed fee, or the credit it carried as a replacement, whichever is larger. */
+export function replacementSlotValue(assessedFee: number, credit = 0): number {
+  return Math.max(whole(assessedFee), whole(credit));
+}
+
+/**
+ * Which slot a new store takes: the smallest that covers its fee in full — a
+ * larger slot stays free for a dearer store — else the largest, the smallest
+ * difference to pay. Ties go to the archived branch's id, so two reads of the
+ * same slots always choose the same one. Null when there is none: the store is
+ * priced in full.
+ */
+export function chooseReplacementSlot<T extends ReplacementSlotChoice>(slots: readonly T[], newFee: number): T | null {
+  const fee = whole(newFee);
+  const byId = (a: T, b: T): number => (a.branchId < b.branchId ? -1 : a.branchId > b.branchId ? 1 : 0);
+  const covering = slots.filter((s) => whole(s.value) >= fee).sort((a, b) => whole(a.value) - whole(b.value) || byId(a, b));
+  if (covering.length > 0) return covering[0];
+  const largest = [...slots].sort((a, b) => whole(b.value) - whole(a.value) || byId(a, b));
+  return largest[0] ?? null;
+}
+
+/** What a new store pays to take a slot: what its fee exceeds what the location already paid. Never negative. */
+export function replacementDue(newFee: number, slot: number): number {
+  return Math.max(0, whole(newFee) - whole(slot));
 }
 
 /** One store, as the price sees it. */
@@ -366,6 +440,18 @@ export function estimateFor(
  * high-water mark, and a branch that leaves mid-period keeps the fee it was
  * assessed at (nothing is refunded). A period opened before this existed has
  * no map; it starts one from today's lines, which reads exactly as before.
+ *
+ * ## A replacement is charged only what its location was not paid (D158)
+ *
+ * A store that took the slot of one archived this period carries a credit —
+ * what the period had already paid for that location. Each branch is charged
+ * its high-water mark less its credit, never below zero, so the archived
+ * store's fee and its replacement's are not both charged in full. The map
+ * itself keeps every branch's whole mark: a credit lowers what a branch is
+ * charged, never what it was assessed at. The plain quote of the branches
+ * active now stays a floor: an archived store brought back while its
+ * replacement runs is two stores at once, and both are charged in full (B4).
+ * With no credits every figure is exactly what it was before.
  */
 export interface AssessedPeriod {
   /** The largest store fee assessed so far this period. */
@@ -390,10 +476,17 @@ export interface PeriodAssessment extends Quote {
   addedThisPeriod: number;
 }
 
+/**
+ * What this period already paid for each replacement store's location, by the
+ * replacement's branch id (D158): the value of the slot it took.
+ */
+export type ReplacementCredits = Readonly<Record<string, number>>;
+
 export function assessPeriod(
   size: CompanySize,
   prior: AssessedPeriod,
   plan: PlanPricing = CURRENT_PLAN,
+  credits: ReplacementCredits = {},
 ): PeriodAssessment {
   const q = quoteFor(size, plan);
 
@@ -414,7 +507,11 @@ export function assessPeriod(
       line.activityFee,
     );
   }
-  const branchFeeByBranch = Object.values(assessedActivityFeeByBranch).reduce((n, fee) => n + fee, 0);
+  // What each branch is charged: its mark, less the credit a replacement carries for a location already paid for.
+  const branchFeeByBranch = Object.entries(assessedActivityFeeByBranch).reduce(
+    (n, [branchId, fee]) => n + Math.max(0, fee - whole(credits[branchId] ?? 0)),
+    0,
+  );
 
   // The high-water mark, component by component. Taken per component rather
   // than on the total, so a store added late cannot mask a seat charge that

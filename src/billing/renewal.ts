@@ -121,8 +121,12 @@ export class SubscriptionRenewal {
   }
 }
 
-/** One renewal at a time per company: every roll takes the subscription row first. */
-async function lockSubscription(tx: BillingDb, companyId: Buffer): Promise<void> {
+/**
+ * One renewal at a time per company: every roll takes the subscription row first. So do the store requests, the
+ * activity requests and the payment confirmations (D158), so anything that prices the running period is decided
+ * one at a time, against what the previous one committed — and always in the same order, subscription first.
+ */
+export async function lockSubscription(tx: BillingDb, companyId: Buffer): Promise<void> {
   await tx.$queryRaw(Prisma.sql`SELECT id FROM subscriptions WHERE company_id = ${companyId} FOR UPDATE`);
 }
 

@@ -2,13 +2,18 @@ import {
   activityChange,
   activityFee,
   assessPeriod,
+  chooseReplacementSlot,
   CURRENT_PLAN,
   estimateFor,
   nextRenewalEstimate,
   quoteFor,
+  replacementDue,
+  replacementSlotValue,
   STANDARD_PLAN_V1,
   STANDARD_PLAN_V2,
   STANDARD_PLAN_V3,
+  upgradeDue,
+  type AssessedPeriod,
   type BranchSize,
   type CompanySize,
 } from './pricing-rules';
@@ -403,7 +408,9 @@ describe('the period remembers each branch\'s fee (D154: an upgrade\'s differenc
     expect(upgraded.assessedActivityFeeByBranch).toEqual({ 'b-Shop': 500, 'b-Counter': 700 });
   });
 
-  it('a store that replaces an archived one costs its whole month: nothing was refunded for the one that left', () => {
+  it('a store added beside an archived one with no replacement recorded costs its whole month: nothing was refunded for the one that left', () => {
+    // No credit — no slot was taken (the store came after the period, or beside a store still running). A replacement
+    // that took the slot carries a credit: see the D158 block below.
     const opened = assessPeriod(company(store('A', 0)), none);
     const replaced = assessPeriod(company(store('B', 0)), opened);
     expect(replaced.assessedBranchFee).toBe(1000);
@@ -438,5 +445,223 @@ describe('the applicant estimate takes an activity per store', () => {
     ]);
     expect(q.branchFee).toBe(1500);
     expect(q.monthlyTotal).toBe(1600);
+  });
+});
+
+/**
+ * The owner's billing decisions of 2026-10-10 (D158, docs/73 §11.1): a store that takes the place of one archived in
+ * the same paid period costs no second base fee when it is the same activity or cheaper (B2), only the difference when
+ * dearer (B3); a store beside one still running pays in full (B4). Plan v3, one paid month running.
+ */
+describe('replacing an archived store in the same paid period (D158)', () => {
+  const none = { assessedBranchFee: 0, assessedStaffFee: 0 };
+  const at = (name: string, activity: Activity) => store(name, 0, 0, 0, activity);
+  /** The one slot an archived branch leaves, valued from the period's map and any credit it carried itself. */
+  const slotOf = (period: { assessedActivityFeeByBranch: Record<string, number> }, branchId: string, credit = 0) => ({
+    branchId,
+    value: replacementSlotValue(period.assessedActivityFeeByBranch[branchId], credit),
+  });
+
+  describe('the worked examples', () => {
+    it.each([
+      ['electronics A (500) archived; new electronics store', 'electronics', 'electronics', 0],
+      ['both A (700) archived; new money-agent store — cheaper, nothing refunded', 'both', 'money_agent', 0],
+      ['money-agent A (300) archived; new electronics store — dearer, the difference', 'money_agent', 'electronics', 200],
+      ['money-agent A (300) archived; new both store', 'money_agent', 'both', 400],
+    ] as const)('%s (%s → %s) → due %i', (_label, archived, replacement, due) => {
+      const opened = assessPeriod(company(at('A', archived)), none);
+      const slot = chooseReplacementSlot([slotOf(opened, 'b-A')], activityFee(replacement));
+      expect(slot).toEqual({ branchId: 'b-A', value: activityFee(archived) });
+      expect(replacementDue(activityFee(replacement), slot!.value)).toBe(due);
+      // The period charges exactly what was due: the replacement's credit is the slot it took.
+      const replaced = assessPeriod(company(at('N', replacement)), opened, CURRENT_PLAN, { 'b-N': slot!.value });
+      expect(replaced.addedThisPeriod).toBe(due);
+      expect(replaced.assessedBranchFee).toBe(Math.max(activityFee(archived), activityFee(replacement)));
+      // Both locations stay in the map at their whole fee: a credit lowers the charge, never what was assessed.
+      expect(replaced.assessedActivityFeeByBranch).toEqual({ 'b-A': activityFee(archived), 'b-N': activityFee(replacement) });
+    });
+
+    it('electronics A (500) still active; a new electronics store → 500: two stores at once (B4)', () => {
+      const opened = assessPeriod(company(at('A', 'electronics')), none);
+      // An active store is never a slot; with none, the new store is priced in full.
+      expect(chooseReplacementSlot([], 500)).toBeNull();
+      const both = assessPeriod(company(at('A', 'electronics'), at('N', 'electronics')), opened);
+      expect(both.addedThisPeriod).toBe(500);
+      expect(both.assessedBranchFee).toBe(1000);
+    });
+
+    it('A (700) archived; R an electronics store at 0; R later upgraded to both → 0: R’s credit of 700 covers 700', () => {
+      const opened = assessPeriod(company(at('A', 'both')), none);
+      const slot = chooseReplacementSlot([slotOf(opened, 'b-A')], 500)!;
+      expect(replacementDue(500, slot.value)).toBe(0);
+      const credits = { 'b-R': slot.value };
+      const replaced = assessPeriod(company(at('R', 'electronics')), opened, CURRENT_PLAN, credits);
+      expect(replaced.addedThisPeriod).toBe(0);
+      expect(activityChange('electronics', 'both', CURRENT_PLAN, slot.value)).toMatchObject({ kind: 'upgrade', amountNow: 0, effective: 'now' });
+      const upgraded = assessPeriod(company(at('R', 'both')), replaced, CURRENT_PLAN, credits);
+      expect(upgraded.addedThisPeriod).toBe(0);
+      expect(upgraded.assessedBranchFee).toBe(700);
+      expect(upgraded.assessedActivityFeeByBranch).toEqual({ 'b-A': 700, 'b-R': 700 });
+    });
+
+    it('the chain: A (300) archived; R electronics (200 paid); R archived; R2 both → 200, slot(R) = max(500, 300)', () => {
+      const opened = assessPeriod(company(at('A', 'money_agent')), none);
+      const slotA = chooseReplacementSlot([slotOf(opened, 'b-A')], 500)!;
+      expect(replacementDue(500, slotA.value)).toBe(200);
+      const r = assessPeriod(company(at('R', 'electronics')), opened, CURRENT_PLAN, { 'b-R': slotA.value });
+      expect(r.assessedBranchFee).toBe(500);
+      // R leaves in turn: what the period paid for its location is the larger of its own fee and the credit it carried.
+      const slotR = chooseReplacementSlot([slotOf(r, 'b-R', slotA.value)], 700)!;
+      expect(slotR.value).toBe(500);
+      expect(replacementSlotValue(500, 300)).toBe(500);
+      expect(replacementSlotValue(500, 700)).toBe(700);
+      expect(replacementDue(700, slotR.value)).toBe(200);
+      const r2 = assessPeriod(company(at('R2', 'both')), r, CURRENT_PLAN, { 'b-R': slotA.value, 'b-R2': slotR.value });
+      expect(r2.addedThisPeriod).toBe(200);
+      // 300 + 200 + 200: the period charged exactly one location, at the dearest activity it ever had.
+      expect(r2.assessedBranchFee).toBe(700);
+    });
+
+    it('two store requests at once, one 500 slot: one takes it at 0, the other pays 500 (B6)', () => {
+      const opened = assessPeriod(company(at('A', 'electronics')), none);
+      const first = chooseReplacementSlot([slotOf(opened, 'b-A')], 500)!;
+      expect(replacementDue(500, first.value)).toBe(0);
+      // Taken by the first, the slot is gone for the second.
+      expect(chooseReplacementSlot([], 500)).toBeNull();
+      const after = assessPeriod(company(at('N1', 'electronics'), at('N2', 'electronics')), opened, CURRENT_PLAN, { 'b-N1': first.value });
+      expect(after.addedThisPeriod).toBe(500);
+      expect(after.assessedBranchFee).toBe(1000);
+    });
+
+    it('a slot reserved when the period renews: the next period never billed A, so it offers no slot', () => {
+      // The renewal opens the next period from the active branches alone (`openPeriod`), so A is not in its map.
+      const next = assessPeriod(company(at('Main', 'electronics')), none);
+      expect(Object.keys(next.assessedActivityFeeByBranch)).toEqual(['b-Main']);
+    });
+  });
+
+  it('chooses the smallest slot that covers the fee in full, else the largest; ties by the archived branch’s id', () => {
+    const slots = [
+      { branchId: 'b-3', value: 700 },
+      { branchId: 'b-2', value: 300 },
+      { branchId: 'b-1', value: 500 },
+      { branchId: 'b-0', value: 500 },
+    ];
+    expect(chooseReplacementSlot(slots, 300)?.branchId).toBe('b-2');
+    // Two 500 slots cover a 500 store: the first by id, the 700 one kept for a dearer store.
+    expect(chooseReplacementSlot(slots, 500)?.branchId).toBe('b-0');
+    expect(chooseReplacementSlot(slots, 600)?.branchId).toBe('b-3');
+    // Nothing covers 900: the largest, the smallest difference to pay.
+    expect(chooseReplacementSlot(slots, 900)?.branchId).toBe('b-3');
+    expect(chooseReplacementSlot(slots.filter((x) => x.value < 700), 900)?.branchId).toBe('b-0');
+    expect(chooseReplacementSlot([], 500)).toBeNull();
+    // The caller's list is read, never reordered.
+    expect(slots.map((x) => x.branchId)).toEqual(['b-3', 'b-2', 'b-1', 'b-0']);
+  });
+
+  it('a difference is never negative, and a slot never worth less than either of its figures', () => {
+    for (const fee of [0, 300, 500, 700]) {
+      for (const slot of [0, 300, 500, 700, 900]) {
+        expect(replacementDue(fee, slot)).toBe(Math.max(0, fee - slot));
+        expect(replacementDue(fee, slot)).toBeGreaterThanOrEqual(0);
+        expect(replacementSlotValue(fee, slot)).toBe(Math.max(fee, slot));
+      }
+    }
+  });
+
+  it('an upgrade with a credit costs max(0, fee(to) − c) − max(0, fee(from) − c); with none, the plain difference', () => {
+    const activities: Activity[] = ['electronics', 'money_agent', 'both'];
+    for (const from of activities) {
+      for (const to of activities) {
+        const plain = activityChange(from, to);
+        expect(activityChange(from, to, CURRENT_PLAN, 0)).toEqual(plain);
+        if (plain.kind === 'upgrade') expect(upgradeDue(plain.feeFrom, plain.feeTo)).toBe(plain.amountNow);
+        for (const credit of [0, 300, 500, 700, 900]) {
+          const change = activityChange(from, to, CURRENT_PLAN, credit);
+          // The credit decides how much, never which way: a downgrade still waits for the renewal.
+          expect(change.kind).toBe(plain.kind);
+          if (change.kind === 'upgrade') {
+            expect(change.amountNow).toBe(Math.max(0, change.feeTo - credit) - Math.max(0, change.feeFrom - credit));
+            expect(change.amountNow).toBeLessThanOrEqual(plain.amountNow);
+          } else {
+            expect(change.amountNow).toBe(0);
+          }
+        }
+      }
+    }
+    expect(upgradeDue(300, 700, 300)).toBe(400);
+    expect(upgradeDue(500, 700, 300)).toBe(200);
+    expect(upgradeDue(500, 700, 600)).toBe(100);
+  });
+
+  it('with no credits every figure is what it was: the earlier cases, assessed both ways, agree', () => {
+    const cases: [CompanySize, AssessedPeriod][] = [
+      [company(store('A', 0)), none],
+      [company(store('A', 0), store('B', 0)), assessPeriod(company(store('A', 0)), none)],
+      [company(store('A', 1, 1)), assessPeriod(company(store('A', 1)), none)],
+      [company(store('A', 1, 0)), assessPeriod(company(store('A', 2, 1)), none)],
+      [company(store('B', 0)), assessPeriod(company(store('A', 0)), none)],
+      [company(store('Counter', 0, 0, 0, 'both')), assessPeriod(company(store('Shop', 0), store('Counter', 0, 0, 0, 'money_agent')), none)],
+      [company(store('Main', 0)), { assessedBranchFee: 1000, assessedStaffFee: 0 }],
+      [company(store('Main', 0)), { assessedBranchFee: 1000, assessedStaffFee: 0, assessedActivityFeeByBranch: null }],
+      [company(store('Main', 0, 0, 0, 'money_agent')), { assessedBranchFee: 700, assessedStaffFee: 0, assessedActivityFeeByBranch: { 'b-Main': 700 } }],
+      [company(store('Main', 3)), { assessedBranchFee: 500, assessedStaffFee: 100 }],
+    ];
+    for (const [size, prior] of cases) {
+      expect(assessPeriod(size, prior, CURRENT_PLAN, {})).toEqual(assessPeriod(size, prior));
+      // A credit for a branch the period never billed changes nothing either.
+      expect(assessPeriod(size, prior, CURRENT_PLAN, { 'b-nowhere': 700 })).toEqual(assessPeriod(size, prior));
+    }
+  });
+
+  it('never lower than before: every replacement sequence only ever raises the period, or leaves it', () => {
+    const activities: Activity[] = ['electronics', 'money_agent', 'both'];
+    let sequences = 0;
+    for (const archived of activities) {
+      for (const replacement of activities) {
+        for (const upgradeTo of activities) {
+          const opened = assessPeriod(company(at('Shop', 'electronics'), at('A', archived)), none);
+          const slot = chooseReplacementSlot([slotOf(opened, 'b-A')], activityFee(replacement))!;
+          const credits = { 'b-R': slot.value };
+          const steps = [
+            company(at('Shop', 'electronics'), at('R', replacement)),
+            company(at('Shop', 'electronics'), at('R', activityFee(upgradeTo) > activityFee(replacement) ? upgradeTo : replacement)),
+            // A brought back while R runs: two stores at once.
+            company(at('Shop', 'electronics'), at('A', archived), at('R', replacement)),
+            // And archived again: nothing refunded.
+            company(at('Shop', 'electronics')),
+          ];
+          let acc: AssessedPeriod = opened;
+          let last = opened.assessedTotal;
+          for (const size of steps) {
+            const a = assessPeriod(size, acc, CURRENT_PLAN, credits);
+            expect(a.assessedTotal).toBeGreaterThanOrEqual(last);
+            expect(a.addedThisPeriod).toBe(a.assessedTotal - last);
+            last = a.assessedTotal;
+            acc = a;
+          }
+          sequences += 1;
+        }
+      }
+    }
+    expect(sequences).toBe(27);
+  });
+
+  it('an archived store brought back while its replacement runs is charged in full by the plain-quote floor (B4)', () => {
+    const opened = assessPeriod(company(at('A', 'electronics')), none);
+    const credits = { 'b-R': 500 };
+    const replaced = assessPeriod(company(at('R', 'electronics')), opened, CURRENT_PLAN, credits);
+    expect(replaced.assessedBranchFee).toBe(500);
+    const reactivated = assessPeriod(company(at('A', 'electronics'), at('R', 'electronics')), replaced, CURRENT_PLAN, credits);
+    expect(reactivated.assessedBranchFee).toBe(1000);
+    expect(reactivated.addedThisPeriod).toBe(500);
+  });
+
+  it('a credit larger than a branch’s fee charges that branch nothing, never less than nothing', () => {
+    const opened = assessPeriod(company(at('A', 'both'), at('Shop', 'electronics')), none);
+    const replaced = assessPeriod(company(at('R', 'money_agent'), at('Shop', 'electronics')), opened, CURRENT_PLAN, { 'b-R': 700 });
+    // 700 (A) + 500 (Shop) + max(0, 300 − 700): the cheaper replacement is free, and the others are not discounted.
+    expect(replaced.assessedBranchFee).toBe(1200);
+    expect(replaced.addedThisPeriod).toBe(0);
   });
 });
