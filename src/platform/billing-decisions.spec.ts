@@ -237,6 +237,51 @@ describe('a store that replaced another, upgraded in the same period (D158)', ()
       [500, 700, 200],
     ]);
   });
+
+  it('a difference left after the credit is that period’s alone: confirmed after the roll it is refused, nothing written; asked again, priced in full', async () => {
+    // Found by the review: P2 has no credit for R, so collecting the 200 would leave P2 assessed 400 more with 200 paid.
+    const w = await makeBillingWorld({ stores: [{ name: 'A', activity: 'electronics' }], currentPeriodEnd: DEC_1 });
+    w.archive('A');
+    await askStore(w, 'R', 'money_agent');
+    const up = await askActivity(w, 'R', 'both');
+    expect(up.allocation).toMatchObject({ status: 'pending_payment', monthlyAmount: 200 });
+    expect(w.request(up.allocation.id)).toMatchObject({ replacementCredit: 500, replacementPeriodId: w.period().id, replacesBranchId: null });
+
+    w.clock.set(new Date('2026-11-03T09:00:00.000Z'));
+    await w.service.activityOptions(COMPANY);
+    expect(w.periods()).toHaveLength(2);
+    expect(w.period().assessedActivityFeeByBranch).toEqual(fees(w, { R: 300 }));
+    const refusal = await w.confirm(up.allocation.id, 200).catch((e: unknown) => e);
+    expect(codeOf(refusal)).toBe('replacement_no_longer_applies');
+    expect(w.t.payments).toHaveLength(0);
+    expect(w.request(up.allocation.id)).toMatchObject({ status: 'pending_payment', version: 0 });
+    expect(w.branch('R')).toMatchObject({ activity: 'money_agent' });
+    expect(w.period().assessedBranchFee).toBe(300);
+
+    await w.service.withdraw(COMPANY, w.request(up.allocation.id).id, owner);
+    const again = await askActivity(w, 'R', 'both');
+    expect(again.allocation).toMatchObject({ status: 'pending_payment', monthlyAmount: 400 });
+    expect(w.request(again.allocation.id)).toMatchObject({ replacementCredit: null, replacementPeriodId: null });
+    await w.confirm(again.allocation.id, 400);
+    expect(w.period().assessedBranchFee).toBe(700);
+    expect(w.t.payments.map((p) => String(p.amount))).toEqual(['400']);
+  });
+
+  it('a credit never applies a change at once for a business suspended while the request was on its way', async () => {
+    // The status is read under the subscription lock: a suspension committed after the first read sends the change to
+    // the renewal, priced in full there, instead of applying it at once on a credit.
+    const w = await makeBillingWorld({ stores: [{ name: 'A', activity: 'both' }] });
+    w.archive('A');
+    await askStore(w, 'R', 'electronics');
+    const renewal = (w.service as unknown as { renewal: { rollIfDue: (c: Buffer) => Promise<unknown> } }).renewal;
+    jest.spyOn(renewal, 'rollIfDue').mockImplementationOnce(async () => {
+      w.subscription().status = 'suspended';
+    });
+    const up = await askActivity(w, 'R', 'both');
+    expect(up.allocation).toMatchObject({ status: 'granted', activityEffective: 'renewal', monthlyAmount: 0 });
+    expect(w.branch('R')).toMatchObject({ activity: 'electronics', activityNext: 'both' });
+    expect(w.period().assessedBranchFee).toBe(700);
+  });
 });
 
 describe('B6 — racing requests and retries', () => {

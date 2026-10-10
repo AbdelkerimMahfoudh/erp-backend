@@ -4600,7 +4600,9 @@ model SeatAllocation {
   activityEffective ActivityChangeEffective? @map("activity_effective")
 
   /// 0091 (D158, docs/73 §11.1): a store request that replaces a store archived in the running paid period —
-  /// the archived branch whose slot it reserved, what that period already paid for it, and the period.
+  /// the archived branch whose slot it reserved, what that period already paid for it, and the period. An activity
+  /// upgrade priced against such a credit carries the credit and the period too (no branch): its difference is that
+  /// period's figure alone, refused at confirmation once the period has ended.
   replacesBranchId    Bytes? @map("replaces_branch_id") @db.Binary(16)
   replacementCredit   Int?   @map("replacement_credit") @db.UnsignedInt
   replacementPeriodId Bytes? @map("replacement_period_id") @db.Binary(16)

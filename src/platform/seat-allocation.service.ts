@@ -148,6 +148,14 @@ const NO_LONGER_APPLIES = () =>
       'This store was priced as the replacement of a store archived in the running period, and that no longer holds: the period renewed, the archived store is active again, or another store already took its place. Nothing was charged. Refuse or withdraw this request; asked again, it is priced afresh.',
   });
 
+/** An activity upgrade priced against a replacement's credit (D158) whose period has ended: the credit belonged to it alone. */
+const CREDIT_NO_LONGER_APPLIES = () =>
+  new ConflictException({
+    code: 'replacement_no_longer_applies',
+    message:
+      'This change was priced against what the running period had already paid for the store this one replaced, and that period has ended. Nothing was charged. Refuse or withdraw this request; asked again, it is priced afresh.',
+  });
+
 /** The audit writer's client: a tenant transaction, which the base transaction is at run time. */
 type AuditClient = Parameters<AuditService['recordTx']>[0];
 
@@ -624,6 +632,8 @@ export class SeatAllocationService {
       const unpaid = open.find((r) => r.status === 'pending_payment');
       const { pricing, running } = await this.billing.chargeablePricing(companyId, tx);
       const credit = (await this.billing.replacementCredits(companyId, tx))[binToUuid(branch.id)] ?? 0;
+      // Read under the lock: a suspension committed since the read above must not let a credit apply the change at once.
+      const locked = await tx.subscription.findFirst({ where: { companyId }, select: { status: true } });
       const decision = decideActivityChange({
         from: branch.activity,
         to: input.activity,
@@ -631,7 +641,7 @@ export class SeatAllocationService {
         scheduledTo: scheduled?.activityTo ?? null,
         pricing,
         running,
-        activated: sub.status === 'activated',
+        activated: locked?.status === 'activated',
         credit,
       });
 
@@ -660,6 +670,9 @@ export class SeatAllocationService {
 
       if (decision.kind === 'charge_now') {
         if (scheduled) await this.closeTx(tx, scheduled, 'released', 'Cancelled by a later upgrade request.', actor);
+        // A difference left after a replacement's credit is this period's figure alone (D158): the period is written
+        // down with it, and the confirmation refuses the figure once that period has ended.
+        const pricedIn = credit > 0 ? await this.billing.latestPeriod(companyId, tx) : null;
         const id = newUuidV7Bin();
         await tx.seatAllocation.create({
           data: {
@@ -674,6 +687,7 @@ export class SeatAllocationService {
             activityEffective: 'now',
             monthlyAmount: change.amountNow,
             requestedBy: actor,
+            ...(pricedIn ? { replacementCredit: credit, replacementPeriodId: pricedIn.id } : {}),
           },
         });
         await tx.subscriptionEvent.create({
@@ -970,6 +984,7 @@ export class SeatAllocationService {
       // Judged only for the confirmation that won the guard. A slot that is gone throws, and the throw rolls the
       // payment and the status back with it: nothing is charged on a stale figure.
       const slot = before.kind === 'store' && before.replacesBranchId ? await this.reservedSlotTx(tx, before) : null;
+      if (before.kind === 'activity' && before.replacementPeriodId) await this.creditPeriodTx(tx, before);
 
       let storeName: string | null = null;
       let replacement: ReplacementRecord | null = null;
@@ -1301,6 +1316,24 @@ export class SeatAllocationService {
     });
     if (taken) throw NO_LONGER_APPLIES();
     return { periodId: period.id, prices: period, archived: { id: archived.id, name: archived.name, activity: archived.activity } };
+  }
+
+  /**
+   * The period an activity upgrade was priced in against a replacement's credit, re-read at its confirmation under the
+   * subscription lock (D158): it must still be the latest period and still running. The credit was that period's
+   * alone — the next one bills the branch at its own fee with no credit — so after a roll the difference is a stale
+   * figure: collecting it would leave the new period assessed the full difference while only part was paid.
+   */
+  private async creditPeriodTx(tx: BillingDb, before: Row): Promise<void> {
+    const period = await this.billing.latestPeriod(before.companyId, tx);
+    if (
+      !period ||
+      !before.replacementPeriodId ||
+      !period.id.equals(before.replacementPeriodId) ||
+      !periodRunning(period, this.clock.now())
+    ) {
+      throw CREDIT_NO_LONGER_APPLIES();
+    }
   }
 
   /**
