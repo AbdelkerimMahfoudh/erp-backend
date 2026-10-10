@@ -158,6 +158,15 @@ describe('B2 and B3 — a store that takes the place of one archived this paid p
     expect(allocation).toMatchObject({ status: 'pending_payment', monthlyAmount: 500, replaces: null });
     expect(w.request(allocation.id).replacesBranchId).toBeNull();
   });
+
+  it('no slot for a business the platform suspended: asking opens nothing, the store is priced in full and waits', async () => {
+    const w = await makeBillingWorld({ stores: [{ name: 'A', activity: 'electronics' }] });
+    w.archive('A');
+    w.subscription().status = 'suspended';
+    const { allocation } = await askStore(w, 'N', 'electronics');
+    expect(allocation).toMatchObject({ status: 'pending_payment', monthlyAmount: 500, replaces: null });
+    expect(w.request(allocation.id).replacesBranchId).toBeNull();
+  });
 });
 
 describe('a store that replaced another, upgraded in the same period (D158)', () => {

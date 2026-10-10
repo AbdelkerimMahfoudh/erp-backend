@@ -526,8 +526,14 @@ export class BillingService {
    * still running offers nothing: a new store beside it is a second store and
    * pays in full (B4). The caller holds the subscription lock when it acts on
    * the answer, so two requests cannot both take one slot.
+   *
+   * Only an activated subscription has a slot: a free replacement opens a store
+   * at once, and a business the platform suspended or cancelled is opened
+   * nothing by asking — it is priced as any store request and waits.
    */
   async replacementSlots(companyId: Buffer, db: BillingDb = this.prisma): Promise<{ period: PeriodState; slots: ReplacementSlot[] } | null> {
+    const sub = await db.subscription.findFirst({ where: { companyId }, select: { status: true } });
+    if (sub?.status !== 'activated') return null;
     const period = await db.billingPeriod.findFirst({ where: { companyId }, orderBy: { periodStart: 'desc' } });
     if (!period || !periodRunning(period, this.clock.now())) return null;
     const fees = feesFrom(period.assessedActivityFeeByBranch) ?? {};
