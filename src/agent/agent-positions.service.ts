@@ -1,5 +1,6 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { withLockRetry } from '../common/db/deadlock-retry';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
@@ -113,7 +114,13 @@ export class AgentPositionsService {
     const providerId = uuidToBin(dto.providerId);
     const id = newUuidV7Bin();
     try {
-      await this.db.$transaction(async (tx) => {
+      /*
+       * Retried on a lock conflict: the provider row first, then the day's (D159), is the exchange's order, and the
+       * close, a rebalancing and a reversal take the day first and the provider after (a foreign key). At the deadlock
+       * this set holds only the provider, so it is the lighter victim; the rollback is total and the id and the key
+       * are fixed outside, so a second attempt is the same write.
+       */
+      await withLockRetry(() => this.db.$transaction(async (tx) => {
         // The provider row first, locked: an exchange being posted against it commits before the position is read.
         const [provider] = await tx.$queryRaw<{ id: Buffer; label: string }[]>(Prisma.sql`
           SELECT id, label FROM agent_providers WHERE id = ${providerId} AND company_id = ${companyId} FOR UPDATE`);
@@ -157,7 +164,7 @@ export class AgentPositionsService {
           after: { providerId: dto.providerId, label: provider.label, accountKind, amount: dto.amount, trackedBefore, difference, businessDate, source: 'set' },
           branchId,
         });
-      });
+      }));
     } catch (e) {
       // Two identical retries raced and the other committed first: answer with it, or refuse a different payload.
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {

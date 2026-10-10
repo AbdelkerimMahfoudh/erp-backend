@@ -228,6 +228,8 @@ export interface FloatAnchor {
   businessDate: string;
   byName: string | null;
   source: 'set' | 'confirmed' | 'counted_close';
+  /** A close's anchor (`counted_close`): what the app tracked when that count was taken — the figure it was held against. */
+  trackedBefore?: number | null;
 }
 
 export interface LegSums {

@@ -29,7 +29,7 @@ type Row = Record<string, any>;
 interface Options {
   activity?: string;
   /** The float's anchor and legs: expected = anchor + legs after it. Absent: unknown. */
-  anchor?: { amount: number; at: Date; source?: string } | null;
+  anchor?: { amount: number; at: Date; source?: string; trackedBefore?: number | null } | null;
   /** The closing's float count rows, as the report and the live view read them. */
   saved?: Row[];
   legs?: { direction: 'inflow' | 'outflow'; amount: number; at: Date }[];
@@ -66,7 +66,14 @@ function harness(opts: Options = {}) {
         if (where.clientUuid) return null;
         const a = opts.anchor ?? null;
         if (!a || (where.at?.lte && a.at.getTime() > where.at.lte.getTime())) return null;
-        return { amount: new Prisma.Decimal(a.amount), at: a.at, businessDate: dateValue(DAY), source: a.source ?? 'set', recordedByName: 'Owner' };
+        return {
+          amount: new Prisma.Decimal(a.amount),
+          at: a.at,
+          businessDate: dateValue(DAY),
+          source: a.source ?? 'set',
+          recordedByName: 'Owner',
+          trackedBefore: a.trackedBefore == null ? null : new Prisma.Decimal(a.trackedBefore),
+        };
       }),
       create: write('agentPosition', 'create'),
     },
@@ -225,7 +232,11 @@ describe('POST closings/:date/float-counts — counting a provider float', () =>
       const { error, body } = await refusal(h.svc.recordFloatCount(DAY, { providerId: BANKILY, counted: 1_000 }));
       expect(error).toBeInstanceOf(ConflictException);
       expect(body).toEqual({ code: 'already_closed', message: `Day ${DAY} is already closed for this branch` });
-      expect(h.db.$queryRaw.mock.calls[0][0].sql).toMatch(/SELECT status, reopened_at FROM daily_closings WHERE id = \? FOR UPDATE/);
+      // The provider shared, then the day's row: the order an exchange and a float set take them in, so neither deadlocks the count.
+      expect(h.db.$queryRaw.mock.calls.map((c) => (c[0] as Prisma.Sql).sql)).toEqual([
+        expect.stringMatching(/SELECT id FROM agent_providers WHERE id = \? AND company_id = \? FOR SHARE/),
+        expect.stringMatching(/SELECT status, reopened_at FROM daily_closings WHERE id = \? FOR UPDATE/),
+      ]);
       expect(h.writes).toEqual([]);
     });
 
@@ -423,13 +434,46 @@ describe('a counted float held against the float now (D159)', () => {
 
   it('a day reopened since its close: the close’s anchor of this very count is the count, so only the legs after it move the float', async () => {
     // Counted 29 900 against 30 000; the close anchored the float at 29 900 at the count instant; the day was reopened.
-    const anchoredByTheClose = { amount: 29_900, at: t('10:00'), source: 'counted_close' };
+    const anchoredByTheClose = { amount: 29_900, at: t('10:00'), source: 'counted_close', trackedBefore: 30_000 };
     const still = harness({ anchor: anchoredByTheClose, saved: [countedRow({ counted: new Prisma.Decimal(29_900) })] });
     expect(floatSinceCount((await read(still, { id: CLOSING, status: 'reopened' })).rows[0] as never)).toEqual({ expectedAtCount: 30_000, movedSinceCount: false });
     const moved = harness({ anchor: anchoredByTheClose, legs: [{ direction: 'inflow', amount: 700, at: t('12:00') }], saved: [countedRow({ counted: new Prisma.Decimal(29_900) })] });
     const [row] = (await read(moved, { id: CLOSING, status: 'reopened' })).rows;
     expect(row).toMatchObject({ expected: 30_700, expectedAtCount: 30_000 });
     expect(floatSinceCount(row as never).movedSinceCount).toBe(true);
+  });
+
+  it('a recount on a reopened day keeps the shortfall the close recorded, and the report reads it back as current', async () => {
+    // Found by the review. 18:00: counted 990 against 1 000 (−10, a question). The close anchored 990 at 18:00, holding
+    // 1 000 beside it. Reopened; 18:40 an exchange takes 50 out. The recount of 940 is against 950, not against 990 − 50.
+    const anchor = { amount: 990, at: t('18:00'), source: 'counted_close', trackedBefore: 1_000 };
+    const legs = [{ direction: 'outflow' as const, amount: 50, at: t('18:40') }];
+    const h = harness({
+      anchor,
+      legs,
+      closing: { id: CLOSING, status: 'reopened', version: 3, channelCounts: [] },
+      lockedStatus: 'reopened',
+      prior: { id: Buffer.alloc(16, 5) },
+      questions: [{ id: Buffer.alloc(16, 6), status: 'pending_investigation', amount: new Prisma.Decimal(-10), openedAt: t('18:00') }],
+    });
+    await h.svc.recordFloatCount(DAY, { providerId: BANKILY, counted: 940 });
+    expect(of(h.writes, 'agentFloatCount', 'update')[0].args.data).toMatchObject({ expected: 950, counted: 940, difference: -10 });
+    // The −10 question stays open: never closed as "no difference remains".
+    expect(of(h.writes, 'closingDiscrepancy').filter((w) => w.args.data?.status === 'resolved')).toEqual([]);
+
+    // Read back: the recount holds, so the reclose is not sent back to count again.
+    const after = harness({ anchor, legs, saved: [countedRow({ expected: new Prisma.Decimal(950), counted: new Prisma.Decimal(940), countedAt: t('18:45') })] });
+    const [row] = (await read(after, { id: CLOSING, status: 'reopened' })).rows;
+    expect(row).toMatchObject({ expected: 950, expectedAtCount: 950 });
+    expect(floatSinceCount(row as never).movedSinceCount).toBe(false);
+  });
+
+  it('a day counted behind the boundary, closed and reopened: its own anchor at the day’s end is the count, not a move', async () => {
+    // Counted the next morning against the float at the day's end (30 000), anchored at that end by the close.
+    const anchor = { amount: 29_900, at: new Date(`2026-10-09T06:00:00Z`), source: 'counted_close', trackedBefore: 30_000 };
+    const h = harness({ anchor, today: '2026-10-09', saved: [countedRow({ counted: new Prisma.Decimal(29_900), countedAt: new Date('2026-10-09T07:30:00Z') })] });
+    const [row] = (await read(h, { id: CLOSING, status: 'reopened' }, '2026-10-09')).rows;
+    expect(floatSinceCount(row as never)).toEqual({ expectedAtCount: 30_000, movedSinceCount: false });
   });
 
   it('a locked day is read as it was closed: the stored figure, compared with nothing', async () => {

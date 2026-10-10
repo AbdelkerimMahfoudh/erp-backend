@@ -31,7 +31,7 @@ import { ReopenClosingDto } from './dto/reopen-closing.dto';
 import { cashDayRows } from './money-positions';
 import { activityNotSubscribed, agentActivityAllowed, branchActivityOf } from '../agent/agent-access';
 import { floatPosition } from '../agent/agent-rules';
-import { readFloatInputs } from '../agent/float-positions';
+import { readFloatInputs, type FloatInputs } from '../agent/float-positions';
 import { floatDifference, floatsToCount, listedFloats, type FloatCountState, type FloatProviderRow } from './float-counts';
 import { assertDayOpen as assertExpenseDayOpen } from '../expenses/expense-rules';
 import { assertApprovalDayOpen } from '../returns/return-workflow';
@@ -207,6 +207,21 @@ function alreadyClosed(day: string): ConflictException {
 }
 
 /** The channel a count names among the day's, or the refusal: not part of this day, or nothing to count it against. */
+/**
+ * The provider float a count on `day` is held against (D154, D159): the latest anchor and the legs after it — except
+ * when that anchor is this day's own close (`counted_close`, a day since reopened). That anchor IS this day's count, at
+ * what the provider's app showed; the day's figure runs on from what that count was held against (`trackedBefore`),
+ * so the difference the close recorded is carried into a recount and into the report, never absorbed by them. The
+ * count, the report and the live view read it here — one rule, or a recount and the report disagree for good.
+ */
+function floatExpectedOn(inputs: FloatInputs, day: string): number | null {
+  const anchor = inputs.anchor;
+  if (anchor?.source === 'counted_close' && anchor.businessDate === day) {
+    return anchor.trackedBefore == null ? null : floatPosition({ amount: anchor.trackedBefore }, inputs.sinceAnchor).position;
+  }
+  return floatPosition(anchor, inputs.sinceAnchor).position;
+}
+
 function countTarget(channels: ChannelRow[], dto: RecordCountDto): ChannelRow {
   const target = channels.find((c) => c.channel === dto.channel && (c.accountId ?? null) === (dto.accountId ?? null));
   if (!target) throw new NotFoundException('That channel is not part of this day at this branch');
@@ -3080,10 +3095,16 @@ export class ClosingService {
     let nextStatus: string;
     try {
       nextStatus = await this.db.$transaction(async (tx) => {
+        /*
+         * The provider row shared, before the day's: an exchange and a float set take the provider and then the day,
+         * and a first count's insert needs the provider shared (a foreign key) — taken after the day, the two would
+         * deadlock. Shared, not exclusive: the close, a rebalancing and a reversal hold the day and need it shared too.
+         */
+        await tx.$queryRaw(Prisma.sql`SELECT id FROM agent_providers WHERE id = ${providerId} AND company_id = ${companyId} FOR SHARE`);
         const row = await this.lockCountDayTx(tx, closingId, day);
         // Read under the day's lock (D159), so the expected figure stored is the one the float was counted against.
         const inputs = await readFloatInputs(tx, { branchId, providerId, accountKind: 'provider', businessDate: day, asOf });
-        const expected = floatPosition(inputs.anchor, inputs.sinceAnchor).position;
+        const expected = floatExpectedOn(inputs, day);
         const difference = floatDifference(expected, counted);
         const prior = await tx.agentFloatCount.findFirst({ where: { closingId, providerId }, select: { id: true } });
         const rowId = prior?.id ?? newUuidV7Bin();
@@ -3293,7 +3314,7 @@ export class ClosingService {
           return {
             providerId: p.providerId,
             label: p.label,
-            expected: comparedAt ? await this.floatSinceCountedAt(branchId, row.providerId, day, asOf, atCount, comparedAt) : atCount,
+            expected: comparedAt ? await this.floatSinceCountedAt(branchId, row.providerId, day, asOf) : atCount,
             counted: row.counted == null ? null : round2(num(row.counted)),
             explanation: row.explanation,
             isSkipped: row.isSkipped,
@@ -3307,7 +3328,7 @@ export class ClosingService {
         return {
           providerId: p.providerId,
           label: p.label,
-          expected: floatPosition(inputs.anchor, inputs.sinceAnchor).position,
+          expected: floatExpectedOn(inputs, day),
           counted: null,
           explanation: null,
           isSkipped: false,
@@ -3357,17 +3378,9 @@ export class ClosingService {
     return { providers: listed, counts, saved };
   }
 
-  /**
-   * A counted float as the app tracks it now, to hold against the figure it was counted against (D159). A close of a
-   * day since reopened anchored this very count at what the provider's app showed — that anchor IS the count — so on
-   * it the float has moved since only by the legs after it, carried from the figure the count was held against.
-   */
-  private async floatSinceCountedAt(branchId: Buffer, providerId: Buffer, day: string, asOf: Date, atCount: number | null, countedAt: Date): Promise<number | null> {
-    const inputs = await readFloatInputs(this.db, { branchId, providerId, accountKind: 'provider', businessDate: day, asOf });
-    const anchor = inputs.anchor;
-    const itsOwn = anchor?.source === 'counted_close' && anchor.businessDate === day && anchor.at.getTime() >= countedAt.getTime();
-    if (!itsOwn) return floatPosition(anchor, inputs.sinceAnchor).position;
-    return atCount === null ? null : floatPosition({ amount: atCount }, inputs.sinceAnchor).position;
+  /** A counted float as the app tracks it now, to hold against the figure it was counted against (D159). */
+  private async floatSinceCountedAt(branchId: Buffer, providerId: Buffer, day: string, asOf: Date): Promise<number | null> {
+    return floatExpectedOn(await readFloatInputs(this.db, { branchId, providerId, accountKind: 'provider', businessDate: day, asOf }), day);
   }
 
   /**

@@ -72,9 +72,18 @@ export async function readFloatInputs(
   const row = await client.agentPosition.findFirst({
     where: { branchId: args.branchId, accountKind: args.accountKind, providerId: args.providerId, ...(asOf ? { at: { lte: asOf } } : {}) },
     orderBy: [{ at: 'desc' }, { createdAt: 'desc' }],
-    select: { amount: true, at: true, businessDate: true, source: true, recordedByName: true },
+    select: { amount: true, at: true, businessDate: true, source: true, recordedByName: true, trackedBefore: true },
   });
-  const anchor: FloatAnchor | null = row ? { amount: num(row.amount), at: row.at, businessDate: dateKey(row.businessDate), byName: row.recordedByName, source: row.source } : null;
+  const anchor: FloatAnchor | null = row
+    ? {
+        amount: num(row.amount),
+        at: row.at,
+        businessDate: dateKey(row.businessDate),
+        byName: row.recordedByName,
+        source: row.source,
+        trackedBefore: row.trackedBefore == null ? null : num(row.trackedBefore),
+      }
+    : null;
   const account = { branchId: args.branchId, accountKind: args.accountKind, providerId: args.providerId };
   const [sinceAnchor, day] = await Promise.all([
     anchor ? legSums(client, { ...account, recordedAt: { gt: anchor.at, ...(asOf ? { lte: asOf } : {}) } }) : Promise.resolve({ inflows: 0, outflows: 0 }),

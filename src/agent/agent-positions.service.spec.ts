@@ -263,6 +263,18 @@ describe('POST agent/positions — the Owner sets what a float holds', () => {
     expect(h.closing.lockDayForMoneyTx.mock.invocationCallOrder[0]).toBeLessThan(h.db.agentPosition.create.mock.invocationCallOrder[0]);
   });
 
+  it('a deadlock against the close is retried: the rolled-back attempt left nothing, the second writes the one record', async () => {
+    // The set takes the provider then the day; the close, a rebalancing or a reversal take the day then the provider.
+    const h = harness({ positions: [anchorRow(BANKILY, 50_000, t('08:00'))] });
+    h.closing.lockDayForMoneyTx.mockImplementationOnce(async () => {
+      throw new Prisma.PrismaClientKnownRequestError('Deadlock found when trying to get lock', { code: 'P2034', clientVersion: 'test' });
+    });
+    const result = await h.svc.set({ clientUuid: KEY, providerId: BANKILY, amount: 30_100 });
+    expect(h.db.$transaction).toHaveBeenCalledTimes(2);
+    expect(h.db.agentPosition.create).toHaveBeenCalledTimes(1);
+    expect(result.position).toMatchObject({ amount: 30_100, source: 'set' });
+  });
+
   it('an unknown float records no tracked amount and no difference; a held commission can be set too', async () => {
     const h = harness();
     const result = await h.svc.set({ clientUuid: KEY, providerId: SEDAD, accountKind: 'commission_held', amount: 0 });
