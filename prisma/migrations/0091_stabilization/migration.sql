@@ -10,9 +10,10 @@
 --   * A closing must notice money that moved after it was loaded: every money
 --     write bumps a counter on the business day's row under the lock the close
 --     takes, and the close compares it.
---   * The Owner's provider settings and float amounts must be safe to retry: a
---     lost answer retried later must not write a second version or re-anchor a
---     float after the legs it should have counted.
+--   * The Owner's provider settings must be safe to retry: a lost answer
+--     retried later must not create the provider twice, audit a change twice
+--     or append a second configuration version. (Float amounts already carry
+--     their own key and fingerprint on `agent_positions`, 0089.)
 --
 -- ## What this adds
 --
@@ -26,9 +27,9 @@
 --    made, linking the archived branch, the replacement, the request, the
 --    period, the fees and the decision. UNIQUE per (period, archived branch)
 --    and per replacement branch, so a slot is consumed once.
--- 4. `agent_request_keys` — append-only: the idempotency key of each provider,
---    configuration and float-position write, with its request fingerprint and
---    the answer it gave. UNIQUE per (company, key).
+-- 4. `agent_request_keys` — append-only: the idempotency key of each provider
+--    and configuration write, with its request fingerprint and the answer it
+--    gave. UNIQUE per (company, key).
 --
 -- Additive. Reverse, for a database you would rather not restore:
 --   DROP TABLE `agent_request_keys`, `branch_replacements`;
@@ -109,7 +110,7 @@ CREATE TABLE IF NOT EXISTS `agent_request_keys` (
   `id`                BINARY(16)   NOT NULL,
   `company_id`        BINARY(16)   NOT NULL,
   `client_request_id` BINARY(16)   NOT NULL,
-  `operation`         ENUM('provider_create','provider_update','provider_config','position_set') NOT NULL,
+  `operation`         ENUM('provider_create','provider_update','provider_config') NOT NULL,
   `target_id`         BINARY(16)   NULL,
   `request_hash`      CHAR(64)     NOT NULL,
   `response`          JSON         NOT NULL,

@@ -5429,10 +5429,9 @@ enum AgentRequestOperation {
   provider_create
   provider_update
   provider_config
-  position_set
 }
 
-/// 0091 (D160, docs/73 §11.3): one key per provider, configuration or float-position write — append-only (triggers).
+/// 0091 (D160, docs/73 §11.3): one key per provider or configuration write — append-only (triggers).
 /// The same key and the same request answer with `response`; the same key with another request is refused.
 model AgentRequestKey {
   id              Bytes                 @id @db.Binary(16)
