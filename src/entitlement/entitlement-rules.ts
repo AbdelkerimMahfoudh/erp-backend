@@ -354,6 +354,45 @@ export const ENTITLEMENT_SUSPENDED = 'ENTITLEMENT_SUSPENDED';
 export const ENTITLEMENT_REJECTED = 'ENTITLEMENT_REJECTED';
 export const SEAT_LIMIT_REACHED = 'SEAT_LIMIT_REACHED';
 
+/**
+ * A platform grant, as the shop is told about it (docs/73 §11.5, 2026-10-10).
+ *
+ * The grant has its own end, and it is never the paid period's: the website
+ * once said "granted until" beside the latest billing period's START, because
+ * the grant's own date never reached it.
+ *
+ *  - `active` — a grant runs to `until`;
+ *  - `ended` — a grant ran out on `until` and nothing paid runs past it: access
+ *    follows the paid period (often `expired`);
+ *  - `superseded` — a grant ran out on `until` and a paid period now runs to
+ *    `paidUntil`: the paid month took over;
+ *  - `indefinite` — the grant flag with no end recorded. The database refuses
+ *    that shape today (`ck_subscriptions_complimentary`); a row that ever holds
+ *    it is shown as a grant with no date, never given someone else's;
+ *  - `none` — no grant.
+ */
+export type ComplimentaryStatus = 'none' | 'active' | 'ended' | 'superseded' | 'indefinite';
+
+export interface ComplimentaryView {
+  status: ComplimentaryStatus;
+  /** The grant's own end. Null when there is no grant, or no end is recorded. */
+  until: string | null;
+  /** `superseded` only: the end of the paid period that took over. */
+  paidUntil: string | null;
+}
+
+export function complimentaryOf(sub: SubscriptionRecord, now: Date): ComplimentaryView {
+  if (!sub.isComplimentary) return { status: 'none', until: null, paidUntil: null };
+  const until = sub.complimentaryUntil;
+  if (!until) return { status: 'indefinite', until: null, paidUntil: null };
+  if (until.getTime() > now.getTime()) return { status: 'active', until: until.toISOString(), paidUntil: null };
+  const paid = sub.currentPeriodEnd;
+  if (paid && paid.getTime() > until.getTime() && paid.getTime() > now.getTime()) {
+    return { status: 'superseded', until: until.toISOString(), paidUntil: paid.toISOString() };
+  }
+  return { status: 'ended', until: until.toISOString(), paidUntil: null };
+}
+
 export interface Entitlement {
   state: EntitlementState;
   periodEnd: string | null;
@@ -372,6 +411,8 @@ export interface Entitlement {
   canRead: boolean;
   canWrite: boolean;
   isComplimentary: boolean;
+  /** The platform's grant with its own dates — what the shop reads instead of a paid period's. */
+  complimentary: ComplimentaryView;
   /** The lifecycle position an administrator put this in. */
   status: SubscriptionStatus;
   /** When the server computed this, so a cached copy can be shown as stale. */
@@ -410,6 +451,7 @@ export function buildEntitlement(
     canRead: canRead(state),
     canWrite: canWrite(state),
     isComplimentary: state === 'complimentary',
+    complimentary: complimentaryOf(sub, now),
     status: sub.status ?? 'activated',
     calculatedAt: now.toISOString(),
   };

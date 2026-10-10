@@ -1,6 +1,7 @@
 import {
   buildEntitlement,
   canWrite,
+  complimentaryOf,
   daysRemaining,
   ENTITLEMENT_WRITE_BLOCKED,
   GRACE_MS,
@@ -133,6 +134,65 @@ describe('a complimentary grant outranks the paid period', () => {
       complimentaryUntil: new Date('2026-08-01T00:00:00.000Z'),
     });
     expect(stateOf(s, AUG_18)).toBe('expired');
+  });
+});
+
+describe('the grant has its own dates (docs/73 §11.5)', () => {
+  const usage = { activeBranchCount: 1, seatsUsed: 0 };
+
+  it('a live grant is told with its own end, never the paid period’s', () => {
+    const s = sub({ isComplimentary: true, complimentaryUntil: new Date('2026-12-01T00:00:00.000Z') });
+    const e = buildEntitlement(s, usage, AUG_18);
+    expect(e.state).toBe('complimentary');
+    expect(e.complimentary).toEqual({ status: 'active', until: '2026-12-01T00:00:00.000Z', paidUntil: null });
+    expect(e.complimentary.until).not.toBe(e.periodEnd);
+  });
+
+  it('a grant that ran out with nothing paid after it is ended, and access follows the paid period', () => {
+    const s = sub({ currentPeriodEnd: null, isComplimentary: true, complimentaryUntil: new Date('2026-08-01T00:00:00.000Z') });
+    const e = buildEntitlement(s, usage, AUG_18);
+    expect(e.state).toBe('expired');
+    expect(e.complimentary).toEqual({ status: 'ended', until: '2026-08-01T00:00:00.000Z', paidUntil: null });
+  });
+
+  it('a paid period that runs past the grant has superseded it', () => {
+    const s = sub({ isComplimentary: true, complimentaryUntil: new Date('2026-08-01T00:00:00.000Z') });
+    const e = buildEntitlement(s, usage, AUG_18);
+    expect(e.state).toBe('active');
+    expect(e.complimentary).toEqual({ status: 'superseded', until: '2026-08-01T00:00:00.000Z', paidUntil: '2026-09-01T00:00:00.000Z' });
+  });
+
+  it('a paid period that ended before the grant did not supersede it', () => {
+    const s = sub({
+      currentPeriodEnd: new Date('2026-07-01T00:00:00.000Z'),
+      isComplimentary: true,
+      complimentaryUntil: new Date('2026-08-01T00:00:00.000Z'),
+    });
+    expect(complimentaryOf(s, AUG_18).status).toBe('ended');
+  });
+
+  it('a grant with no end recorded is shown without a date, never another one', () => {
+    const s = sub({ isComplimentary: true, complimentaryUntil: null });
+    expect(complimentaryOf(s, AUG_18)).toEqual({ status: 'indefinite', until: null, paidUntil: null });
+  });
+
+  it('no grant is none, whatever the paid period says', () => {
+    expect(complimentaryOf(sub(), AUG_18)).toEqual({ status: 'none', until: null, paidUntil: null });
+    expect(buildEntitlement(sub(), usage, AUG_18).complimentary.status).toBe('none');
+  });
+
+  it('a newer grant replaces the older one: only its own end is told', () => {
+    // activateByGrant overwrites complimentary_until; the earlier end lives on in the timeline only.
+    const older = sub({ isComplimentary: true, complimentaryUntil: new Date('2026-09-15T00:00:00.000Z') });
+    const newer = { ...older, complimentaryUntil: new Date('2026-10-01T00:00:00.000Z') };
+    expect(complimentaryOf(newer, AUG_18)).toEqual({ status: 'active', until: '2026-10-01T00:00:00.000Z', paidUntil: null });
+  });
+
+  it('a suspended business with a live grant is suspended, and the grant keeps its own end', () => {
+    const s = sub({ status: 'suspended', isComplimentary: true, complimentaryUntil: new Date('2026-12-01T00:00:00.000Z') });
+    const e = buildEntitlement(s, usage, AUG_18);
+    expect(e.state).toBe('suspended');
+    expect(e.complimentary.status).toBe('active');
   });
 });
 
