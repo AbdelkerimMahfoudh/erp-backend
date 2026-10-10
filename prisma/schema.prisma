@@ -433,6 +433,8 @@ model Company {
   billingPeriods                 BillingPeriod[]
   anomalyDismissals              AnomalyDismissal[]
   seatAllocations                SeatAllocation[]
+  branchReplacements             BranchReplacement[]
+  agentRequestKeys               AgentRequestKey[]
 
   @@map("companies")
 }
@@ -496,7 +498,11 @@ model Branch {
   priceChangeEvents    PriceChangeEvent[]
   supplierSettlements  SupplierSettlement[]
   rollupRequests       RollupRequest[]
-  seatAllocations      SeatAllocation[]
+  seatAllocations      SeatAllocation[]       @relation("SeatAllocationBranch")
+  /// 0091: open store requests that reserved this archived branch's slot, and the replacements made.
+  replacementRequests  SeatAllocation[]       @relation("SeatAllocationReplaces")
+  replacedBy           BranchReplacement[]    @relation("BranchReplacementArchived")
+  replacementOf        BranchReplacement[]    @relation("BranchReplacementReplacement")
 
   @@unique([companyId, name]) // company_id is the leftmost column → covers company scans
   @@map("branches")
@@ -658,6 +664,7 @@ model User {
   settlementsConfirmed  SupplierSettlement[]   @relation("SettlementConfirmedBy")
   anomalyDismissals     AnomalyDismissal[]     @relation("AnomalyDismissedBy")
   seatAllocations       SeatAllocation[]
+  agentRequestKeys      AgentRequestKey[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -1854,6 +1861,9 @@ model DailyClosing {
   countedAt                DateTime?     @map("counted_at") @db.DateTime(6)
   /// Optimistic concurrency: two people finishing one day, one winner.
   version                  Int           @default(0)
+  /// 0091 (D159, docs/73 §11.2): bumped by every money write on this business day, inside the writer's transaction
+  /// and under this row's lock. The close compares it under the same lock; a closed day keeps the one it closed on.
+  moneyVersion             Int           @default(0) @map("money_version") @db.UnsignedInt
   /// The first sign-off, kept forever (0076). `closedAt`/`closedById` move
   /// to the latest reclose; these two never do, so the first count, its actor
   /// and its time survive every reopen.
@@ -4528,6 +4538,7 @@ model SubscriptionPayment {
   company         Company          @relation(fields: [companyId], references: [id])
   subscription    Subscription     @relation(fields: [subscriptionId], references: [id])
   seatAllocations SeatAllocation[]
+  replacements    BranchReplacement[]
 
   @@index([companyId, paidAt], map: "ix_subpayments_company")
   @@map("subscription_payments")
@@ -4588,6 +4599,12 @@ model SeatAllocation {
   activityTo        BranchActivity?          @map("activity_to")
   activityEffective ActivityChangeEffective? @map("activity_effective")
 
+  /// 0091 (D158, docs/73 §11.1): a store request that replaces a store archived in the running paid period —
+  /// the archived branch whose slot it reserved, what that period already paid for it, and the period.
+  replacesBranchId    Bytes? @map("replaces_branch_id") @db.Binary(16)
+  replacementCredit   Int?   @map("replacement_credit") @db.UnsignedInt
+  replacementPeriodId Bytes? @map("replacement_period_id") @db.Binary(16)
+
   /// Integer MRU per month, copied from the plan when requested. Zero for a grant.
   monthlyAmount Int    @map("monthly_amount") @db.UnsignedInt
   currency      String @default("MRU") @db.Char(3)
@@ -4612,14 +4629,17 @@ model SeatAllocation {
 
   company      Company              @relation(fields: [companyId], references: [id])
   subscription Subscription         @relation(fields: [subscriptionId], references: [id])
-  branch       Branch?              @relation(fields: [branchId], references: [id])
+  branch       Branch?              @relation("SeatAllocationBranch", fields: [branchId], references: [id])
+  replaces     Branch?              @relation("SeatAllocationReplaces", fields: [replacesBranchId], references: [id], map: "fk_seat_alloc_replaces_branch")
   user         User?                @relation(fields: [userId], references: [id])
   payment      SubscriptionPayment? @relation(fields: [paymentId], references: [id])
+  replacements BranchReplacement[]
 
   @@index([companyId, status], map: "ix_seat_alloc_company_status")
   @@index([branchId, status], map: "ix_seat_alloc_branch_status")
   @@index([userId], map: "ix_seat_alloc_user")
   @@index([status, requestedAt], map: "ix_seat_alloc_status_requested")
+  @@index([replacesBranchId, status], map: "ix_seat_alloc_replaces_branch")
   @@map("seat_allocations")
 }
 
@@ -4807,6 +4827,7 @@ model BillingPeriod {
   company      Company      @relation(fields: [companyId], references: [id])
   subscription Subscription @relation(fields: [subscriptionId], references: [id])
   planVersion  PlanVersion  @relation(fields: [planVersionId], references: [id])
+  replacements BranchReplacement[]
 
   @@index([companyId, periodStart], map: "ix_billing_periods_company")
   @@map("billing_periods")
@@ -5357,4 +5378,78 @@ model AgentFloatCount {
   @@index([providerId], map: "ix_agent_float_counts_provider")
   @@index([countedById], map: "ix_agent_float_counts_counted_by")
   @@map("agent_float_counts")
+}
+
+/// 0091 (D158, docs/73 §11.1): what a replacement store was charged, and why.
+enum BranchReplacementDecision {
+  no_additional_charge
+  difference_charged
+}
+
+/// 0091 (D158, docs/73 §11.1): a store that replaced one archived in the same paid period — append-only (triggers).
+/// One row per slot (period, archived branch) and per replacement branch: a slot is consumed once.
+model BranchReplacement {
+  id                  Bytes                     @id @db.Binary(16)
+  companyId           Bytes                     @map("company_id") @db.Binary(16)
+  billingPeriodId     Bytes                     @map("billing_period_id") @db.Binary(16)
+  archivedBranchId    Bytes                     @map("archived_branch_id") @db.Binary(16)
+  replacementBranchId Bytes                     @map("replacement_branch_id") @db.Binary(16)
+  seatAllocationId    Bytes                     @map("seat_allocation_id") @db.Binary(16)
+  archivedActivity    BranchActivity            @map("archived_activity")
+  replacementActivity BranchActivity            @map("replacement_activity")
+  /// What the period had already charged for the archived location.
+  slotFee             Int                       @map("slot_fee") @db.UnsignedInt
+  /// The replacement's fee at the period's own prices.
+  replacementFee      Int                       @map("replacement_fee") @db.UnsignedInt
+  /// max(0, replacementFee − slotFee): what the replacement cost this period.
+  chargedDifference   Int                       @map("charged_difference") @db.UnsignedInt
+  decision            BranchReplacementDecision
+  paymentId           Bytes?                    @map("payment_id") @db.Binary(16)
+  decidedBy           String                    @map("decided_by") @db.VarChar(160)
+  decidedAt           DateTime                  @map("decided_at") @db.DateTime(6)
+  createdAt           DateTime                  @default(now()) @map("created_at") @db.DateTime(6)
+
+  company           Company              @relation(fields: [companyId], references: [id], map: "fk_branch_replacements_company")
+  billingPeriod     BillingPeriod        @relation(fields: [billingPeriodId], references: [id], map: "fk_branch_replacements_period")
+  archivedBranch    Branch               @relation("BranchReplacementArchived", fields: [archivedBranchId], references: [id], map: "fk_branch_replacements_archived")
+  replacementBranch Branch               @relation("BranchReplacementReplacement", fields: [replacementBranchId], references: [id], map: "fk_branch_replacements_replacement")
+  seatAllocation    SeatAllocation       @relation(fields: [seatAllocationId], references: [id], map: "fk_branch_replacements_request")
+  payment           SubscriptionPayment? @relation(fields: [paymentId], references: [id], map: "fk_branch_replacements_payment")
+
+  @@unique([billingPeriodId, archivedBranchId], map: "ux_branch_replacements_slot")
+  @@unique([replacementBranchId], map: "ux_branch_replacements_replacement")
+  @@index([companyId], map: "ix_branch_replacements_company")
+  @@index([archivedBranchId], map: "ix_branch_replacements_archived")
+  @@index([seatAllocationId], map: "ix_branch_replacements_request")
+  @@map("branch_replacements")
+}
+
+/// 0091 (D160, docs/73 §11.3): the write an idempotency key belongs to.
+enum AgentRequestOperation {
+  provider_create
+  provider_update
+  provider_config
+  position_set
+}
+
+/// 0091 (D160, docs/73 §11.3): one key per provider, configuration or float-position write — append-only (triggers).
+/// The same key and the same request answer with `response`; the same key with another request is refused.
+model AgentRequestKey {
+  id              Bytes                 @id @db.Binary(16)
+  companyId       Bytes                 @map("company_id") @db.Binary(16)
+  clientRequestId Bytes                 @map("client_request_id") @db.Binary(16)
+  operation       AgentRequestOperation
+  targetId        Bytes?                @map("target_id") @db.Binary(16)
+  /// SHA-256 of the canonical request (the operation, the target and the body without the key).
+  requestHash     String                @map("request_hash") @db.Char(64)
+  response        Json                  @db.Json
+  recordedById    Bytes                 @map("recorded_by_id") @db.Binary(16)
+  createdAt       DateTime              @default(now()) @map("created_at") @db.DateTime(6)
+
+  company    Company @relation(fields: [companyId], references: [id], map: "fk_agent_request_keys_company")
+  recordedBy User    @relation(fields: [recordedById], references: [id], map: "fk_agent_request_keys_user")
+
+  @@unique([companyId, clientRequestId], map: "ux_agent_request_keys_key")
+  @@index([targetId], map: "ix_agent_request_keys_target")
+  @@map("agent_request_keys")
 }
