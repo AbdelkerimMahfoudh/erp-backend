@@ -21,6 +21,7 @@ import {
   ENTITLEMENT_PENDING,
   ENTITLEMENT_REJECTED,
   ENTITLEMENT_SUSPENDED,
+  ENTITLEMENT_WRITE_BLOCKED,
   type EntitlementState,
 } from './entitlement-rules';
 
@@ -38,6 +39,15 @@ import {
  */
 /** How long a company's "is a renewal due?" answer is trusted before it is asked again. */
 const ROLL_CHECK_TTL_MS = 60_000;
+
+/** What a refused write says, per state that cannot write. Only an expired subscription has "ended". */
+const WRITE_REFUSED = {
+  expired: 'Your subscription has ended. You can still read and export everything.',
+  suspended: 'This business is suspended, so nothing can be changed. Open your account page to see why.',
+  cancelled: 'This business is cancelled, so nothing can be changed. Open your account page to see why.',
+  pending: 'This business is waiting to be activated, so nothing can be changed yet.',
+  rejected: 'This registration was not approved, so nothing can be changed.',
+} satisfies Record<Exclude<EntitlementState, 'active' | 'grace' | 'complimentary'>, string>;
 
 @Injectable()
 export class EntitlementService {
@@ -139,10 +149,20 @@ export class EntitlementService {
     return this.forCompany(this.tenant.companyId());
   }
 
-  /** The one question the guard asks, kept cheap. */
-  async mayWrite(companyId: Buffer): Promise<boolean> {
+  /**
+   * Why a write is refused, or `null` when it may run — the one question the
+   * write gate asks, kept cheap.
+   *
+   * The refusal names the state (D161). A suspended business was told its
+   * subscription "has ended", which is untrue and sends the Owner looking for
+   * a renewal that will not help; and a phone replaying a queued write needs
+   * the state to know whether sending again later can ever succeed.
+   */
+  async writeRefusal(companyId: Buffer): Promise<{ code: string; message: string; state: EntitlementState } | null> {
     const record = await this.recordFor(companyId);
-    return canWrite(stateOf(record, this.clock.now()));
+    const state = stateOf(record, this.clock.now());
+    if (canWrite(state)) return null;
+    return { code: ENTITLEMENT_WRITE_BLOCKED, message: WRITE_REFUSED[state as keyof typeof WRITE_REFUSED], state };
   }
 
   /**

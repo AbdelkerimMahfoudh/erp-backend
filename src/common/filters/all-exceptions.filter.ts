@@ -44,6 +44,7 @@ interface ErrorBody {
   providers?: unknown;
   activity?: unknown;
   required?: unknown;
+  state?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -107,7 +108,8 @@ const DETAIL_KEYS = [
    * (`missing`) so the Owner knows what to fill; `stale_configuration` names the version the phone showed and the
    * one in force; `float_count_required` lists the providers still to count; `activity_not_subscribed` (D156) says
    * what the branch IS subscribed to and what the route needed, so the app can say "this branch does not sell"
-   * rather than "forbidden" — a flag, never a price.
+   * rather than "forbidden" — a flag, never a price. `permission_denied` (D161) names the keys the caller lacks
+   * under the same `missing`.
    */
   'missing',
   'expectedConfigVersionId',
@@ -115,6 +117,13 @@ const DETAIL_KEYS = [
   'providers',
   'activity',
   'required',
+  /*
+   * The subscription state behind an entitlement refusal (D161): the write refusal says `expired`, `suspended`,
+   * `cancelled`, `pending` or `rejected`, so a phone replaying a queued write knows whether sending it again can
+   * ever succeed, and a suspended business is not told its subscription ended. The read refusals attached it all
+   * along; this list dropped it.
+   */
+  'state',
 ] as const;
 
 /**

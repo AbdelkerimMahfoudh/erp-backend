@@ -18,6 +18,7 @@ import {
   ENTITLEMENT_PENDING,
   ENTITLEMENT_REJECTED,
   ENTITLEMENT_SUSPENDED,
+  ENTITLEMENT_WRITE_BLOCKED,
 } from '../entitlement/entitlement-rules';
 
 /**
@@ -373,10 +374,16 @@ describe('a closed business stays closed on the server', () => {
     });
   });
 
-  it('expiry still hides nothing, and none of the five may write', async () => {
+  it('expiry still hides nothing, and none of the five may write — each refusal names its own state (D161)', async () => {
     await expect(serviceWith('activated', null).operationalAccessBlocked(company)).resolves.toBeNull();
-    for (const status of ['pending_activation', 'rejected', 'suspended', 'cancelled', 'activated']) {
-      await expect(serviceWith(status, null).mayWrite(company)).resolves.toBe(false);
+    for (const [status, state] of [
+      ['pending_activation', 'pending'],
+      ['rejected', 'rejected'],
+      ['suspended', 'suspended'],
+      ['cancelled', 'cancelled'],
+      ['activated', 'expired'],
+    ]) {
+      await expect(serviceWith(status, null).writeRefusal(company)).resolves.toMatchObject({ code: ENTITLEMENT_WRITE_BLOCKED, state });
     }
   });
 

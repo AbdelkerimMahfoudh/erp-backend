@@ -9,7 +9,7 @@ import {
   type Activity,
 } from './activity';
 import { AGENT_PREFIX, ELECTRONICS_WRITE_ROUTES, requiredActivityFor } from './activity-gate';
-import { ActivityGateInterceptor } from './activity-gate.interceptor';
+import { ActivityGateInterceptor, BRANCH_INACTIVE } from './activity-gate.interceptor';
 import { ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
 
 /**
@@ -185,13 +185,14 @@ describe('the interceptor', () => {
   }
   const handler = { handle: () => of('ran') };
 
-  function interceptorWith(activity: Activity | null, store: Record<string, unknown>, reflector: unknown) {
+  /** The branch as the database answers it: open unless the test says it was switched off or deleted. */
+  function interceptorWith(activity: Activity | null, store: Record<string, unknown>, reflector: unknown, state: { isActive?: boolean; deletedAt?: Date | null } = {}) {
     const queries: unknown[] = [];
     const prisma = {
       branch: {
         findFirst: async (args: unknown) => {
           queries.push(args);
-          return activity === null ? null : { activity };
+          return activity === null ? null : { activity, isActive: state.isActive ?? true, deletedAt: state.deletedAt ?? null };
         },
       },
     };
@@ -208,8 +209,8 @@ describe('the interceptor', () => {
       const { context, reflector } = makeContext(method, path);
       const { int, queries } = interceptorWith(activity, { companyId: COMPANY, branchId: BRANCH }, reflector);
       await expect(lastValueFrom(await int.intercept(context, handler))).resolves.toBe('ran');
-      // One indexed query, on the branch in context and the caller's own company.
-      expect(queries).toEqual([{ where: { id: BRANCH, companyId: COMPANY }, select: { activity: true } }]);
+      // One indexed query, on the branch in context and the caller's own company: its activity and whether it is open.
+      expect(queries).toEqual([{ where: { id: BRANCH, companyId: COMPANY }, select: { activity: true, isActive: true, deletedAt: true } }]);
     }
   });
 
@@ -274,6 +275,38 @@ describe('the interceptor', () => {
     expect((refusal as ForbiddenException).getResponse()).toMatchObject({ code: ENTITLEMENT_WRITE_BLOCKED });
 
     const other = interceptorWith(null, { companyId: COMPANY, branchId: BRANCH }, reflector);
-    await expect(other.int.intercept(context, handler)).rejects.toThrow('No access to the requested branch');
+    const notTheirs = await other.int.intercept(context, handler).catch((e: unknown) => e);
+    expect(notTheirs).toBeInstanceOf(ForbiddenException);
+    // The guard's own refusal, coded (D161): the same sentence, and a code a replaying phone can read.
+    expect((notTheirs as ForbiddenException).getResponse()).toEqual({ code: 'branch_access_denied', message: 'No access to the requested branch' });
+  });
+
+  it('a branch switched off or deleted takes no gated write, whatever its activity (D161)', async () => {
+    /*
+     * Nothing else stopped a phone that still held the branch in its header
+     * from recording into it. Checked before the activity, so a closed branch
+     * is never told it is merely subscribed to something else.
+     */
+    for (const [path, state] of [
+      ['/api/v1/agent/transactions', { isActive: false }],
+      ['/api/v1/agent/transactions', { deletedAt: new Date('2026-10-01T00:00:00Z') }],
+      ['/api/v1/sales', { isActive: false }],
+      ['/api/v1/sales', { isActive: true, deletedAt: new Date('2026-10-01T00:00:00Z') }],
+    ] as const) {
+      const { context, reflector } = makeContext('POST', path);
+      const { int } = interceptorWith('electronics', { companyId: COMPANY, branchId: BRANCH }, reflector, state);
+      const refusal = await int.intercept(context, handler).catch((e: unknown) => e);
+      expect(refusal).toBeInstanceOf(ForbiddenException);
+      expect((refusal as ForbiddenException).getResponse()).toMatchObject({ code: 'branch_inactive' });
+    }
+    // The code the phone keys on is stable.
+    expect(BRANCH_INACTIVE).toBe('branch_inactive');
+  });
+
+  it('reads at a closed branch stay open: its history is still the shop\'s', async () => {
+    const { context, reflector } = makeContext('GET', '/api/v1/agent/transactions');
+    const { int, queries } = interceptorWith('money_agent', { companyId: COMPANY, branchId: BRANCH }, reflector, { isActive: false });
+    await expect(lastValueFrom(await int.intercept(context, handler))).resolves.toBe('ran');
+    expect(queries).toEqual([]);
   });
 });

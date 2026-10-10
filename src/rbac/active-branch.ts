@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { branchAccessDenied } from './refusals';
 
 /**
  * Confirm the caller is actually assigned to the branch they are asking about.
@@ -34,8 +34,8 @@ export async function assertAssignedToBranch(
     where: { userId, branchId },
     select: { id: true },
   });
-  // Same wording as the guard, so a caller cannot tell from the message
-  // whether the branch exists, only that it is not theirs.
-  if (!assignment) throw new ForbiddenException('No access to the requested branch');
+  // The guard's own refusal, so a caller cannot tell from the answer whether
+  // the branch exists, only that it is not theirs.
+  if (!assignment) throw branchAccessDenied();
   return branchId;
 }

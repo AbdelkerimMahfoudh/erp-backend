@@ -104,12 +104,11 @@ export class EntitlementInterceptor implements NestInterceptor {
       });
     }
 
-    if (await this.entitlement.mayWrite(companyId)) return next.handle();
+    const refused = await this.entitlement.writeRefusal(companyId);
+    if (!refused) return next.handle();
 
-    throw new ForbiddenException({
-      code: ENTITLEMENT_WRITE_BLOCKED,
-      message: 'Your subscription has ended. You can still read and export everything.',
-    });
+    // The state travels with the code, so a suspended business is never told its subscription ended.
+    throw new ForbiddenException({ code: refused.code, message: refused.message, state: refused.state });
   }
 }
 

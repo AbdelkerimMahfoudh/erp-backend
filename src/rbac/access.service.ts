@@ -1,8 +1,9 @@
-import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { binToUuid } from '../common/utils/uuid.util';
 import { isCompanyPermission, isDelegatable, mayHoldDelegated } from './permission-scope';
+import { branchAccessDenied } from './refusals';
 
 /**
  * Resolves a user's effective permissions from `user_branches → role →
@@ -27,9 +28,7 @@ export class AccessService {
       select: { id: true, roleId: true, role: { select: { key: true } } },
     });
 
-    if (branchId && assignments.length === 0) {
-      throw new ForbiddenException('No access to the requested branch');
-    }
+    if (branchId && assignments.length === 0) throw branchAccessDenied();
 
     const roleIds = assignments.map((a) => a.roleId);
     if (roleIds.length === 0) {

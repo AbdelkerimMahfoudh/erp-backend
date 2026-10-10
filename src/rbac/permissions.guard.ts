@@ -5,6 +5,7 @@ import { AppClsStore } from '../common/context/request-context';
 import { uuidToBin } from '../common/utils/uuid.util';
 import { AccessService } from './access.service';
 import { REQUIRE_PERMISSIONS_KEY } from './require-permissions.decorator';
+import { permissionDenied } from './refusals';
 
 /**
  * Enforces `@RequirePermissions(...)`. Resolves the caller's effective
@@ -48,9 +49,7 @@ export class PermissionsGuard implements CanActivate {
     }
 
     const missing = required.filter((p) => !permissions!.has(p));
-    if (missing.length > 0) {
-      throw new ForbiddenException(`Missing permission(s): ${missing.join(', ')}`);
-    }
+    if (missing.length > 0) throw permissionDenied(missing);
     return true;
   }
 }

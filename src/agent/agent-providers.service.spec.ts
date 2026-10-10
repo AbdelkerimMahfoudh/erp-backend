@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
+import { AGENT_PERMISSIONS } from './agent-access';
 import { AgentProvidersService, configInForce } from './agent-providers.service';
 
 /**
@@ -127,8 +128,10 @@ describe('the provider list', () => {
     const resolved = harness({ permissions: null, resolved: ['agent.mistake.report'] });
     await expect(resolved.svc.list()).resolves.toBeDefined();
     expect(resolved.access.getEffectivePermissions).toHaveBeenCalledWith(USER, BRANCH);
-    const { error } = await refusal(harness({ permissions: ['sale.create', 'report.view'] }).svc.list());
+    const { error, body } = await refusal(harness({ permissions: ['sale.create', 'report.view'] }).svc.list());
     expect(error).toBeInstanceOf(ForbiddenException);
+    // The guard's refusal shape (D161): any one of the nine would do, and all nine are named.
+    expect(body).toMatchObject({ code: 'permission_denied', missing: [...AGENT_PERMISSIONS] });
   });
 });
 

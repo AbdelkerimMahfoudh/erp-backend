@@ -86,11 +86,15 @@ describe('branch-safety boundary', () => {
     expect(perms.has('sale.create')).toBe(false);
   });
 
-  it('403s for a branch the user is not assigned to', async () => {
+  it('403s for a branch the user is not assigned to, with a code a client can branch on (D161)', async () => {
     const svc = makeService([managerInA]);
-    await expect(svc.getEffectivePermissions(USER, BRANCH_B)).rejects.toBeInstanceOf(
-      ForbiddenException,
-    );
+    const refusal = await svc.getEffectivePermissions(USER, BRANCH_B).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(ForbiddenException);
+    // The sentence is unchanged; the code is what a replaying phone reads.
+    expect((refusal as ForbiddenException).getResponse()).toEqual({
+      code: 'branch_access_denied',
+      message: 'No access to the requested branch',
+    });
   });
 
   it('grants nothing when the user has no assignments', async () => {

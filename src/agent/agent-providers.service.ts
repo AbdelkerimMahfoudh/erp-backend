@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -8,7 +8,8 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { AccessService } from '../rbac/access.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
-import { hasAnyAgentPermission } from './agent-access';
+import { permissionDenied } from '../rbac/refusals';
+import { AGENT_PERMISSIONS, hasAnyAgentPermission } from './agent-access';
 import { configRefusal, missingConfigFields, readyForTransactions, reasonGiven, withSameRate } from './agent-rules';
 import { CreateAgentProviderConfigDto, CreateAgentProviderDto, UpdateAgentProviderDto } from './dto/provider.dto';
 
@@ -218,11 +219,12 @@ export class AgentProvidersService {
    * Any of the nine keys opens the list: the route carries no single key, so
    * the permissions are the request's when a guard resolved them, else resolved
    * here for the branch in context — as the catalogue does for its own reads.
+   * The refusal is the guard's `permission_denied`, naming the nine: any one would do.
    */
   private async requireAnyAgentPermission(): Promise<void> {
     let held = this.cls.get('permissions');
     if (!held) held = await this.access.getEffectivePermissions(this.tenant.requireUserId(), this.tenant.branchId());
-    if (!hasAnyAgentPermission(held)) throw new ForbiddenException('Missing permission(s): one of the agent counter’s keys');
+    if (!hasAnyAgentPermission(held)) throw permissionDenied(AGENT_PERMISSIONS, 'Missing permission(s): one of the agent counter’s keys');
   }
 }
 

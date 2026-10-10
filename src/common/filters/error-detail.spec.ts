@@ -177,6 +177,26 @@ describe('per-item detail survives the filter', () => {
     expect(body).toMatchObject({ code: 'activity_not_subscribed', activity: 'money_agent', required: 'electronics' });
   });
 
+  it('carries the stable access refusals a replaying phone reads (D161)', () => {
+    // A refusal raised before a queued write's key was looked up: the phone decides from the code and these fields.
+    expect(
+      runFilter(new ForbiddenException({ code: 'permission_denied', message: 'Missing permission(s): agent.transaction.record', missing: ['agent.transaction.record'] })),
+    ).toMatchObject({ statusCode: 403, code: 'permission_denied', missing: ['agent.transaction.record'] });
+    expect(runFilter(new ForbiddenException({ code: 'branch_access_denied', message: 'No access to the requested branch' }))).toMatchObject({
+      statusCode: 403,
+      code: 'branch_access_denied',
+      message: 'No access to the requested branch',
+    });
+    expect(runFilter(new ForbiddenException({ code: 'branch_inactive', message: 'closed' }))).toMatchObject({ statusCode: 403, code: 'branch_inactive' });
+  });
+
+  it('says which subscription state refused the change, so a suspended business is not told it ended (D161)', () => {
+    const body = runFilter(new ForbiddenException({ code: 'ENTITLEMENT_WRITE_BLOCKED', message: 'suspended', state: 'suspended' }));
+    expect(body).toMatchObject({ statusCode: 403, code: 'ENTITLEMENT_WRITE_BLOCKED', state: 'suspended' });
+    // The read refusals attached it all along, and this filter dropped it.
+    expect(runFilter(new ForbiddenException({ code: 'ENTITLEMENT_SUSPENDED', message: 'm', state: 'cancelled' }))).toMatchObject({ state: 'cancelled' });
+  });
+
   it('still reveals nothing about an unexpected error', () => {
     const body = runFilter(new Error('connect ECONNREFUSED 127.0.0.1:3306'));
     expect(body.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);

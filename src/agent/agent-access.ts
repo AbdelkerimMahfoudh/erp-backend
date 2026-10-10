@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import type { TenantPrisma } from '../prisma/tenant.extension';
+import { branchAccessDenied } from '../rbac/refusals';
 
 /**
  * Who, and which branch, may use the agent counter (D156, docs/73 §7).
@@ -45,7 +46,7 @@ type BranchReader = Pick<TenantPrisma, 'branch'>;
 /** The branch's activity, as stored. A branch outside the company reads as no access, like the guard says it. */
 export async function branchActivityOf(db: BranchReader, branchId: Buffer): Promise<BranchActivity> {
   const branch = await db.branch.findFirst({ where: { id: branchId }, select: { activity: true } });
-  if (!branch) throw new ForbiddenException('No access to the requested branch');
+  if (!branch) throw branchAccessDenied();
   return branch.activity;
 }
 

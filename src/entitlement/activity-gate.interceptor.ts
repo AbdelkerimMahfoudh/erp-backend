@@ -12,10 +12,14 @@ import { Observable } from 'rxjs';
 import { IS_PUBLIC_KEY } from '../common/decorators/public.decorator';
 import type { AppClsStore } from '../common/context/request-context';
 import { PrismaService } from '../prisma/prisma.service';
+import { branchAccessDenied } from '../rbac/refusals';
 import { ACTIVITY_NOT_SUBSCRIBED, activityAllows, activityLabel, type ActivityNeed } from './activity';
 import { requiredActivityFor } from './activity-gate';
 import { normalise } from './entitlement.interceptor';
 import { ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
+
+/** A gated write aimed at a branch that is switched off or deleted. */
+export const BRANCH_INACTIVE = 'branch_inactive';
 
 /**
  * A branch's activity stops a write it is not subscribed to (D156).
@@ -33,6 +37,11 @@ import { ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
  * read the header itself would then run unchecked (reviewed 2026-10-09). The
  * refusal carries the branch's activity and what the route needed, so the app
  * can say "this branch does not sell" in words.
+ *
+ * A branch that is switched off or deleted takes no gated write at all
+ * (`branch_inactive`, D161): nothing else stopped a phone that still held the
+ * branch in its header from recording into it. Checked before the activity, so
+ * a closed branch is never told it is merely subscribed to something else.
  */
 @Injectable()
 export class ActivityGateInterceptor implements NestInterceptor {
@@ -67,11 +76,17 @@ export class ActivityGateInterceptor implements NestInterceptor {
 
     const branch = await this.prisma.branch.findFirst({
       where: { id: branchId, companyId },
-      select: { activity: true },
+      select: { activity: true, isActive: true, deletedAt: true },
     });
-    // Same wording as the guard, so a caller cannot tell from the message
-    // whether the branch exists, only that it is not theirs.
-    if (!branch) throw new ForbiddenException('No access to the requested branch');
+    // The guard's own refusal, so a caller cannot tell from the answer whether
+    // the branch exists, only that it is not theirs.
+    if (!branch) throw branchAccessDenied();
+    if (!branch.isActive || branch.deletedAt) {
+      throw new ForbiddenException({
+        code: BRANCH_INACTIVE,
+        message: 'This branch is no longer active, so nothing can be recorded in it.',
+      });
+    }
 
     if (activityAllows(branch.activity, need)) return next.handle();
 

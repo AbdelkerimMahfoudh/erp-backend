@@ -45,15 +45,15 @@ describe('the entitlement check applies a renewal that fell due', () => {
   it('rolls once after the old end, and checks again only after a minute', async () => {
     const now = { t: new Date(OLD_END.getTime() + 60 * 60_000) };
     const w = makeWorld(now);
-    await w.service.mayWrite(COMPANY);
+    await w.service.writeRefusal(COMPANY);
     expect(w.rolls()).toBe(1);
     const readsAfterFirst = w.reads();
-    await w.service.mayWrite(COMPANY);
+    await w.service.writeRefusal(COMPANY);
     await w.service.current();
     // Within the minute: not even the cheap read again.
     expect(w.reads()).toBe(readsAfterFirst);
     now.t = new Date(now.t.getTime() + 61_000);
-    await w.service.mayWrite(COMPANY);
+    await w.service.writeRefusal(COMPANY);
     // A minute later it looks again, finds the new period running, and rolls nothing.
     expect(w.reads()).toBeGreaterThan(readsAfterFirst);
     expect(w.rolls()).toBe(1);
@@ -61,13 +61,13 @@ describe('the entitlement check applies a renewal that fell due', () => {
 
   it('before the old end, nothing rolls', async () => {
     const w = makeWorld({ t: new Date(OLD_END.getTime() - 60_000) });
-    await w.service.mayWrite(COMPANY);
+    await w.service.writeRefusal(COMPANY);
     expect(w.rolls()).toBe(0);
   });
 
   it('a failing check never fails the request: the state is still answered', async () => {
     const w = makeWorld({ t: new Date(OLD_END.getTime() + 60_000) }, { failRead: true });
-    await expect(w.service.mayWrite(COMPANY)).resolves.toBe(true);
+    await expect(w.service.writeRefusal(COMPANY)).resolves.toBeNull();
     expect(w.rolls()).toBe(0);
   });
 });
