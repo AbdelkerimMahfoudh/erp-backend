@@ -68,6 +68,28 @@ const listSelect = {
   movements: { select: legSelect, orderBy: { createdAt: 'asc' } },
   mistakeReports: { select: mistakeSelect, orderBy: { reportedAt: 'asc' } },
 } satisfies Prisma.AgentTransactionSelect;
+/**
+ * What the status lookup reads (D161, docs/73 §11.4): what became of the exchange, and nothing a Manager wrote about it
+ * since — not its notes, not a reversal's reason, not its legs — for it answers whoever recorded it, in any
+ * subscription state and whatever they may still view.
+ */
+const lookupSelect = {
+  id: true,
+  branchId: true,
+  providerId: true,
+  provider: { select: { label: true } },
+  direction: true,
+  amount: true,
+  customerNumberLast4: true,
+  commissionAmount: true,
+  configVersionId: true,
+  businessDate: true,
+  recordedAt: true,
+  deviceRecordedAt: true,
+  recordedById: true,
+  recordedByName: true,
+  status: true,
+} satisfies Prisma.AgentTransactionSelect;
 /** Only `agent.customer.reveal` on the detail route reads this column; nothing else ever selects it. */
 const detailSelect = { ...listSelect, customerNumber: true } satisfies Prisma.AgentTransactionSelect;
 
@@ -309,11 +331,29 @@ export class AgentTransactionsService {
    */
   async findByClientUuid(clientUuid: string) {
     if (!isUuid(clientUuid)) throw new BadRequestException({ code: 'client_uuid_invalid', message: 'That is not a client key' });
-    const row = await this.db.agentTransaction.findFirst({ where: { companyId: this.tenant.companyId(), clientUuid: uuidToBin(clientUuid) }, select: listSelect });
+    const row = await this.db.agentTransaction.findFirst({ where: { companyId: this.tenant.companyId(), clientUuid: uuidToBin(clientUuid) }, select: lookupSelect });
     if (!row) return { recorded: false };
     const userId = this.tenant.requireUserId();
     if (!row.recordedById.equals(userId) && !(await this.mayViewAt(userId, row.branchId))) throw permissionDenied(['agent.transaction.view']);
-    return { recorded: true, transaction: { ...toTransactionView(row, false), configVersionId: binToUuid(row.configVersionId) } };
+    return {
+      recorded: true,
+      transaction: {
+        id: binToUuid(row.id),
+        branchId: binToUuid(row.branchId),
+        status: row.status,
+        direction: row.direction,
+        providerId: binToUuid(row.providerId),
+        providerLabel: row.provider.label,
+        amount: num(row.amount),
+        commission: num(row.commissionAmount),
+        customerNumberMasked: maskedCustomerNumber(row.customerNumberLast4),
+        businessDate: dateKey(row.businessDate),
+        recordedAt: row.recordedAt.toISOString(),
+        recordedByName: row.recordedByName,
+        configVersionId: binToUuid(row.configVersionId),
+        deviceRecordedAt: row.deviceRecordedAt?.toISOString() ?? null,
+      },
+    };
   }
 
   /** Whether the caller may view exchanges at that branch; not being assigned there is holding nothing there. */

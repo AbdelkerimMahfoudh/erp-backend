@@ -751,16 +751,20 @@ describe('what became of an exchange, by its client key (D161, docs/73 §11.4)',
         direction: 'cash_in_credit_out',
         amount: 20_000,
         customerNumberMasked: '•••• 3456',
-        commission: { amount: 200, rateBp: 100 },
+        commission: 200,
         businessDate: DAY,
         status: 'completed',
         configVersionId: CONFIG,
         deviceRecordedAt: '2026-10-08T08:59:00.000Z',
-        recordedBy: { id: binToUuid(USER), name: 'Aicha' },
+        recordedByName: 'Aicha',
       },
     });
     // Never the number itself.
     expect(JSON.stringify(answer)).not.toContain('36123456');
+    // What became of it, and nothing written about it since: no reference, no legs, no notes, no reversal's reason.
+    expect(Object.keys((answer as { transaction: Record<string, unknown> }).transaction).sort()).toEqual(
+      ['amount', 'branchId', 'businessDate', 'commission', 'configVersionId', 'customerNumberMasked', 'deviceRecordedAt', 'direction', 'id', 'providerId', 'providerLabel', 'recordedAt', 'recordedByName', 'status'],
+    );
     // The recorder is not asked about: their own record is theirs.
     expect(h.access.getEffectivePermissions).not.toHaveBeenCalled();
   });
