@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ConflictException, ForbiddenException, RequestMethod } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, HttpStatus, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { METHOD_METADATA, MODULE_METADATA, PATH_METADATA, VERSION_METADATA } from '@nestjs/common/constants';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,6 +15,7 @@ import { AgentPositionsService } from './agent-positions.service';
 import { AgentProvidersService } from './agent-providers.service';
 import { AgentReportsService } from './agent-reports.service';
 import { AgentTransactionsService } from './agent-transactions.service';
+import { CreateAgentProviderConfigDto, CreateAgentProviderDto, UpdateAgentProviderDto } from './dto/provider.dto';
 
 /**
  * The agent counter's routes and who may reach them (docs/73 §7), the module's
@@ -79,6 +80,46 @@ describe('the routes, under agent/ and version 1', () => {
     expect(Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, AgentModule)).toEqual([AgentController]);
     expect(Reflect.getMetadata(MODULE_METADATA.PROVIDERS, AgentModule)).toEqual([AgentProvidersService, AgentPositionsService, AgentTransactionsService, AgentReportsService]);
     expect(Reflect.getMetadata(MODULE_METADATA.IMPORTS, ClosingModule)).not.toContain(AgentModule);
+  });
+});
+
+describe('the provider writes carry a request key (D160)', () => {
+  // The pipe as main.ts builds it.
+  const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true, transformOptions: { enableImplicitConversion: false } });
+  const KEY = '01a0b1c2-0000-7000-8000-0000000000d1';
+
+  it('each of the three requires a clientRequestId, and it must be a uuid', async () => {
+    for (const [metatype, body] of [
+      [CreateAgentProviderDto, { kind: 'sedad', label: 'Sedad' }],
+      [UpdateAgentProviderDto, { isActive: false }],
+      [CreateAgentProviderConfigDto, { sameRateBothDirections: true, reason: 'the October schedule' }],
+    ] as const) {
+      const meta = { type: 'body' as const, metatype: metatype as never };
+      await expect(pipe.transform({ ...body, clientRequestId: KEY }, meta)).resolves.toBeInstanceOf(metatype);
+      for (const bad of [{ ...body }, { ...body, clientRequestId: 'retry-1' }]) {
+        const e = await pipe.transform(bad, meta).catch((err: unknown) => err);
+        expect([metatype.name, e]).toEqual([metatype.name, expect.any(BadRequestException)]);
+        expect(JSON.stringify((e as BadRequestException).getResponse())).toContain('clientRequestId must be a UUID');
+      }
+    }
+  });
+
+  it('a replay answers 200 — this request created nothing; a first write keeps its 201', async () => {
+    for (const [replayed, status] of [
+      [false, undefined],
+      [true, HttpStatus.OK],
+    ] as const) {
+      const providers = { create: jest.fn(async () => ({ id: 'p', replayed })), addConfig: jest.fn(async () => ({ config: {}, provider: {}, replayed })) };
+      const controller = new AgentController(providers as never, {} as never, {} as never, {} as never);
+      for (const call of [
+        (res: never) => controller.createProvider({} as never, res),
+        (res: never) => controller.addProviderConfig('01a0b1c2-0000-7000-8000-00000000000b', {} as never, res),
+      ]) {
+        const res = { status: jest.fn() };
+        await expect(call(res as never)).resolves.toMatchObject({ replayed });
+        expect(res.status.mock.calls.map(([s]) => s)).toEqual(status === undefined ? [] : [status]);
+      }
+    }
   });
 });
 

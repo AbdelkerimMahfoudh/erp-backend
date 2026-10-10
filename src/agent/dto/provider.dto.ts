@@ -1,9 +1,14 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { AgentCommissionDestination, AgentPrincipalFeeMode, AgentProviderKind, AgentReferenceRule } from '@prisma/client';
-import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
 
 /** A provider the company's agent counters exchange credit with (docs/73 §4.1). Company-wide; never deleted. */
 export class CreateAgentProviderDto {
+  /** One key per change, reused on every retry: the same key and body answer with the first answer (D160). */
+  @ApiProperty({ format: 'uuid', description: 'The client’s key for this change, kept across retries' })
+  @IsUUID()
+  clientRequestId: string;
+
   @ApiProperty({ enum: AgentProviderKind })
   @IsEnum(AgentProviderKind)
   kind: AgentProviderKind;
@@ -22,6 +27,11 @@ export class CreateAgentProviderDto {
 }
 
 export class UpdateAgentProviderDto {
+  /** One key per change, reused on every retry: the same key and body answer with the first answer (D160). */
+  @ApiProperty({ format: 'uuid', description: 'The client’s key for this change, kept across retries' })
+  @IsUUID()
+  clientRequestId: string;
+
   @ApiPropertyOptional({ maxLength: 80 })
   @IsOptional()
   @IsString()
@@ -49,6 +59,11 @@ export class UpdateAgentProviderDto {
  * `effectiveFrom` is the server's clock, not a field.
  */
 export class CreateAgentProviderConfigDto {
+  /** One key per change, reused on every retry: the same key and body answer with the first answer (D160). */
+  @ApiProperty({ format: 'uuid', description: 'The client’s key for this change, kept across retries' })
+  @IsUUID()
+  clientRequestId: string;
+
   @ApiPropertyOptional({ minimum: 0, maximum: 10_000, nullable: true, description: 'Basis points on Receive cash / Send credit; null = not supplied' })
   @IsOptional()
   @IsInt()

@@ -10,6 +10,7 @@ import { AccessService } from '../rbac/access.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { permissionDenied } from '../rbac/refusals';
 import { AGENT_PERMISSIONS, hasAnyAgentPermission } from './agent-access';
+import { isUniqueViolation, withRequestKey } from './agent-request-keys';
 import { configRefusal, missingConfigFields, readyForTransactions, reasonGiven, withSameRate } from './agent-rules';
 import { CreateAgentProviderConfigDto, CreateAgentProviderDto, UpdateAgentProviderDto } from './dto/provider.dto';
 
@@ -102,61 +103,82 @@ export class AgentProvidersService {
     return { providers };
   }
 
+  /**
+   * Add a provider, once per request key (D160): the row, its audit and the
+   * key in one transaction. A label already used is `provider_label_in_use` —
+   * unless it is this very request's own retry, which answers with the
+   * provider it made.
+   */
   async create(dto: CreateAgentProviderDto) {
     const label = dto.label.trim();
     if (!label) throw new BadRequestException('A provider needs a label');
-    const id = newUuidV7Bin();
+    const companyId = this.tenant.companyId();
+    const userId = this.tenant.requireUserId();
     try {
-      await this.db.agentProvider.create({ data: { id, companyId: this.tenant.companyId(), kind: dto.kind, label, sortOrder: dto.sortOrder ?? 0 } });
+      return await withRequestKey(this.db, { operation: 'provider_create', targetId: null, body: dto, companyId, userId }, async (tx) => {
+        const id = newUuidV7Bin();
+        await tx.agentProvider.create({ data: { id, companyId, kind: dto.kind, label, sortOrder: dto.sortOrder ?? 0 } });
+        await this.audit.recordTx(tx, { entityType: 'AgentProvider', entityId: id, action: 'create', after: { kind: dto.kind, label, sortOrder: dto.sortOrder ?? 0 } });
+        return viewOf(tx, id);
+      });
     } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') throw labelInUse(label);
+      if (isUniqueViolation(e)) throw labelInUse(label);
       throw e;
     }
-    await this.audit.record({ entityType: 'AgentProvider', entityId: id, action: 'create', after: { kind: dto.kind, label, sortOrder: dto.sortOrder ?? 0 } });
-    return this.view(id);
-  }
-
-  async update(id: string, dto: UpdateAgentProviderDto) {
-    const providerId = uuidToBin(id);
-    const before = await this.db.agentProvider.findFirst({ where: { id: providerId }, select: providerSelect });
-    if (!before) throw providerNotFound();
-    const label = dto.label === undefined ? undefined : dto.label.trim();
-    if (label === '') throw new BadRequestException('A provider needs a label');
-    const data = {
-      ...(label !== undefined ? { label } : {}),
-      ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
-      ...(dto.sortOrder !== undefined ? { sortOrder: dto.sortOrder } : {}),
-    };
-    if (Object.keys(data).length > 0) {
-      try {
-        await this.db.agentProvider.update({ where: { id: providerId }, data });
-      } catch (e) {
-        if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') throw labelInUse(label ?? before.label);
-        throw e;
-      }
-      await this.audit.record({
-        entityType: 'AgentProvider',
-        entityId: providerId,
-        action: dto.isActive !== undefined && dto.isActive !== before.isActive ? 'status_change' : 'update',
-        before: { label: before.label, isActive: before.isActive, sortOrder: before.sortOrder },
-        after: { label: label ?? before.label, isActive: dto.isActive ?? before.isActive, sortOrder: dto.sortOrder ?? before.sortOrder },
-      });
-    }
-    return this.view(providerId);
   }
 
   /**
-   * A new version, in force from this instant. Append-only: the version an
-   * exchange used is never edited. A fee deducted from the principal can only
-   * land on the float (`config_invalid`); a blank stays a blank and keeps the
-   * provider from posting until the Owner fills it.
+   * Rename, reorder or switch a provider off or on, once per request key
+   * (D160). The row is locked, so two changes to one provider apply one after
+   * the other and each is audited against what it actually found.
+   */
+  async update(id: string, dto: UpdateAgentProviderDto) {
+    const providerId = uuidToBin(id);
+    const label = dto.label === undefined ? undefined : dto.label.trim();
+    if (label === '') throw new BadRequestException('A provider needs a label');
+    const companyId = this.tenant.companyId();
+    const userId = this.tenant.requireUserId();
+    try {
+      return await withRequestKey(this.db, { operation: 'provider_update', targetId: id, body: dto, companyId, userId }, async (tx) => {
+        await tx.$queryRaw(Prisma.sql`SELECT id FROM agent_providers WHERE id = ${providerId} AND company_id = ${companyId} FOR UPDATE`);
+        const before = await tx.agentProvider.findFirst({ where: { id: providerId }, select: providerSelect });
+        if (!before) throw providerNotFound();
+        const data = {
+          ...(label !== undefined ? { label } : {}),
+          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+          ...(dto.sortOrder !== undefined ? { sortOrder: dto.sortOrder } : {}),
+        };
+        if (Object.keys(data).length > 0) {
+          await tx.agentProvider.update({ where: { id: providerId }, data });
+          await this.audit.recordTx(tx, {
+            entityType: 'AgentProvider',
+            entityId: providerId,
+            action: dto.isActive !== undefined && dto.isActive !== before.isActive ? 'status_change' : 'update',
+            before: { label: before.label, isActive: before.isActive, sortOrder: before.sortOrder },
+            after: { label: label ?? before.label, isActive: dto.isActive ?? before.isActive, sortOrder: dto.sortOrder ?? before.sortOrder },
+          });
+        }
+        return viewOf(tx, providerId);
+      });
+    } catch (e) {
+      // Only a rename can clash with another provider's label; any other unique violation is not this one.
+      if (isUniqueViolation(e) && label !== undefined) throw labelInUse(label);
+      throw e;
+    }
+  }
+
+  /**
+   * A new version, in force from this instant, once per request key (D160):
+   * a retry never appends a second version, so the phones holding this one's
+   * id are not refused as stale. Append-only: the version an exchange used is
+   * never edited. A fee deducted from the principal can only land on the float
+   * (`config_invalid`); a blank stays a blank and keeps the provider from
+   * posting until the Owner fills it.
    */
   async addConfig(id: string, dto: CreateAgentProviderConfigDto) {
     const providerId = uuidToBin(id);
     const userId = this.tenant.requireUserId();
     const reason = reasonGiven(dto.reason);
-    const provider = await this.db.agentProvider.findFirst({ where: { id: providerId }, select: providerSelect });
-    if (!provider) throw providerNotFound();
     const fields = withSameRate({
       rateInBp: dto.rateInBp ?? null,
       rateOutBp: dto.rateOutBp ?? null,
@@ -172,11 +194,13 @@ export class AgentProvidersService {
       });
     }
     const companyId = this.tenant.companyId();
-    const actor = await this.db.user.findFirst({ where: { id: userId }, select: { name: true } });
-    const configId = newUuidV7Bin();
-    await this.db.$transaction(async (tx) => {
+    return withRequestKey(this.db, { operation: 'provider_config', targetId: id, body: dto, companyId, userId }, async (tx) => {
       // The provider row, locked: an exchange being posted reads the version in force under this same lock.
       await tx.$queryRaw(Prisma.sql`SELECT id FROM agent_providers WHERE id = ${providerId} AND company_id = ${companyId} FOR UPDATE`);
+      const provider = await tx.agentProvider.findFirst({ where: { id: providerId }, select: providerSelect });
+      if (!provider) throw providerNotFound();
+      const actor = await tx.user.findFirst({ where: { id: userId }, select: { name: true } });
+      const configId = newUuidV7Bin();
       await tx.agentProviderConfig.create({
         data: {
           id: configId,
@@ -196,9 +220,9 @@ export class AgentProvidersService {
         reason: reason.slice(0, 255),
         after: { providerId: id, label: provider.label, ...fields, missing: missingConfigFields(fields) },
       });
+      const config = await tx.agentProviderConfig.findFirstOrThrow({ where: { id: configId }, select: configSelect });
+      return { config: configView(config), provider: providerView(provider, await configInForce(tx, providerId, new Date())) };
     });
-    const config = await this.db.agentProviderConfig.findFirstOrThrow({ where: { id: configId }, select: configSelect });
-    return { config: configView(config), provider: providerView(provider, await configInForce(this.db, providerId, new Date())) };
   }
 
   /** Every version of a provider, newest first: the history behind every exchange's rate. */
@@ -208,11 +232,6 @@ export class AgentProvidersService {
     if (!provider) throw providerNotFound();
     const rows = await this.db.agentProviderConfig.findMany({ where: { providerId }, select: configSelect, orderBy: [{ effectiveFrom: 'desc' }, { createdAt: 'desc' }] });
     return { configs: rows.map(configView) };
-  }
-
-  private async view(providerId: Buffer) {
-    const row = await this.db.agentProvider.findFirstOrThrow({ where: { id: providerId }, select: providerSelect });
-    return providerView(row, await configInForce(this.db, providerId, new Date()));
   }
 
   /**
@@ -226,6 +245,12 @@ export class AgentProvidersService {
     if (!held) held = await this.access.getEffectivePermissions(this.tenant.requireUserId(), this.tenant.branchId());
     if (!hasAnyAgentPermission(held)) throw permissionDenied(AGENT_PERMISSIONS, 'Missing permission(s): one of the agent counter’s keys');
   }
+}
+
+/** The provider as the list shows it, read through the client given — the write's own transaction, so its answer is what it wrote. */
+async function viewOf(client: Pick<TenantPrisma, 'agentProvider' | 'agentProviderConfig'>, providerId: Buffer) {
+  const row = await client.agentProvider.findFirstOrThrow({ where: { id: providerId }, select: providerSelect });
+  return providerView(row, await configInForce(client, providerId, new Date()));
 }
 
 const labelInUse = (label: string) => new ConflictException({ code: 'provider_label_in_use', message: `A provider is already called "${label}"` });

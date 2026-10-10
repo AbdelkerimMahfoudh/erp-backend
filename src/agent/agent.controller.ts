@@ -1,5 +1,6 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { AgentPositionsService } from './agent-positions.service';
 import { AgentProvidersService } from './agent-providers.service';
@@ -37,25 +38,33 @@ export class AgentController {
     return this.providers.list();
   }
 
+  /*
+   * The Owner's three provider writes carry a `clientRequestId` (D160): the
+   * same key and body answer with the first answer, `replayed: true`, and 200
+   * rather than 201 — this request created nothing.
+   */
+
   @Post('providers')
   @RequirePermissions('agent.provider.manage')
-  @ApiOperation({ summary: 'Add a provider (Owner)' })
-  createProvider(@Body() dto: CreateAgentProviderDto) {
-    return this.providers.create(dto);
+  @ApiOperation({ summary: 'Add a provider (Owner); a retry under the same clientRequestId answers 200 with the provider it made' })
+  async createProvider(@Body() dto: CreateAgentProviderDto, @Res({ passthrough: true }) res: Response) {
+    return replayAnswersOk(res, await this.providers.create(dto));
   }
 
   @Patch('providers/:id')
   @RequirePermissions('agent.provider.manage')
-  @ApiOperation({ summary: 'Rename, reorder or switch a provider off or on (Owner)' })
+  @ApiOperation({ summary: 'Rename, reorder or switch a provider off or on (Owner); a retry under the same clientRequestId changes nothing again' })
   updateProvider(@Param('id') id: string, @Body() dto: UpdateAgentProviderDto) {
     return this.providers.update(id, dto);
   }
 
   @Post('providers/:id/configs')
   @RequirePermissions('agent.provider.manage')
-  @ApiOperation({ summary: 'Record a new configuration version — rates, settlement, reference rule — in force from now (Owner)' })
-  addProviderConfig(@Param('id') id: string, @Body() dto: CreateAgentProviderConfigDto) {
-    return this.providers.addConfig(id, dto);
+  @ApiOperation({
+    summary: 'Record a new configuration version — rates, settlement, reference rule — in force from now (Owner); a retry under the same clientRequestId answers 200 with the version it made',
+  })
+  async addProviderConfig(@Param('id') id: string, @Body() dto: CreateAgentProviderConfigDto, @Res({ passthrough: true }) res: Response) {
+    return replayAnswersOk(res, await this.providers.addConfig(id, dto));
   }
 
   @Get('providers/:id/configs')
@@ -157,4 +166,10 @@ export class AgentController {
   report(@Query() query: AgentReportQueryDto) {
     return this.reports.report(query);
   }
+}
+
+/** A replayed answer created nothing: 200, where the first answer was 201. */
+function replayAnswersOk<T extends { replayed: boolean }>(res: Response, answer: T): T {
+  if (answer.replayed) res.status(HttpStatus.OK);
+  return answer;
 }
