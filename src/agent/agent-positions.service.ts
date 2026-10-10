@@ -120,6 +120,12 @@ export class AgentPositionsService {
         if (!provider) throw new NotFoundException({ code: 'provider_not_found', message: 'That provider does not exist' });
         const at = new Date();
         const businessDate = await this.businessDay.assign(branchId, at, tx as unknown as Prisma.TransactionClient);
+        /**
+         * Then the day's row, as an exchange takes it (D159): a set re-anchors the float, so a float counted on an open
+         * day before it no longer holds and a close that read the day before it is refused under its own lock. A closed
+         * day never refused a set, and still does not.
+         */
+        await this.closing.lockDayForMoneyTx(tx, { branchId, businessDate, operation: 'float_set' });
         const before = floatPosition(...(await readFloatInputs(tx, { branchId, providerId, accountKind, businessDate }).then((i) => [i.anchor, i.sinceAnchor] as const)));
         const trackedBefore = before.position;
         const difference = trackedBefore === null ? null : round2(dto.amount - trackedBefore);

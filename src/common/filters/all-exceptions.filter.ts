@@ -45,6 +45,9 @@ interface ErrorBody {
   activity?: unknown;
   required?: unknown;
   state?: unknown;
+  report?: unknown;
+  channels?: unknown;
+  floats?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -124,6 +127,15 @@ const DETAIL_KEYS = [
    * along; this list dropped it.
    */
   'state',
+  /*
+   * The close refused on figures that moved (D159, docs/73 §11.2): `report_changed` and `money_moved_after_count`
+   * carry the report as it stands now — already gated for the caller, section by section — and the latter names the
+   * channels and floats to count again, so the phone reloads and opens the count step for exactly those. Before
+   * this, `report_changed` attached its report and the filter dropped it.
+   */
+  'report',
+  'channels',
+  'floats',
 ] as const;
 
 /**

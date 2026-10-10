@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * The business day's lifecycle rules, pure (docs/50 §3.2).
  *
@@ -308,6 +310,23 @@ export function closeVerification(channels: { key: string; countable: boolean; v
     (c.verification === 'counted' ? verified : c.verification === 'attested' ? attested : unverified).push(c.key);
   }
   return { verified, unverified, attested, requiresAcknowledgement: unverified.length > 0 };
+}
+
+/**
+ * What a close's idempotency key is bound to (D159, docs/73 §11.2): the date and the statements made with it — "I
+ * checked", "I did not check, because…", the legacy drawer count. The same key and the same request on the closed day
+ * is a retry, answered with that close; the same key with anything else is refused. The report version is not part
+ * of it: a retry sent after the phone refreshed the report is still the same close.
+ */
+export function closeRequestHash(input: { date: string; attestChecked?: boolean; acknowledgeUnverified?: boolean; reason?: string; countedCash?: number }): string {
+  const canonical = JSON.stringify({
+    date: input.date,
+    attestChecked: input.attestChecked === true,
+    acknowledgeUnverified: input.acknowledgeUnverified === true,
+    reason: input.reason?.trim() || null,
+    countedCash: input.countedCash == null ? null : round2(input.countedCash).toFixed(2),
+  });
+  return createHash('sha256').update(canonical).digest('hex');
 }
 
 /** The Owner plus at most this many named delegates per branch (docs/50 §3.3). */

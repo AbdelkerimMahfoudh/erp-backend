@@ -133,6 +133,8 @@ function saleHarness() {
     dailyClosing: { update: jest.fn(), updateMany: jest.fn() },
     closingEvent: { create: jest.fn() },
     $queryRaw: jest.fn(async (query: { sql: string }) => (/FROM closing_events/.test(query.sql) ? [{ one: 1 }] : [])),
+    // The day's money version (D159), moved by the counter's check.
+    $executeRaw: jest.fn(async () => 1),
   };
   const db: any = {
     closingEvent: { findFirst: jest.fn(async () => ({ id: Buffer.alloc(16, 7) })) },

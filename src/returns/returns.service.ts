@@ -18,6 +18,7 @@ import { evaluateEligibility } from '../sales/return-policy';
 import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-queue';
 import { dayKey } from '../common/utils/date.util';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
+import { ClosingService } from '../closing/closing.service';
 import { parseDateRange, parseEnumList } from '../sales/sale-query';
 import { payoutNotCorrected } from '../corrections/correction-sql';
 import { toNum } from '../analytics/held-value';
@@ -92,6 +93,7 @@ export class ReturnsService {
     @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
     private readonly cls: ClsService<AppClsStore>,
     private readonly businessDay: BusinessDayService,
+    private readonly closing: ClosingService,
   ) {}
 
   // ────────────────────────────── create ──────────────────────────────
@@ -527,20 +529,12 @@ export class ReturnsService {
      * The reversal belongs to TODAY, the approval day — never the sale's day.
      * If today is already closed for this branch, its locked snapshot would
      * permanently disagree with a recomputed rollup, so the approval is refused
-     * rather than reopening a closing. That refusal is the single accounting
-     * rule this phase must not get wrong.
+     * rather than reopening a closing (`assertApprovalDayOpen`, decided under the
+     * day's lock below). That refusal is the single accounting rule this phase
+     * must not get wrong.
      */
     const approvalDay = await this.businessDay.today(branchId);
     const approvalDate = dateValue(approvalDay);
-    const closing = await this.db.dailyClosing.findUnique({
-      where: { branchId_closingDate: { branchId, closingDate: approvalDate } },
-    });
-    if (closing?.isLocked) {
-      throw new ConflictException({
-        code: 'day_already_closed',
-        message: `${approvalDay} is already closed for this branch. Approve this return tomorrow, or ask the owner to review the closing.`,
-      });
-    }
 
     const reversalId = newUuidV7Bin();
     await this.db.$transaction(async (tx) => {
@@ -558,6 +552,9 @@ export class ReturnsService {
         },
       });
       if (moved.count === 0) throw this.staleWrite();
+      // The approval day, locked as the close locks it, after the request's own row (D159): refused when it is closed,
+      // otherwise told money moved, so a close that read it before this approval is refused under its own lock.
+      await this.closing.lockDayForMoneyTx(tx, { branchId, businessDate: approvalDay, operation: 'return_approval' });
 
       /**
        * The immutable record. Every figure is a SNAPSHOT of the original line,
@@ -960,21 +957,6 @@ export class ReturnsService {
     const confirmationDay = await this.businessDay.today(branchId);
     const confirmationDate = dateValue(confirmationDay);
 
-    /**
-     * The same rule approval already obeys: a locked day's snapshot must never
-     * disagree with a recomputed one, so the confirmation is refused rather
-     * than the closing reopened.
-     */
-    const closing = await this.db.dailyClosing.findUnique({
-      where: { branchId_closingDate: { branchId, closingDate: confirmationDate } },
-    });
-    if (closing?.isLocked) {
-      throw new ConflictException({
-        code: 'day_already_closed',
-        message: `${confirmationDay} is already closed for this branch. Confirm this refund tomorrow, or ask the owner to review the closing.`,
-      });
-    }
-
     await this.db.$transaction(async (tx) => {
       const moved = await tx.refundPayout.updateMany({
         where: {
@@ -999,6 +981,12 @@ export class ReturnsService {
         },
       });
       if (moved.count === 0) throw this.staleWrite();
+      /**
+       * The same rule approval obeys (`assertConfirmationDayOpen`): a locked day's snapshot must never disagree with a
+       * recomputed one, so the confirmation is refused rather than the closing reopened — decided on the day's row,
+       * locked as the close locks it, after the payout's own (D159). An open day is told money moved.
+       */
+      await this.closing.lockDayForMoneyTx(tx, { branchId, businessDate: confirmationDay, operation: 'refund_confirmation' });
 
       await this.audit.recordTx(tx, {
         entityType: 'RefundPayout',

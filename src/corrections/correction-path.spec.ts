@@ -224,6 +224,14 @@ describe('the approval decides on the record as it is now', () => {
     expect(service).toMatch(/ignoreCorrectionId: c\.id/);
   });
 
+  it('moves the correction day’s money version under that same lock, once the day is found open (D159)', () => {
+    // A close that read the day before this approval meets a version that moved, under its own lock, and is refused.
+    const approve = service.slice(service.indexOf('async approve('), service.indexOf('async reject('));
+    expect(approve).toMatch(
+      /FOR UPDATE`\);[\s\S]*assertDayOpen\(closing, day\);\s*await bumpMoneyVersionTx\(tx, \{ companyId, branchId: correction\.branchId, businessDate: day \}\);\s*const plan = /,
+    );
+  });
+
   it('another open request never blocks a decision — only an approved one does', () => {
     expect(targets).toMatch(/requested: !ignore && others\.some/);
     expect(targets).toMatch(/paymentRequestPending: \w+\.payments\.some\(\(p\) => !ctx\.ignoreCorrectionId/);

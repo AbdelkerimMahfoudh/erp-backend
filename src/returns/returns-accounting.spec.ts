@@ -47,8 +47,18 @@ describe('the original sale is never touched', () => {
   });
 
   it('refuses to approve on a day that is already closed', () => {
-    expect(code).toMatch(/day_already_closed/);
-    expect(code).toMatch(/closing\?\.isLocked/);
+    /*
+     * D159: decided on the day's row as the close locks it — inside the approval's transaction, after the request's
+     * own compare-and-swap — by the returns' own rule, with the code and the words it always had.
+     */
+    const approve = code.slice(code.indexOf('async approve('), code.indexOf('async reject('));
+    const lock = approve.indexOf("await this.closing.lockDayForMoneyTx(tx, { branchId, businessDate: approvalDay, operation: 'return_approval' });");
+    expect(lock).toBeGreaterThan(approve.indexOf('if (moved.count === 0) throw this.staleWrite();'));
+    expect(lock).toBeLessThan(approve.indexOf('tx.returnReversal.create('));
+    expect(approve).not.toMatch(/dailyClosing\.findUnique/);
+    const rules = readFileSync(join(SRC, 'return-workflow.ts'), 'utf8');
+    expect(rules).toMatch(/export function assertApprovalDayOpen\(closing: \{ isLocked: boolean \} \| null, day: string\): void \{\s*if \(closing\?\.isLocked\) \{\s*throw new ConflictException\(\{\s*code: 'day_already_closed'/);
+    expect(closing).toMatch(/return_approval: assertApprovalDayOpen,/);
   });
 });
 

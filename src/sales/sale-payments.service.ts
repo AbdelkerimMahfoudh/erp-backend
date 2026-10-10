@@ -13,7 +13,6 @@ import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { ClosingService } from '../closing/closing.service';
-import { assertDayOpen } from '../expenses/expense-rules';
 import { RecordSalePaymentDto } from './dto/record-payment.dto';
 import { CorrectPayerNumberDto } from './dto/correct-payer-number.dto';
 import { afterPayment, assertCollectable, collectionFingerprint, resolvePaidAt } from './sale-payment-rules';
@@ -152,21 +151,21 @@ export class SalePaymentsService {
         const reader = tx as unknown as Prisma.TransactionClient;
         const day = await this.businessDay.assign(branchId, paidAt, reader);
         const today = await this.businessDay.today(branchId, reader);
-        const closing = await tx.dailyClosing.findUnique({
-          where: { branchId_closingDate: { branchId, closingDate: dateValue(day) } },
-          select: { isLocked: true },
-        });
         if (day === today) {
           /**
            * Money arriving on the CURRENT business day while it is closed is
            * refused, decided on the locked row itself so a close committed
            * meanwhile is seen (docs/61) — no movement reopens a day any more.
-           * A payment back-dated into an earlier locked day is refused too:
-           * that day is behind the boundary and is corrected through Milestone B.
            */
           await this.closing.assertCounterOpenTx(tx, { branchId, businessDate: day, operation: 'payment' });
         } else {
-          assertDayOpen(closing, day);
+          /**
+           * A payment back-dated into an earlier day: refused when that day is
+           * locked — it is behind the boundary and corrected through Milestone B —
+           * decided on its row as the close locks it (D159). An open one, and every
+           * later day whose opening the money moves, is told money moved.
+           */
+          await this.closing.lockDayForMoneyTx(tx, { branchId, businessDate: day, operation: 'backdated_payment' });
         }
 
         const account = accountBin

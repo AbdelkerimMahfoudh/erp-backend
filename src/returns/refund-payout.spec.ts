@@ -7,6 +7,7 @@ import { REQUIRE_PERMISSIONS_KEY } from '../rbac/require-permissions.decorator';
 import { isCompanyPermission } from '../rbac/permission-scope';
 import {
   assertAmountMatchesDue,
+  assertConfirmationDayOpen,
   assertCorrectable,
   assertMethodAndAccount,
   assertReportable,
@@ -200,8 +201,28 @@ describe('confirmation moves cash, and only cash', () => {
   });
 
   it('refuses a locked day rather than reopening it', () => {
-    const confirm = service.slice(service.indexOf('async confirmRefund('));
-    expect(confirm).toMatch(/day_already_closed/);
+    // D159: on the day's row as the close locks it, inside the confirmation's transaction, after the payout's own row.
+    const confirm = service.slice(service.indexOf('async confirmRefund('), service.indexOf('async refundReceipt('));
+    const lock = confirm.indexOf("await this.closing.lockDayForMoneyTx(tx, { branchId, businessDate: confirmationDay, operation: 'refund_confirmation' });");
+    expect(lock).toBeGreaterThan(confirm.indexOf('if (moved.count === 0) throw this.staleWrite();'));
+    expect(lock).toBeLessThan(confirm.indexOf('await requestRollupTx('));
+    expect(confirm).not.toMatch(/dailyClosing\.findUnique/);
+    expect(closing).toMatch(/refund_confirmation: assertConfirmationDayOpen,/);
+    // The rule itself: the code and the words a phone already handles, and an open day goes through.
+    expect(() => assertConfirmationDayOpen({ isLocked: false }, '2026-10-10')).not.toThrow();
+    expect(() => assertConfirmationDayOpen(null, '2026-10-10')).not.toThrow();
+    const refused = (() => {
+      try {
+        assertConfirmationDayOpen({ isLocked: true }, '2026-10-10');
+      } catch (e) {
+        return e as ConflictException;
+      }
+      throw new Error('expected a refusal');
+    })();
+    expect(refused.getResponse()).toEqual({
+      code: 'day_already_closed',
+      message: '2026-10-10 is already closed for this branch. Confirm this refund tomorrow, or ask the owner to review the closing.',
+    });
   });
 
   /**

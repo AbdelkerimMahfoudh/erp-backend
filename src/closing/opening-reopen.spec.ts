@@ -29,6 +29,8 @@ interface Options {
   race?: boolean;
   /** The drawer as Money shows it now; null when unknown. */
   previous?: number | null;
+  /** The day's row as the review's lock reads it (D159). */
+  dayStatus?: string | null;
 }
 
 function build(opts: Options = {}) {
@@ -49,6 +51,9 @@ function build(opts: Options = {}) {
         return {};
       }),
     },
+    // The day's lock and its money version (D159): what the lock reads, and every bump.
+    $queryRaw: jest.fn(async (_sql: Prisma.Sql) => (opts.dayStatus === null ? [] : [{ status: opts.dayStatus ?? 'counting' }])),
+    $executeRaw: jest.fn(async (_sql: Prisma.Sql) => 1),
     $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>): Promise<unknown> => fn(db)),
   };
   const record = jest.fn().mockResolvedValue(undefined);
@@ -139,10 +144,11 @@ describe('the reopen carries the money the shop reopens with (docs/63)', () => {
     expect(setting.db.dailyClosing.updateMany).not.toHaveBeenCalled();
   });
 
-  it('a day changed meanwhile: refused, and the decision is not written either', async () => {
+  it('a day changed meanwhile: refused by name — refresh_required — and the decision is not written either', async () => {
     const { svc, db } = build({ owner: true, won: 0 });
     const refusal = await svc.reopen({ openingMoney: { clientUuid: KEY, decision: 'keep' } }).catch((e: unknown) => e);
     expect(refusal).toBeInstanceOf(ConflictException);
+    expect((refusal as ConflictException).getResponse()).toEqual({ code: 'refresh_required', message: 'This day changed while you were reopening it' });
     expect(db.openingDecision.create).not.toHaveBeenCalled();
   });
 
@@ -247,6 +253,30 @@ describe('the Owner’s review of a carried opening (docs/63)', () => {
   it('is the Owner’s alone', async () => {
     const { svc } = build({ opening: carried });
     await expect(svc.reviewOpening({ clientUuid: KEY, decision: 'keep' })).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('takes the day’s lock in its transaction and moves the day’s money version, before the decision is written (D159)', async () => {
+    const { svc, db } = build({ owner: true, opening: carried });
+    await svc.reviewOpening({ clientUuid: KEY, decision: 'set', cashAmount: 3000 });
+    const lock = db.$queryRaw.mock.calls[0][0];
+    expect(lock.sql).toMatch(/SELECT status FROM daily_closings\s+WHERE company_id = \? AND branch_id = \? AND closing_date = \?\s+FOR UPDATE/);
+    expect(lock.values).toEqual([companyId, branchId, DAY]);
+    expect(db.$executeRaw).toHaveBeenCalledTimes(1);
+    expect(db.$executeRaw.mock.calls[0][0].sql).toMatch(/UPDATE daily_closings SET money_version = money_version \+ 1/);
+    expect(db.$executeRaw.mock.calls[0][0].values).toEqual([companyId, branchId, DAY]);
+    expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(db.openingDecision.create.mock.invocationCallOrder[0]);
+  });
+
+  it('on a day already closed is refused — day_already_closed — and nothing is written or moved (D159)', async () => {
+    const { svc, db } = build({ owner: true, opening: carried, dayStatus: 'locked' });
+    const refusal = await svc.reviewOpening({ clientUuid: KEY, decision: 'keep' }).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(ConflictException);
+    expect((refusal as ConflictException).getResponse()).toEqual({
+      code: 'day_already_closed',
+      message: `${DAY} is already closed for this branch. Review the opening once the day is reopened.`,
+    });
+    expect(db.openingDecision.create).not.toHaveBeenCalled();
+    expect(db.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('a second review that lost the race stands down: the first one stands', async () => {

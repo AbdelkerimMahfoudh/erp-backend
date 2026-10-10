@@ -10,10 +10,10 @@ import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayKey } from '../common/utils/date.util';
 import { dateKey, BusinessDayService, dateValue } from '../common/business-day/business-day.service';
+import { ClosingService } from '../closing/closing.service';
 import {
   assertAmount,
   assertClassAndDueDate,
-  assertDayOpen,
   assertDecidable,
   assertMethodAndAccount,
   assertSalaryIsFixed,
@@ -60,6 +60,7 @@ export class ExpensesService {
     @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
     @Inject(STORAGE_PROVIDER) private readonly storage: StorageProvider,
     private readonly businessDay: BusinessDayService,
+    private readonly closing: ClosingService,
   ) {}
 
   private has(permission: string): boolean {
@@ -209,10 +210,6 @@ export class ExpensesService {
      * report without anybody reopening it, so it is refused the same way (D10).
      */
     const landsOn = expense.expenseClass === 'fixed' && expense.dueDate ? dateKey(expense.dueDate) : day;
-    const closing = await this.db.dailyClosing.findUnique({
-      where: { branchId_closingDate: { branchId: expense.branchId!, closingDate: dateValue(landsOn) } },
-    });
-    assertDayOpen(closing, landsOn);
 
     /**
      * The confirmation and the request to recompute the day it lands on commit
@@ -233,6 +230,12 @@ export class ExpensesService {
         },
       });
       if (changed.count > 0) {
+        /**
+         * The day it lands on, locked as the close locks it (D159), after the expense's own row: a closed day refuses
+         * the confirmation and rolls it back, an open one — and, for a fixed expense due on an earlier day, every
+         * later day whose opening it moves — is told money moved, so a close that read it before is refused.
+         */
+        await this.closing.lockDayForMoneyTx(tx, { branchId: expense.branchId!, businessDate: landsOn, operation: 'expense_confirmation' });
         await requestRollupTx(tx as never, [
           { kind: 'daily', companyId, branchId: expense.branchId!, day: landsOn, cause: 'expense_confirmed', sourceId: expense.id },
         ]);

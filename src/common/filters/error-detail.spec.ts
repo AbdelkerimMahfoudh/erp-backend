@@ -197,6 +197,22 @@ describe('per-item detail survives the filter', () => {
     expect(runFilter(new ForbiddenException({ code: 'ENTITLEMENT_SUSPENDED', message: 'm', state: 'cancelled' }))).toMatchObject({ state: 'cancelled' });
   });
 
+  it('a close refused on figures that moved carries the report as it stands, and what to count again (D159)', () => {
+    // Without these the phone could only say "something changed": it reloads from `report` and opens the count step for exactly these.
+    const report = { reportVersion: '0123456789abcdef', expected: { cash: { movedSinceCount: true } } };
+    const moved = runFilter(
+      new ConflictException({
+        code: 'money_moved_after_count',
+        message: 'Money moved after counting began.',
+        channels: [{ key: 'cash:NONE', label: 'Cash' }],
+        floats: [{ providerId: 'p1', label: 'Bankily' }],
+        report,
+      }),
+    );
+    expect(moved).toMatchObject({ code: 'money_moved_after_count', channels: [{ key: 'cash:NONE', label: 'Cash' }], floats: [{ providerId: 'p1', label: 'Bankily' }], report });
+    expect(runFilter(new ConflictException({ code: 'report_changed', message: 'no', report }))).toMatchObject({ code: 'report_changed', report });
+  });
+
   it('still reveals nothing about an unexpected error', () => {
     const body = runFilter(new Error('connect ECONNREFUSED 127.0.0.1:3306'));
     expect(body.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);

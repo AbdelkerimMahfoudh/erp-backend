@@ -33,6 +33,10 @@ import { activityNotSubscribed, agentActivityAllowed, branchActivityOf } from '.
 import { floatPosition } from '../agent/agent-rules';
 import { readFloatInputs } from '../agent/float-positions';
 import { floatDifference, floatsToCount, listedFloats, type FloatCountState, type FloatProviderRow } from './float-counts';
+import { assertDayOpen as assertExpenseDayOpen } from '../expenses/expense-rules';
+import { assertApprovalDayOpen } from '../returns/return-workflow';
+import { assertConfirmationDayOpen } from '../returns/refund-payout';
+import { bumpLaterOpenDaysTx, bumpMoneyVersionTx } from './money-version';
 import { OpenDayDto } from './dto/open-day.dto';
 import { ReviewOpeningDto } from './dto/review-opening.dto';
 import {
@@ -67,6 +71,7 @@ import {
   canOpen,
   canReopen,
   closeKindOf,
+  closeRequestHash,
   counterRefusal,
   DOOR_OPENS,
   doorState,
@@ -91,7 +96,10 @@ import { MoneyAnchorsService } from './money-anchors.service';
 import type { OpenedAnchor, TrackedMethod } from './money-positions';
 import {
   assembleReport,
+  figureMoved,
+  floatSinceCount,
   gateReport,
+  movedCounts,
   reportInvariants,
   reportVersion,
   type ChannelCountState,
@@ -99,9 +107,11 @@ import {
   type OpeningCash,
   type ReportCashSet,
   type ReportFloatInput,
+  type ReportInputs,
   type ReportPermissions,
 } from './closing-report';
 import {
+  agentActivitySince,
   cancellationFigures,
   channelSplits,
   collectedForSales,
@@ -159,6 +169,59 @@ function storeClosed(day: string, operation: CounterOperation, reason: CounterRe
     businessDate: day,
   });
 }
+
+/**
+ * The money writes that do not pass the counter (D159, docs/73 §11.2): none waits for the door to open — none ever
+ * did — but each takes the day's lock and moves its money version, so a close that read the day before it is refused
+ * under its own lock.
+ */
+export type MoneyOperation = 'expense_confirmation' | 'refund_confirmation' | 'return_approval' | 'backdated_payment' | 'opening_review' | 'float_set';
+
+/**
+ * How a locked day refuses each of them: the writer's own rule, with the code and the message it has always answered
+ * (the phone already handles each), now decided on the row the lock returns. A later payment dated on an earlier day
+ * has always been refused by the expense's rule. The Owner's review of an opening was never refused, and wrote onto a
+ * closed day's drawer; it now meets the same `day_already_closed`. The Owner's float set was never refused by a
+ * closed day, and still is not: null.
+ */
+const LOCKED_DAY_RULE: Record<MoneyOperation, ((closing: { isLocked: boolean }, day: string) => void) | null> = {
+  expense_confirmation: assertExpenseDayOpen,
+  backdated_payment: assertExpenseDayOpen,
+  refund_confirmation: assertConfirmationDayOpen,
+  return_approval: assertApprovalDayOpen,
+  opening_review: (closing, day) => {
+    // The review moves the day's drawer from its own instant; a closed day's drawer is the one it was closed with.
+    if (closing.isLocked) {
+      throw new ConflictException({
+        code: 'day_already_closed',
+        message: `${day} is already closed for this branch. Review the opening once the day is reopened.`,
+      });
+    }
+  },
+  float_set: null,
+};
+
+/** A day already signed off, met by a close or a count: reopening it is an explicit act (0076), never a side effect. */
+function alreadyClosed(day: string): ConflictException {
+  return new ConflictException({ code: 'already_closed', message: `Day ${day} is already closed for this branch` });
+}
+
+/** The channel a count names among the day's, or the refusal: not part of this day, or nothing to count it against. */
+function countTarget(channels: ChannelRow[], dto: RecordCountDto): ChannelRow {
+  const target = channels.find((c) => c.channel === dto.channel && (c.accountId ?? null) === (dto.accountId ?? null));
+  if (!target) throw new NotFoundException('That channel is not part of this day at this branch');
+  if (!isCountable(target)) throw new BadRequestException('Unattributed money has no balance to count against');
+  return target;
+}
+
+/**
+ * Money that landed on the day after the close read its report, found under the close's lock (D159). Thrown inside
+ * the transaction so it rolls back, and answered with the fresh report once it has.
+ */
+class ChangedUnderLock extends Error {}
+
+/** The client a count's transaction reads the floats through. */
+type FloatCountReader = Pick<TenantPrisma, 'branch' | 'agentProvider' | 'agentFloatCount' | 'agentPosition' | 'agentMovement'>;
 
 interface RecordedCount {
   id: Buffer;
@@ -351,7 +414,8 @@ export class ClosingService {
    * channel is closed as NOT VERIFIED — never as counted, matched or zero — and
    * that requires the person closing to acknowledge it with a reason. The close
    * stores the whole report in its event, so every earlier close keeps the figures
-   * it was made on, and it is safe to retry: the same `clientUuid` replays it.
+   * it was made on, and it is safe to retry: the same `clientUuid` with the same
+   * request replays it (D159).
    */
   async close(dto: CreateClosingDto) {
     const companyId = this.tenant.companyId();
@@ -375,9 +439,17 @@ export class ClosingService {
     /**
      * A double tap, or a retry after a network failure whose first attempt did
      * land: the same idempotency key on a day it already closed returns that
-     * close instead of a 409 the person cannot interpret.
+     * close instead of a 409 the person cannot interpret. The key is bound to
+     * what it asked (D159): the same key asking something else is refused.
      */
-    const replayed = await this.replayClose(branchId, dayDate, dto.clientUuid, perms, day, today);
+    const requestHash = closeRequestHash({
+      date: day,
+      attestChecked: dto.attestChecked,
+      acknowledgeUnverified: dto.acknowledgeUnverified,
+      reason: dto.reason,
+      countedCash: dto.countedCash,
+    });
+    const replayed = await this.replayClose(branchId, dayDate, dto.clientUuid, requestHash, perms, day, today);
     if (replayed) return replayed;
 
     /**
@@ -391,10 +463,10 @@ export class ClosingService {
       include: { channelCounts: true },
     });
     if (already?.status === 'locked') {
-      throw new ConflictException({ code: 'already_closed', message: `Day ${day} is already closed for this branch` });
+      throw alreadyClosed(day);
     }
     const kind = closeKindOf(already);
-    if (kind === 'already_locked') throw new ConflictException({ code: 'already_closed', message: `Day ${day} is already closed for this branch` });
+    if (kind === 'already_locked') throw alreadyClosed(day);
 
     /**
      * The closing row exists before anything is locked, so a sale committing
@@ -425,7 +497,7 @@ export class ClosingService {
         include: { channelCounts: true },
       });
       if (!already) throw new ConflictException({ code: 'refresh_required', message: 'This day changed while you were closing it' });
-      if (already.status === 'locked') throw new ConflictException({ code: 'already_closed', message: `Day ${day} is already closed for this branch` });
+      if (already.status === 'locked') throw alreadyClosed(day);
     }
     const closingId = already.id;
 
@@ -449,6 +521,22 @@ export class ClosingService {
       throw new ConflictException({
         code: 'report_changed',
         message: 'The figures changed while you were reviewing them. Review the new report before closing.',
+        report: this.gatedFor(built.report, built.version, perms, day === today),
+      });
+    }
+    /**
+     * Money moved after somebody counted (D159): a drawer, an account or a float whose figure changed since its count
+     * would close with a difference nobody has. The close waits for each to be counted again — named, with the report
+     * that says what moved — on every branch: a sale paid in cash after the drawer was counted moves it as surely as
+     * an exchange does.
+     */
+    const moved = movedCounts(built.report);
+    if (moved.channels.length + moved.floats.length > 0) {
+      throw new ConflictException({
+        code: 'money_moved_after_count',
+        message: 'Money moved after counting began. Count again what changed before closing.',
+        channels: moved.channels,
+        floats: moved.floats,
         report: this.gatedFor(built.report, built.version, perms, day === today),
       });
     }
@@ -638,25 +726,26 @@ export class ClosingService {
             close: { ...built.report.close, unverified, verified: verification.verified, requiresAcknowledgement: unverified.length > 0 },
           },
     );
-    const frozenVersion = reportVersion(frozenReport);
+    const frozenVersion = reportVersion(frozenReport, built.moneyVersion);
     const alreadyVersion = already.version;
 
     let result: { eventId: Buffer; reopenCount: number };
     try {
       result = await this.db.$transaction(async (tx) => {
         /**
-         * Lock the row every sale and correction on this day also locks, then check
-         * that nothing moved since the report was read. Anything that did is in the
+         * Lock the row every money write on this day also locks, then check that
+         * nothing moved since the report was read. Anything that did is in the
          * fresh report the person is sent back to — never silently outside a close.
+         * The money version is read BY the locking statement (D159): every writer
+         * bumps it under this lock, the ones a count and a sum cannot see too — a
+         * write that leaves both as they were, money dated on an earlier day that
+         * moved this day's opening, the Owner's review of the drawer.
          */
-        await tx.$queryRaw(Prisma.sql`
-          SELECT id FROM daily_closings WHERE id = ${closingId} FOR UPDATE`);
+        const [row] = await tx.$queryRaw<{ money_version: number }[]>(Prisma.sql`
+          SELECT money_version FROM daily_closings WHERE id = ${closingId} FOR UPDATE`);
         const fingerprintNow = await movementFingerprint(tx, companyId, branchId, day);
-        if (fingerprintNow !== fingerprintBefore) {
-          throw new ConflictException({
-            code: 'report_changed',
-            message: 'Something was recorded on this day while you were closing it. Review the new report before closing.',
-          });
+        if (Number(row?.money_version ?? 0) !== built.moneyVersion || fingerprintNow !== fingerprintBefore) {
+          throw new ChangedUnderLock('Something was recorded on this day while you were closing it. Review the new report before closing.');
         }
 
         const snapshot = {
@@ -860,6 +949,7 @@ export class ClosingService {
               attestedCount: attested.length,
               verification,
               clientUuid: dto.clientUuid ?? null,
+              requestHash,
               reportVersion: frozenVersion,
               report: frozenReport,
               ...(sinceFirst ? { sinceFirstCount: sinceFirst } : {}),
@@ -885,13 +975,18 @@ export class ClosingService {
         return { eventId, reopenCount };
       });
     } catch (e) {
+      // Rolled back: the person is sent the report as it stands now, built after the money that moved, as before the lock.
+      if (e instanceof ChangedUnderLock) {
+        const fresh = await this.buildReport(companyId, branchId, day, today, described.timezone);
+        throw new ConflictException({ code: 'report_changed', message: e.message, report: this.gatedFor(fresh.report, fresh.version, perms, day === today) });
+      }
       /**
        * Two taps at the same moment with the same key: the first closed the day, so
        * the second meets the lock and the version guard. That is not a failure —
        * it is the same close — so it is answered with it.
        */
       if (e instanceof ConflictException) {
-        const again = await this.replayClose(branchId, dayDate, dto.clientUuid, perms, day, today);
+        const again = await this.replayClose(branchId, dayDate, dto.clientUuid, requestHash, perms, day, today);
         if (again) return again;
       }
       throw e;
@@ -940,8 +1035,20 @@ export class ClosingService {
     return { ...gateReport(report, perms, canClose), reportVersion: version };
   }
 
-  /** The same idempotency key on a day it already closed returns that close. */
-  private async replayClose(branchId: Buffer, dayDate: Date, clientUuid: string | undefined, perms: ReportPermissions, day: string, today: string) {
+  /**
+   * The same idempotency key on a day it already closed returns that close — when it asks the same thing (D159). The
+   * same key with another date or statement is not a retry and is refused; a close stored before the key was bound
+   * to its request carries no hash, and replays on the key alone as it always did.
+   */
+  private async replayClose(
+    branchId: Buffer,
+    dayDate: Date,
+    clientUuid: string | undefined,
+    requestHash: string,
+    perms: ReportPermissions,
+    day: string,
+    today: string,
+  ) {
     if (!clientUuid) return null;
     const row = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
@@ -955,6 +1062,9 @@ export class ClosingService {
     });
     const p = (event?.payload ?? null) as Record<string, unknown> | null;
     if (!p || p.clientUuid !== clientUuid) return null;
+    if (typeof p.requestHash === 'string' && p.requestHash !== requestHash) {
+      throw new ConflictException({ code: 'idempotency_conflict', message: 'That request id was already used for a different close.' });
+    }
     const stored = snapshotReport(p);
     if (!stored) return null;
     return {
@@ -1419,10 +1529,16 @@ export class ClosingService {
   /** Reads every figure of (branch, date) and assembles the full, ungated report. */
   private async buildReport(companyId: Buffer, branchId: Buffer, day: string, today: string, timezone: string) {
     const dayDate = dateValue(day);
+    /**
+     * The day's row first, with its money version (D159), and every figure after it: money landing while the figures
+     * are read moves the version past the one read here, so the close — comparing it under its lock — refuses rather
+     * than locking figures that may predate it.
+     */
     const closing = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
       include: { channelCounts: true },
     });
+    const moneyVersion = closing?.moneyVersion ?? 0;
     const drawer = await this.dayChannels(companyId, branchId, day);
     const opening = drawer.opening;
     const [channels, splits, sales, returns, cancellations, collected, expenses, expenseReversals, pending, discrepancies, active, floats] = await Promise.all([
@@ -1438,9 +1554,11 @@ export class ClosingService {
       openDiscrepancies(this.db, companyId, branchId),
       closing ? Promise.resolve(true) : day < today ? dayActivity(this.db, companyId, branchId, day) : Promise.resolve(true),
       // The provider floats of an agent branch (D154); none for an electronics-only one.
-      this.floatCountsFor(branchId, closing?.id ?? null, day, today),
+      this.floatCountsFor(branchId, closing, day, today),
     ]);
     const reopenedAt = closing?.status === 'reopened' ? closing.reopenedAt : null;
+    // A locked day is read as it was closed: its counts are compared with nothing (D159).
+    const compare = closing?.status !== 'locked';
     const counts = new Map<string, ChannelCountState>();
     for (const c of closing?.channelCounts ?? []) {
       const key = keyOf({ channel: c.channel, accountId: c.receivingAccountId ? binToUuid(c.receivingAccountId) : null });
@@ -1450,6 +1568,7 @@ export class ClosingService {
         counted,
         countedAt: c.countedAt,
         skipReason: c.skipReason,
+        ...(compare ? { expectedAtCount: round2(num(c.expected)) } : {}),
       });
     }
     const standing = standingOf(closing ? { status: closing.status, businessDate: day } : null, today, active, day);
@@ -1465,7 +1584,7 @@ export class ClosingService {
       previousDay = { businessDate: previousDate, standing: standingOf(row, today, prevActive, previousDate), needsReview: previousDayNeedsReview(row, prevActive) };
     }
     const window = dayWindowOf(day, timezone);
-    const report = assembleReport({
+    const inputs: ReportInputs = {
       date: day,
       today,
       timezone,
@@ -1487,12 +1606,35 @@ export class ClosingService {
       openDiscrepancies: discrepancies,
       previousDay,
       closeKind: closeKindOf(closing),
-    });
+    };
+    let report = assembleReport(inputs);
+    /**
+     * A count whose figure moved (D159): what the agent counter recorded since the earliest such count, so the phone
+     * can say why — assembled again with it, the figures being the same.
+     */
+    const moved = movedCounts(report);
+    const movedAt = [
+      ...moved.channels.map((c) => counts.get(c.key)?.countedAt?.getTime()),
+      ...moved.floats.map((f) => floats.rows.find((r) => r.providerId === f.providerId)?.countedAt).map((at) => (at ? Date.parse(at) : undefined)),
+    ].filter((t): t is number => t !== undefined);
+    if (movedAt.length > 0) {
+      report = assembleReport({ ...inputs, agentSinceCount: await agentActivitySince(this.db, companyId, branchId, day, new Date(Math.min(...movedAt))) });
+    }
     const invariantFailures = reportInvariants(report, channels, splits, cancellations.ofTheseSales);
     if (invariantFailures.length > 0) {
       this.logger.error(`Daily closing report for ${day} does not reconcile: ${invariantFailures.join('; ')}`);
     }
-    return { report, version: reportVersion(report), invariantFailures, channels, closing, opening, cashAdjustment: drawer.adjustment, floats };
+    return {
+      report,
+      version: reportVersion(report, moneyVersion),
+      moneyVersion,
+      invariantFailures,
+      channels,
+      closing,
+      opening,
+      cashAdjustment: drawer.adjustment,
+      floats,
+    };
   }
 
   // ── Reopening ───────────────────────────────────────────────────────────
@@ -1562,7 +1704,7 @@ export class ClosingService {
             version: { increment: 1 },
           },
         });
-        if (won.count === 0) throw new ConflictException('refresh_required: this day changed while you were reopening it');
+        if (won.count === 0) throw new ConflictException({ code: 'refresh_required', message: 'This day changed while you were reopening it' });
         await tx.closingEvent.create({
           data: {
             id: eventId,
@@ -1641,6 +1783,8 @@ export class ClosingService {
     this.requireKeepable(verdict, position);
     try {
       await this.db.$transaction(async (tx) => {
+        // The review moves today's drawer (D159): under the day's lock, refused on a closed day, and the day's money moved.
+        await this.lockDayForMoneyTx(tx, { branchId, businessDate: day, operation: 'opening_review' });
         await this.recordDecisionTx(tx, {
           companyId,
           branchId,
@@ -2073,10 +2217,11 @@ export class ClosingService {
    * takes (docs/51 §12.6): a close that committed after the plain read makes
    * this wait, then refuse, and the whole sale or receipt rolls back. The status
    * is read BY the locking statement — under MySQL's repeatable read a later
-   * plain read could answer from the transaction's older snapshot.
+   * plain read could answer from the transaction's older snapshot. Once open,
+   * the day's money version moves under the same lock (D159).
    */
   async assertCounterOpenTx(
-    tx: Pick<TenantPrisma, '$queryRaw'>,
+    tx: Pick<TenantPrisma, '$queryRaw' | '$executeRaw'>,
     args: { branchId: Buffer; businessDate: string; operation: CounterOperation },
   ): Promise<void> {
     const companyId = this.tenant.companyId();
@@ -2097,6 +2242,34 @@ export class ClosingService {
       ).length > 0;
     const refusal = counterRefusal(row?.status, opened);
     if (refusal) throw storeClosed(args.businessDate, args.operation, refusal);
+    await bumpMoneyVersionTx(tx, { companyId, branchId: args.branchId, businessDate: args.businessDate });
+  }
+
+  /**
+   * The day's lock for a money write that does not pass the counter (D159, docs/73 §11.2): an expense or a refund
+   * confirmed, a return approved, a payment dated on an earlier day, the Owner's review of an opening, a float set.
+   * Taken after the writer's own row locks, as the counter's is. A locked day refuses the write by the writer's own
+   * rule (`LOCKED_DAY_RULE`); otherwise the day's money version moves, and — for money dated on an earlier day — so
+   * does every later day still open, whose opening it moved. A float set on a closed day is not refused and moves
+   * nothing: the day's floats were counted before it locked, and its figures are the ones it was closed with.
+   */
+  async lockDayForMoneyTx(
+    tx: Pick<TenantPrisma, '$queryRaw' | '$executeRaw'>,
+    args: { branchId: Buffer; businessDate: string; operation: MoneyOperation },
+  ): Promise<void> {
+    const companyId = this.tenant.companyId();
+    const [row] = await tx.$queryRaw<{ status: string }[]>(Prisma.sql`
+      SELECT status FROM daily_closings
+       WHERE company_id = ${companyId} AND branch_id = ${args.branchId} AND closing_date = ${args.businessDate}
+       FOR UPDATE`);
+    const isLocked = row?.status === 'locked';
+    const rule = LOCKED_DAY_RULE[args.operation];
+    if (isLocked && !rule) return;
+    rule?.({ isLocked }, args.businessDate);
+    await bumpMoneyVersionTx(tx, { companyId, branchId: args.branchId, businessDate: args.businessDate });
+    if (args.businessDate < (await this.businessDay.today(args.branchId))) {
+      await bumpLaterOpenDaysTx(tx, { companyId, branchId: args.branchId, after: args.businessDate });
+    }
   }
 
   /**
@@ -2452,12 +2625,24 @@ export class ClosingService {
       ]),
     );
 
+    const reopenedAt = closing?.status === 'reopened' ? closing.reopenedAt : null;
     const rows = channels.map((ch) => {
       const saved = recorded.get(keyOf(ch));
       const counted = saved?.counted == null ? null : round2(num(saved.counted));
+      const countable = isCountable(ch);
+      /**
+       * The figure a fresh count was taken against, while the day is open (D159): money that moved after it makes the
+       * count stale, and the close waits for it to be taken again.
+       */
+      const fresh =
+        countable &&
+        closing?.status !== 'locked' &&
+        !!saved &&
+        verificationOf({ counted, isSkipped: saved.isSkipped, skipReason: saved.skipReason, countedAt: saved.countedAt }, reopenedAt) === 'counted';
+      const expectedAtCount = saved && fresh ? round2(num(saved.expected)) : null;
       return {
         ...ch,
-        countable: isCountable(ch),
+        countable,
         counted,
         // Recomputed against the CURRENT expected figure: while the day is
         // open the expected figure still moves, so a stored difference is stale.
@@ -2467,17 +2652,20 @@ export class ClosingService {
         countedAt: saved?.countedAt ?? null,
         /** True when this count predates the reopen and must be taken again. */
         stale: !!(closing?.status === 'reopened' && saved && saved.countedAt && closing.reopenedAt && saved.countedAt < closing.reopenedAt),
+        expectedAtCount,
+        /** Money moved after this count: it no longer describes the channel, and must be taken again (D159). */
+        movedSinceCount: expectedAtCount !== null && figureMoved(ch.expected, expectedAtCount),
       };
     });
 
     const fresh = freshCounts(
       rows.map((r) => ({ key: keyOf(r), countable: r.countable, counted: r.counted, isSkipped: r.isSkipped, countedAt: r.countedAt })),
-      closing?.status === 'reopened' ? closing.reopenedAt : null,
+      reopenedAt,
     );
     const cashRow = rows.find((r) => r.channel === 'cash');
     const savedCash = recorded.get('cash:NONE');
     // The provider floats of an agent branch (D154): listed beside the channels, counted or skipped before the lock.
-    const floats = await this.floatCountsFor(branchId, closing?.id ?? null, day, today);
+    const floats = await this.floatCountsFor(branchId, closing, day, today);
     const floatsOutstanding = floatsToCount(floats.providers, floats.counts).length;
     // A day behind the boundary with no closing row needs review if anything happened on it, and is inactive if nothing did (D8).
     const active = closing ? true : day < today ? await dayActivity(this.db, companyId, branchId, day) : true;
@@ -2496,8 +2684,8 @@ export class ClosingService {
       status: closing?.status ?? 'counting',
       isLocked: closing?.isLocked ?? false,
       channels: rows,
-      /** The floats of an agent branch, each with its difference; empty for an electronics-only branch. */
-      floats: floats.rows.map((f) => ({ ...f, difference: floatDifference(f.expected, f.counted) })),
+      /** The floats of an agent branch, each with its difference and whether it moved since its count; empty for an electronics-only branch. */
+      floats: floats.rows.map((f) => ({ ...f, difference: floatDifference(f.expected, f.counted), ...floatSinceCount(f) })),
       outstanding: rows.filter((r) => r.countable && r.counted === null && !r.isSkipped).length + floatsOutstanding,
       complete: countingComplete(rows) && fresh.complete && floatsOutstanding === 0,
       freshCountRequired: closing?.status === 'reopened' && !fresh.complete,
@@ -2685,7 +2873,8 @@ export class ClosingService {
    * Record one channel's count (E-CP1) — the `closing.count` path. The day
    * stays open and fully correctable until somebody with `closing.perform`
    * signs it off. On a reopened day the count is the fresh one the reclose
-   * needs (0076).
+   * needs (0076). One transaction behind the day's lock (D159): a close that
+   * committed first refuses the count, one that comes after waits for it.
    */
   async recordCount(dto: RecordCountDto) {
     const companyId = this.tenant.companyId();
@@ -2717,151 +2906,127 @@ export class ClosingService {
 
     const existing = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
+      select: { id: true, status: true },
     });
     /**
      * A locked day is signed off. Reopening it is an explicit act (0076), never
      * a side effect (docs/61); a count is no exception, so it is refused until then.
      */
-    if (existing?.status === 'locked') {
-      throw new ConflictException(`Day ${day} is already closed for this branch`);
-    }
+    if (existing?.status === 'locked') throw alreadyClosed(day);
 
     // The same figures the live view and the report show, the amount set when the shop opened included (docs/63).
-    const { channels } = await this.dayChannels(companyId, branchId, day);
-    const target = channels.find(
-      (c) => c.channel === dto.channel && (c.accountId ?? null) === (dto.accountId ?? null),
-    );
-    if (!target) {
-      throw new NotFoundException('That channel is not part of this day at this branch');
-    }
-    if (!isCountable(target)) {
-      throw new BadRequestException('Unattributed money has no balance to count against');
-    }
-
+    countTarget((await this.dayChannels(companyId, branchId, day)).channels, dto);
     if (dto.channel === 'cash' && dto.counted != null && dto.counted < 0) {
       throw new BadRequestException('A drawer cannot hold less than nothing');
     }
     const counted = dto.counted == null ? null : round2(dto.counted);
-    const difference = counted == null ? null : round2(counted - target.expected);
     const userId = this.tenant.userId() ?? null;
-
-    const closingId = existing
-      ? existing.id
-      : await this.db.dailyClosing
-          .create({
-            data: {
-              id: newUuidV7Bin(),
-              companyId,
-              branchId,
-              closingDate: dayDate,
-              // Nothing is counted until somebody counts (0078): NULL, never a placeholder zero.
-              expectedCash: 0,
-              countedCash: null,
-              difference: null,
-              totalSales: 0,
-              totalProfit: 0,
-              status: 'counting',
-              isLocked: false,
-            },
-          })
-          .then((c) => c.id);
-
+    const closingId = existing?.id ?? (await this.createDayRow(companyId, branchId, dayDate));
     const accountBin = dto.accountId ? uuidToBin(dto.accountId) : null;
-    const prior = await this.db.closingChannelCount.findFirst({
-      where: { closingId, channel: dto.channel, receivingAccountId: accountBin },
-    });
 
-    const payload = {
-      labelSnapshot: target.labelSnapshot,
-      salesIn: target.salesIn,
-      refundsOut: target.refundsOut,
-      supplierOut: target.supplierOut,
-      expensesOut: target.expensesOut,
-      correctionsIn: target.correctionsIn,
-      correctionsOut: target.correctionsOut,
-      agentIn: target.agentIn,
-      agentOut: target.agentOut,
-      openingBalance: target.openingBalance,
-      expected: target.expected,
-      counted,
-      difference,
-      isSkipped: dto.skip ?? false,
-      skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
-      countedById: userId,
-      countedAt: now,
-    };
+    const nextStatus = await this.db.$transaction(async (tx) => {
+      const row = await this.lockCountDayTx(tx, closingId, day);
+      /**
+       * The figure the count is held against, read under the day's lock (D159): no money on this day commits while
+       * it is held, so the expected figure stored is the one the person counted against — and money landing after it
+       * moves the day, so the count reads as moved until it is taken again.
+       */
+      const { channels } = await this.dayChannels(companyId, branchId, day);
+      const target = countTarget(channels, dto);
+      const difference = counted == null ? null : round2(counted - target.expected);
+      const prior = await tx.closingChannelCount.findFirst({
+        where: { closingId, channel: dto.channel, receivingAccountId: accountBin },
+      });
 
-    if (prior) {
-      await this.db.closingChannelCount.update({ where: { id: prior.id }, data: payload });
-    } else {
-      await this.db.closingChannelCount.create({
+      const payload = {
+        labelSnapshot: target.labelSnapshot,
+        salesIn: target.salesIn,
+        refundsOut: target.refundsOut,
+        supplierOut: target.supplierOut,
+        expensesOut: target.expensesOut,
+        correctionsIn: target.correctionsIn,
+        correctionsOut: target.correctionsOut,
+        agentIn: target.agentIn,
+        agentOut: target.agentOut,
+        openingBalance: target.openingBalance,
+        expected: target.expected,
+        counted,
+        difference,
+        isSkipped: dto.skip ?? false,
+        skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
+        countedById: userId,
+        countedAt: now,
+      };
+
+      if (prior) {
+        await tx.closingChannelCount.update({ where: { id: prior.id }, data: payload });
+      } else {
+        await tx.closingChannelCount.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            closingId,
+            channel: dto.channel,
+            receivingAccountId: accountBin,
+            ...payload,
+          },
+        });
+      }
+
+      /**
+       * `counted` once nothing countable is outstanding — a signal to whoever
+       * signs the day off, never a lock. A reopened day stays `reopened` until it
+       * is closed again; only `counting` moves forward here. Never onto a locked
+       * row: the lock above refused one, and the condition says so again.
+       */
+      const done = row.status !== 'reopened' && (await this.countingDone(tx, { branchId, closingId, reopenedAt: row.reopenedAt, channels }));
+      const status = row.status === 'reopened' ? 'reopened' : done ? 'counted' : 'counting';
+      await tx.dailyClosing.updateMany({
+        where: { id: closingId, status: { not: 'locked' } },
+        data: { status, countedById: userId, countedAt: now, version: { increment: 1 } },
+      });
+
+      await tx.closingEvent.create({
         data: {
           id: newUuidV7Bin(),
           companyId,
+          branchId,
+          businessDate: dayDate,
           closingId,
-          channel: dto.channel,
-          receivingAccountId: accountBin,
-          ...payload,
+          kind: 'count_saved',
+          at: now,
+          actorId: userId,
+          payload: {
+            channel: dto.channel,
+            accountId: dto.accountId ?? null,
+            label: target.labelSnapshot,
+            counted,
+            expected: target.expected,
+            difference,
+            skipped: dto.skip ?? false,
+            // Kept here as well as on the row: a later count, or a close on the person's word, replaces the row's.
+            skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
+          } as Prisma.InputJsonValue,
         },
       });
-    }
 
-    /**
-     * `counted` once nothing countable is outstanding — a signal to whoever
-     * signs the day off, never a lock. A reopened day stays `reopened` until it
-     * is closed again; only `counting` moves forward here.
-     */
-    const view = await this.openView(day);
-    const nextStatus = existing?.status === 'reopened' ? 'reopened' : view.complete ? 'counted' : 'counting';
-    await this.db.dailyClosing.update({
-      where: { id: closingId },
-      data: {
-        status: nextStatus,
-        countedById: userId,
-        countedAt: now,
-        version: { increment: 1 },
-      },
-    });
-
-    await this.db.closingEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        branchId,
-        businessDate: dayDate,
-        closingId,
-        kind: 'count_saved',
-        at: now,
-        actorId: userId,
-        payload: {
+      await this.audit.recordTx(tx, {
+        entityType: 'ClosingChannelCount',
+        entityId: closingId,
+        action: prior ? 'update' : 'create',
+        after: {
+          day,
           channel: dto.channel,
-          accountId: dto.accountId ?? null,
-          label: target.labelSnapshot,
+          account: dto.accountId ?? null,
           counted,
           expected: target.expected,
           difference,
           skipped: dto.skip ?? false,
-          // Kept here as well as on the row: a later count, or a close on the person's word, replaces the row's.
           skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
-        } as Prisma.InputJsonValue,
-      },
-    });
-
-    await this.audit.record({
-      entityType: 'ClosingChannelCount',
-      entityId: closingId,
-      action: prior ? 'update' : 'create',
-      after: {
-        day,
-        channel: dto.channel,
-        account: dto.accountId ?? null,
-        counted,
-        expected: target.expected,
-        difference,
-        skipped: dto.skip ?? false,
-        skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
-      },
-      branchId,
+        },
+        branchId,
+      });
+      return status;
     });
 
     return { ...(await this.openView(day)), status: nextStatus };
@@ -2871,7 +3036,8 @@ export class ClosingService {
    * Record one provider float's count at the closing of an agent branch (D154, docs/73 §4.5) — the float's own
    * `recordCount`, on the same `closing.count` authority: the day stays open and correctable until somebody signs
    * it off. Expected is what the app tracked at this instant — unknown stays null, nothing is fabricated — and a
-   * difference, when both figures exist, becomes a question through the same rule as a channel's.
+   * difference, when both figures exist, becomes a question through the same rule as a channel's. One transaction
+   * behind the day's lock, as a channel's count (D159).
    */
   async recordFloatCount(date: string, dto: RecordFloatCountDto) {
     const companyId = this.tenant.companyId();
@@ -2898,56 +3064,39 @@ export class ClosingService {
     const provider = await this.db.agentProvider.findFirst({ where: { id: providerId }, select: { id: true, label: true } });
     if (!provider) throw new NotFoundException({ code: 'provider_not_found', message: 'That provider does not exist' });
 
-    const existing = await this.db.dailyClosing.findUnique({ where: { branchId_closingDate: { branchId, closingDate: dayDate } } });
+    const existing = await this.db.dailyClosing.findUnique({ where: { branchId_closingDate: { branchId, closingDate: dayDate } }, select: { id: true, status: true } });
     // A locked day is signed off: reopening it is an explicit act (0076), never a count's side effect.
-    if (existing?.status === 'locked') throw new ConflictException(`Day ${day} is already closed for this branch`);
+    if (existing?.status === 'locked') throw alreadyClosed(day);
 
     /**
      * The float as the app tracks it at the count instant — or, for a day behind the boundary, at that day's end,
      * as the drawer's figure is the day's — from the same read the Money card and the reports use.
      */
     const asOf = day === today ? now : (await this.businessDay.windowOf(day)).end;
-    const inputs = await readFloatInputs(this.db, { branchId, providerId, accountKind: 'provider', businessDate: day, asOf });
-    const expected = floatPosition(inputs.anchor, inputs.sinceAnchor).position;
     const counted = dto.counted == null ? null : round2(dto.counted);
-    const difference = floatDifference(expected, counted);
     const userId = this.tenant.userId() ?? null;
+    const closingId = existing?.id ?? (await this.createDayRow(companyId, branchId, dayDate));
 
-    const closingId = existing
-      ? existing.id
-      : await this.db.dailyClosing
-          .create({
-            data: {
-              id: newUuidV7Bin(),
-              companyId,
-              branchId,
-              closingDate: dayDate,
-              // Nothing is counted until somebody counts (0078): NULL, never a placeholder zero.
-              expectedCash: 0,
-              countedCash: null,
-              difference: null,
-              totalSales: 0,
-              totalProfit: 0,
-              status: 'counting',
-              isLocked: false,
-            },
-          })
-          .then((c) => c.id);
-
-    const prior = await this.db.agentFloatCount.findFirst({ where: { closingId, providerId }, select: { id: true } });
-    const rowId = prior?.id ?? newUuidV7Bin();
-    const payload = {
-      expected,
-      counted,
-      difference,
-      explanation: dto.explanation?.trim() || null,
-      isSkipped: dto.skip ?? false,
-      skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
-      countedById: userId,
-      countedAt: now,
-    };
+    let nextStatus: string;
     try {
-      await this.db.$transaction(async (tx) => {
+      nextStatus = await this.db.$transaction(async (tx) => {
+        const row = await this.lockCountDayTx(tx, closingId, day);
+        // Read under the day's lock (D159), so the expected figure stored is the one the float was counted against.
+        const inputs = await readFloatInputs(tx, { branchId, providerId, accountKind: 'provider', businessDate: day, asOf });
+        const expected = floatPosition(inputs.anchor, inputs.sinceAnchor).position;
+        const difference = floatDifference(expected, counted);
+        const prior = await tx.agentFloatCount.findFirst({ where: { closingId, providerId }, select: { id: true } });
+        const rowId = prior?.id ?? newUuidV7Bin();
+        const payload = {
+          expected,
+          counted,
+          difference,
+          explanation: dto.explanation?.trim() || null,
+          isSkipped: dto.skip ?? false,
+          skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
+          countedById: userId,
+          countedAt: now,
+        };
         if (prior) await tx.agentFloatCount.update({ where: { id: prior.id }, data: payload });
         else await tx.agentFloatCount.create({ data: { id: rowId, companyId, closingId, branchId, providerId, ...payload } });
         /**
@@ -2978,6 +3127,59 @@ export class ClosingService {
             },
           });
         }
+
+        // `counted` once nothing countable is outstanding — the floats included — a signal to the sign-off, never a lock.
+        const done =
+          row.status !== 'reopened' &&
+          (await this.countingDone(tx, { branchId, closingId, reopenedAt: row.reopenedAt, channels: (await this.dayChannels(companyId, branchId, day)).channels }));
+        const status = row.status === 'reopened' ? 'reopened' : done ? 'counted' : 'counting';
+        await tx.dailyClosing.updateMany({
+          where: { id: closingId, status: { not: 'locked' } },
+          data: { status, countedById: userId, countedAt: now, version: { increment: 1 } },
+        });
+
+        await tx.closingEvent.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            branchId,
+            businessDate: dayDate,
+            closingId,
+            kind: 'count_saved',
+            at: now,
+            actorId: userId,
+            payload: {
+              channel: 'float',
+              accountId: null,
+              providerId: dto.providerId,
+              label: provider.label,
+              counted,
+              expected,
+              difference,
+              skipped: dto.skip ?? false,
+              skipReason: payload.skipReason,
+            } as Prisma.InputJsonValue,
+          },
+        });
+
+        await this.audit.recordTx(tx, {
+          entityType: 'AgentFloatCount',
+          entityId: rowId,
+          action: prior ? 'update' : 'create',
+          after: {
+            day,
+            providerId: dto.providerId,
+            label: provider.label,
+            counted,
+            expected,
+            difference,
+            explanation: payload.explanation,
+            skipped: dto.skip ?? false,
+            skipReason: payload.skipReason,
+          },
+          branchId,
+        });
+        return status;
       });
     } catch (e) {
       // Two people counting the same float at the same moment: one row, and the other is sent back to the day.
@@ -2987,58 +3189,71 @@ export class ClosingService {
       throw e;
     }
 
-    // `counted` once nothing countable is outstanding — the floats included — a signal to the sign-off, never a lock.
-    const view = await this.openView(day);
-    const nextStatus = existing?.status === 'reopened' ? 'reopened' : view.complete ? 'counted' : 'counting';
-    await this.db.dailyClosing.update({
-      where: { id: closingId },
-      data: { status: nextStatus, countedById: userId, countedAt: now, version: { increment: 1 } },
-    });
-
-    await this.db.closingEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        branchId,
-        businessDate: dayDate,
-        closingId,
-        kind: 'count_saved',
-        at: now,
-        actorId: userId,
-        payload: {
-          channel: 'float',
-          accountId: null,
-          providerId: dto.providerId,
-          label: provider.label,
-          counted,
-          expected,
-          difference,
-          skipped: dto.skip ?? false,
-          skipReason: dto.skip ? (dto.skipReason?.trim() ?? null) : null,
-        } as Prisma.InputJsonValue,
-      },
-    });
-
-    await this.audit.record({
-      entityType: 'AgentFloatCount',
-      entityId: rowId,
-      action: prior ? 'update' : 'create',
-      after: {
-        day,
-        providerId: dto.providerId,
-        label: provider.label,
-        counted,
-        expected,
-        difference,
-        explanation: payload.explanation,
-        skipped: dto.skip ?? false,
-        skipReason: payload.skipReason,
-      },
-      branchId,
-    });
-
     const after = await this.openView(day);
     return { ...after, status: nextStatus, float: after.floats.find((f) => f.providerId === dto.providerId) ?? null };
+  }
+
+  /**
+   * The day's closing row, created by the first count (E-CP1) — `counting`, never the schema's locked default — so a
+   * count, the close and every money write on this day lock the same row (docs/51 §12.6). Two first counts at once
+   * create one: the second reads the first's.
+   */
+  private async createDayRow(companyId: Buffer, branchId: Buffer, dayDate: Date): Promise<Buffer> {
+    try {
+      const created = await this.db.dailyClosing.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId,
+          branchId,
+          closingDate: dayDate,
+          // Nothing is counted until somebody counts (0078): NULL, never a placeholder zero.
+          expectedCash: 0,
+          countedCash: null,
+          difference: null,
+          totalSales: 0,
+          totalProfit: 0,
+          status: 'counting',
+          isLocked: false,
+        },
+      });
+      return created.id;
+    } catch (e) {
+      if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
+      const row = await this.db.dailyClosing.findUnique({ where: { branchId_closingDate: { branchId, closingDate: dayDate } }, select: { id: true } });
+      if (!row) throw e;
+      return row.id;
+    }
+  }
+
+  /**
+   * The day's row locked the way the close locks it, for a count (D159): a close that committed first is seen here
+   * and refuses the count — read BY the locking statement, as the counter's check is — and one that comes after
+   * waits for the count to commit.
+   */
+  private async lockCountDayTx(tx: Pick<TenantPrisma, '$queryRaw'>, closingId: Buffer, day: string): Promise<{ status: string | null; reopenedAt: Date | null }> {
+    const [row] = await tx.$queryRaw<{ status: string; reopened_at: Date | null }[]>(Prisma.sql`
+      SELECT status, reopened_at FROM daily_closings WHERE id = ${closingId} FOR UPDATE`);
+    if (row?.status === 'locked') throw alreadyClosed(day);
+    return { status: row?.status ?? null, reopenedAt: row?.reopened_at ?? null };
+  }
+
+  /**
+   * Whether nothing countable is left on the day — every channel counted (freshly, after any reopen) or skipped, every
+   * active float counted or skipped — the rule the live view's `complete` follows, read through the count's own
+   * transaction so the row it has just written is part of the answer.
+   */
+  private async countingDone(tx: TenantTx, a: { branchId: Buffer; closingId: Buffer; reopenedAt: Date | null; channels: ChannelRow[] }): Promise<boolean> {
+    const saved = await tx.closingChannelCount.findMany({
+      where: { closingId: a.closingId },
+      select: { channel: true, receivingAccountId: true, counted: true, isSkipped: true, countedAt: true },
+    });
+    const byKey = new Map(saved.map((c) => [keyOf({ channel: c.channel, accountId: c.receivingAccountId ? binToUuid(c.receivingAccountId) : null }), c]));
+    const rows = a.channels.map((ch) => {
+      const c = byKey.get(keyOf(ch));
+      return { key: keyOf(ch), isUnattributed: ch.isUnattributed, countable: isCountable(ch), counted: c?.counted == null ? null : num(c.counted), isSkipped: c?.isSkipped ?? false, countedAt: c?.countedAt ?? null };
+    });
+    const floats = await this.listedFloatsAt(tx, a.branchId, a.closingId);
+    return countingComplete(rows) && freshCounts(rows, a.reopenedAt).complete && floatsToCount(floats.providers, floats.counts).length === 0;
   }
 
   // --- helpers --------------------------------------------------------------
@@ -3047,11 +3262,13 @@ export class ClosingService {
    * The provider floats at a closing of this branch (D154, docs/73 §4.5): none for an electronics-only branch;
    * for an agent branch every active provider and any provider already counted or skipped at this closing — each
    * as its count row left it, or, uncounted, as the app tracks it now (for a day behind the boundary, at that
-   * day's end). Read once per report, view or close; the close locks on the same reading it reports.
+   * day's end). A counted float on a day still open is held against the float now as well (D159): `expected` is the
+   * float now and `expectedAtCount` the figure it was counted against, so a float that moved after its count says
+   * so. Read once per report, view or close; the close locks on the same reading it reports.
    */
   private async floatCountsFor(
     branchId: Buffer,
-    closingId: Buffer | null,
+    closing: { id: Buffer; status: string } | null,
     day: string,
     today: string,
   ): Promise<{
@@ -3060,49 +3277,30 @@ export class ClosingService {
     rows: ReportFloatInput[];
     counted: { providerId: Buffer; counted: number; expected: number | null; countedAt: Date }[];
   }> {
-    const none = { providers: [], counts: new Map<string, FloatCountState>(), rows: [], counted: [] };
-    if (!agentActivityAllowed(await branchActivityOf(this.db, branchId))) return none;
-    const [providers, saved] = await Promise.all([
-      this.db.agentProvider.findMany({ select: { id: true, label: true, isActive: true }, orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }] }),
-      closingId
-        ? this.db.agentFloatCount.findMany({
-            where: { closingId },
-            select: {
-              providerId: true,
-              expected: true,
-              counted: true,
-              explanation: true,
-              isSkipped: true,
-              skipReason: true,
-              countedAt: true,
-              countedBy: { select: { name: true } },
-            },
-          })
-        : Promise.resolve([]),
-    ]);
+    const { providers: listed, counts, saved } = await this.listedFloatsAt(this.db, branchId, closing?.id ?? null);
+    if (listed.length === 0 && saved.length === 0) return { providers: [], counts, rows: [], counted: [] };
     const rowsByProvider = new Map(saved.map((s) => [binToUuid(s.providerId), s]));
-    const counts = new Map<string, FloatCountState>(
-      saved.map((s) => [binToUuid(s.providerId), { providerId: binToUuid(s.providerId), counted: s.counted == null ? null : round2(num(s.counted)), isSkipped: s.isSkipped }]),
-    );
-    const listed = listedFloats(
-      providers.map((p) => ({ providerId: binToUuid(p.id), label: p.label, isActive: p.isActive })),
-      counts,
-    );
     const asOf = day === today ? new Date() : (await this.businessDay.windowOf(day)).end;
+    // A locked day is read as it was closed: its counts are compared with nothing.
+    const compare = closing?.status !== 'locked';
     const rows: ReportFloatInput[] = await Promise.all(
       listed.map(async (p) => {
         const row = rowsByProvider.get(p.providerId);
         if (row) {
+          const atCount = row.expected == null ? null : round2(num(row.expected));
+          // The instant of a count to compare: a count, not a skip, on a day still open.
+          const comparedAt = compare && row.counted != null && !row.isSkipped ? row.countedAt : null;
           return {
             providerId: p.providerId,
             label: p.label,
-            expected: row.expected == null ? null : round2(num(row.expected)),
+            expected: comparedAt ? await this.floatSinceCountedAt(branchId, row.providerId, day, asOf, atCount, comparedAt) : atCount,
             counted: row.counted == null ? null : round2(num(row.counted)),
             explanation: row.explanation,
             isSkipped: row.isSkipped,
             skipReason: row.skipReason,
             countedAt: row.countedAt?.toISOString() ?? null,
             countedByName: row.countedBy?.name ?? null,
+            ...(comparedAt ? { expectedAtCount: atCount } : {}),
           };
         }
         const inputs = await readFloatInputs(this.db, { branchId, providerId: uuidToBin(p.providerId), accountKind: 'provider', businessDate: day, asOf });
@@ -3123,6 +3321,53 @@ export class ClosingService {
       .filter((s) => s.counted != null && s.countedAt !== null)
       .map((s) => ({ providerId: s.providerId, counted: round2(num(s.counted)), expected: s.expected == null ? null : round2(num(s.expected)), countedAt: s.countedAt as Date }));
     return { providers: listed, counts, rows, counted };
+  }
+
+  /**
+   * Which floats a closing lists, and their count rows (D154): none for an electronics-only branch. Read through the
+   * caller's client, so a count's transaction sees the row it has just written.
+   */
+  private async listedFloatsAt(client: FloatCountReader, branchId: Buffer, closingId: Buffer | null) {
+    if (!agentActivityAllowed(await branchActivityOf(client, branchId))) return { providers: [], counts: new Map<string, FloatCountState>(), saved: [] };
+    const [providers, saved] = await Promise.all([
+      client.agentProvider.findMany({ select: { id: true, label: true, isActive: true }, orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }] }),
+      closingId
+        ? client.agentFloatCount.findMany({
+            where: { closingId },
+            select: {
+              providerId: true,
+              expected: true,
+              counted: true,
+              explanation: true,
+              isSkipped: true,
+              skipReason: true,
+              countedAt: true,
+              countedBy: { select: { name: true } },
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+    const counts = new Map<string, FloatCountState>(
+      saved.map((s) => [binToUuid(s.providerId), { providerId: binToUuid(s.providerId), counted: s.counted == null ? null : round2(num(s.counted)), isSkipped: s.isSkipped }]),
+    );
+    const listed = listedFloats(
+      providers.map((p) => ({ providerId: binToUuid(p.id), label: p.label, isActive: p.isActive })),
+      counts,
+    );
+    return { providers: listed, counts, saved };
+  }
+
+  /**
+   * A counted float as the app tracks it now, to hold against the figure it was counted against (D159). A close of a
+   * day since reopened anchored this very count at what the provider's app showed — that anchor IS the count — so on
+   * it the float has moved since only by the legs after it, carried from the figure the count was held against.
+   */
+  private async floatSinceCountedAt(branchId: Buffer, providerId: Buffer, day: string, asOf: Date, atCount: number | null, countedAt: Date): Promise<number | null> {
+    const inputs = await readFloatInputs(this.db, { branchId, providerId, accountKind: 'provider', businessDate: day, asOf });
+    const anchor = inputs.anchor;
+    const itsOwn = anchor?.source === 'counted_close' && anchor.businessDate === day && anchor.at.getTime() >= countedAt.getTime();
+    if (!itsOwn) return floatPosition(anchor, inputs.sinceAnchor).position;
+    return atCount === null ? null : floatPosition({ amount: atCount }, inputs.sinceAnchor).position;
   }
 
   /**

@@ -119,6 +119,7 @@ function harness(opts: { activity?: string; providers?: Row[]; positions?: Row[]
     },
     user: { findFirst: jest.fn(async () => ({ name: 'Owner' })) },
     $queryRaw: jest.fn(async (sql: Prisma.Sql) => {
+      order.push('provider');
       const id = sql.values[0] as Buffer;
       const found = providers.find((p) => p.id.equals(id));
       return found ? [{ id: found.id, label: found.label }] : [];
@@ -126,12 +127,17 @@ function harness(opts: { activity?: string; providers?: Row[]; positions?: Row[]
     $transaction: jest.fn(async (fn: (tx: unknown) => unknown): Promise<unknown> => fn(db)),
   };
   const cash = opts.cash ?? { key: 'cash', channel: 'cash', known: true, position: 10_000, unknownReason: null, anchor: { source: 'opening', amount: 10_000 }, sinceAnchorNet: 0, movement: { businessDate: DAY, inflows: 0, outflows: 0, net: 0 } };
-  const closing = { drawerMethod: jest.fn(async () => cash) };
+  const order: string[] = [];
+  const closing = {
+    drawerMethod: jest.fn(async () => cash),
+    // The day's lock a set takes (D159); its own rules are the closing's tests.
+    lockDayForMoneyTx: jest.fn(async (_tx: unknown, _args: Row) => void order.push('day')),
+  };
   const audit = { recordTx: jest.fn(async (_tx: unknown, _entry: Row) => undefined) };
   const businessDay = { today: jest.fn(async () => DAY), assign: jest.fn(async () => DAY) };
   const tenant = { companyId: () => COMPANY, requireBranchId: () => BRANCH, requireUserId: () => USER };
   const svc = new AgentPositionsService(db as never, tenant as never, audit as never, businessDay as never, closing as never);
-  return { svc, db, audit, businessDay, closing, positions, movements };
+  return { svc, db, audit, businessDay, closing, positions, movements, order };
 }
 
 const refusal = async (p: Promise<unknown>) => {
@@ -245,6 +251,16 @@ describe('POST agent/positions — the Owner sets what a float holds', () => {
     expect(result.position).toMatchObject({ providerId: BANKILY, accountKind: 'provider', amount: 30_100, trackedBefore: 30_200, difference: -100, note: 'app', byName: 'Owner', source: 'set', businessDate: DAY });
     // From now on the float holds what was set: the earlier legs are inside it.
     expect(result.float).toMatchObject({ known: true, position: 30_100, sinceAnchorNet: 0, anchor: { amount: 30_100, source: 'set' } });
+  });
+
+  it('takes the business day’s lock after the provider’s, in the same transaction, so the day’s money moves with it (D159)', async () => {
+    const h = harness({ positions: [anchorRow(BANKILY, 50_000, t('08:00'))] });
+    await h.svc.set({ clientUuid: KEY, providerId: BANKILY, amount: 30_100 });
+    expect(h.closing.lockDayForMoneyTx).toHaveBeenCalledTimes(1);
+    expect(h.closing.lockDayForMoneyTx).toHaveBeenCalledWith(h.db, { branchId: BRANCH, businessDate: DAY, operation: 'float_set' });
+    expect(h.order).toEqual(['provider', 'day']);
+    // Before the float is read and the position written: the reading is the one the day's lock holds still.
+    expect(h.closing.lockDayForMoneyTx.mock.invocationCallOrder[0]).toBeLessThan(h.db.agentPosition.create.mock.invocationCallOrder[0]);
   });
 
   it('an unknown float records no tracked amount and no difference; a held commission can be set too', async () => {

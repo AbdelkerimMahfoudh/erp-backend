@@ -192,7 +192,8 @@ describe('a later collection is a movement of money, not a second sale', () => {
   });
 
   it('refuses a signed-off day, like an expense and a correction', () => {
-    expect(service).toContain('assertDayOpen(closing, day)');
+    // On the day's row as the close locks it (D159); the refusal is the expense's own rule.
+    expect(service).toContain("await this.closing.lockDayForMoneyTx(tx, { branchId, businessDate: day, operation: 'backdated_payment' })");
   });
 
   it('refuses an inactive account, and freezes the label of an active one', () => {

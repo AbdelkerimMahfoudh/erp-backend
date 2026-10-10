@@ -17,6 +17,7 @@ const BRANCH = Buffer.alloc(16, 2);
 const USER = Buffer.alloc(16, 3);
 const SALE = '0190a8c0-0000-7000-8000-000000000001';
 const DAY = '2026-09-27';
+const YESTERDAY = '2026-09-26';
 type Status = 'counting' | 'counted' | 'locked' | 'reopened';
 
 const dto = () => ({ clientUuid: '0190a8c0-0000-7000-8000-0000000000aa', amount: 500, method: 'cash' as const });
@@ -31,16 +32,22 @@ function closingWith(early: Status | null, locked: Status | null, opened = true)
   };
   const businessDay: any = { today: jest.fn(async () => DAY) };
   const closing = new ClosingService(db, tenant, {} as never, {} as never, {} as never, businessDay, {} as never, {} as never, {} as never);
+  const bumps: { sql: string; values: unknown[] }[] = [];
   const tx: any = {
     $queryRaw: jest.fn(async () => (locked ? [{ status: locked }] : [])),
+    // The day's money version (D159): every bump the closing makes, in order.
+    $executeRaw: jest.fn(async (query: { sql: string; values: unknown[] }) => {
+      bumps.push(query);
+      return 1;
+    }),
     dailyClosing: { update: jest.fn(), findUnique: jest.fn() },
     closingEvent: { create: jest.fn() },
   };
-  return { closing, tx };
+  return { closing, tx, bumps };
 }
 
-function harness(opts: { early?: Status | null; locked?: Status | null; replayed?: boolean; unopened?: boolean; unopenedInside?: boolean } = {}) {
-  const { closing, tx: closingTx } = closingWith(opts.early ?? null, opts.locked ?? null, !opts.unopened);
+function harness(opts: { early?: Status | null; locked?: Status | null; replayed?: boolean; unopened?: boolean; unopenedInside?: boolean; paidOn?: string } = {}) {
+  const { closing, tx: closingTx, bumps } = closingWith(opts.early ?? null, opts.locked ?? null, !opts.unopened);
   const written = { payments: 0, sales: 0 };
   // Past the day check the transaction stops here: what matters is that it was, or was not, reached.
   const reached = new Error('reached the recording');
@@ -62,9 +69,9 @@ function harness(opts: { early?: Status | null; locked?: Status | null; replayed
     $transaction: jest.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx)),
   };
   const tenant: any = { companyId: () => COMPANY, requireBranchId: () => BRANCH, userId: () => USER };
-  const businessDay: any = { assign: jest.fn(async () => DAY), today: jest.fn(async () => DAY) };
+  const businessDay: any = { assign: jest.fn(async () => opts.paidOn ?? DAY), today: jest.fn(async () => DAY) };
   const service = new SalePaymentsService(db, tenant, { recordTx: jest.fn() } as never, businessDay, closing);
-  return { service, db, tx, closingTx, written, reached };
+  return { service, db, tx, closingTx, written, reached, bumps };
 }
 
 const refusal = async (p: Promise<unknown>) => {
@@ -128,6 +135,44 @@ describe('a later payment on a debt while the business day is closed', () => {
       await expect(h.service.record(SALE, dto())).rejects.toBe(h.reached);
     }
   });
+
+  it('on the current day, moves its money version under the lock the close takes (D159)', async () => {
+    const h = harness({ early: 'counted', locked: 'counted' });
+    await expect(h.service.record(SALE, dto())).rejects.toBe(h.reached);
+    expect(h.bumps).toHaveLength(1);
+    expect(h.bumps[0].sql).toMatch(/UPDATE daily_closings SET money_version = money_version \+ 1\s+WHERE company_id = \? AND branch_id = \? AND closing_date = \?/);
+    expect(h.bumps[0].values).toEqual([COMPANY, BRANCH, DAY]);
+  });
+});
+
+/**
+ * A payment dated on an earlier day (D159): it never waited for that day's door, and still does not — but it takes
+ * the day's row as the close locks it, is refused when that day is locked (by the rule it always followed), and
+ * moves the money version of its own day and of every later day still open, whose opening it moved.
+ */
+describe('a later payment dated on an earlier day', () => {
+  it('locks that day’s row, moves its money version, and moves every later day still open', async () => {
+    const h = harness({ early: 'counting', locked: 'counted', paidOn: YESTERDAY });
+    await expect(h.service.record(SALE, dto())).rejects.toBe(h.reached);
+    const lock = h.tx.$queryRaw.mock.calls.map((c: [{ strings?: string[]; values?: unknown[] }]) => c[0]).find((q: { strings?: string[] }) => /FOR UPDATE/.test((q.strings ?? []).join('?')) && /FROM daily_closings/.test((q.strings ?? []).join('?')));
+    expect(lock.values).toEqual([COMPANY, BRANCH, YESTERDAY]);
+    expect(h.bumps.map((b) => b.values)).toEqual([
+      [COMPANY, BRANCH, YESTERDAY],
+      [COMPANY, BRANCH, YESTERDAY],
+    ]);
+    expect(h.bumps[1].sql).toMatch(/closing_date > \? AND status <> 'locked'/);
+  });
+
+  it('is refused on a locked day with the code and words it always had, nothing written and nothing moved', async () => {
+    const h = harness({ early: 'counting', locked: 'locked', paidOn: YESTERDAY });
+    const e = await refusal(h.service.record(SALE, dto()));
+    expect(e.getResponse()).toEqual({
+      code: 'day_already_closed',
+      message: `${YESTERDAY} is already closed for this branch. Confirm this expense once the next day opens.`,
+    });
+    expect(h.written).toEqual({ payments: 0, sales: 0 });
+    expect(h.bumps).toEqual([]);
+  });
 });
 
 describe('the open-first rule for payments, in the source', () => {
@@ -142,7 +187,8 @@ describe('the open-first rule for payments, in the source', () => {
     const early = service.indexOf("await this.closing.assertCounterOpen(branchId, 'payment');");
     expect(early).toBeGreaterThan(replay);
     expect(early).toBeLessThan(service.indexOf('this.db.$transaction('));
-    expect(service).toMatch(/if \(day === today\) \{\s*await this\.closing\.assertCounterOpenTx\(tx, \{ branchId, businessDate: day, operation: 'payment' \}\);\s*\} else \{\s*assertDayOpen\(closing, day\);/);
+    // D159: a back-dated payment takes its day's lock too, where it used to read the row plainly.
+    expect(service).toMatch(/if \(day === today\) \{\s*await this\.closing\.assertCounterOpenTx\(tx, \{ branchId, businessDate: day, operation: 'payment' \}\);\s*\} else \{\s*await this\.closing\.lockDayForMoneyTx\(tx, \{ branchId, businessDate: day, operation: 'backdated_payment' \}\);/);
   });
 
   it('no path reopens a day any more', () => {

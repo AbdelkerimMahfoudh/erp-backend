@@ -11,6 +11,7 @@ import { dayKey } from '../common/utils/date.util';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-queue';
 import { receiveQuantityAtCost } from '../inventory/stock-cost';
+import { bumpMoneyVersionTx } from '../closing/money-version';
 import {
   actionOf,
   assertDayOpen,
@@ -297,6 +298,8 @@ export class CorrectionsService {
             where: { branchId_closingDate: { branchId: correction.branchId, closingDate: correctionDate } },
           });
           assertDayOpen(closing, day);
+          // Money moves on the day, under the lock just taken (D159): a close that read it before this approval is refused under its own.
+          await bumpMoneyVersionTx(tx, { companyId, branchId: correction.branchId, businessDate: day });
 
           // Lock what the correction changes, then plan again: the record as it is NOW decides.
           const plan = PLANNED.has(correction.targetKind as CorrectionKind)

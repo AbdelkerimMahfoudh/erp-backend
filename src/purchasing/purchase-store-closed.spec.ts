@@ -43,6 +43,7 @@ function harness(day = DAY) {
   };
   const stored: any[] = [];
   const lockReads: { sql: string; values: unknown[] }[] = [];
+  const bumps: { sql: string; values: unknown[] }[] = [];
   const writes = { purchases: [] as any[], payments: [] as any[], units: [] as any[] };
   const tx: any = {
     purchase: { create: async ({ data }: any) => void writes.purchases.push(data) },
@@ -57,6 +58,11 @@ function harness(day = DAY) {
       lockReads.push(query);
       const status = (state.locked ?? state.closings)[date];
       return status ? [{ status }] : [];
+    }),
+    // The day's money version (D159): moved under the same lock once the day is found open.
+    $executeRaw: jest.fn(async (query: { sql: string; values: unknown[] }) => {
+      bumps.push(query);
+      return 1;
     }),
   };
   const db: any = {
@@ -128,7 +134,7 @@ function harness(day = DAY) {
     businessDay,
     closing,
   );
-  return { service, state, db, tx, inventory, writes, lockReads };
+  return { service, state, db, tx, inventory, writes, lockReads, bumps };
 }
 
 async function refusal(run: () => Promise<unknown>): Promise<ConflictException> {
@@ -170,7 +176,7 @@ describe('a receipt while the business day is closed', () => {
   });
 
   it('is refused under the day’s lock when the day closed after the first check: rolled back, not retried, nothing reopened', async () => {
-    const { service, state, db, tx, writes, lockReads } = harness();
+    const { service, state, db, tx, writes, lockReads, bumps } = harness();
     state.locked = { [DAY]: 'locked' };
     const e = await refusal(() => service.createPurchase(delivery()));
     expect(e.getResponse()).toMatchObject({ code: 'store_closed' });
@@ -182,6 +188,8 @@ describe('a receipt while the business day is closed', () => {
     expect(tx.dailyClosing.update).not.toHaveBeenCalled();
     expect(tx.dailyClosing.updateMany).not.toHaveBeenCalled();
     expect(tx.closingEvent.create).not.toHaveBeenCalled();
+    // A refused receipt moves no money: the day's money version stays as the close read it (D159).
+    expect(bumps).toEqual([]);
     expect(writes.purchases).toHaveLength(0);
     expect(writes.payments).toHaveLength(0);
     expect(writes.units).toHaveLength(0);
@@ -233,6 +241,16 @@ describe('a receipt on a day the counter may use', () => {
     await service.createPurchase(delivery());
     expect(writes.payments[0].businessDate).toEqual(new Date(`${NEXT}T00:00:00.000Z`));
     expect(lockReads[0].values).toEqual([COMPANY, BRANCH, NEXT]);
+  });
+
+  it('moves the day’s money version once, under the lock the close takes, after the day is found open (D159)', async () => {
+    const { service, state, lockReads, bumps } = harness();
+    state.closings = { [DAY]: 'counting' };
+    await service.createPurchase(delivery());
+    expect(bumps).toHaveLength(1);
+    expect(bumps[0].sql).toMatch(/UPDATE daily_closings SET money_version = money_version \+ 1\s+WHERE company_id = \? AND branch_id = \? AND closing_date = \?/);
+    expect(bumps[0].values).toEqual([COMPANY, BRANCH, DAY]);
+    expect(lockReads).toHaveLength(1);
   });
 });
 

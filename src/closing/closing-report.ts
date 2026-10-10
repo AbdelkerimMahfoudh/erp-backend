@@ -30,8 +30,9 @@ import { closeVerification } from './closing-lifecycle';
  *             cost of units sold = Σ sales.total_cost − Σ return line_cost − Σ cancelled sales' total_cost;
  *             gross profit = net sales − cost of units sold;  result after expenses = gross profit − expenses total
  *   Expected  cash = opening + cash in − cash out;  each account: recorded movement (in − out), never a balance;
- *             each provider float of an agent branch (D154): the position the app tracked at the count instant
- *             (null while unknown — nothing fabricated) against what the provider's app showed
+ *             each provider float of an agent branch (D154): the position the app tracks (null while unknown —
+ *             nothing fabricated) against what the provider's app showed
+ *             a count whose figure moved since it was taken (D159): |figure now − figure at the count| ≥ 0.005
  */
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -121,6 +122,11 @@ export interface ChannelCountState {
   counted: number | null;
   countedAt: Date | null;
   skipReason: string | null;
+  /**
+   * The channel's expected figure when it was counted (D159). Absent when there is nothing to compare: a day already
+   * locked is read as it was closed.
+   */
+  expectedAtCount?: number | null;
 }
 
 /**
@@ -139,11 +145,23 @@ export interface ReportFloatInput {
   skipReason: string | null;
   countedAt: string | null;
   countedByName: string | null;
+  /** What the app tracked when the float was counted (D159); absent when there is nothing to compare, as for a channel. */
+  expectedAtCount?: number | null;
 }
 
 export interface ReportFloat extends ReportFloatInput {
   /** counted − expected, only when both are known. */
   difference: number | null;
+  expectedAtCount: number | null;
+  /** The float moved after it was counted: the count no longer describes it, and the close waits for a recount (D159). */
+  movedSinceCount: boolean;
+}
+
+/** What the agent counter recorded at this branch on the day after the earliest count that moved (D159). */
+export interface AgentActivitySince {
+  exchanges: number;
+  reversals: number;
+  rebalancings: number;
 }
 
 export interface OpeningCash {
@@ -199,6 +217,8 @@ export interface ReportInputs {
   cashSet?: ReportCashSet | null;
   /** The provider floats of an agent branch (D154); absent or empty for an electronics-only branch. */
   floats?: ReportFloatInput[];
+  /** The agent counter's exchanges, reversals and rebalancings since the earliest count that moved; zero when absent. */
+  agentSinceCount?: AgentActivitySince | null;
   pending: { refundReports: { count: number; amount: number }; expenseReports: { count: number; amount: number } } | null;
   openDiscrepancies: number;
   previousDay: { businessDate: string; standing: DayStanding; needsReview: boolean } | null;
@@ -241,7 +261,8 @@ export type WarningCode =
   | 'previous_day_needs_review'
   | 'overcollected'
   | 'changed_since_close'
-  | 'figures_disagree';
+  | 'figures_disagree'
+  | 'money_moved_after_count';
 
 export interface ReportWarning {
   code: WarningCode;
@@ -341,6 +362,10 @@ export interface ClosingReport {
       difference: number | null;
       verification: Verification;
       countedAt: string | null;
+      /** The expected figure the count was taken against; null when the drawer has no count to compare (D159). */
+      expectedAtCount: number | null;
+      /** Money moved after the drawer was counted: the count no longer describes it (D159). */
+      movedSinceCount: boolean;
     };
     accounts: {
       key: string;
@@ -354,6 +379,8 @@ export interface ClosingReport {
       verification: Verification;
       /** What the backend knows: the movement staff recorded, never the provider's balance. */
       basis: 'recorded_movement_not_balance';
+      expectedAtCount: number | null;
+      movedSinceCount: boolean;
     }[];
     /** The provider floats of an agent branch (D154); empty for an electronics-only branch. */
     floats: ReportFloat[];
@@ -370,6 +397,30 @@ export interface ClosingReport {
 }
 
 const keyOfChannel = (c: { channel: string; accountId: string | null }) => `${c.channel}:${c.accountId ?? 'NONE'}`;
+
+/**
+ * Whether a counted figure moved after the count (D159): the figure now against the one the count was taken against.
+ * A float unknown when it was counted and known now — or the reverse — moved too: the count was held against
+ * another figure.
+ */
+export function figureMoved(now: number | null, atCount: number | null): boolean {
+  if (now === null || atCount === null) return now !== atCount;
+  return Math.abs(now - atCount) >= 0.005;
+}
+
+/** The figure a channel's count is compared with: a fresh count's own, never a skip's or one a close froze. */
+function figureAtCount(s: ChannelCountState | null): number | null {
+  return s?.verification === 'counted' && s.expectedAtCount != null ? s.expectedAtCount : null;
+}
+
+/** A float's count against the float now (D159): compared only when it was counted — a skip asserts no figure. */
+export function floatSinceCount(f: ReportFloatInput): { expectedAtCount: number | null; movedSinceCount: boolean } {
+  const compared = f.counted !== null && !f.isSkipped && f.expectedAtCount !== undefined;
+  return {
+    expectedAtCount: compared ? (f.expectedAtCount ?? null) : null,
+    movedSinceCount: compared && figureMoved(f.expected, f.expectedAtCount ?? null),
+  };
+}
 
 export function assembleReport(i: ReportInputs): ClosingReport {
   // ── Sales ──
@@ -464,12 +515,14 @@ export function assembleReport(i: ReportInputs): ClosingReport {
   const cashExpected = round2(i.opening.amount + cashRow.net + (cashSet?.adjustment ?? 0));
   const cashVerification = cashCount?.verification ?? 'not_counted';
   const cashCounted = cashVerification === 'counted' ? cashCount!.counted : null;
+  const cashAtCount = figureAtCount(cashCount);
   const accounts = channels
     .filter((c) => c.channel === 'account')
     .map((c) => {
       const s = i.counts.get(c.key) ?? null;
       const verification: Verification = c.countable ? (s?.verification ?? 'not_counted') : 'not_counted';
       const counted = verification === 'counted' ? s!.counted : null;
+      const atCount = c.countable ? figureAtCount(s) : null;
       return {
         key: c.key,
         accountId: c.accountId,
@@ -481,13 +534,17 @@ export function assembleReport(i: ReportInputs): ClosingReport {
         difference: counted === null ? null : round2(counted - c.net),
         verification,
         basis: 'recorded_movement_not_balance' as const,
+        expectedAtCount: atCount,
+        movedSinceCount: atCount !== null && figureMoved(c.net, atCount),
       };
     });
   // The floats of an agent branch (D154): a difference only when both figures are known; unknown stays unknown.
   const floats: ReportFloat[] = (i.floats ?? []).map((f) => ({
     ...f,
     difference: f.counted === null || f.expected === null ? null : round2(f.counted - f.expected),
+    ...floatSinceCount(f),
   }));
+  const cashMoved = cashAtCount !== null && figureMoved(cashExpected, cashAtCount);
 
   // ── The close (D2) ──
   const verificationByKey = (c: ReportChannel): Verification =>
@@ -506,6 +563,21 @@ export function assembleReport(i: ReportInputs): ClosingReport {
     warnings.push({ code: 'channels_attested', severity: 'info', section: 'money', params: { count: verdict.attested.length } });
   }
   if (stale.length > 0) warnings.push({ code: 'channels_stale', severity: 'warning', section: 'money', params: { count: stale.length } });
+  /*
+    Money moved after somebody counted (D159): the count describes a drawer, an account or a float that has changed
+    since, so closing on it would record a false difference. Said with what the agent counter recorded meanwhile, so
+    the phone can name it; the close waits for a recount.
+  */
+  const movedCount = (cashMoved ? 1 : 0) + accounts.filter((a) => a.movedSinceCount).length + floats.filter((f) => f.movedSinceCount).length;
+  if (movedCount > 0) {
+    const since = i.agentSinceCount ?? { exchanges: 0, reversals: 0, rebalancings: 0 };
+    warnings.push({
+      code: 'money_moved_after_count',
+      severity: 'warning',
+      section: 'money',
+      params: { count: movedCount, exchanges: since.exchanges, reversals: since.reversals, rebalancings: since.rebalancings },
+    });
+  }
   if (channels.some((c) => c.channel === 'account' && c.countable && (c.in.total !== 0 || c.out.total !== 0))) {
     warnings.push({ code: 'account_movement_not_balance', severity: 'info', section: 'money' });
   }
@@ -576,6 +648,8 @@ export function assembleReport(i: ReportInputs): ClosingReport {
         difference: cashCounted === null ? null : round2(cashCounted - cashExpected),
         verification: cashVerification,
         countedAt: cashVerification === 'counted' && cashCount?.countedAt ? cashCount.countedAt.toISOString() : null,
+        expectedAtCount: cashAtCount,
+        movedSinceCount: cashMoved,
       },
       accounts,
       floats,
@@ -639,13 +713,28 @@ export function reportInvariants(
 
 // ── Binding a close to what was seen (D5) ────────────────────────────────────
 
+/** The counts a close waits for again (D159): each channel and float whose figure moved after it was counted. */
+export function movedCounts(r: ClosingReport): { channels: { key: string; label: string }[]; floats: { providerId: string; label: string }[] } {
+  const cashLabel = r.money.channels.find((c) => c.key === 'cash:NONE')?.label ?? 'cash:NONE';
+  return {
+    channels: [
+      ...(r.expected.cash.movedSinceCount ? [{ key: 'cash:NONE', label: cashLabel }] : []),
+      ...r.expected.accounts.filter((a) => a.movedSinceCount).map((a) => ({ key: a.key, label: a.label })),
+    ],
+    floats: (r.expected.floats ?? []).filter((f) => f.movedSinceCount).map((f) => ({ providerId: f.providerId, label: f.label })),
+  };
+}
+
 /**
  * A short fingerprint of every figure in the report. The phone sends back the
  * version it showed; if the day moved since, the close is refused with the new
- * report rather than signing off figures nobody looked at.
+ * report rather than signing off figures nobody looked at. `moneyVersion` is the
+ * day's own counter of money writes (D159): it moves with every one, even one
+ * that leaves every figure here as it was.
  */
-export function reportVersion(r: ClosingReport): string {
+export function reportVersion(r: ClosingReport, moneyVersion = 0): string {
   const floats = r.expected.floats ?? [];
+  const moved = movedCounts(r);
   const figures = {
     // The defined count and units are derived from fields already here; leaving them out keeps every stored version valid.
     s: { ...r.sales, salesCount: undefined, unitsSold: undefined },
@@ -657,6 +746,10 @@ export function reportVersion(r: ClosingReport): string {
     r: [r.result.status, r.result.costOfUnitsSold, r.result.grossProfit],
     // The floats of an agent branch, when there are any: the figure each is held against, and whether it was counted.
     ...(floats.length > 0 ? { f: floats.map((f) => [f.providerId, f.expected, f.counted === null ? (f.isSkipped ? 'skipped' : 'not_counted') : 'counted']) } : {}),
+    // The day's money version and the counts that moved (D159), each only when there is one: every day closed before
+    // them keeps the version it was closed on, and a recount that clears a moved count moves the version again.
+    ...(moneyVersion > 0 ? { v: moneyVersion } : {}),
+    ...(moved.channels.length + moved.floats.length > 0 ? { c: [...moved.channels.map((c) => c.key), ...moved.floats.map((f) => f.providerId)] } : {}),
   };
   return createHash('sha256').update(JSON.stringify(figures)).digest('hex').slice(0, 16);
 }

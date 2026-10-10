@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { binToUuid } from '../common/utils/uuid.util';
 import type {
+  AgentActivitySince,
   CancellationFigures,
   ChannelSplit,
   CollectedForSales,
@@ -299,4 +300,23 @@ export async function movementFingerprint(db: RawRunner, companyId: Buffer, bran
       (SELECT CONCAT(COUNT(*), '/', COALESCE(SUM(amount), 0)) FROM agent_movements
         WHERE company_id = ${companyId} AND branch_id = ${branchId} AND business_date = ${date}) AS a`);
   return JSON.stringify(r ?? {});
+}
+
+/**
+ * What the agent counter recorded at this branch on the date after an instant (D159): the exchanges, the reversals
+ * and the rebalancings a count taken at that instant does not include, so the phone can say why the count moved.
+ * A reversal is read from its own legs, which carry the day it was made on and the instant it was made — the
+ * exchange it reverses may belong to another day.
+ */
+export async function agentActivitySince(db: RawRunner, companyId: Buffer, branchId: Buffer, date: string, since: Date): Promise<AgentActivitySince> {
+  const [r] = await db.$queryRaw<{ exchanges: bigint; reversals: bigint; rebalancings: bigint }[]>(Prisma.sql`
+    SELECT
+      (SELECT COUNT(*) FROM agent_transactions
+        WHERE company_id = ${companyId} AND branch_id = ${branchId} AND business_date = ${date} AND recorded_at > ${since}) AS exchanges,
+      (SELECT COUNT(DISTINCT transaction_id) FROM agent_movements
+        WHERE company_id = ${companyId} AND branch_id = ${branchId} AND business_date = ${date}
+          AND kind = 'reversal' AND recorded_at > ${since}) AS reversals,
+      (SELECT COUNT(*) FROM agent_rebalancings
+        WHERE company_id = ${companyId} AND branch_id = ${branchId} AND business_date = ${date} AND recorded_at > ${since}) AS rebalancings`);
+  return { exchanges: Number(r?.exchanges ?? 0), reversals: Number(r?.reversals ?? 0), rebalancings: Number(r?.rebalancings ?? 0) };
 }

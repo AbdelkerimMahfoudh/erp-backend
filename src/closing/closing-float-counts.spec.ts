@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { uuidToBin } from '../common/utils/uuid.util';
 import { dateValue } from '../common/business-day/business-day.service';
 import { buildChannels } from './channels';
-import { assembleReport, reportVersion, type ReportInputs } from './closing-report';
+import { assembleReport, floatSinceCount, reportVersion, type ReportInputs } from './closing-report';
 import { ClosingService } from './closing.service';
 
 /**
@@ -29,13 +29,17 @@ type Row = Record<string, any>;
 interface Options {
   activity?: string;
   /** The float's anchor and legs: expected = anchor + legs after it. Absent: unknown. */
-  anchor?: { amount: number; at: Date } | null;
+  anchor?: { amount: number; at: Date; source?: string } | null;
+  /** The closing's float count rows, as the report and the live view read them. */
+  saved?: Row[];
   legs?: { direction: 'inflow' | 'outflow'; amount: number; at: Date }[];
   closing?: Row | null;
   prior?: Row | null;
   questions?: Row[];
   complete?: boolean;
   today?: string;
+  /** The day's row as the count's lock reads it (D159); the plain read before it is `closing`. */
+  lockedStatus?: string;
 }
 
 function harness(opts: Options = {}) {
@@ -55,14 +59,14 @@ function harness(opts: Options = {}) {
     dailyClosing: {
       findUnique: jest.fn(async () => opts.closing === undefined ? { id: CLOSING, status: 'counting', version: 0, channelCounts: [] } : opts.closing),
       create: write('dailyClosing', 'create'),
-      update: write('dailyClosing', 'update'),
+      updateMany: write('dailyClosing', 'updateMany'),
     },
     agentPosition: {
       findFirst: jest.fn(async ({ where }: { where: Row }) => {
         if (where.clientUuid) return null;
         const a = opts.anchor ?? null;
         if (!a || (where.at?.lte && a.at.getTime() > where.at.lte.getTime())) return null;
-        return { amount: new Prisma.Decimal(a.amount), at: a.at, businessDate: dateValue(DAY), source: 'set', recordedByName: 'Owner' };
+        return { amount: new Prisma.Decimal(a.amount), at: a.at, businessDate: dateValue(DAY), source: a.source ?? 'set', recordedByName: 'Owner' };
       }),
       create: write('agentPosition', 'create'),
     },
@@ -76,7 +80,7 @@ function harness(opts: Options = {}) {
     },
     agentFloatCount: {
       findFirst: jest.fn(async () => opts.prior ?? null),
-      findMany: jest.fn(async () => []),
+      findMany: jest.fn(async () => opts.saved ?? []),
       create: write('agentFloatCount', 'create'),
       update: write('agentFloatCount', 'update'),
     },
@@ -87,9 +91,13 @@ function harness(opts: Options = {}) {
     },
     closingEvent: { create: write('closingEvent', 'create') },
     user: { findFirst: jest.fn(async () => ({ name: 'Owner' })) },
+    // The count's lock on the day's row (D159), read by the locking statement.
+    $queryRaw: jest.fn(async (_sql: Prisma.Sql) => [{ status: opts.lockedStatus ?? opts.closing?.status ?? 'counting', reopened_at: null }]),
     $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>): Promise<unknown> => fn(db)),
   };
-  const audit = { record: jest.fn(async (_entry: Row) => undefined), recordTx: jest.fn(async (_tx: unknown, _entry: Row) => undefined) };
+  // Inside the count's transaction, in order: one list of what was audited.
+  const record = jest.fn(async (_entry: Row) => undefined);
+  const audit = { record, recordTx: jest.fn(async (_tx: unknown, entry: Row) => record(entry)) };
   const today = opts.today ?? DAY;
   const businessDay = { today: jest.fn(async () => today), windowOf: jest.fn(async (day: string) => ({ start: new Date(`${day}T06:00:00Z`), end: new Date(new Date(`${day}T06:00:00Z`).getTime() + 86_400_000) })) };
   const openView = jest.fn(async (day: string) => ({
@@ -103,6 +111,9 @@ function harness(opts: Options = {}) {
     audit,
     businessDay,
     openView,
+    // Whether nothing countable is left, and the day's channels it is read against: the channels' own tests are the closing's.
+    countingDone: jest.fn(async () => opts.complete ?? false),
+    dayChannels: jest.fn(async () => ({ channels: [] })),
     tenant: { companyId: () => COMPANY, requireBranchId: () => BRANCH, userId: () => USER, requireUserId: () => USER },
   });
   return { svc, db, audit, writes, openView, businessDay };
@@ -142,8 +153,8 @@ describe('POST closings/:date/float-counts — counting a provider float', () =>
     const [question] = of(h.writes, 'closingDiscrepancy', 'create');
     expect(question.args.data).toMatchObject({ companyId: COMPANY, branchId: BRANCH, closingId: CLOSING, agentFloatCountId: row.args.data.id, amount: -100 });
     expect(question.args.data).not.toHaveProperty('channelCountId');
-    // The day: counted once nothing is outstanding, the event on the timeline, the audit row.
-    expect(of(h.writes, 'dailyClosing', 'update')[0].args.data).toMatchObject({ status: 'counted', countedById: USER });
+    // The day: counted once nothing is outstanding — never onto a locked row (D159) — the event on the timeline, the audit row.
+    expect(of(h.writes, 'dailyClosing', 'updateMany')[0].args).toMatchObject({ where: { id: CLOSING, status: { not: 'locked' } }, data: { status: 'counted', countedById: USER } });
     expect(of(h.writes, 'closingEvent', 'create')[0].args.data).toMatchObject({ kind: 'count_saved', closingId: CLOSING, businessDate: dateValue(DAY), actorId: USER });
     expect(of(h.writes, 'closingEvent', 'create')[0].args.data.payload).toEqual({ channel: 'float', accountId: null, providerId: BANKILY, label: 'Bankily', counted: 30_100, expected: 30_200, difference: -100, skipped: false, skipReason: null });
     expect(h.audit.record).toHaveBeenCalledWith(expect.objectContaining({ entityType: 'AgentFloatCount', action: 'create', after: expect.objectContaining({ day: DAY, providerId: BANKILY, counted: 30_100, expected: 30_200, difference: -100, explanation: 'a fee' }), branchId: BRANCH }));
@@ -155,7 +166,7 @@ describe('POST closings/:date/float-counts — counting a provider float', () =>
     await h.svc.recordFloatCount(DAY, { providerId: BANKILY, counted: 40_000 });
     expect(of(h.writes, 'agentFloatCount', 'create')[0].args.data).toMatchObject({ expected: null, counted: 40_000, difference: null });
     expect(of(h.writes, 'closingDiscrepancy')).toEqual([]);
-    expect(of(h.writes, 'dailyClosing', 'update')[0].args.data).toMatchObject({ status: 'counting' });
+    expect(of(h.writes, 'dailyClosing', 'updateMany')[0].args.data).toMatchObject({ status: 'counting' });
   });
 
   it('a skip with a reason is a decision, recorded as one: no amount, no difference, no question', async () => {
@@ -207,6 +218,15 @@ describe('POST closings/:date/float-counts — counting a provider float', () =>
         expect(error).toBeInstanceOf(BadRequestException);
         expect(h.writes).toEqual([]);
       }
+    });
+
+    it('a day closed after the plain read, found by the count’s own lock: 409 already_closed, nothing written (D159)', async () => {
+      const h = harness({ anchor: { amount: 1_000, at: t('08:00') }, lockedStatus: 'locked' });
+      const { error, body } = await refusal(h.svc.recordFloatCount(DAY, { providerId: BANKILY, counted: 1_000 }));
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(body).toEqual({ code: 'already_closed', message: `Day ${DAY} is already closed for this branch` });
+      expect(h.db.$queryRaw.mock.calls[0][0].sql).toMatch(/SELECT status, reopened_at FROM daily_closings WHERE id = \? FOR UPDATE/);
+      expect(h.writes).toEqual([]);
     });
 
     it('an unknown provider, a locked day, a day that has not begun', async () => {
@@ -361,5 +381,68 @@ describe('a locked close anchors each counted float (D154)', () => {
     const none = harness();
     await (none.svc as unknown as { anchorCountedFloatsTx: (tx: unknown, args: Row) => Promise<void> }).anchorCountedFloatsTx(none.db, { companyId: COMPANY, branchId: BRANCH, closingId: CLOSING, day: DAY, counted: [] });
     expect(none.db.user.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A counted float against the float now (D159): what the report and the live view compare it with. The count was held
+ * against what the app tracked at its instant; a leg or a set after it moves the float, and the close waits for a
+ * recount. On a day reopened since its close, the close's own anchor of that very count is the count, not a move.
+ */
+describe('a counted float held against the float now (D159)', () => {
+  const read = (h: ReturnType<typeof harness>, closing: Row, today = DAY) =>
+    (h.svc as unknown as { floatCountsFor: (b: Buffer, c: Row, d: string, t: string) => Promise<{ rows: Record<string, any>[] }> }).floatCountsFor(BRANCH, closing, DAY, today);
+  const countedRow = (over: Row = {}): Row => ({
+    providerId: uuidToBin(BANKILY),
+    expected: new Prisma.Decimal(30_000),
+    counted: new Prisma.Decimal(30_000),
+    explanation: null,
+    isSkipped: false,
+    skipReason: null,
+    countedAt: t('10:00'),
+    countedBy: { name: 'Aicha' },
+    ...over,
+  });
+
+  it('an exchange’s float leg after the count moves it: expected is the float now, expectedAtCount the figure counted against', async () => {
+    const h = harness({
+      anchor: { amount: 50_000, at: t('08:00') },
+      legs: [{ direction: 'outflow', amount: 20_000, at: t('09:00') }, { direction: 'inflow', amount: 500, at: t('11:00') }],
+      saved: [countedRow()],
+    });
+    const [row] = (await read(h, { id: CLOSING, status: 'counting' })).rows;
+    expect(row).toMatchObject({ expected: 30_500, expectedAtCount: 30_000, counted: 30_000 });
+    expect(floatSinceCount(row as never)).toEqual({ expectedAtCount: 30_000, movedSinceCount: true });
+  });
+
+  it('nothing after the count: the float holds', async () => {
+    const h = harness({ anchor: { amount: 50_000, at: t('08:00') }, legs: [{ direction: 'outflow', amount: 20_000, at: t('09:00') }], saved: [countedRow()] });
+    const [row] = (await read(h, { id: CLOSING, status: 'counting' })).rows;
+    expect(floatSinceCount(row as never)).toEqual({ expectedAtCount: 30_000, movedSinceCount: false });
+  });
+
+  it('a day reopened since its close: the close’s anchor of this very count is the count, so only the legs after it move the float', async () => {
+    // Counted 29 900 against 30 000; the close anchored the float at 29 900 at the count instant; the day was reopened.
+    const anchoredByTheClose = { amount: 29_900, at: t('10:00'), source: 'counted_close' };
+    const still = harness({ anchor: anchoredByTheClose, saved: [countedRow({ counted: new Prisma.Decimal(29_900) })] });
+    expect(floatSinceCount((await read(still, { id: CLOSING, status: 'reopened' })).rows[0] as never)).toEqual({ expectedAtCount: 30_000, movedSinceCount: false });
+    const moved = harness({ anchor: anchoredByTheClose, legs: [{ direction: 'inflow', amount: 700, at: t('12:00') }], saved: [countedRow({ counted: new Prisma.Decimal(29_900) })] });
+    const [row] = (await read(moved, { id: CLOSING, status: 'reopened' })).rows;
+    expect(row).toMatchObject({ expected: 30_700, expectedAtCount: 30_000 });
+    expect(floatSinceCount(row as never).movedSinceCount).toBe(true);
+  });
+
+  it('a locked day is read as it was closed: the stored figure, compared with nothing', async () => {
+    const h = harness({ anchor: { amount: 50_000, at: t('08:00') }, legs: [{ direction: 'inflow', amount: 500, at: t('11:00') }], saved: [countedRow()] });
+    const [row] = (await read(h, { id: CLOSING, status: 'locked' })).rows;
+    expect(row.expected).toBe(30_000);
+    expect(row).not.toHaveProperty('expectedAtCount');
+    expect(floatSinceCount(row as never)).toEqual({ expectedAtCount: null, movedSinceCount: false });
+  });
+
+  it('a skipped float is not compared', async () => {
+    const h = harness({ anchor: { amount: 50_000, at: t('08:00') }, legs: [{ direction: 'inflow', amount: 500, at: t('11:00') }], saved: [countedRow({ counted: null, isSkipped: true, skipReason: 'App down' })] });
+    const [row] = (await read(h, { id: CLOSING, status: 'counting' })).rows;
+    expect(floatSinceCount(row as never)).toEqual({ expectedAtCount: null, movedSinceCount: false });
   });
 });

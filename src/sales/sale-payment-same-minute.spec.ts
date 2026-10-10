@@ -135,6 +135,8 @@ function shop() {
       if (/FROM closing_events/.test(text)) return [{ one: 1 }];
       return [{ id: SALE_BIN, total: 1500, amount_paid: state.paid, balance_due: 1500 - state.paid, sold_at: SOLD_AT, is_reversed: 0, customer_id: null, branch_id: BRANCH }];
     }),
+    // The day's money version (D159), moved by the counter's check.
+    $executeRaw: jest.fn(async () => 1),
     financialCorrection: { findFirst: jest.fn(async () => null) },
     dailyClosing: { findUnique: jest.fn(async () => null) },
     receivingAccount: { findFirst: jest.fn() },

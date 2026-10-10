@@ -72,6 +72,20 @@ export function fingerprintPayout(payload: {
   return createHash('sha256').update(canonical).digest('hex');
 }
 
+/**
+ * The refund is booked on the confirmation day, and a locked day's snapshot must never disagree with a recomputed
+ * one: confirming on it is refused rather than the closing reopened — the rule approval obeys too. Decided on the
+ * day's row as the closing's lock returns it (D159).
+ */
+export function assertConfirmationDayOpen(closing: { isLocked: boolean } | null, day: string): void {
+  if (closing?.isLocked) {
+    throw new ConflictException({
+      code: 'day_already_closed',
+      message: `${day} is already closed for this branch. Confirm this refund tomorrow, or ask the owner to review the closing.`,
+    });
+  }
+}
+
 /** Everything after confirmation is read-only. */
 export function assertCorrectable(status: 'reported_pending_confirmation' | 'confirmed'): void {
   if (status === 'confirmed') {

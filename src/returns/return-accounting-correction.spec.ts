@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { grossRefundOf, settleRefund } from './return-workflow';
+import { ConflictException } from '@nestjs/common';
+import { assertApprovalDayOpen, grossRefundOf, settleRefund } from './return-workflow';
 
 /**
  * The corrected accounting for an approved return (I2-CP4.1).
@@ -190,6 +191,17 @@ describe('what approval and rejection each do', () => {
   });
 
   it('approval is still refused on a locked day', () => {
-    expect(service).toMatch(/day_already_closed/);
+    // D159: through the day's lock, by the returns' own rule — the same code and words as ever.
+    expect(service).toMatch(/operation: 'return_approval'/);
+    expect(() => assertApprovalDayOpen({ isLocked: true }, '2026-10-10')).toThrow(ConflictException);
+    expect(() => assertApprovalDayOpen({ isLocked: false }, '2026-10-10')).not.toThrow();
+    try {
+      assertApprovalDayOpen({ isLocked: true }, '2026-10-10');
+    } catch (e) {
+      expect((e as ConflictException).getResponse()).toEqual({
+        code: 'day_already_closed',
+        message: '2026-10-10 is already closed for this branch. Approve this return tomorrow, or ask the owner to review the closing.',
+      });
+    }
   });
 });
