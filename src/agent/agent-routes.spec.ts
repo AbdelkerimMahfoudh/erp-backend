@@ -1,10 +1,11 @@
 import 'reflect-metadata';
 import { BadRequestException, ConflictException, ForbiddenException, HttpStatus, RequestMethod, ValidationPipe } from '@nestjs/common';
-import { METHOD_METADATA, MODULE_METADATA, PATH_METADATA, VERSION_METADATA } from '@nestjs/common/constants';
+import { METHOD_METADATA, MODULE_METADATA, PATH_METADATA, ROUTE_ARGS_METADATA, VERSION_METADATA } from '@nestjs/common/constants';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ClosingModule } from '../closing/closing.module';
 import { AllExceptionsFilter } from '../common/filters/all-exceptions.filter';
+import { RecordIdPipe } from '../common/pipes/record-id.pipe';
 import { REQUIRE_PERMISSIONS_KEY } from '../rbac/require-permissions.decorator';
 import { DELEGATABLE_PERMISSIONS, isCompanyPermission } from '../rbac/permission-scope';
 import { ROLE_PERMISSIONS } from '../rbac/role-permissions';
@@ -43,6 +44,8 @@ describe('the routes, under agent/ and version 1', () => {
       setPosition: ['POST positions', ['agent.position.set']],
       recordTransaction: ['POST transactions', ['agent.transaction.record']],
       listTransactions: ['GET transactions', ['agent.transaction.view']],
+      // D161: no route key and no branch header — the service answers the recorder or a viewer at the record's branch.
+      transactionByClientUuid: ['GET transactions/client/:clientUuid', undefined],
       getTransaction: ['GET transactions/:id', ['agent.transaction.view']],
       reverseTransaction: ['POST transactions/:id/reverse', ['agent.transaction.reverse']],
       reportMistake: ['POST transactions/:id/mistakes', ['agent.mistake.report']],
@@ -55,6 +58,33 @@ describe('the routes, under agent/ and version 1', () => {
     for (const [name, [path, keys]] of Object.entries(expected)) {
       expect([name, route(name as keyof AgentController)]).toEqual([name, path]);
       expect([name, perms(name as keyof AgentController)]).toEqual([name, keys]);
+    }
+  });
+
+  it('the client-key lookup is declared before transactions/:id', () => {
+    const order = Object.getOwnPropertyNames(AgentController.prototype);
+    expect(order.indexOf('transactionByClientUuid')).toBeLessThan(order.indexOf('getTransaction'));
+  });
+
+  it('a malformed path id is 400 id_invalid on every route that takes one — never a 500 (D161)', () => {
+    const withId = Object.getOwnPropertyNames(AgentController.prototype).filter((name) => /:id\b/.test(String(Reflect.getMetadata(PATH_METADATA, handler(name as keyof AgentController)))));
+    expect(withId.sort()).toEqual(['addProviderConfig', 'dismissMistake', 'getTransaction', 'listProviderConfigs', 'reportMistake', 'reverseTransaction', 'updateProvider']);
+    for (const name of withId) {
+      const params = Object.values(Reflect.getMetadata(ROUTE_ARGS_METADATA, AgentController, name) as Record<string, { data?: string; pipes?: unknown[] }>);
+      expect([name, params.find((p) => p.data === 'id')?.pipes]).toEqual([name, [RecordIdPipe]]);
+    }
+    const pipe = new RecordIdPipe();
+    expect(pipe.transform('01a0b1c2-0000-7000-8000-00000000000b')).toBe('01a0b1c2-0000-7000-8000-00000000000b');
+    for (const bad of ['not-a-uuid', '01a0b1c2000070008000000000000000b', '', '01a0b1c2-0000-7000-8000-00000000000b; DROP']) {
+      const e = (() => {
+        try {
+          return pipe.transform(bad);
+        } catch (err) {
+          return err;
+        }
+      })();
+      expect(e).toBeInstanceOf(BadRequestException);
+      expect((e as BadRequestException).getResponse()).toEqual({ code: 'id_invalid', message: 'That record id is not valid.' });
     }
   });
 

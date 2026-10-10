@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -6,10 +6,12 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { AppClsStore } from '../common/context/request-context';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
-import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { isDateString } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
 import { ClosingService } from '../closing/closing.service';
+import { AccessService } from '../rbac/access.service';
+import { permissionDenied } from '../rbac/refusals';
 import { requireAgentActivity } from './agent-access';
 import { configInForce, configView } from './agent-providers.service';
 import {
@@ -153,6 +155,7 @@ export class AgentTransactionsService {
     private readonly businessDay: BusinessDayService,
     private readonly closing: ClosingService,
     private readonly cls: ClsService<AppClsStore>,
+    private readonly access: AccessService,
   ) {}
 
   // ── Recording ───────────────────────────────────────────────────────────
@@ -290,7 +293,36 @@ export class AgentTransactionsService {
     if (prior.clientRequestHash !== hash) {
       throw new ConflictException({ code: 'idempotency_conflict', message: 'That request id already recorded a different exchange. Refresh and record it again with a new key.' });
     }
-    return this.viewOf(prior.id, false);
+    // The record's own view, whatever branch the retry's header names (D161): the key is the exchange, and a
+    // "not found" here told a phone that had switched branches that its recorded exchange never happened.
+    return this.viewWhere({ id: prior.id }, false);
+  }
+
+  /**
+   * What became of an exchange whose answer was lost (D161, docs/73 §11.4): the
+   * phone asks with its own key and is told `recorded: false` (send it again
+   * under the same key) or given the record — masked, with the configuration
+   * version and the device time it was sent with, so the phone can tell its
+   * own exchange from a different one recorded under the key. Company-wide:
+   * no branch header is needed, and none is read. Answered to the person who
+   * recorded it, or to anybody holding `agent.transaction.view` at its branch.
+   */
+  async findByClientUuid(clientUuid: string) {
+    if (!isUuid(clientUuid)) throw new BadRequestException({ code: 'client_uuid_invalid', message: 'That is not a client key' });
+    const row = await this.db.agentTransaction.findFirst({ where: { companyId: this.tenant.companyId(), clientUuid: uuidToBin(clientUuid) }, select: listSelect });
+    if (!row) return { recorded: false };
+    const userId = this.tenant.requireUserId();
+    if (!row.recordedById.equals(userId) && !(await this.mayViewAt(userId, row.branchId))) throw permissionDenied(['agent.transaction.view']);
+    return { recorded: true, transaction: { ...toTransactionView(row, false), configVersionId: binToUuid(row.configVersionId) } };
+  }
+
+  /** Whether the caller may view exchanges at that branch; not being assigned there is holding nothing there. */
+  private async mayViewAt(userId: Buffer, branchId: Buffer): Promise<boolean> {
+    const held = await this.access.getEffectivePermissions(userId, branchId).catch((e: unknown) => {
+      if (e instanceof ForbiddenException) return new Set<string>();
+      throw e;
+    });
+    return held.has('agent.transaction.view');
   }
 
   /** The legs of an exchange, a reversal or a rebalancing: append-only, dated and timed with their source. */
@@ -353,8 +385,11 @@ export class AgentTransactionsService {
   }
 
   private async viewOf(id: Buffer, reveal: boolean) {
-    const branchId = this.tenant.requireBranchId();
-    const row = await this.db.agentTransaction.findFirst({ where: { id, branchId }, select: reveal ? detailSelect : listSelect });
+    return this.viewWhere({ id, branchId: this.tenant.requireBranchId() }, reveal);
+  }
+
+  private async viewWhere(where: Prisma.AgentTransactionWhereInput, reveal: boolean) {
+    const row = await this.db.agentTransaction.findFirst({ where, select: reveal ? detailSelect : listSelect });
     if (!row) throw new NotFoundException({ code: 'transaction_not_found', message: 'No such exchange at this branch' });
     return toTransactionView(row, reveal);
   }

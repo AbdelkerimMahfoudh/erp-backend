@@ -56,6 +56,12 @@ interface Options {
   drawer?: number | null;
   /** Bankily's float anchor; none (unknown) by default. */
   floatAnchor?: number | null;
+  /** The branch in the request's header; null for none. */
+  branch?: Buffer | null;
+  /** The person asking; the recorder (USER) by default. */
+  caller?: Buffer;
+  /** What the caller holds at a branch, as AccessService resolves it (it throws for a branch they are not assigned to). */
+  heldAt?: (branchId: Buffer) => Promise<Set<string>>;
 }
 
 function harness(opts: Options = {}) {
@@ -93,7 +99,8 @@ function harness(opts: Options = {}) {
           ? transactions.find((t) => t.clientUuid.equals(where.clientUuid))
           : transactions.find((t) => t.id.equals(where.id) && (!where.branchId || t.branchId.equals(where.branchId)));
         if (!hit) return null;
-        return where.clientUuid ? { id: hit.id, clientRequestHash: hit.clientRequestHash } : rowOf(hit, select);
+        // The replay reads the key and its fingerprint; the status lookup reads the masked row by the key.
+        return where.clientUuid && select?.clientRequestHash ? { id: hit.id, clientRequestHash: hit.clientRequestHash } : rowOf(hit, select);
       }),
       findMany: jest.fn(async (args: Row) => transactions.map((t) => rowOf(t, args.select))),
       create: jest.fn(async ({ data }: { data: Row }) => {
@@ -167,10 +174,19 @@ function harness(opts: Options = {}) {
   };
   const audit = { record: jest.fn(async (_entry: Row) => undefined), recordTx: jest.fn(async (_tx: unknown, _entry: Row) => undefined) };
   const businessDay = { assign: jest.fn(async () => DAY), today: jest.fn(async () => DAY) };
-  const tenant = { companyId: () => COMPANY, requireBranchId: () => BRANCH, requireUserId: () => USER };
+  const header = opts.branch === undefined ? BRANCH : opts.branch;
+  const tenant = {
+    companyId: () => COMPANY,
+    requireBranchId: () => {
+      if (!header) throw new BadRequestException('X-Branch-Id header is required for this operation');
+      return header;
+    },
+    requireUserId: () => opts.caller ?? USER,
+  };
   const cls = { get: (key: string) => (key === 'permissions' ? new Set(opts.permissions ?? []) : undefined) };
-  const svc = new AgentTransactionsService(db as never, tenant as never, audit as never, businessDay as never, closing as never, cls as never);
-  return { svc, db, audit, businessDay, closing, transactions, movements, mistakes, rebalancings };
+  const access = { getEffectivePermissions: jest.fn(async (_userId: Buffer, branchId: Buffer) => (opts.heldAt ? opts.heldAt(branchId) : new Set<string>())) };
+  const svc = new AgentTransactionsService(db as never, tenant as never, audit as never, businessDay as never, closing as never, cls as never, access as never);
+  return { svc, db, audit, businessDay, closing, access, transactions, movements, mistakes, rebalancings };
 }
 
 const exchange = (over: Partial<CreateAgentTransactionDto> = {}): CreateAgentTransactionDto => ({
@@ -406,6 +422,18 @@ describe('recording an exchange', () => {
       });
       const view = await h.svc.record(exchange());
       expect(view.id).toBe('01a0b1c2-0000-7000-8000-0000000000e1');
+    });
+
+    it('a retry sent under another branch header still answers with the record — never a false "not found" (D161)', async () => {
+      const h = harness();
+      const first = await h.svc.record(exchange());
+      // The phone switched branches before the retry: the key is the exchange, wherever the header now points.
+      const elsewhere = harness({ branch: Buffer.alloc(16, 9) });
+      elsewhere.transactions.push(...h.transactions);
+      elsewhere.movements.push(...h.movements);
+      const again = await elsewhere.svc.record(exchange());
+      expect(again).toMatchObject({ id: first.id, branchId: binToUuid(BRANCH) });
+      expect(elsewhere.db.agentTransaction.create).not.toHaveBeenCalled();
     });
   });
 
@@ -699,5 +727,90 @@ describe('rebalancing (A8)', () => {
       expect(String(body?.message)).toMatch(/^Bankily would go to -5000 MRU/);
       expect(h.closing.drawerPosition).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('what became of an exchange, by its client key (D161, docs/73 §11.4)', () => {
+  const OTHER = Buffer.alloc(16, 4);
+
+  async function recorded(over: Options = {}) {
+    const h = harness(over);
+    await h.svc.record(exchange({ configVersionId: CONFIG, deviceRecordedAt: '2026-10-08T08:59:00.000Z' }));
+    return h;
+  }
+
+  it('to the person who recorded it: recorded, masked, with the configuration version and the device time it was sent with', async () => {
+    const h = await recorded();
+    const answer = await h.svc.findByClientUuid(KEY);
+    expect(answer).toMatchObject({
+      recorded: true,
+      transaction: {
+        branchId: binToUuid(BRANCH),
+        providerId: BANKILY,
+        providerLabel: 'Bankily',
+        direction: 'cash_in_credit_out',
+        amount: 20_000,
+        customerNumberMasked: '•••• 3456',
+        commission: { amount: 200, rateBp: 100 },
+        businessDate: DAY,
+        status: 'completed',
+        configVersionId: CONFIG,
+        deviceRecordedAt: '2026-10-08T08:59:00.000Z',
+        recordedBy: { id: binToUuid(USER), name: 'Aicha' },
+      },
+    });
+    // Never the number itself.
+    expect(JSON.stringify(answer)).not.toContain('36123456');
+    // The recorder is not asked about: their own record is theirs.
+    expect(h.access.getEffectivePermissions).not.toHaveBeenCalled();
+  });
+
+  it('a key nothing was recorded under: recorded false — send it again under the same key', async () => {
+    const h = harness();
+    await expect(h.svc.findByClientUuid(KEY2)).resolves.toEqual({ recorded: false });
+  });
+
+  it('a malformed key is client_uuid_invalid, before anything is read', async () => {
+    const h = harness();
+    for (const bad of ['retry-1', '', `${KEY}x`]) {
+      const { error, body } = await refusal(h.svc.findByClientUuid(bad));
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect(body?.code).toBe('client_uuid_invalid');
+    }
+    expect(h.db.agentTransaction.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('somebody else without agent.transaction.view at its branch is refused: permission_denied, nothing shown', async () => {
+    for (const heldAt of [
+      async () => new Set(['agent.transaction.record']),
+      // Not assigned to the record's branch at all: holding nothing there, the same refusal.
+      async () => {
+        throw new ForbiddenException({ code: 'branch_access_denied', message: 'No access to the requested branch' });
+      },
+    ]) {
+      const h = await recorded();
+      const asker = harness({ caller: OTHER, heldAt });
+      asker.transactions.push(...h.transactions);
+      const { error, body } = await refusal(asker.svc.findByClientUuid(KEY));
+      expect(error).toBeInstanceOf(ForbiddenException);
+      expect(body).toEqual({ code: 'permission_denied', message: 'Missing permission(s): agent.transaction.view', missing: ['agent.transaction.view'] });
+    }
+  });
+
+  it('somebody else holding agent.transaction.view at the record’s branch is answered — asked at that branch, not the header’s', async () => {
+    const h = await recorded();
+    const manager = harness({ caller: OTHER, branch: Buffer.alloc(16, 9), heldAt: async (branchId) => new Set(branchId.equals(BRANCH) ? ['agent.transaction.view'] : []) });
+    manager.transactions.push(...h.transactions);
+    await expect(manager.svc.findByClientUuid(KEY)).resolves.toMatchObject({ recorded: true, transaction: { branchId: binToUuid(BRANCH) } });
+    expect(manager.access.getEffectivePermissions).toHaveBeenCalledWith(OTHER, BRANCH);
+  });
+
+  it('needs no branch header, and reads none', async () => {
+    const h = await recorded();
+    const noHeader = harness({ branch: null });
+    noHeader.transactions.push(...h.transactions);
+    await expect(noHeader.svc.findByClientUuid(KEY)).resolves.toMatchObject({ recorded: true });
+    // Company-scoped by key alone: the branch is the record's, never the request's.
+    expect(noHeader.db.agentTransaction.findFirst.mock.calls[0][0].where).toEqual({ companyId: COMPANY, clientUuid: uuidToBin(KEY) });
   });
 });

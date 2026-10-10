@@ -81,4 +81,11 @@ describe('a refused write names the subscription state (D161)', () => {
     const body = await refusalOf({ status: 'suspended', currentPeriodEnd: null }, 'GET', '/api/v1/agent/transactions');
     expect(body).toMatchObject({ code: ENTITLEMENT_SUSPENDED, state: 'suspended' });
   });
+
+  it('but a phone may still ask what became of its own money record, in every closed state (D161)', async () => {
+    for (const status of ['suspended', 'cancelled', 'pending_activation', 'rejected']) {
+      const closed = interceptorFor({ status, currentPeriodEnd: null });
+      await expect(lastValueFrom(await closed.intercept(request('GET', '/api/v1/agent/transactions/client/:clientUuid'), handler))).resolves.toBe('ran');
+    }
+  });
 });

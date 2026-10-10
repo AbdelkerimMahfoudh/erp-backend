@@ -1,6 +1,7 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
+import { RecordIdPipe } from '../common/pipes/record-id.pipe';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { AgentPositionsService } from './agent-positions.service';
 import { AgentProvidersService } from './agent-providers.service';
@@ -15,8 +16,10 @@ import { CreateAgentTransactionDto, ListAgentTransactionsDto, ReverseAgentTransa
 
 /**
  * The Money Services Agent counter (docs/73, D154–D157). Every route is gated
- * by one of the activity's nine keys (§7); the branch's activity is checked
- * again in each service (D156), and the actor of every record is the session's.
+ * by one of the activity's nine keys (§7) — the provider list and the
+ * client-key lookup check theirs in the service; the branch's activity is
+ * checked again in each service (D156), and the actor of every record is the
+ * session's. A path id that is not a uuid is 400 `id_invalid`, never a 500.
  */
 @ApiTags('agent')
 @ApiBearerAuth()
@@ -54,7 +57,7 @@ export class AgentController {
   @Patch('providers/:id')
   @RequirePermissions('agent.provider.manage')
   @ApiOperation({ summary: 'Rename, reorder or switch a provider off or on (Owner); a retry under the same clientRequestId changes nothing again' })
-  updateProvider(@Param('id') id: string, @Body() dto: UpdateAgentProviderDto) {
+  updateProvider(@Param('id', RecordIdPipe) id: string, @Body() dto: UpdateAgentProviderDto) {
     return this.providers.update(id, dto);
   }
 
@@ -63,14 +66,14 @@ export class AgentController {
   @ApiOperation({
     summary: 'Record a new configuration version — rates, settlement, reference rule — in force from now (Owner); a retry under the same clientRequestId answers 200 with the version it made',
   })
-  async addProviderConfig(@Param('id') id: string, @Body() dto: CreateAgentProviderConfigDto, @Res({ passthrough: true }) res: Response) {
+  async addProviderConfig(@Param('id', RecordIdPipe) id: string, @Body() dto: CreateAgentProviderConfigDto, @Res({ passthrough: true }) res: Response) {
     return replayAnswersOk(res, await this.providers.addConfig(id, dto));
   }
 
   @Get('providers/:id/configs')
   @RequirePermissions('agent.provider.manage')
   @ApiOperation({ summary: 'Every configuration version of a provider, newest first (Owner)' })
-  listProviderConfigs(@Param('id') id: string) {
+  listProviderConfigs(@Param('id', RecordIdPipe) id: string) {
     return this.providers.listConfigs(id);
   }
 
@@ -106,24 +109,38 @@ export class AgentController {
     return this.transactions.list(query);
   }
 
+  /**
+   * What became of an exchange whose answer was lost (D161, docs/73 §11.4):
+   * `{ recorded: false }`, or the record, masked. No route key and no branch
+   * header: the phone asks about its own key whatever branch it now has in
+   * hand, and the service answers the person who recorded it or anybody who
+   * may view exchanges at its branch. Readable in every subscription state
+   * (route-classification.ts). Declared before `transactions/:id`.
+   */
+  @Get('transactions/client/:clientUuid')
+  @ApiOperation({ summary: 'Whether an exchange was recorded under a client key, and the record (masked) if it was' })
+  transactionByClientUuid(@Param('clientUuid') clientUuid: string) {
+    return this.transactions.findByClientUuid(clientUuid);
+  }
+
   @Get('transactions/:id')
   @RequirePermissions('agent.transaction.view')
   @ApiOperation({ summary: 'One exchange; the customer’s number only with agent.customer.reveal' })
-  getTransaction(@Param('id') id: string) {
+  getTransaction(@Param('id', RecordIdPipe) id: string) {
     return this.transactions.detail(id);
   }
 
   @Post('transactions/:id/reverse')
   @RequirePermissions('agent.transaction.reverse')
   @ApiOperation({ summary: 'Reverse an exchange exactly once, countering every leg (Owner, Manager)' })
-  reverseTransaction(@Param('id') id: string, @Body() dto: ReverseAgentTransactionDto) {
+  reverseTransaction(@Param('id', RecordIdPipe) id: string, @Body() dto: ReverseAgentTransactionDto) {
     return this.transactions.reverse(id, dto);
   }
 
   @Post('transactions/:id/mistakes')
   @RequirePermissions('agent.mistake.report')
   @ApiOperation({ summary: 'Report a mistake on a recorded exchange; moves nothing' })
-  reportMistake(@Param('id') id: string, @Body() dto: ReportAgentMistakeDto) {
+  reportMistake(@Param('id', RecordIdPipe) id: string, @Body() dto: ReportAgentMistakeDto) {
     return this.transactions.reportMistake(id, dto);
   }
 
@@ -138,7 +155,7 @@ export class AgentController {
   @HttpCode(HttpStatus.OK)
   @RequirePermissions('agent.transaction.reverse')
   @ApiOperation({ summary: 'Dismiss a mistake report: the exchange stands' })
-  dismissMistake(@Param('id') id: string, @Body() dto: DismissAgentMistakeDto) {
+  dismissMistake(@Param('id', RecordIdPipe) id: string, @Body() dto: DismissAgentMistakeDto) {
     return this.transactions.dismissMistake(id, dto);
   }
 

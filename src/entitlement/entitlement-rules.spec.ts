@@ -504,9 +504,11 @@ describe('route classification fails closed', () => {
  */
 describe('what a pending or suspended shop may still read', () => {
   it('the readable list stays exactly this short', () => {
-    expect([...ALWAYS_READABLE].sort()).toEqual([
+    expect(ALWAYS_READABLE.map((r) => r.path).sort()).toEqual([
       'account',
       'account/deletion',
+      // D161 (2026-10-10): what became of the phone's own money record, under its own key.
+      'agent/transactions/client/:clientUuid',
       'auth/logout',
       'auth/me',
       'auth/refresh',
@@ -515,6 +517,23 @@ describe('what a pending or suspended shop may still read', () => {
       'platform/my-subscription',
       'platform/payment-instructions',
     ]);
+  });
+
+  it('every readable exception explains itself', () => {
+    for (const rule of ALWAYS_READABLE) expect([rule.path, rule.why.length > 20]).toEqual([rule.path, true]);
+  });
+
+  it('a phone can learn the fate of its own money record while the business is suspended (D161)', () => {
+    /*
+     * The exchange happened at the counter whatever the subscription became
+     * while it sat in the queue; refusing the lookup would leave the phone
+     * guessing whether to send it again. Only the lookup by the phone's own
+     * key: the history, the detail and every other agent read stay closed.
+     */
+    expect(isAlwaysReadable('agent/transactions/client/:clientUuid')).toBe(true);
+    for (const path of ['agent/transactions', 'agent/transactions/:id', 'agent/positions', 'agent/providers', 'agent/reports', 'agent/mistakes', 'agent/rebalancings']) {
+      expect([path, isAlwaysReadable(path)]).toEqual([path, false]);
+    }
   });
 
   it('lets a pending shop read how to pay', () => {
@@ -540,9 +559,10 @@ describe('what a pending or suspended shop may still read', () => {
     }
   });
 
-  it('names only account routes, never a business one', () => {
-    for (const path of ALWAYS_READABLE) {
-      const accountish = /^(entitlement|health|auth\/|account(\/deletion)?$|platform\/(my-subscription|payment-instructions))/;
+  it('names only account routes, and the one money-record lookup — never another business read', () => {
+    // The lookup is the single argued exception (D161, 2026-10-10): one record, under the phone's own key, masked.
+    const accountish = /^(entitlement|health|auth\/|account(\/deletion)?$|platform\/(my-subscription|payment-instructions))/;
+    for (const { path } of ALWAYS_READABLE.filter((r) => r.path !== 'agent/transactions/client/:clientUuid')) {
       expect([path, accountish.test(path)]).toEqual([path, true]);
     }
   });

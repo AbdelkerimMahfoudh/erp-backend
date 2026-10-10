@@ -140,23 +140,30 @@ export function isSeatConsumingRoute(method: string, path: string): boolean {
   return SEAT_KEYS.has(key(method, path));
 }
 
+/** A read that stays open in every subscription state, and why. Path as Nest sees it, like {@link RouteRule}. */
+export interface ReadRule {
+  path: string;
+  why: string;
+}
+
+const readable = (path: string, why: string): ReadRule => ({ path, why });
+
 /**
  * Reads that stay available however the subscription stands.
  *
  * The customer's own account surface: what state am I in, who am I, and how do
  * I sign out. A business that is pending or suspended keeps all of it, because
  * these are the routes that let the app *explain* the situation. Nothing here
- * returns operational business data — no sales, no stock, no money.
+ * returns operational business data — no sales, no stock, no money — with one
+ * argued exception: a phone asking what became of its own money record.
  */
-export const ALWAYS_READABLE: readonly string[] = [
-  'entitlement',
-  'auth/me',
-  'auth/logout',
-  'auth/refresh',
-  'health',
-  // The customer's own account page. Reachable in EVERY state — it is where
-  // somebody goes to find out why they cannot get in.
-  'platform/my-subscription',
+export const ALWAYS_READABLE: readonly ReadRule[] = [
+  readable('entitlement', 'How the app learns it is pending or suspended; refusing it would leave the app unable to explain the refusal'),
+  readable('auth/me', 'Who is signed in: the app needs it to show any screen at all, including the one that explains a closed business'),
+  readable('auth/logout', 'Signing out must never be blocked; it is a security action'),
+  readable('auth/refresh', 'Keeping an existing session alive returns no business data'),
+  readable('health', 'Whether the server is up; no tenant data'),
+  readable('platform/my-subscription', 'The customer’s own account page: where somebody goes to find out why they cannot get in'),
   /*
    * How to pay, for a shop that has not paid — the website's account page.
    *
@@ -171,17 +178,30 @@ export const ALWAYS_READABLE: readonly string[] = [
    * (2026-10-05). No operational data, no money, and reading it pays nothing.
    * The mobile app never reads it.
    */
-  'platform/payment-instructions',
+  readable('platform/payment-instructions', 'How to pay, for a shop that has not paid: the other half of the account page, and no operational data'),
   /*
    * The person's own account page and the state of their deletion request
    * (docs/64). Where somebody goes to find their sign-in identifier, verify
    * their number and see whether a deletion is pending — none of it business
    * data, and all of it needed in exactly the states that close everything else.
    */
-  'account',
-  'account/deletion',
+  readable('account', 'The person’s own account page: their sign-in identifier and their number, needed to leave in any state'),
+  readable('account/deletion', 'Whether the person’s own deletion request is pending; a right the subscription cannot withhold'),
+  /*
+   * What became of the phone's own money record (D161, docs/73 §11.4). A phone
+   * that lost the answer to an agent exchange must learn whether it was
+   * recorded before it may send it again — and a business suspended while the
+   * exchange sat in its queue is exactly when it needs to know: the money
+   * changed hands at the counter either way. One record, under the phone's own
+   * random key, masked, to the person who recorded it or to somebody allowed to
+   * view exchanges at its branch; never a list, never the customer's number.
+   */
+  readable(
+    'agent/transactions/client/:clientUuid',
+    'A phone must learn whether its own queued money exchange was recorded, whatever the subscription became meanwhile: one masked record under its own key, to its recorder or a viewer at its branch',
+  ),
 ] as const;
 
 export function isAlwaysReadable(path: string): boolean {
-  return ALWAYS_READABLE.includes(path);
+  return ALWAYS_READABLE.some((rule) => rule.path === path);
 }

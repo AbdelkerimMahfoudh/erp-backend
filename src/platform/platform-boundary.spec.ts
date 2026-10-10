@@ -396,7 +396,7 @@ describe('a closed business stays closed on the server', () => {
 
   it('the only platform routes open to a locked tenant are its own account surface', () => {
     const allowedWrites = ALWAYS_ALLOWED.map((r) => r.path).filter((p) => p.startsWith('platform/'));
-    const allowedReads = ALWAYS_READABLE.filter((p) => p.startsWith('platform/'));
+    const allowedReads = ALWAYS_READABLE.map((r) => r.path).filter((p) => p.startsWith('platform/'));
     // Asking to pay for a seat or a store is the one thing a lapsed or pending shop most needs
     // to be allowed (docs/21, 2026-10-05); nothing is granted by asking. Asking for another
     // activity for a branch (D154, 2026-10-08) is the same kind of request: an upgrade waits for
