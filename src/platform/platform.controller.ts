@@ -613,6 +613,8 @@ export class PlatformController {
         state: ent?.state ?? 'expired',
         status: sub?.status ?? 'activated',
         periodEnd: sub?.currentPeriodEnd?.toISOString() ?? null,
+        // The grant with its own dates (docs/73 §11.5): the list says when a complimentary business's access ends.
+        complimentary: ent?.complimentary ?? null,
         version: sub?.version ?? 0,
       };
     });
