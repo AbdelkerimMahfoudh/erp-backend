@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
-import { parsePayerNumber, PAYER_NUMBER_MAX_DIGITS } from '../sales/payer-number';
+import { parsePayerNumber } from '../sales/payer-number';
 
 /**
  * The rules of the agent ledger (docs/73 §4, D154): what a provider must have
@@ -291,27 +291,29 @@ export function assertFloatAmount(amount: number): void {
 
 // ── The customer number ─────────────────────────────────────────────────────
 
-export const CUSTOMER_NUMBER_MIN_DIGITS = 4;
-export const CUSTOMER_NUMBER_MAX_DIGITS = PAYER_NUMBER_MAX_DIGITS;
+/** A Mauritanian number: exactly eight digits — never seven, never nine (D162). */
+export const CUSTOMER_NUMBER_DIGITS = 8;
 
 export type ParsedCustomerNumber =
   | { ok: true; value: string; last4: string }
   | { ok: false; reason: 'missing' | 'invalid' | 'too_short' | 'too_long' };
 
 /**
- * The customer number (A6, docs/73 §4.6): the same digits rule as the payer
- * number — digits, an optional leading `+`, Arabic-Indic digits read as the
- * same digits, spaces and hyphens dropped, no country guessed — but mandatory,
- * and at least four digits so the masked `•••• 1234` has something to show.
- * The last four digits are kept apart for the masked list and search.
+ * The customer number (A6, docs/73 §4.6; D162): read as the payer number is —
+ * Arabic-Indic digits read as the same digits, spaces and hyphens dropped — but
+ * mandatory, and exactly eight digits with no `+` or country code: a Mauritanian
+ * number, as the customer says it. The sale's payer number keeps its open
+ * format (D151). The last four digits are kept apart for the masked list and search.
  */
 export function parseCustomerNumber(raw: string | null | undefined): ParsedCustomerNumber {
   const parsed = parsePayerNumber(raw);
   if (!parsed.ok) return { ok: false, reason: parsed.reason };
   if (parsed.value === null) return { ok: false, reason: 'missing' };
-  const digits = parsed.value.replace(/^\+/, '');
-  if (digits.length < CUSTOMER_NUMBER_MIN_DIGITS) return { ok: false, reason: 'too_short' };
-  return { ok: true, value: parsed.value, last4: digits.slice(-4) };
+  const digits = parsed.value;
+  if (digits.startsWith('+')) return { ok: false, reason: 'invalid' };
+  if (digits.length < CUSTOMER_NUMBER_DIGITS) return { ok: false, reason: 'too_short' };
+  if (digits.length > CUSTOMER_NUMBER_DIGITS) return { ok: false, reason: 'too_long' };
+  return { ok: true, value: digits, last4: digits.slice(-4) };
 }
 
 /** The number as it is stored, or the refusal — which names the problem, never the number (it reaches the log). */
@@ -320,9 +322,9 @@ export function customerNumberFor(raw: string | null | undefined): { value: stri
   if (parsed.ok) return { value: parsed.value, last4: parsed.last4 };
   const message = {
     missing: 'The customer number is required.',
-    invalid: 'A customer number is digits, with spaces or hyphens and an optional leading +',
-    too_short: `A customer number has at least ${CUSTOMER_NUMBER_MIN_DIGITS} digits`,
-    too_long: `A customer number has at most ${CUSTOMER_NUMBER_MAX_DIGITS} digits`,
+    invalid: `A customer number is ${CUSTOMER_NUMBER_DIGITS} digits, with no + and no country code`,
+    too_short: `A customer number has exactly ${CUSTOMER_NUMBER_DIGITS} digits; this one has fewer`,
+    too_long: `A customer number has exactly ${CUSTOMER_NUMBER_DIGITS} digits; this one has more`,
   }[parsed.reason];
   throw new BadRequestException({ code: 'customer_number_invalid', message });
 }

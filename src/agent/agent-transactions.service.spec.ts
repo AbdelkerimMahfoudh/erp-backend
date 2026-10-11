@@ -194,7 +194,7 @@ const exchange = (over: Partial<CreateAgentTransactionDto> = {}): CreateAgentTra
   providerId: BANKILY,
   direction: 'cash_in_credit_out',
   amount: 20_000,
-  customerNumber: ' +222 36 12-34-56 ',
+  customerNumber: ' 36 12-34-56 ',
   ...over,
 });
 
@@ -216,7 +216,7 @@ describe('recording an exchange', () => {
       providerId: uuidToBin(BANKILY),
       direction: 'cash_in_credit_out',
       amount: 20_000,
-      customerNumber: '+22236123456',
+      customerNumber: '36123456',
       customerNumberLast4: '3456',
       providerReference: 'TX-77',
       commissionAmount: 200,
@@ -366,7 +366,7 @@ describe('recording an exchange', () => {
       h.closing.assertCounterOpen.mockImplementation(async () => {
         throw new ConflictException({ code: 'store_closed' });
       });
-      const again = await h.svc.record(exchange({ customerNumber: '+22236123456' }));
+      const again = await h.svc.record(exchange({ customerNumber: '36123456' }));
       expect(again.id).toBe(first.id);
       expect(h.db.agentTransaction.create).toHaveBeenCalledTimes(1);
       expect(h.db.agentMovement.createMany).toHaveBeenCalledTimes(1);
@@ -396,7 +396,7 @@ describe('recording an exchange', () => {
             providerId: uuidToBin(BANKILY),
             direction: 'cash_in_credit_out',
             amount: 20_000,
-            customerNumber: '+22236123456',
+            customerNumber: '36123456',
             customerNumberLast4: '3456',
             providerReference: null,
             commissionAmount: 200,
@@ -409,7 +409,7 @@ describe('recording an exchange', () => {
             recordedById: USER,
             recordedByName: 'Aicha',
             clientUuid: uuidToBin(KEY),
-            clientRequestHash: exchangeFingerprint({ providerId: BANKILY, direction: 'cash_in_credit_out', amount: 20_000, customerNumber: '+22236123456' }),
+            clientRequestHash: exchangeFingerprint({ providerId: BANKILY, direction: 'cash_in_credit_out', amount: 20_000, customerNumber: '36123456' }),
             status: 'completed',
             reversedAt: null,
             reversedByName: null,
@@ -486,7 +486,7 @@ describe('reading exchanges', () => {
     const reveal = harness({ permissions: ['agent.transaction.view', 'agent.customer.reveal'] });
     const own = await reveal.svc.record(exchange());
     const full = await reveal.svc.detail(own.id);
-    expect(full.customerNumber).toBe('+22236123456');
+    expect(full.customerNumber).toBe('36123456');
     expect(reveal.db.agentTransaction.findFirst.mock.calls.at(-1)![0].select).toMatchObject({ customerNumber: true });
     const { error } = await refusal(reveal.svc.detail('01a0b1c2-0000-7000-8000-0000000000ff'));
     expect(error).toBeInstanceOf(NotFoundException);

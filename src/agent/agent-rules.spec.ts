@@ -317,21 +317,23 @@ describe('a float’s position: the anchor plus the legs after its instant (docs
   });
 });
 
-describe('the customer number: the payer number’s digit rule, mandatory, four digits at least (docs/73 §4.6)', () => {
+describe('the customer number: a Mauritanian number, exactly eight digits, mandatory (docs/73 §4.6, D162)', () => {
   it('normalised as the payer number is, with the last four digits apart', () => {
-    expect(parseCustomerNumber(' +222 36 12-34-56 ')).toEqual({ ok: true, value: '+22236123456', last4: '3456' });
+    expect(parseCustomerNumber(' 36 12-34-56 ')).toEqual({ ok: true, value: '36123456', last4: '3456' });
     expect(parseCustomerNumber('٣٦١٢٣٤٥٦')).toEqual({ ok: true, value: '36123456', last4: '3456' });
-    expect(parseCustomerNumber('1234')).toEqual({ ok: true, value: '1234', last4: '1234' });
-    expect(parseCustomerNumber('+1234')).toEqual({ ok: true, value: '+1234', last4: '1234' });
+    expect(parseCustomerNumber('00001234')).toEqual({ ok: true, value: '00001234', last4: '1234' });
   });
 
-  it('refused: blank, letters, a misplaced +, fewer than four digits, more than the payer number’s most', () => {
+  it('refused: blank, letters, any +, seven digits, nine digits, more than the payer number’s most', () => {
     expect(parseCustomerNumber('')).toEqual({ ok: false, reason: 'missing' });
     expect(parseCustomerNumber(undefined)).toEqual({ ok: false, reason: 'missing' });
-    expect(parseCustomerNumber('36A1')).toEqual({ ok: false, reason: 'invalid' });
-    expect(parseCustomerNumber('36+12')).toEqual({ ok: false, reason: 'invalid' });
-    expect(parseCustomerNumber('123')).toEqual({ ok: false, reason: 'too_short' });
-    expect(parseCustomerNumber('+123')).toEqual({ ok: false, reason: 'too_short' });
+    expect(parseCustomerNumber('36A12345')).toEqual({ ok: false, reason: 'invalid' });
+    expect(parseCustomerNumber('36+12345')).toEqual({ ok: false, reason: 'invalid' });
+    expect(parseCustomerNumber('+36123456')).toEqual({ ok: false, reason: 'invalid' });
+    expect(parseCustomerNumber('+222 36 12 34 56')).toEqual({ ok: false, reason: 'invalid' });
+    expect(parseCustomerNumber('3612345')).toEqual({ ok: false, reason: 'too_short' });
+    expect(parseCustomerNumber('1234')).toEqual({ ok: false, reason: 'too_short' });
+    expect(parseCustomerNumber('361234567')).toEqual({ ok: false, reason: 'too_long' });
     expect(parseCustomerNumber('1'.repeat(PAYER_NUMBER_MAX_DIGITS + 1))).toEqual({ ok: false, reason: 'too_long' });
   });
 
