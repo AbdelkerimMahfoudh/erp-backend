@@ -147,6 +147,11 @@ export interface ReportFloatInput {
   countedByName: string | null;
   /** What the app tracked when the float was counted (D159); absent when there is nothing to compare, as for a channel. */
   expectedAtCount?: number | null;
+  /**
+   * A movement of the float was recorded after its count (D159). The only sign of a move when the app does not know
+   * the float's figure: Unknown at the count and Unknown now compare equal, however much moved in between.
+   */
+  movedAfterCount?: boolean;
 }
 
 export interface ReportFloat extends ReportFloatInput {
@@ -413,12 +418,17 @@ function figureAtCount(s: ChannelCountState | null): number | null {
   return s?.verification === 'counted' && s.expectedAtCount != null ? s.expectedAtCount : null;
 }
 
-/** A float's count against the float now (D159): compared only when it was counted — a skip asserts no figure. */
+/**
+ * A float's count against the float now (D159): compared only when it was counted — a skip asserts no figure. A
+ * float whose figure was Unknown at the count has nothing to compare, so a movement recorded after the count is
+ * what says it moved (device run, 2026-10-10: an exchange after an Unknown float's count closed silently).
+ */
 export function floatSinceCount(f: ReportFloatInput): { expectedAtCount: number | null; movedSinceCount: boolean } {
   const compared = f.counted !== null && !f.isSkipped && f.expectedAtCount !== undefined;
+  const atCount = compared ? (f.expectedAtCount ?? null) : null;
   return {
-    expectedAtCount: compared ? (f.expectedAtCount ?? null) : null,
-    movedSinceCount: compared && figureMoved(f.expected, f.expectedAtCount ?? null),
+    expectedAtCount: atCount,
+    movedSinceCount: compared && (figureMoved(f.expected, atCount) || (atCount === null && f.movedAfterCount === true)),
   };
 }
 

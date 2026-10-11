@@ -3322,6 +3322,8 @@ export class ClosingService {
             countedAt: row.countedAt?.toISOString() ?? null,
             countedByName: row.countedBy?.name ?? null,
             ...(comparedAt ? { expectedAtCount: atCount } : {}),
+            // Unknown at the count: only a movement recorded since can say the float moved (D159).
+            ...(comparedAt && atCount === null ? { movedAfterCount: await this.floatMovedAfter(branchId, row.providerId, comparedAt, asOf) } : {}),
           };
         }
         const inputs = await readFloatInputs(this.db, { branchId, providerId: uuidToBin(p.providerId), accountKind: 'provider', businessDate: day, asOf });
@@ -3381,6 +3383,15 @@ export class ClosingService {
   /** A counted float as the app tracks it now, to hold against the figure it was counted against (D159). */
   private async floatSinceCountedAt(branchId: Buffer, providerId: Buffer, day: string, asOf: Date): Promise<number | null> {
     return floatExpectedOn(await readFloatInputs(this.db, { branchId, providerId, accountKind: 'provider', businessDate: day, asOf }), day);
+  }
+
+  /** Whether the provider's float at this branch moved after `countedAt` (up to `asOf`): one indexed read, no sum. */
+  private async floatMovedAfter(branchId: Buffer, providerId: Buffer, countedAt: Date, asOf: Date): Promise<boolean> {
+    const moved = await this.db.agentMovement.findFirst({
+      where: { branchId, providerId, accountKind: 'provider', recordedAt: { gt: countedAt, lte: asOf } },
+      select: { id: true },
+    });
+    return moved !== null;
   }
 
   /**

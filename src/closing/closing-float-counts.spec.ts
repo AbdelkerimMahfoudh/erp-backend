@@ -84,6 +84,12 @@ function harness(opts: Options = {}) {
         const rows = legs.filter((l) => (!after || l.at.getTime() > after.getTime()) && (!upTo || l.at.getTime() <= upTo.getTime()));
         return (['inflow', 'outflow'] as const).map((direction) => ({ direction, _sum: { amount: new Prisma.Decimal(rows.filter((l) => l.direction === direction).reduce((n, l) => n + l.amount, 0)) } }));
       }),
+      findFirst: jest.fn(async ({ where }: { where: Row }) => {
+        const after = where.recordedAt?.gt as Date | undefined;
+        const upTo = where.recordedAt?.lte as Date | undefined;
+        const leg = legs.find((l) => (!after || l.at.getTime() > after.getTime()) && (!upTo || l.at.getTime() <= upTo.getTime()));
+        return leg ? { id: Buffer.alloc(16) } : null;
+      }),
     },
     agentFloatCount: {
       findFirst: jest.fn(async () => opts.prior ?? null),
@@ -430,6 +436,25 @@ describe('a counted float held against the float now (D159)', () => {
     const h = harness({ anchor: { amount: 50_000, at: t('08:00') }, legs: [{ direction: 'outflow', amount: 20_000, at: t('09:00') }], saved: [countedRow()] });
     const [row] = (await read(h, { id: CLOSING, status: 'counting' })).rows;
     expect(floatSinceCount(row as never)).toEqual({ expectedAtCount: 30_000, movedSinceCount: false });
+    // A known float is held against its figure alone: no extra read.
+    expect(h.db.agentMovement.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('an Unknown float counted, then an exchange: Unknown still compares equal, so the leg after the count is what moves it (device run, 2026-10-10)', async () => {
+    const h = harness({
+      legs: [{ direction: 'outflow', amount: 500, at: t('09:00') }, { direction: 'outflow', amount: 194, at: t('11:00') }],
+      saved: [countedRow({ expected: null, counted: new Prisma.Decimal(1_000) })],
+    });
+    const [row] = (await read(h, { id: CLOSING, status: 'counting' })).rows;
+    expect(row).toMatchObject({ expected: null, expectedAtCount: null, counted: 1_000, movedAfterCount: true });
+    expect(floatSinceCount(row as never)).toEqual({ expectedAtCount: null, movedSinceCount: true });
+  });
+
+  it('an Unknown float with nothing recorded after its count holds', async () => {
+    const h = harness({ legs: [{ direction: 'outflow', amount: 500, at: t('09:00') }], saved: [countedRow({ expected: null, counted: new Prisma.Decimal(1_000) })] });
+    const [row] = (await read(h, { id: CLOSING, status: 'counting' })).rows;
+    expect(row).toMatchObject({ expectedAtCount: null, movedAfterCount: false });
+    expect(floatSinceCount(row as never)).toEqual({ expectedAtCount: null, movedSinceCount: false });
   });
 
   it('a day reopened since its close: the close’s anchor of this very count is the count, so only the legs after it move the float', async () => {
