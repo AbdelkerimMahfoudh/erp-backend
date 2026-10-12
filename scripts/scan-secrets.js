@@ -76,7 +76,7 @@ function git(...a) {
 }
 
 /** Paths never scanned: lockfiles and vendored assets are noise, and this script and its tests describe the patterns. */
-const SKIP_PATH = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$|\.(png|jpg|jpeg|gif|ico|woff2?|ttf|pdf|xlsx)$|scan-secrets/;
+const SKIP_PATH = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$|\.(png|jpg|jpeg|gif|ico|woff2?|ttf|pdf|xlsx)$|scan-secrets|\.secret-scan-allow$/; // the scanner, and its own reviewed allowlist of fixture patterns
 
 function scanText(text, where, findings) {
   const lines = text.split('\n');
