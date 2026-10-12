@@ -31,7 +31,8 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
-import { uuidToBin, isUuid } from '../common/utils/uuid.util';
+import { binToUuid, uuidToBin, isUuid } from '../common/utils/uuid.util';
+import { actorRef } from '../common/privacy/audit-contact';
 import { PlatformAdminGuard, type AdminRequest } from './platform-admin.guard';
 import { PlatformAdminService } from './platform-admin.service';
 import { BillingService, ESTIMATE_MAX_STORES } from '../billing/billing.service';
@@ -217,12 +218,9 @@ export class SeatRequestsController {
     return this.allocations.withdraw(companyId, idOf(rid, 'request'), await this.actorLabel());
   }
 
+  /** The Owner's account, never their email or number: a seat request outlives the person's deletion. */
   private async actorLabel(): Promise<string> {
-    const user = await this.prisma.user.findUniqueOrThrow({
-      where: { id: this.tenant.requireUserId() },
-      select: { name: true, email: true, phone: true },
-    });
-    return user.email ?? user.phone ?? user.name;
+    return actorRef(binToUuid(this.tenant.requireUserId()));
   }
 
   // ── Administrators ───────────────────────────────────────────────────────

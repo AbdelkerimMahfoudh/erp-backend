@@ -16,7 +16,24 @@
  *
  * The path is kept and the value replaced, so the request is still followable.
  */
-const SECRET_QUERY_KEYS = new Set(['t', 'token', 'code', 'continuation', 'secret']);
+const SECRET_QUERY_KEYS = new Set([
+  't',
+  'token',
+  'code',
+  'continuation',
+  'secret',
+  /*
+   * And what a person searched for (privacy correction, 2026-10-12): a customer's name or number typed into
+   * `customers?search=`, a business into `businesses?q=`, a contact into `connections?q=`. A log file outlives
+   * the deletion of the person searched for, and nobody de-identifies a log line.
+   */
+  'search',
+  'q',
+  'query',
+  'phone',
+  'email',
+  'number',
+]);
 
 export const REDACTED = '[redacted]';
 

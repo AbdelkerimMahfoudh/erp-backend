@@ -5,6 +5,7 @@ import { AuditService } from '../common/audit/audit.service';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { contactPresence } from '../common/privacy/audit-contact';
 import { CreateCustomerDto, ListCustomersDto } from './dto/customer.dto';
 
 /**
@@ -103,7 +104,8 @@ export class CustomersService {
       entityType: 'Customer',
       entityId: customer.id,
       action: 'create',
-      after: { name: customer.name, phone: customer.phone },
+      // Never the number itself: the audit cannot forget it when the customer is de-identified (audit-contact.ts).
+      after: { name: customer.name, phone: contactPresence(customer.phone) },
     });
 
     return {

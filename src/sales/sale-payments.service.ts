@@ -11,6 +11,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { contactPresence } from '../common/privacy/audit-contact';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { ClosingService } from '../closing/closing.service';
 import { RecordSalePaymentDto } from './dto/record-payment.dto';
@@ -236,7 +237,8 @@ export class SalePaymentsService {
             paidAt,
             // The minute the person chose, when the payment was lifted to its sale's instant within it (docs/61 §9).
             ...(dto.paidAt && new Date(dto.paidAt).getTime() !== paidAt.getTime() ? { paidAtRequested: dto.paidAt } : {}),
-            ...(payerNumber ? { payerNumber } : {}),
+            // Whether a payer's number was taken, never the number (D151; audit-contact.ts).
+            ...(payerNumber ? { payerNumber: contactPresence(payerNumber) } : {}),
             remaining: next.remaining,
             payStatus: next.payStatus,
           },
@@ -293,8 +295,8 @@ export class SalePaymentsService {
         entityId: paymentId,
         action: 'update',
         reason: 'payer_number_corrected',
-        before: { saleId: saleIdStr, payerNumber: payment.payerNumber },
-        after: { saleId: saleIdStr, payerNumber: next, ...(reason ? { note: reason } : {}) },
+        before: { saleId: saleIdStr, payerNumber: contactPresence(payment.payerNumber) },
+        after: { saleId: saleIdStr, payerNumber: contactPresence(next), ...(reason ? { note: reason } : {}) },
         branchId,
       });
     });

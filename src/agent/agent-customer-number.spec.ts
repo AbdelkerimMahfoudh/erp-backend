@@ -16,7 +16,8 @@ const read = (...p: string[]) => readFileSync(join(SRC, ...p), 'utf8').replace(/
 const NAMES_THE_NUMBER = /customerNumber(?!Last4|Masked)|customer_number(?!_last4)/;
 
 describe('where the customer number is named', () => {
-  const ALLOWED = ['agent/agent-rules.ts', 'agent/agent-transactions.service.ts', 'agent/dto/transaction.dto.ts'];
+  // And the deletion that blanks it when the business is closed (privacy correction, 2026-10-12).
+  const ALLOWED = ['account/account-deletion.service.ts', 'agent/agent-rules.ts', 'agent/agent-transactions.service.ts', 'agent/dto/transaction.dto.ts'];
 
   it('is named only where it is taken, normalised, stored and read on the detail', () => {
     const found: string[] = [];

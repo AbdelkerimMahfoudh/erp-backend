@@ -3,7 +3,7 @@ import { OtpService } from '../auth/otp/otp.service';
 import { DisabledWhatsAppChannel, TestWhatsAppChannel } from '../messaging/channels';
 import { ACCOUNT_DELETED_TEMPLATE, ACCOUNT_DELETION_TEMPLATE } from '../messaging/templates';
 import { uuidToBin } from '../common/utils/uuid.util';
-import { AccountDeletionService, DeletionPrincipal } from './account-deletion.service';
+import { AccountDeletionService, DeletionPrincipal, NOT_REMOVED, REDACTED_DESTINATION } from './account-deletion.service';
 import { AccountService } from './account.service';
 import { FakePrisma } from './testing/fake-prisma';
 import { DELETED_USER_NAME, UNUSABLE_PASSWORD_HASH } from './deletion-rules';
@@ -57,7 +57,7 @@ function user(over: Record<string, unknown>) {
   };
 }
 
-function harness(opts: { pepper?: string | null; withOtherOwner?: boolean; whatsappOff?: boolean } = {}) {
+function harness(opts: { pepper?: string | null; withOtherOwner?: boolean; whatsappOff?: boolean; storage?: { delete: (key: string) => Promise<void> } } = {}) {
   const prisma = new FakePrisma();
   const channel = new TestWhatsAppChannel();
   /** `WHATSAPP_CHANNEL=disabled` with a pepper set: production while WhatsApp sending is postponed. */
@@ -78,7 +78,7 @@ function harness(opts: { pepper?: string | null; withOtherOwner?: boolean; whats
   };
   const otpAudit = { record: jest.fn(async (p: Record<string, unknown>) => void audits.push(p)) };
   const otp = new OtpService(prisma as never, config as never, otpAudit as never, sender);
-  const service = new AccountDeletionService(prisma as never, hashing as never, otp, sender);
+  const service = new AccountDeletionService(prisma as never, hashing as never, otp, sender, opts.storage as never);
   const account = new AccountService(prisma as never, hashing as never, otp, service);
 
   prisma.seed('company', { id: C1, name: 'Boutique Un', isActive: true, closedAt: null, publicPhone: '+22200000001', logoRef: 'logo', isDiscoverable: true });
@@ -657,6 +657,116 @@ describe('closing the business', () => {
     const notice = h.channel.messages.find((m) => m.template === ACCOUNT_DELETED_TEMPLATE.key)!;
     expect(notice.language).toBe('ar');
     expect(notice.variables.what).toBe('متجرك وجميع حسابات الدخول فيه');
+  });
+});
+
+
+describe('what a deletion leaves of the person, wherever it was copied (privacy correction, 2026-10-12)', () => {
+  const seedCopies = (h: ReturnType<typeof harness>) => {
+    h.prisma.seed(
+      'authSession',
+      { id: id('5101'), companyId: C1, userId: EMPLOYEE, revokedAt: new Date('2026-09-01T00:00:00Z'), ip: '10.0.0.7', userAgent: 'Moussa phone', deviceName: 'Moussa A52', deviceId: 'install-7' },
+      { id: id('5102'), companyId: C1, userId: OWNER, revokedAt: null, ip: '10.0.0.8', userAgent: 'Owner phone', deviceName: 'Aminata', deviceId: 'install-8' },
+    );
+    h.prisma.seed('userDevice', { id: id('8101'), companyId: C1, userId: EMPLOYEE, revokedAt: null, revokedById: null, label: 'Moussa A52', model: 'SM-A525' });
+    h.prisma.seed('otpChallenge', {
+      id: id('5201'),
+      companyId: C1,
+      userId: EMPLOYEE,
+      purpose: 'sign_in',
+      destination: '+22231234568',
+      candidatePhone: '+22231234599',
+      codeHash: 'x',
+      status: 'consumed',
+      expiresAt: new Date('2026-09-01T00:05:00Z'),
+      maxAttempts: 5,
+    });
+    h.prisma.seed('contactVerification', { id: id('5301'), channel: 'whatsapp', destination: '+22231234568' }, { id: id('5302'), channel: 'whatsapp', destination: '+22299999999' });
+    h.prisma.seed('verificationIntent', { id: id('5401'), companyId: C1, userId: EMPLOYEE, consumedAt: null }, { id: id('5402'), companyId: C1, userId: OWNER, consumedAt: null });
+    h.prisma.seed('registrationAttempt', { id: id('9802'), companyId: null, ownerName: 'Moussa Employee', email: null, phone: '+22231234568' });
+    h.prisma.seed('seatAllocation', { id: id('5501'), companyId: C1, requestedBy: '+22231234568', confirmedBy: null, closedBy: null }, { id: id('5502'), companyId: C1, requestedBy: 'user:someone-else', confirmedBy: null, closedBy: null });
+    h.prisma.seed('outboxChange', { id: id('5601'), companyId: C1, deviceId: 'phone-1', payload: { name: 'Moussa' } }, { id: id('5602'), companyId: C1, deviceId: 'phone-2', payload: {} });
+    h.prisma.seed(
+      'agentTransaction',
+      { id: id('5701'), companyId: C1, recordedById: EMPLOYEE, recordedByName: 'Moussa Employee', reversedById: OWNER, reversedByName: 'Aminata Owner', status: 'reversed', customerNumber: '36123456', customerNumberLast4: '3456' },
+      { id: id('5702'), companyId: C1, recordedById: OWNER, recordedByName: 'Aminata Owner', reversedById: EMPLOYEE, reversedByName: 'Moussa Employee', status: 'reversed', customerNumber: '36999999', customerNumberLast4: '9999' },
+    );
+    h.prisma.seed('agentMistakeReport', { id: id('5801'), companyId: C1, reportedById: EMPLOYEE, reportedByName: 'Moussa Employee', decidedById: OWNER, decidedByName: 'Aminata Owner', note: 'the customer was Ahmed', decisionNote: 'ok' });
+    h.prisma.seed('counterparty', { id: id('5901'), companyId: C1, kind: 'employee', userId: EMPLOYEE, name: 'Moussa Employee', phone: '+22231234568', city: 'Nouakchott', note: 'advance' });
+  };
+
+  it('a login: its sign-in identifier, sessions, devices, codes, intents, sign-up and seat records, sync queue and counter names', async () => {
+    const h = harness();
+    seedCopies(h);
+    await h.service.start(h.principal(EMPLOYEE), { password: 'employee-pw' });
+    const view = await h.service.confirm(h.principal(EMPLOYEE), h.lastCode()!);
+    expect(view.status).toBe('completed');
+    expect(view.retained).toMatchObject({ notRemoved: NOT_REMOVED, counterRecordsRenamed: 1 });
+
+    // A fresh sign-in identifier: the one written down leads nowhere.
+    expect(h.row('user', EMPLOYEE).personalId).not.toBe('U-XXXXXXXX');
+    expect(h.row('authSession', id('5101'))).toMatchObject({ ip: null, userAgent: null, deviceName: null, deviceId: null });
+    expect(h.row('userDevice', id('8101'))).toMatchObject({ label: null, model: null });
+    // Every code ever sent to them, the deletion code included: masked; the rows stay.
+    for (const c of h.prisma.rows('otpChallenge').filter((r) => (r.userId as Buffer).equals(EMPLOYEE))) {
+      expect(c).toMatchObject({ destination: REDACTED_DESTINATION, candidatePhone: null });
+    }
+    expect(h.prisma.rows('contactVerification').map((r) => r.destination)).toEqual(['+22299999999']);
+    expect(h.prisma.rows('verificationIntent').map((r) => (r.userId as Buffer).equals(OWNER))).toEqual([true]);
+    expect(h.row('registrationAttempt', id('9802'))).toMatchObject({ ownerName: DELETED_USER_NAME, phone: null });
+    expect(h.row('seatAllocation', id('5501')).requestedBy).toBe(DELETED_USER_NAME);
+    expect(h.row('seatAllocation', id('5502')).requestedBy).toBe('user:someone-else');
+    expect(h.prisma.rows('outboxChange').map((r) => r.deviceId)).toEqual(['phone-2']);
+    // Their name on the counter's records, wherever the record allows it; the numbers and the other names stay.
+    expect(h.row('agentTransaction', id('5701'))).toMatchObject({ recordedByName: DELETED_USER_NAME, reversedByName: 'Aminata Owner', customerNumber: '36123456' });
+    expect(h.row('agentTransaction', id('5702'))).toMatchObject({ recordedByName: 'Aminata Owner', reversedByName: DELETED_USER_NAME });
+    expect(h.row('agentMistakeReport', id('5801'))).toMatchObject({ reportedByName: DELETED_USER_NAME, decidedByName: 'Aminata Owner', note: 'the customer was Ahmed' });
+    expect(h.row('counterparty', id('5901'))).toMatchObject({ name: DELETED_USER_NAME, phone: null, city: null, note: null });
+
+    // Nobody else's.
+    expect(h.row('authSession', id('5102'))).toMatchObject({ ip: '10.0.0.8', deviceName: 'Aminata' });
+    expect(h.row('registrationAttempt', id('9801'))).toMatchObject({ ownerName: 'Aminata Owner', phone: '+22231234567' });
+    // The completion notice still reached the number the code went to: read before it was masked.
+    expect(h.channel.messages.find((m) => m.template === ACCOUNT_DELETED_TEMPLATE.key)!.to).toBe('+22231234568');
+  });
+
+  it('a business: the counter’s numbers, notes, receipts (files removed after the commit), branch addresses and city', async () => {
+    const removed: string[] = [];
+    const h = harness({ storage: { delete: async (key: string) => void removed.push(key) } });
+    seedCopies(h);
+    h.prisma.seed('expense', { id: id('6101'), companyId: C1, note: 'taxi for Moussa', receiptKey: 'c1/e1.jpg' }, { id: id('6102'), companyId: C2, note: 'other business', receiptKey: 'c2/e2.jpg' });
+    h.prisma.seed('counterparty', { id: id('5902'), companyId: C1, kind: 'manual_person', userId: null, name: 'Ahmed Lender', phone: '+22241111111', city: 'Atar', note: 'cousin' }, { id: id('5903'), companyId: C1, kind: 'manual_store', userId: null, name: 'Shop Voisin', phone: '+22241111112', city: 'Nouakchott', note: 'x' });
+    h.row('branch', BRANCH).address = 'Ilot K, maison 12';
+    h.row('company', C1).city = 'Nouakchott';
+    await h.service.start(h.principal(OWNER), { password: 'owner-pw' });
+    const view = await h.service.confirm(h.principal(OWNER), h.lastCode()!);
+    expect(view.status).toBe('completed');
+    expect(view.retained).toMatchObject({ kind: 'company_closure', counterNumbersBlanked: 2, receiptsRemoved: 1, peopleDeidentified: 2, notRemoved: NOT_REMOVED });
+
+    for (const t of [id('5701'), id('5702')]) expect(h.row('agentTransaction', t)).toMatchObject({ customerNumber: '', customerNumberLast4: '', recordedByName: DELETED_USER_NAME, reversedByName: DELETED_USER_NAME });
+    expect(h.row('agentMistakeReport', id('5801'))).toMatchObject({ note: null, decisionNote: null, reportedByName: DELETED_USER_NAME, decidedByName: DELETED_USER_NAME });
+    expect(h.row('expense', id('6101'))).toMatchObject({ note: null, receiptKey: null });
+    expect(removed).toEqual(['c1/e1.jpg']);
+    expect(h.row('expense', id('6102'))).toMatchObject({ note: 'other business', receiptKey: 'c2/e2.jpg' });
+    expect(h.row('counterparty', id('5902'))).toMatchObject({ name: DELETED_USER_NAME, phone: null, city: null, note: null });
+    // Another store is a business: its name stays, its number and notes go.
+    expect(h.row('counterparty', id('5903'))).toMatchObject({ name: 'Shop Voisin', phone: null, note: null });
+    expect(h.row('branch', BRANCH)).toMatchObject({ address: null, phone: null, isActive: false });
+    expect(h.row('company', C1).city).toBeNull();
+    expect(h.prisma.rows('outboxChange')).toHaveLength(0);
+    for (const c of h.prisma.rows('otpChallenge').filter((r) => (r.companyId as Buffer).equals(C1))) expect(c.destination).toBe(REDACTED_DESTINATION);
+  });
+
+  it('a receipt file that cannot be removed fails nothing already committed, and is logged by count — never by name', async () => {
+    const h = harness({ storage: { delete: async () => Promise.reject(new Error('disk')) } });
+    h.prisma.seed('expense', { id: id('6101'), companyId: C1, note: null, receiptKey: 'c1/e1.jpg' });
+    const errors = jest.spyOn((h.service as unknown as { logger: { error: (m: string) => void } }).logger, 'error').mockImplementation(() => undefined);
+    await h.service.start(h.principal(OWNER), { password: 'owner-pw' });
+    const view = await h.service.confirm(h.principal(OWNER), h.lastCode()!);
+    expect(view.status).toBe('completed');
+    expect(h.row('expense', id('6101')).receiptKey).toBeNull();
+    expect(errors.mock.calls.map(([m]) => m).join(' ')).toMatch(/1 of 1 receipt file\(s\) could not be removed/);
+    expect(errors.mock.calls.map(([m]) => m).join(' ')).not.toContain('c1/e1.jpg');
   });
 });
 

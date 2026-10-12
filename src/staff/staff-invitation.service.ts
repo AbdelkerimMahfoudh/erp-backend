@@ -16,6 +16,7 @@ type AuditClient = Parameters<AuditService['recordTx']>[0];
 import { HashingService } from '../common/security/hashing.service';
 import { generatePersonalId, isEmail, normaliseEmail, normalisePhone } from '../auth/identifier';
 import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
+import { actorRef, contactPresence } from '../common/privacy/audit-contact';
 import { ContactVerificationService } from '../platform/contact-verification.service';
 import { ContactDeliveryProvider, codeMayBeReturned, OutboxDeliveryProvider } from '../platform/contact-delivery';
 import { EntitlementService } from '../entitlement/entitlement.service';
@@ -113,7 +114,8 @@ export class StaffInvitationService {
       where: { id: actorId },
       select: { name: true, email: true, phone: true },
     });
-    const actorLabel = actor.email ?? actor.phone ?? actor.name;
+    // The Owner's account, never their email or number: the seat request and the audit outlive a deletion.
+    const actorLabel = actorRef(binToUuid(this.tenant.requireUserId()));
 
     const name = (dto.name ?? '').trim();
     if (!name) throw new BadRequestException('Give the person a name.');
@@ -217,8 +219,8 @@ export class StaffInvitationService {
           action: 'create',
           after: {
             name,
-            email,
-            phone,
+            email: contactPresence(email),
+            phone: contactPresence(phone),
             role: dto.role,
             stores: branches.map((b) => b.name),
             status: 'pending',
@@ -318,7 +320,7 @@ export class StaffInvitationService {
         entityType: 'User',
         entityId: user.id,
         action: 'status_change',
-        before: { status: 'pending', email: user.email, phone: user.phone },
+        before: { status: 'pending', email: contactPresence(user.email), phone: contactPresence(user.phone) },
         after: { status: 'cancelled', deletedAt: now.toISOString() },
       });
     });
@@ -404,7 +406,7 @@ export class StaffInvitationService {
 
     const accounts: StaffConfirmResult['accounts'] = [];
     for (const u of pending) {
-      const result = await this.activation.tryActivate(u.id, destination.value);
+      const result = await this.activation.tryActivate(u.id, actorRef(binToUuid(u.id)));
       accounts.push({
         business: u.company.name,
         name: u.name,

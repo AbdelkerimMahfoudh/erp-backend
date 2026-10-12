@@ -140,14 +140,15 @@ describe('adding a customer', () => {
     expect(recorded.create[0].data.phone).toBeNull();
   });
 
-  it('records the creation in the audit trail', async () => {
+  it('records the creation in the audit trail — that a number was given, never the number', async () => {
     const { service, recorded } = makeService();
     await service.create({ name: 'Aminetou', phone: '22110011' });
 
+    expect(JSON.stringify(recorded.audits[0])).not.toContain('22110011');
     expect(recorded.audits[0]).toMatchObject({
       entityType: 'Customer',
       action: 'create',
-      after: { name: 'Aminetou', phone: '22110011' },
+      after: { name: 'Aminetou', phone: 'set' },
     });
   });
 

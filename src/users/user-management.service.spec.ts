@@ -586,15 +586,18 @@ describe('activation lifecycle (no hard delete)', () => {
 });
 
 describe('audit safety', () => {
-  it('records safe old/new metadata and never a secret', async () => {
+  it('records safe old/new metadata — whether a contact is held, never the contact — and never a secret', async () => {
     const u = user({ phone: null, email: null });
     const { service, audits } = makeService({ users: [u] });
 
     await service.update(binToUuid(u.id), { phone: '+22231234567', email: 'a@shop.mr' , currentPassword: 'actor-password' });
 
     const entry = audits.find((a) => a.entityType === 'User');
-    expect(entry.after).toMatchObject({ phone: '+22231234567', email: 'a@shop.mr', phoneVerifiedAt: null });
+    expect(entry.after).toMatchObject({ phone: 'set', email: 'set', phoneVerifiedAt: null });
+    expect(entry.before).toMatchObject({ phone: null, email: null });
     const serialized = JSON.stringify(entry);
+    // The audit is append-only and hash-chained: a contact written into it would outlive the person's deletion.
+    for (const contact of ['31234567', 'a@shop.mr']) expect(serialized).not.toContain(contact);
     for (const forbidden of ['passwordHash', 'pinHash', 'argon2', 'otp', 'code']) {
       expect(serialized.toLowerCase()).not.toContain(forbidden.toLowerCase());
     }

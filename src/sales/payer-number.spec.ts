@@ -175,7 +175,9 @@ describe('a sale stores each part’s own payer number', () => {
     await h.service.createSale(sell([{ method: 'mobile', amount: 899, receivingAccountId: ACCT_A, payerNumber: ' +222 36 12-34-56 ' }]) as never);
     expect(h.created).toHaveLength(1);
     expect(h.created[0]).toMatchObject({ method: 'mobile', payerNumber: '+22236123456' });
-    expect(h.saleAudit()!.after.payerNumbers).toEqual([{ method: 'mobile', amount: 899, payerNumber: '+22236123456' }]);
+    // The audit says the part was paid from a number, never the number: it cannot be de-identified later.
+    expect(h.saleAudit()!.after.payerNumbers).toEqual([{ method: 'mobile', amount: 899, payerNumber: 'set' }]);
+    expect(JSON.stringify(h.saleAudit())).not.toContain('36123456');
   });
 
   it('blank is optional: nothing stored, nothing audited', async () => {
@@ -360,9 +362,10 @@ describe('correcting the payer number', () => {
       entityType: 'Payment',
       action: 'update',
       reason: 'payer_number_corrected',
-      before: { saleId: saleUuid, payerNumber: '36111111' },
-      after: { saleId: saleUuid, payerNumber: '+22236111112', note: 'typo' },
+      before: { saleId: saleUuid, payerNumber: 'set' },
+      after: { saleId: saleUuid, payerNumber: 'set', note: 'typo' },
     });
+    expect(JSON.stringify(h.audits)).not.toMatch(/36111111|36111112/);
   });
 
   it('the same number again — however it is spaced — writes and audits nothing', async () => {

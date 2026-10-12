@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
+import { HttpException, HttpStatus, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   AccountDeletionKind,
   AccountDeletionStatus,
@@ -13,6 +13,8 @@ import { maskPhone } from '../auth/otp/otp-code.util';
 import { WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel';
 import { ACCOUNT_DELETED_TEMPLATE, MessageLanguage } from '../messaging/templates';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { generatePersonalId } from '../auth/identifier';
+import { STORAGE_PROVIDER, type StorageProvider } from '../storage/storage.types';
 import {
   DELETED_USER_NAME,
   UNUSABLE_PASSWORD_HASH,
@@ -36,12 +38,26 @@ import {
  * code.
  *
  * What "deleted" means here: the person's identity and contact details are
- * removed and every credential is revoked; the financial records they appear
- * on — sales, purchases, closings, ledgers, the audit trail — are kept, as
- * the law requires for accounting, and keep pointing at a row that now says
- * "Deleted user". The request stores counts of what was kept, never a name,
- * a number or an amount.
+ * removed wherever the app copied them — sessions, devices, codes, sign-up
+ * records, seat requests, the counter's records — and every credential is
+ * revoked; the financial records they appear on — sales, purchases, closings,
+ * ledgers, the audit trail — are kept, as the law requires for accounting, and
+ * keep pointing at a row that now says "Deleted user". The request stores
+ * counts of what was kept, never a name, a number or an amount.
+ *
+ * What is NOT removed, said as such (`NOT_REMOVED`, docs/24): the hash-chained
+ * audit trail, subscription and platform audit events (append-only; editing
+ * them would break the chain), the names on append-only money-agent records
+ * (positions, rebalancings, configuration versions), and backups — which
+ * expire on their own schedule, never edited, and which TSX-MR has not yet
+ * fixed (production stays blocked until it does).
  */
+
+/** What a code's destination reads once its person is deleted: the row stays, the number does not. */
+export const REDACTED_DESTINATION = '[deleted]';
+
+/** The copies a deletion cannot reach, named in its summary rather than claimed gone. */
+export const NOT_REMOVED = ['audit_logs', 'subscription_events', 'platform_audit_events', 'agent_append_only_snapshots', 'backups'] as const;
 
 export interface DeletionPrincipal {
   userId: Buffer;
@@ -102,6 +118,7 @@ export class AccountDeletionService {
     private readonly hashing: HashingService,
     private readonly otp: OtpService,
     @Inject(WHATSAPP_CHANNEL) private readonly channel: WhatsAppChannel,
+    @Optional() @Inject(STORAGE_PROVIDER) private readonly storage?: StorageProvider,
   ) {}
 
   // ------------------------------------------------------------------ reads
@@ -375,7 +392,7 @@ export class AccountDeletionService {
    */
   async execute(requestId: Buffer): Promise<DeletionRequestView> {
     const now = new Date();
-    let done: { request: RequestRow; destination: string } | null = null;
+    let done: { request: RequestRow; destination: string; receiptKeys: string[] } | null = null;
 
     try {
       done = await this.prisma.$transaction(
@@ -394,10 +411,10 @@ export class AccountDeletionService {
           });
           if (moved.count === 0) throw new DeletionRefused('request is no longer confirmed');
 
-          const summary =
+          const { summary, receiptKeys } =
             request.kind === 'company_closure'
               ? await this.closeCompany(tx, request, now)
-              : await this.deleteLogin(tx, request.companyId, request.userId, now);
+              : { summary: await this.deleteLogin(tx, request.companyId, request.userId, now), receiptKeys: [] as string[] };
 
           await tx.accountDeletionRequest.update({
             where: { id: requestId },
@@ -423,7 +440,7 @@ export class AccountDeletionService {
                   : 'Login deleted by its holder after WhatsApp code confirmation',
             },
           });
-          return { request, destination: challenge!.destination };
+          return { request, destination: challenge!.destination, receiptKeys };
         },
         { timeout: 60_000, maxWait: 10_000 },
       );
@@ -441,32 +458,22 @@ export class AccountDeletionService {
       );
     }
 
+    await this.removeFiles(done.receiptKeys, requestId);
     await this.notifyDeleted(done.destination, done.request.language as MessageLanguage, done.request.kind, requestId);
     const fresh = await this.prisma.accountDeletionRequest.findUnique({ where: { id: requestId } });
     return this.toView(fresh ?? done.request, null);
   }
 
-  /** One login: identity and contacts gone, every credential revoked, records kept. */
+  /** One login: identity and contacts gone wherever they were copied, every credential revoked, records kept. */
   private async deleteLogin(
     tx: Prisma.TransactionClient,
     companyId: Buffer,
     userId: Buffer,
     now: Date,
   ): Promise<Record<string, unknown>> {
-    await tx.user.update({ where: { id: userId }, data: this.deidentified(userId, now) });
-    const sessions = await tx.authSession.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: now } });
-    const devices = await tx.userDevice.updateMany({
-      where: { userId, revokedAt: null },
-      data: { revokedAt: now, revokedById: userId },
-    });
-    await tx.otpChallenge.updateMany({
-      where: { userId, status: OtpStatus.pending },
-      data: { status: OtpStatus.cancelled, cancelledAt: now, activeKey: null },
-    });
-    await tx.verificationIntent.updateMany({ where: { userId, consumedAt: null }, data: { consumedAt: now } });
-    await tx.syncDevice.deleteMany({ where: { userId } });
+    const people = await tx.user.findMany({ where: { id: userId, companyId }, select: { id: true, email: true, phone: true } });
+    const forgotten = await this.forgetPeople(tx, companyId, people, now, userId);
     await tx.notification.deleteMany({ where: { companyId, targetUserId: userId } });
-    await tx.ownerInvitation.updateMany({ where: { userId, acceptedAt: null, revokedAt: null }, data: { revokedAt: now } });
 
     const [ledgerEntries, auditRows] = await Promise.all([
       tx.employeeDebtEntry.count({ where: { companyId, userId } }),
@@ -475,45 +482,52 @@ export class AccountDeletionService {
     return {
       kind: 'personal_login',
       loginsDeleted: 1,
-      sessionsRevoked: sessions.count,
-      devicesRevoked: devices.count,
+      ...forgotten,
       retained: { ledgerEntries, auditRows },
+      notRemoved: NOT_REMOVED,
     };
   }
 
-  /** The business: every login as above, contacts of customers and suppliers gone, the company closed. */
+  /**
+   * The business: every login as above; the contacts of its customers, suppliers and the people it lent to or
+   * employed; the numbers its counter served; its notes, receipts, branch addresses and city; the company closed.
+   * The receipt files are returned, to be removed from storage once the transaction has committed.
+   */
   private async closeCompany(
     tx: Prisma.TransactionClient,
     request: RequestRow,
     now: Date,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<{ summary: Record<string, unknown>; receiptKeys: string[] }> {
     const companyId = request.companyId;
-    const users = await tx.user.findMany({ where: { companyId, deletedAt: null }, select: { id: true } });
-    for (const u of users) {
-      await tx.user.update({ where: { id: u.id }, data: this.deidentified(u.id, now) });
-    }
-    const sessions = await tx.authSession.updateMany({ where: { companyId, revokedAt: null }, data: { revokedAt: now } });
-    const devices = await tx.userDevice.updateMany({
-      where: { companyId, revokedAt: null },
-      data: { revokedAt: now, revokedById: request.userId },
-    });
-    await tx.otpChallenge.updateMany({
-      where: { companyId, status: OtpStatus.pending },
-      data: { status: OtpStatus.cancelled, cancelledAt: now, activeKey: null },
-    });
-    await tx.verificationIntent.updateMany({ where: { companyId, consumedAt: null }, data: { consumedAt: now } });
-    await tx.syncDevice.deleteMany({ where: { companyId } });
+    const people = await tx.user.findMany({ where: { companyId, deletedAt: null }, select: { id: true, email: true, phone: true } });
+    const forgotten = await this.forgetPeople(tx, companyId, people, now, request.userId);
     await tx.notification.deleteMany({ where: { companyId } });
-    await tx.ownerInvitation.updateMany({ where: { companyId, acceptedAt: null, revokedAt: null }, data: { revokedAt: now } });
+    await tx.outboxChange.deleteMany({ where: { companyId } });
+    // Every challenge and session of the company, whoever's — a login deleted earlier included.
+    await tx.otpChallenge.updateMany({ where: { companyId }, data: { destination: REDACTED_DESTINATION, candidatePhone: null } });
+    await tx.authSession.updateMany({ where: { companyId }, data: { ip: null, userAgent: null, deviceName: null, deviceId: null } });
+    await tx.userDevice.updateMany({ where: { companyId }, data: { label: null, model: null } });
 
     const customers = await tx.customer.updateMany({ where: { companyId }, data: { name: null, phone: null, notes: null } });
     const suppliers = await tx.supplier.updateMany({ where: { companyId }, data: { phone: null, notes: null } });
+    // The people it lent to or employed are people; another store is a business, whose name stays.
+    const persons = await tx.counterparty.updateMany({
+      where: { companyId, kind: { in: ['manual_person', 'employee'] } },
+      data: { name: DELETED_USER_NAME, phone: null, city: null, note: null },
+    });
+    await tx.counterparty.updateMany({ where: { companyId, kind: { in: ['manual_store', 'connected_store'] } }, data: { phone: null, note: null } });
     // The numbers payments came from are people's contact details too (D151); the money itself stays.
     await tx.payment.updateMany({ where: { companyId, payerNumber: { not: null } }, data: { payerNumber: null } });
-    await tx.branch.updateMany({ where: { companyId }, data: { isActive: false, phone: null } });
+    // The numbers the money services counter served: blanked, the amounts and legs kept (the 0092 trigger allows exactly this).
+    const agentNumbers = await tx.agentTransaction.updateMany({ where: { companyId }, data: { customerNumber: '', customerNumberLast4: '' } });
+    await tx.agentMistakeReport.updateMany({ where: { companyId }, data: { note: null, decisionNote: null } });
+    // Free text and receipts: written by people, about people.
+    const receipts = await tx.expense.findMany({ where: { companyId, receiptKey: { not: null } }, select: { receiptKey: true } });
+    await tx.expense.updateMany({ where: { companyId }, data: { note: null, receiptKey: null } });
+    await tx.branch.updateMany({ where: { companyId }, data: { isActive: false, phone: null, address: null } });
     await tx.registrationAttempt.updateMany({
       where: { companyId },
-      data: { ownerName: DELETED_USER_NAME, email: null, phone: null },
+      data: { ownerName: DELETED_USER_NAME, email: null, phone: null, city: null },
     });
 
     const sub = await tx.subscription.findFirst({ where: { companyId } });
@@ -536,7 +550,7 @@ export class AccountDeletionService {
 
     await tx.company.update({
       where: { id: companyId },
-      data: { isActive: false, closedAt: now, publicPhone: null, logoRef: null, isDiscoverable: false },
+      data: { isActive: false, closedAt: now, publicPhone: null, logoRef: null, isDiscoverable: false, city: null },
     });
 
     const [sales, purchases, closings, auditRows, subscriptionEvents] = await Promise.all([
@@ -546,21 +560,92 @@ export class AccountDeletionService {
       tx.auditLog.count({ where: { companyId } }),
       tx.subscriptionEvent.count({ where: { companyId } }),
     ]);
+    const receiptKeys = receipts.map((r) => r.receiptKey).filter((k): k is string => !!k);
     return {
-      kind: 'company_closure',
-      loginsDeleted: users.length,
-      sessionsRevoked: sessions.count,
-      devicesRevoked: devices.count,
-      customersDeidentified: customers.count,
-      suppliersDeidentified: suppliers.count,
-      retained: { sales, purchases, closings, auditRows, subscriptionEvents },
+      receiptKeys,
+      summary: {
+        kind: 'company_closure',
+        loginsDeleted: people.length,
+        ...forgotten,
+        customersDeidentified: customers.count,
+        suppliersDeidentified: suppliers.count,
+        peopleDeidentified: persons.count,
+        counterNumbersBlanked: agentNumbers.count,
+        receiptsRemoved: receiptKeys.length,
+        retained: { sales, purchases, closings, auditRows, subscriptionEvents },
+        notRemoved: NOT_REMOVED,
+      },
     };
+  }
+
+  /**
+   * What is removed for each deleted person, wherever their identity was copied (privacy correction,
+   * 2026-10-12): the login, a fresh sign-in identifier, every session and device revoked and stripped of where
+   * it was used from, every code sent to them masked, their verification intents and pending codes gone, their
+   * name on the records they made replaced by "Deleted user" where the record allows it, and their contacts
+   * wherever another table copied them (registration, seat requests, codes awaiting verification).
+   */
+  private async forgetPeople(
+    tx: Prisma.TransactionClient,
+    companyId: Buffer,
+    people: { id: Buffer; email: string | null; phone: string | null }[],
+    now: Date,
+    actorId: Buffer,
+  ): Promise<Record<string, number>> {
+    const ids = people.map((p) => p.id);
+    const emails = people.map((p) => p.email).filter((c): c is string => !!c);
+    const phones = people.map((p) => p.phone).filter((c): c is string => !!c);
+    const contacts = [...emails, ...phones];
+
+    for (const p of people) {
+      await tx.user.update({ where: { id: p.id }, data: this.deidentified(p.id, now) });
+    }
+    const sessions = await tx.authSession.updateMany({ where: { userId: { in: ids }, revokedAt: null }, data: { revokedAt: now } });
+    await tx.authSession.updateMany({ where: { userId: { in: ids } }, data: { ip: null, userAgent: null, deviceName: null, deviceId: null } });
+    const devices = await tx.userDevice.updateMany({
+      where: { userId: { in: ids }, revokedAt: null },
+      data: { revokedAt: now, revokedById: actorId },
+    });
+    await tx.userDevice.updateMany({ where: { userId: { in: ids } }, data: { label: null, model: null } });
+    await tx.otpChallenge.updateMany({
+      where: { userId: { in: ids }, status: OtpStatus.pending },
+      data: { status: OtpStatus.cancelled, cancelledAt: now, activeKey: null },
+    });
+    // Every code ever sent to them: the number it went to is masked. The rows stay, for rate limits and audits.
+    await tx.otpChallenge.updateMany({ where: { userId: { in: ids } }, data: { destination: REDACTED_DESTINATION, candidatePhone: null } });
+    await tx.verificationIntent.deleteMany({ where: { userId: { in: ids } } });
+    if (contacts.length > 0) {
+      await tx.contactVerification.deleteMany({ where: { destination: { in: contacts } } });
+      for (const column of ['requestedBy', 'confirmedBy', 'closedBy'] as const) {
+        await tx.seatAllocation.updateMany({ where: { companyId, [column]: { in: contacts } }, data: { [column]: DELETED_USER_NAME } });
+      }
+      const registrations: Prisma.RegistrationAttemptWhereInput[] = [];
+      if (emails.length > 0) registrations.push({ email: { in: emails } });
+      if (phones.length > 0) registrations.push({ phone: { in: phones } });
+      await tx.registrationAttempt.updateMany({ where: { OR: registrations }, data: { ownerName: DELETED_USER_NAME, email: null, phone: null } });
+    }
+    const devicesSynced = await tx.syncDevice.findMany({ where: { userId: { in: ids } }, select: { deviceId: true } });
+    if (devicesSynced.length > 0) await tx.outboxChange.deleteMany({ where: { companyId, deviceId: { in: devicesSynced.map((d) => d.deviceId) } } });
+    await tx.syncDevice.deleteMany({ where: { userId: { in: ids } } });
+    await tx.ownerInvitation.updateMany({ where: { userId: { in: ids }, acceptedAt: null, revokedAt: null }, data: { revokedAt: now } });
+
+    // Their name on what they recorded, where the record allows it: the counter's exchanges (0092), mistake reports,
+    // and the counterparty that was them. Append-only snapshots elsewhere keep theirs (NOT_REMOVED).
+    const agentRecords = await tx.agentTransaction.updateMany({ where: { recordedById: { in: ids } }, data: { recordedByName: DELETED_USER_NAME } });
+    await tx.agentTransaction.updateMany({ where: { reversedById: { in: ids }, status: 'reversed' }, data: { reversedByName: DELETED_USER_NAME } });
+    await tx.agentMistakeReport.updateMany({ where: { reportedById: { in: ids } }, data: { reportedByName: DELETED_USER_NAME } });
+    await tx.agentMistakeReport.updateMany({ where: { decidedById: { in: ids } }, data: { decidedByName: DELETED_USER_NAME } });
+    await tx.counterparty.updateMany({ where: { companyId, userId: { in: ids } }, data: { name: DELETED_USER_NAME, phone: null, city: null, note: null } });
+
+    return { sessionsRevoked: sessions.count, devicesRevoked: devices.count, counterRecordsRenamed: agentRecords.count };
   }
 
   private deidentified(userId: Buffer, now: Date): Prisma.UserUpdateInput {
     return {
       name: DELETED_USER_NAME,
       login: deidentifiedLogin(userId),
+      // A fresh sign-in identifier: the one the person wrote down leads nowhere now.
+      personalId: generatePersonalId(),
       phone: null,
       phoneVerifiedAt: null,
       email: null,
@@ -570,6 +655,22 @@ export class AccountDeletionService {
       isActive: false,
       deletedAt: now,
     };
+  }
+
+  /**
+   * The receipt files, once the rows no longer point at them: after the commit, so a rollback never leaves a
+   * record pointing at a file already gone. A file that cannot be removed is logged by count and request,
+   * never by name — and is the operator's to remove (docs/24 §deletion).
+   */
+  private async removeFiles(keys: string[], requestId: Buffer): Promise<void> {
+    if (keys.length === 0) return;
+    if (!this.storage) {
+      this.logger.error(`Deletion ${binToUuid(requestId)}: ${keys.length} receipt file(s) not removed — no storage provider`);
+      return;
+    }
+    let failed = 0;
+    for (const key of keys) await this.storage.delete(key).catch(() => void failed++);
+    if (failed > 0) this.logger.error(`Deletion ${binToUuid(requestId)}: ${failed} of ${keys.length} receipt file(s) could not be removed`);
   }
 
   /** Best effort, after the commit. A failure here changes nothing and logs no number. */

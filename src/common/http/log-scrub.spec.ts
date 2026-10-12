@@ -58,3 +58,13 @@ describe('log scrubbing of credential-bearing query parameters', () => {
     expect(scrubQuery(null)).toBeNull();
   });
 });
+
+describe('log scrubbing of what a person searched for (privacy correction, 2026-10-12)', () => {
+  it('a customer, a business or a number typed into a search never reaches a log line', () => {
+    expect(scrubUrl('/api/v1/customers?search=Aminetou%2036123456&page=2')).toBe(`/api/v1/customers?search=${REDACTED}&page=2`);
+    expect(scrubUrl('/api/v1/platform/businesses?q=Boutique')).toBe(`/api/v1/platform/businesses?q=${REDACTED}`);
+    expect(scrubUrl('/api/v1/connections?q=36123456')).toBe(`/api/v1/connections?q=${REDACTED}`);
+    expect(scrubQuery({ search: 'Aminetou', page: '2' })).toEqual({ search: REDACTED, page: '2' });
+    expect(scrubUrl('/api/v1/sales?page=2')).toBe('/api/v1/sales?page=2');
+  });
+});

@@ -12,6 +12,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
+import { contactPresence } from '../common/privacy/audit-contact';
 import { isDelegatable, mayHoldDelegated, DELEGATION_ELIGIBLE_ROLE, DELEGATABLE_PERMISSIONS } from '../rbac/permission-scope';
 import { CLOSING_DELEGATES_MAX, delegationAllowed } from '../closing/closing-lifecycle';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -660,8 +661,9 @@ export class UserManagementService {
   private auditable(row: UserRow, changed: string[]): Prisma.InputJsonValue {
     const all: Record<string, unknown> = {
       name: row.name,
-      phone: row.phone,
-      email: row.email,
+      // Whether a contact is held, never the contact: the audit outlives a deletion (audit-contact.ts).
+      phone: contactPresence(row.phone),
+      email: contactPresence(row.email),
       phoneVerifiedAt: row.phoneVerifiedAt ? row.phoneVerifiedAt.toISOString() : null,
       emailVerifiedAt: row.emailVerifiedAt ? row.emailVerifiedAt.toISOString() : null,
       isActive: row.isActive,

@@ -17,6 +17,7 @@ import { SpineEventBus } from '../common/events/spine-event-bus';
 import { requestRollupTx } from '../analytics/rollup-queue';
 import { figuresByDay } from '../analytics/period-figures';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { contactPresence } from '../common/privacy/audit-contact';
 import { dayKey } from '../common/utils/date.util';
 import { isDateString } from '../common/business-day';
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
@@ -594,9 +595,9 @@ export class SalesService {
           });
         }
 
-        // The payer numbers taken with the sale, part by part (D151): the audit keeps what the till recorded.
+        // Which parts were paid from a number (D151) — never the number itself: the audit outlives a de-identification.
         const payerParts = dto.payments
-          .map((p) => ({ method: p.method, amount: p.amount, payerNumber: payerNumberFor(p.method, p.payerNumber) }))
+          .map((p) => ({ method: p.method, amount: p.amount, payerNumber: contactPresence(payerNumberFor(p.method, p.payerNumber)) }))
           .filter((p) => p.payerNumber !== null);
         await this.audit.recordTx(tx, {
           entityType: 'Sale',
