@@ -2,7 +2,7 @@
   "name": "phonestore-erp-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "Electronics Retail Management System — NestJS backend.",
+  "description": "Dukan ERP — NestJS backend. Developed and operated by TSX-MR.",
   "engines": {
     "node": ">=20"
   },

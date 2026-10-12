@@ -106,8 +106,8 @@ async function bootstrap(): Promise<void> {
 
   if (config.swaggerEnabled) {
     const swaggerConfig = new DocumentBuilder()
-      .setTitle('Phone Store ERP API')
-      .setDescription('Backend API — Sprint 1 foundation')
+      .setTitle('Dukan ERP API')
+      .setDescription('Dukan ERP backend API — developed and operated by TSX-MR')
       .setVersion('1.0')
       .addBearerAuth()
       .build();
