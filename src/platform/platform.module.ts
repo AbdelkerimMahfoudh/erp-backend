@@ -23,8 +23,10 @@ import {
   OutboxDeliveryProvider,
   UnconfiguredDeliveryProvider,
   WhatsAppContactDeliveryProvider,
+  isRealChannel,
 } from './contact-delivery';
 import { WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel';
+import { EMAIL_CHANNEL, EmailChannel } from '../messaging/email-channel';
 
 /**
  * Which delivery provider is real is an environment decision, and the unsafe
@@ -34,7 +36,8 @@ import { WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel
  * of them.
  *
  * Order of preference:
- *  1. a real WhatsApp channel (`cloud-api`) — codes go out as messages;
+ *  1. a real channel — WhatsApp (`cloud-api`) or email (`resend`) — codes go out as messages, and a contact of
+ *     the other kind is refused honestly;
  *  2. the development outbox, where it is allowed;
  *  3. the honest refusal.
  *
@@ -47,8 +50,9 @@ export function selectContactDelivery(
   outbox: OutboxDeliveryProvider,
   unconfigured: UnconfiguredDeliveryProvider,
   allowOutbox: boolean = outboxAllowed(),
+  email?: EmailChannel,
 ): ContactDeliveryProvider {
-  if (channel.isEnabled && channel.name !== 'development-log') return whatsapp;
+  if (isRealChannel(channel) || (email && isRealChannel(email))) return whatsapp;
   if (allowOutbox) return outbox;
   return unconfigured;
 }
@@ -93,8 +97,14 @@ export function selectContactDelivery(
        * single registered instances is what makes the development flow work
        * at all.
        */
-      inject: [WHATSAPP_CHANNEL, WhatsAppContactDeliveryProvider, OutboxDeliveryProvider, UnconfiguredDeliveryProvider],
-      useFactory: selectContactDelivery,
+      inject: [WHATSAPP_CHANNEL, WhatsAppContactDeliveryProvider, OutboxDeliveryProvider, UnconfiguredDeliveryProvider, EMAIL_CHANNEL],
+      useFactory: (
+        channel: WhatsAppChannel,
+        real: WhatsAppContactDeliveryProvider,
+        outbox: OutboxDeliveryProvider,
+        unconfigured: UnconfiguredDeliveryProvider,
+        email: EmailChannel,
+      ) => selectContactDelivery(channel, real, outbox, unconfigured, outboxAllowed(), email),
     },
     WhatsAppContactDeliveryProvider,
     OutboxDeliveryProvider,

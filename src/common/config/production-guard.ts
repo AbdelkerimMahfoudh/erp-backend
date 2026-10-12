@@ -46,6 +46,12 @@ export interface ProductionGuardEnv {
   WHATSAPP_ACCESS_TOKEN?: string;
   WHATSAPP_TEMPLATE_AUTH_OTP?: string;
   WHATSAPP_TEMPLATE_ACCOUNT_DELETION?: string;
+  WHATSAPP_TEMPLATE_ACCOUNT_DELETED?: string;
+  WHATSAPP_TEMPLATE_DELIVERY_CHECK?: string;
+  EMAIL_CHANNEL?: string;
+  EMAIL_FROM?: string;
+  RESEND_API_KEY?: string;
+  RESEND_API_BASE_URL?: string;
   WHATSAPP_APP_SECRET?: string;
   WHATSAPP_WEBHOOK_VERIFY_TOKEN?: string;
   OTP_PEPPER?: string;
@@ -191,6 +197,42 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
     }
     if (!env.OTP_PEPPER || env.OTP_PEPPER.length < 32) {
       problems.push('WHATSAPP_CHANNEL=cloud-api needs OTP_PEPPER (32+ characters), or no code can be issued.');
+    }
+    /*
+     * Delivery is proven on the deployment before anything is claimed (docs/64; messaging/delivery-readiness.ts):
+     * the proof is completed only by the signed webhook, so production needs the webhook, the delivery-check
+     * template that carries the proof, and the completion template a deletion sends.
+     */
+    if (!env.WHATSAPP_APP_SECRET?.trim() || !env.WHATSAPP_WEBHOOK_VERIFY_TOKEN?.trim()) {
+      problems.push(
+        'WHATSAPP_CHANNEL=cloud-api needs WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN in production: only a signed ' +
+          'delivery report can prove delivery, and without the proof the channel stays closed.',
+      );
+    }
+    if (!env.WHATSAPP_TEMPLATE_DELIVERY_CHECK?.trim() || !env.WHATSAPP_TEMPLATE_ACCOUNT_DELETED?.trim()) {
+      problems.push(
+        'WHATSAPP_CHANNEL=cloud-api needs the approved template names WHATSAPP_TEMPLATE_DELIVERY_CHECK (the operator\'s ' +
+          'delivery proof) and WHATSAPP_TEMPLATE_ACCOUNT_DELETED (the deletion completion notice).',
+      );
+    }
+  }
+
+  // Email (messaging/email-channel.ts): the same rules as WhatsApp — nothing faked, nothing in clear text.
+  const email = (env.EMAIL_CHANNEL ?? 'disabled').trim().toLowerCase();
+  if (email === 'development-log') {
+    problems.push('EMAIL_CHANNEL=development-log only logs that an email would go out. Use resend or disabled.');
+  }
+  if (email === 'resend') {
+    if (!env.RESEND_API_KEY?.trim()) problems.push('EMAIL_CHANNEL=resend without RESEND_API_KEY. Set it, or set EMAIL_CHANNEL=disabled.');
+    const from = env.EMAIL_FROM?.trim() ?? '';
+    if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(from.replace(/^.*<([^>]+)>$/, '$1')) || /example\.|\.test\b|\.invalid\b|localhost/i.test(from)) {
+      problems.push('EMAIL_FROM must be a real sender on a domain with SPF, DKIM and DMARC (docs/64), not an example address.');
+    }
+    if (env.RESEND_API_BASE_URL && !/^https:\/\//i.test(env.RESEND_API_BASE_URL.trim())) {
+      problems.push('RESEND_API_BASE_URL must be an https:// address in production.');
+    }
+    if (!env.OTP_PEPPER || env.OTP_PEPPER.length < 32) {
+      problems.push('EMAIL_CHANNEL=resend needs OTP_PEPPER (32+ characters): verification codes are stored as keyed hashes.');
     }
   }
   const hasSecret = Boolean(env.WHATSAPP_APP_SECRET?.trim());

@@ -340,6 +340,43 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
         WHATSAPP_ACCESS_TOKEN: 'EAAB-real-token',
         WHATSAPP_TEMPLATE_AUTH_OTP: 'erp_auth_code',
         WHATSAPP_TEMPLATE_ACCOUNT_DELETION: 'erp_delete_code',
+        WHATSAPP_TEMPLATE_ACCOUNT_DELETED: 'erp_deleted',
+        WHATSAPP_TEMPLATE_DELIVERY_CHECK: 'erp_delivery_check',
+        WHATSAPP_APP_SECRET: 'app-secret',
+        WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-token',
+        OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+      }),
+    ).toEqual([]);
+  });
+
+  it('refuses cloud-api without the signed webhook or the proof and completion templates: delivery could never be proven (correction phase)', () => {
+    const problems = productionConfigProblems({
+      ...SAFE,
+      WHATSAPP_CHANNEL: 'cloud-api',
+      WHATSAPP_PHONE_NUMBER_ID: '1234567890',
+      WHATSAPP_ACCESS_TOKEN: 'EAAB-real-token',
+      WHATSAPP_TEMPLATE_AUTH_OTP: 'erp_auth_code',
+      WHATSAPP_TEMPLATE_ACCOUNT_DELETION: 'erp_delete_code',
+      OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+    }).join('\n');
+    expect(problems).toMatch(/WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN in production/);
+    expect(problems).toMatch(/WHATSAPP_TEMPLATE_DELIVERY_CHECK/);
+    expect(problems).toMatch(/WHATSAPP_TEMPLATE_ACCOUNT_DELETED/);
+  });
+
+  it('email: development-log is refused; resend needs a key, a real sender, https and the pepper (correction phase)', () => {
+    expect(productionConfigProblems({ ...SAFE, EMAIL_CHANNEL: 'development-log' })[0]).toMatch(/EMAIL_CHANNEL=development-log/);
+    const bare = productionConfigProblems({ ...SAFE, EMAIL_CHANNEL: 'resend', EMAIL_FROM: 'Dukan ERP <no-reply@example.com>', RESEND_API_BASE_URL: 'http://api.resend.com' }).join('\n');
+    expect(bare).toMatch(/RESEND_API_KEY/);
+    expect(bare).toMatch(/EMAIL_FROM must be a real sender/);
+    expect(bare).toMatch(/RESEND_API_BASE_URL must be an https/);
+    expect(bare).toMatch(/OTP_PEPPER/);
+    expect(
+      productionConfigProblems({
+        ...SAFE,
+        EMAIL_CHANNEL: 'resend',
+        RESEND_API_KEY: 're_live_key',
+        EMAIL_FROM: 'Dukan ERP <no-reply@mail.dukan-erp.mr>',
         OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
       }),
     ).toEqual([]);
@@ -354,6 +391,10 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
       WHATSAPP_ACCESS_TOKEN: 't',
       WHATSAPP_TEMPLATE_AUTH_OTP: 'a',
       WHATSAPP_TEMPLATE_ACCOUNT_DELETION: 'b',
+      WHATSAPP_TEMPLATE_ACCOUNT_DELETED: 'c',
+      WHATSAPP_TEMPLATE_DELIVERY_CHECK: 'd',
+      WHATSAPP_APP_SECRET: 's',
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'v',
       OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
     });
     expect(problems).toHaveLength(1);

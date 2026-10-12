@@ -77,6 +77,18 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_TEMPLATE_CLOSING_REOPENED: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_CLOSING_SALE: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_CLOSING_RECLOSED: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_DELIVERY_CHECK: Joi.string().allow('').default(''),
+
+  // ── Email (correction phase, 2026-10-12; messaging/email-channel.ts) ─────
+  // "disabled" is the default. "development-log" is refused in production. "resend" needs a key and a sender on a
+  // domain with SPF, DKIM and DMARC (docs/64); no provider is connected without TSX-MR's credentials and approval.
+  EMAIL_CHANNEL: Joi.string().valid('disabled', 'development-log', 'resend').default('disabled'),
+  EMAIL_FROM: Joi.string().allow('').default(''),
+  EMAIL_REPLY_TO: Joi.string().allow('').default(''),
+  // Secret: server-side configuration only.
+  RESEND_API_KEY: Joi.string().allow('').default(''),
+  RESEND_API_BASE_URL: Joi.string().uri({ scheme: ['https', 'http'] }).default('https://api.resend.com'),
+  EMAIL_SEND_TIMEOUT_MS: Joi.number().integer().min(1000).max(60_000).default(10_000),
 
   // File upload foundation.
   UPLOAD_MAX_BYTES: Joi.number().integer().min(1).default(10 * 1024 * 1024),

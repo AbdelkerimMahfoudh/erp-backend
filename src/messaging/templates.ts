@@ -136,6 +136,21 @@ export const CLOSING_RECLOSED_TEMPLATE: TemplateDefinition = {
   configKey: 'WHATSAPP_TEMPLATE_CLOSING_RECLOSED',
 };
 
+/**
+ * The operator's delivery check (correction phase, 2026-10-12): one message per language, sent by
+ * `npm run whatsapp:prove` to the operator's own number, so that a delivered status — reaching us through the
+ * signed webhook — proves the account, the number, the template approvals and the webhook together. Nothing
+ * personal: the variable is a short reference the operator recognises.
+ */
+export const DELIVERY_CHECK_TEMPLATE: TemplateDefinition = {
+  key: 'delivery.check',
+  category: 'operational',
+  variables: ['reference'],
+  languages: ['en', 'ar', 'fr'],
+  providerKind: 'utility',
+  configKey: 'WHATSAPP_TEMPLATE_DELIVERY_CHECK',
+};
+
 const REGISTRY: Record<string, TemplateDefinition> = {
   [AUTH_OTP_TEMPLATE.key]: AUTH_OTP_TEMPLATE,
   [ACCOUNT_DELETION_TEMPLATE.key]: ACCOUNT_DELETION_TEMPLATE,
@@ -143,6 +158,7 @@ const REGISTRY: Record<string, TemplateDefinition> = {
   [CLOSING_REOPENED_TEMPLATE.key]: CLOSING_REOPENED_TEMPLATE,
   [CLOSING_SALE_TEMPLATE.key]: CLOSING_SALE_TEMPLATE,
   [CLOSING_RECLOSED_TEMPLATE.key]: CLOSING_RECLOSED_TEMPLATE,
+  [DELIVERY_CHECK_TEMPLATE.key]: DELIVERY_CHECK_TEMPLATE,
 };
 
 export type TemplateKey = keyof typeof REGISTRY & string;

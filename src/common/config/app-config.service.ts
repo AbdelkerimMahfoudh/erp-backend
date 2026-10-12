@@ -72,6 +72,26 @@ export class AppConfigService {
     return this.get('WHATSAPP_CHANNEL');
   }
 
+  // ── Email (messaging/email-channel.ts) ──
+  get emailChannel(): string {
+    return this.get('EMAIL_CHANNEL');
+  }
+  get emailFrom(): string {
+    return (this.config.get<string>('EMAIL_FROM') ?? '').trim();
+  }
+  get emailReplyTo(): string {
+    return (this.config.get<string>('EMAIL_REPLY_TO') ?? '').trim();
+  }
+  get resendApiKey(): string {
+    return (this.config.get<string>('RESEND_API_KEY') ?? '').trim();
+  }
+  get resendApiBaseUrl(): string {
+    return this.get('RESEND_API_BASE_URL');
+  }
+  get emailSendTimeoutMs(): number {
+    return this.get('EMAIL_SEND_TIMEOUT_MS');
+  }
+
   /** Provider template id for the auth OTP; empty until approved at the provider. */
   get whatsappAuthOtpTemplate(): string {
     return this.get('WHATSAPP_TEMPLATE_AUTH_OTP');

@@ -61,6 +61,7 @@ const DEFAULTS: Record<string, Row> = {
   },
   auditLog: { branchId: null, userId: null, entityId: null, before: null, after: null, reason: null, ip: null },
   subscriptionEvent: { note: null, periodEndAfter: null, branchesAfter: null, seatsAfter: null, actor: null },
+  contactVerification: { attempts: 0, consumedAt: null, hashVersion: 1, deliveryState: 'not_sent', deliveryProvider: null, providerMessageId: null, deliveryDetail: null },
 };
 
 function same(a: unknown, b: unknown): boolean {

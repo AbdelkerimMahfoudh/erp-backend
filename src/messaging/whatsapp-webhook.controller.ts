@@ -21,6 +21,7 @@ import { OtpDeliveryState } from '@prisma/client';
 import { Public } from '../common/decorators/public.decorator';
 import { AppConfigService } from '../common/config/app-config.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { WhatsAppReadiness } from './delivery-readiness';
 
 /**
  * The provider's delivery-status webhook (docs/64 §3).
@@ -94,6 +95,7 @@ export class WhatsAppWebhookController {
   constructor(
     private readonly config: AppConfigService,
     private readonly prisma: PrismaService,
+    private readonly readiness: WhatsAppReadiness,
   ) {}
 
   /** Both settings, or the routes do not exist. */
@@ -144,6 +146,29 @@ export class WhatsAppWebhookController {
             }
           : { deliveryDetail: `Provider reported: ${s.status}` },
       });
+    }
+    /*
+     * The operator's delivery proofs (docs/64): a signed "delivered" (or "read") is the only thing that completes
+     * one, and a completed set is what opens the production channel. A failure is recorded, never a delivery.
+     */
+    let proved = 0;
+    for (const s of statuses) {
+      if (s.status === 'delivered' || s.status === 'read') {
+        const done = await this.prisma.messagingDeliveryProof.updateMany({
+          where: { provider: 'cloud-api', providerMessageId: s.id, deliveredAt: null },
+          data: { deliveredAt: new Date() },
+        });
+        proved += done.count;
+      } else if (s.status === 'failed') {
+        await this.prisma.messagingDeliveryProof.updateMany({
+          where: { provider: 'cloud-api', providerMessageId: s.id, deliveredAt: null },
+          data: { failureDetail: `Provider reported failure${s.errorCode !== undefined ? ` (code ${s.errorCode})` : ''}` },
+        });
+      }
+    }
+    if (proved > 0) {
+      await this.readiness.refresh();
+      this.logger.log(`WhatsApp delivery proofs completed: ${proved}; still to prove: ${this.readiness.missing.join(', ') || 'none'}`);
     }
     if (statuses.length > 0) this.logger.log(`WhatsApp delivery statuses received: ${statuses.length}`);
     return { received: statuses.length };

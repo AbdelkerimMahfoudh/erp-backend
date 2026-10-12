@@ -5,6 +5,14 @@ import { DevelopmentLogWhatsAppChannel, DisabledWhatsAppChannel } from './channe
 import { CloudApiConfig, CloudApiWhatsAppChannel } from './cloud-api-channel';
 import { ALL_TEMPLATES } from './templates';
 import { WhatsAppWebhookController } from './whatsapp-webhook.controller';
+import { ProvenWhatsAppChannel, WhatsAppReadiness } from './delivery-readiness';
+import { createEmailChannel, EMAIL_CHANNEL, EmailChannel } from './email-channel';
+
+/**
+ * The configured WhatsApp channel itself, before the production proof gate. Injected ONLY by the operator's
+ * `whatsapp:prove` command, which is how the proof gets made; every other caller gets {@link WHATSAPP_CHANNEL}.
+ */
+export const WHATSAPP_RAW_CHANNEL = Symbol('WHATSAPP_RAW_CHANNEL');
 
 /**
  * Chooses the messaging adapter (F1 Stage 4A; the Cloud API since 2026-09-30).
@@ -95,8 +103,9 @@ export function cloudApiConfigFrom(config: AppConfigService): CloudApiConfig | n
 @Module({
   controllers: [WhatsAppWebhookController],
   providers: [
+    WhatsAppReadiness,
     {
-      provide: WHATSAPP_CHANNEL,
+      provide: WHATSAPP_RAW_CHANNEL,
       inject: [AppConfigService],
       useFactory: (config: AppConfigService) =>
         createWhatsAppChannel({
@@ -105,7 +114,37 @@ export function cloudApiConfigFrom(config: AppConfigService): CloudApiConfig | n
           cloudApi: cloudApiConfigFrom(config),
         }),
     },
+    {
+      /*
+       * In production a real channel stays closed until its delivery is proven on this deployment (docs/64):
+       * no code, no deletion code, no invitation is claimed before then. Outside production the configured
+       * channel is used as it is.
+       */
+      provide: WHATSAPP_CHANNEL,
+      inject: [AppConfigService, WHATSAPP_RAW_CHANNEL, WhatsAppReadiness],
+      useFactory: (config: AppConfigService, raw: WhatsAppChannel, readiness: WhatsAppReadiness): WhatsAppChannel =>
+        config.nodeEnv === 'production' && raw.isEnabled ? new ProvenWhatsAppChannel(raw, readiness) : raw,
+    },
+    {
+      provide: EMAIL_CHANNEL,
+      inject: [AppConfigService],
+      useFactory: (config: AppConfigService): EmailChannel =>
+        createEmailChannel({
+          channel: config.emailChannel,
+          isProduction: config.nodeEnv === 'production',
+          resend:
+            config.emailChannel === 'resend'
+              ? {
+                  baseUrl: config.resendApiBaseUrl,
+                  apiKey: config.resendApiKey,
+                  from: config.emailFrom,
+                  replyTo: config.emailReplyTo,
+                  timeoutMs: config.emailSendTimeoutMs,
+                }
+              : null,
+        }),
+    },
   ],
-  exports: [WHATSAPP_CHANNEL],
+  exports: [WHATSAPP_CHANNEL, WHATSAPP_RAW_CHANNEL, WhatsAppReadiness, EMAIL_CHANNEL],
 })
 export class MessagingModule {}

@@ -9,6 +9,8 @@ import {
 import { selectContactDelivery } from './platform.module';
 import { DevelopmentLogWhatsAppChannel, DisabledWhatsAppChannel, TestWhatsAppChannel } from '../messaging/channels';
 import { AUTH_OTP_TEMPLATE } from '../messaging/templates';
+import { DevelopmentLogEmailChannel, DisabledEmailChannel, type EmailChannel, type EmailMessage } from '../messaging/email-channel';
+import type { DeliveryResult as ChannelResult } from '../messaging/whatsapp-channel';
 
 /**
  * Which environment may use the outbox, and which may see a code.
@@ -123,7 +125,8 @@ describe('the WhatsApp contact provider', () => {
 
     const result = await provider.send({ channel: 'phone', destination: '+22231234567', code: '123456', language: 'fr' });
 
-    expect(result).toEqual({ delivery: 'sent', provider: 'whatsapp' });
+    // The provider and its message id are returned to be recorded on the code's row (0093).
+    expect(result).toEqual({ delivery: 'sent', provider: 'whatsapp:test', providerMessageId: 'test-1' });
     expect(channel.last).toMatchObject({
       to: '+22231234567',
       template: AUTH_OTP_TEMPLATE.key,
@@ -170,5 +173,65 @@ describe('whether a code can leave at all — asked before anything is created (
     expect(on.canDeliver('email')).toBe(false);
     const off = new WhatsAppContactDeliveryProvider(new DisabledWhatsAppChannel(), unconfigured);
     expect(off.canDeliver('phone')).toBe(false);
+  });
+});
+
+/** An email provider that answers as a test needs: each call takes the next answer. */
+class ScriptedEmail implements EmailChannel {
+  readonly name = 'resend';
+  readonly isEnabled = true;
+  readonly sent: EmailMessage[] = [];
+  constructor(private readonly answers: ChannelResult[]) {}
+  async send(message: EmailMessage): Promise<ChannelResult> {
+    this.sent.push(message);
+    return this.answers.shift() ?? { status: 'accepted', providerMessageId: 'em-1', provider: 'resend' };
+  }
+}
+
+describe('the email boundary (correction phase, 2026-10-12)', () => {
+  const unconfigured = new UnconfiguredDeliveryProvider();
+  const accepted: ChannelResult = { status: 'accepted', providerMessageId: 'em-1', provider: 'resend' };
+  const temporary: ChannelResult = { status: 'failed', reason: 'temporary', detail: '503', provider: 'resend' };
+  const rejected: ChannelResult = { status: 'failed', reason: 'rejected', detail: '422', provider: 'resend' };
+
+  it('an email address goes through the email channel, with its approved text and its message id recorded', async () => {
+    const email = new ScriptedEmail([accepted]);
+    const provider = new WhatsAppContactDeliveryProvider(new DisabledWhatsAppChannel(), unconfigured, email);
+    expect(provider.canDeliver('email')).toBe(true);
+    expect(provider.canDeliver('phone')).toBe(false);
+    await expect(provider.send({ channel: 'email', destination: 'owner@shop.mr', code: '123456', language: 'ar' })).resolves.toEqual({ delivery: 'sent', provider: 'email:resend', providerMessageId: 'em-1' });
+    expect(email.sent[0]).toMatchObject({ to: 'owner@shop.mr', template: 'contact.verification', language: 'ar', variables: { code: '123456', ttlMinutes: '10' } });
+  });
+
+  it('a temporary failure is tried once more under the same key; a refusal is not, and nothing is claimed', async () => {
+    const retried = new ScriptedEmail([temporary, accepted]);
+    const provider = new WhatsAppContactDeliveryProvider(new DisabledWhatsAppChannel(), unconfigured, retried);
+    await expect(provider.send({ channel: 'email', destination: 'owner@shop.mr', code: '123456', language: 'en' })).resolves.toMatchObject({ delivery: 'sent' });
+    expect(retried.sent).toHaveLength(2);
+    expect(retried.sent[0].idempotencyKey).toBe(retried.sent[1].idempotencyKey);
+
+    const twice = new ScriptedEmail([temporary, temporary]);
+    await expect(new WhatsAppContactDeliveryProvider(new DisabledWhatsAppChannel(), unconfigured, twice).send({ channel: 'email', destination: 'owner@shop.mr', code: '1', language: 'en' })).rejects.toMatchObject({ response: { code: 'delivery_failed', delivery: 'temporary' } });
+    expect(twice.sent).toHaveLength(2);
+
+    const refused = new ScriptedEmail([rejected]);
+    await expect(new WhatsAppContactDeliveryProvider(new DisabledWhatsAppChannel(), unconfigured, refused).send({ channel: 'email', destination: 'owner@shop.mr', code: '1', language: 'en' })).rejects.toMatchObject({ response: { code: 'delivery_failed', delivery: 'rejected' } });
+    expect(refused.sent).toHaveLength(1);
+  });
+
+  it('no email provider, or only the development log, is no email channel: refused honestly, nothing sent', async () => {
+    for (const email of [new DisabledEmailChannel(), new DevelopmentLogEmailChannel(), undefined]) {
+      const provider = new WhatsAppContactDeliveryProvider(new TestWhatsAppChannel(), unconfigured, email);
+      expect(provider.canDeliver('email')).toBe(false);
+      await expect(provider.send({ channel: 'email', destination: 'owner@shop.mr', code: '1', language: 'en' })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    }
+  });
+
+  it('a real email channel alone makes the real provider the choice; a WhatsApp number is then refused honestly', () => {
+    const real = new WhatsAppContactDeliveryProvider(new DisabledWhatsAppChannel(), unconfigured, new ScriptedEmail([]));
+    const chosen = selectContactDelivery(new DisabledWhatsAppChannel(), real, new OutboxDeliveryProvider(), unconfigured, false, new ScriptedEmail([]));
+    expect(chosen).toBe(real);
+    expect(chosen.canDeliver('phone')).toBe(false);
+    expect(selectContactDelivery(new DisabledWhatsAppChannel(), real, new OutboxDeliveryProvider(), unconfigured, false, new DisabledEmailChannel())).toBe(unconfigured);
   });
 });

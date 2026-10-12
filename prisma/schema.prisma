@@ -4716,11 +4716,19 @@ model ContactVerification {
   /// The normalised destination — a lowercased email, or an E.164 number.
   destination String         @db.VarChar(160)
 
-  codeHash  String   @map("code_hash") @db.VarChar(255)
-  expiresAt DateTime @map("expires_at") @db.DateTime(6)
+  codeHash    String   @map("code_hash") @db.VarChar(255)
+  /// 1 = the earlier unkeyed SHA-256; 2 = HMAC-SHA256 under OTP_PEPPER (0093).
+  hashVersion Int      @default(1) @map("hash_version") @db.UnsignedTinyInt
+  expiresAt   DateTime @map("expires_at") @db.DateTime(6)
 
   /// Wrong guesses. A code with too many is dead, whatever it is.
   attempts Int @default(0) @db.UnsignedInt
+
+  /// What delivery actually did with the code (0093): never claimed, recorded.
+  deliveryState     ContactDeliveryState @default(not_sent) @map("delivery_state")
+  deliveryProvider  String?              @map("delivery_provider") @db.VarChar(40)
+  providerMessageId String?              @map("provider_message_id") @db.VarChar(191)
+  deliveryDetail    String?              @map("delivery_detail") @db.VarChar(200)
 
   consumedAt DateTime? @map("consumed_at") @db.DateTime(6)
   createdAt  DateTime  @default(now()) @map("created_at") @db.DateTime(6)
@@ -5466,4 +5474,32 @@ model AgentRequestKey {
   @@unique([companyId, clientRequestId], map: "ux_agent_request_keys_key")
   @@index([targetId], map: "ix_agent_request_keys_target")
   @@map("agent_request_keys")
+}
+
+/// What delivery did with a contact verification code (0093).
+enum ContactDeliveryState {
+  not_sent
+  accepted
+  outbox
+  failed
+}
+
+/// One real send an operator made to prove a channel on this deployment (0093; docs/64). `deliveredAt` is set only
+/// by the signed delivery webhook. Production sends no WhatsApp message until en, fr and ar each have one.
+model MessagingDeliveryProof {
+  id                Bytes     @id @db.Binary(16)
+  channel           String    @db.VarChar(20)
+  provider          String    @db.VarChar(40)
+  template          String    @db.VarChar(60)
+  language          String    @db.VarChar(5)
+  destinationMasked String    @map("destination_masked") @db.VarChar(40)
+  providerMessageId String?   @map("provider_message_id") @db.VarChar(191)
+  acceptedAt        DateTime? @map("accepted_at") @db.DateTime(6)
+  deliveredAt       DateTime? @map("delivered_at") @db.DateTime(6)
+  failureDetail     String?   @map("failure_detail") @db.VarChar(200)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  @@unique([provider, providerMessageId], map: "ux_delivery_proof_message")
+  @@index([channel, language, deliveredAt], map: "ix_delivery_proof_channel")
+  @@map("messaging_delivery_proofs")
 }

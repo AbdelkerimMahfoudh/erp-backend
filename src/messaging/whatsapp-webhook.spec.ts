@@ -13,8 +13,9 @@ import { WhatsAppWebhookController, extractStatuses, signatureMatches } from './
 const SECRET = 'app-secret-for-tests';
 const sign = (raw: Buffer, secret = SECRET) => `sha256=${createHmac('sha256', secret).update(raw).digest('hex')}`;
 
-function harness(opts: { verifyToken?: string; appSecret?: string } = {}) {
+function harness(opts: { verifyToken?: string; appSecret?: string; proofs?: number } = {}) {
   const updates: unknown[] = [];
+  const proofUpdates: { where: Record<string, unknown>; data: Record<string, unknown> }[] = [];
   const prisma = {
     otpChallenge: {
       updateMany: jest.fn(async (args: unknown) => {
@@ -22,13 +23,20 @@ function harness(opts: { verifyToken?: string; appSecret?: string } = {}) {
         return { count: 1 };
       }),
     },
+    messagingDeliveryProof: {
+      updateMany: jest.fn(async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        proofUpdates.push(args);
+        return { count: opts.proofs ?? 0 };
+      }),
+    },
   };
+  const readiness = { refresh: jest.fn(async () => undefined), missing: [] as string[] };
   const config = {
     whatsappWebhookVerifyToken: opts.verifyToken ?? '',
     whatsappAppSecret: opts.appSecret ?? '',
   };
-  const controller = new WhatsAppWebhookController(config as never, prisma as never);
-  return { controller, updates, prisma };
+  const controller = new WhatsAppWebhookController(config as never, prisma as never, readiness as never);
+  return { controller, updates, prisma, proofUpdates, readiness };
 }
 
 function res() {
@@ -198,5 +206,21 @@ describe('receiving a report', () => {
       expect(u.where.provider).toBe('cloud-api');
       expect(typeof u.where.providerMessageId).toBe('string');
     }
+  });
+
+  it('completes the operator’s delivery proof only on a signed delivered status, and opens the gate by reading the proofs again', async () => {
+    const { controller, proofUpdates, readiness } = harness({ verifyToken: 'v', appSecret: SECRET, proofs: 1 });
+    await controller.receive({ rawBody: raw, body } as never, sign(raw));
+    expect(proofUpdates[0]).toEqual({ where: { provider: 'cloud-api', providerMessageId: 'wamid.ok', deliveredAt: null }, data: { deliveredAt: expect.any(Date) } });
+    // A failure is recorded on the proof, never a delivery.
+    expect(proofUpdates[1]).toEqual({ where: { provider: 'cloud-api', providerMessageId: 'wamid.bad', deliveredAt: null }, data: { failureDetail: 'Provider reported failure (code 131026)' } });
+    expect(readiness.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('an unsigned report proves nothing', async () => {
+    const { controller, proofUpdates, readiness } = harness({ verifyToken: 'v', appSecret: SECRET, proofs: 1 });
+    await expect(controller.receive({ rawBody: raw, body } as never, sign(raw, 'wrong'))).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(proofUpdates).toHaveLength(0);
+    expect(readiness.refresh).not.toHaveBeenCalled();
   });
 });

@@ -21,7 +21,8 @@
     "migrate:deploy": "prisma migrate deploy",
     "migrate:reset": "prisma migrate reset",
     "db:studio": "prisma studio",
-    "seed": "ts-node prisma/seed.ts"
+    "seed": "ts-node prisma/seed.ts",
+    "whatsapp:prove": "ts-node scripts/whatsapp-prove.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

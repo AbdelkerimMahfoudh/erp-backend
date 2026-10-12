@@ -1,5 +1,6 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { createHash, randomInt } from 'node:crypto';
+import { BadRequestException, Injectable, Optional } from '@nestjs/common';
+import { createHash, createHmac, randomInt, timingSafeEqual } from 'node:crypto';
+import { AppConfigService } from '../common/config/app-config.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
 import { isEmail, normaliseEmail, normalisePhone } from '../auth/identifier';
@@ -18,8 +19,11 @@ import {
  *
  * Every property the brief asks for is a property of the row, not of a
  * convention: the code is bound to one destination, short-lived, single-use,
- * attempt-limited, and stored only as a hash. A leaked database must not hand
- * somebody a working code.
+ * attempt-limited, and stored only as a hash — keyed with the server's pepper
+ * since 0093, so a leaked database alone cannot be searched for the code (a
+ * six-digit code under an unkeyed hash is a million guesses away). What
+ * delivery did with each code is recorded on its row; a code that could not be
+ * sent is dead at once, and is never shown instead.
  */
 
 /** Long enough to resist guessing at six attempts, short enough to read aloud. */
@@ -35,12 +39,31 @@ export class ContactVerificationService {
     private readonly prisma: PrismaService,
     private readonly delivery: ContactDeliveryProvider,
     private readonly outbox: OutboxDeliveryProvider,
+    @Optional() private readonly config?: AppConfigService,
   ) {}
 
-  private hash(destination: string, code: string): string {
-    // The destination is folded in, so a code stolen for one contact cannot be
-    // replayed against another.
+  /**
+   * The code's hash, by version: 2 = HMAC-SHA256 under OTP_PEPPER; 1 = the earlier unkeyed SHA-256, kept only to
+   * check a code issued before 0093 (or on a development machine without a pepper). The destination is folded in,
+   * so a code stolen for one contact cannot be replayed against another.
+   */
+  private hash(destination: string, code: string, version: number): string {
+    const pepper = this.config?.otpPepper ?? null;
+    if (version === 2 && pepper) return createHmac('sha256', pepper).update(`${destination}:${code}`).digest('hex');
     return createHash('sha256').update(`${destination}:${code}`).digest('hex');
+  }
+
+  /** The version a new code is hashed with: keyed whenever a pepper exists. */
+  private get hashVersion(): number {
+    return this.config?.otpPepper ? 2 : 1;
+  }
+
+  /** Constant time, and false for a row whose version cannot be checked (a v2 row with the pepper gone). */
+  private matches(row: { codeHash: string; hashVersion: number; destination: string }, code: string): boolean {
+    if (row.hashVersion === 2 && !this.config?.otpPepper) return false;
+    const expected = Buffer.from(row.codeHash, 'utf8');
+    const given = Buffer.from(this.hash(row.destination, code.trim(), row.hashVersion), 'utf8');
+    return expected.length === given.length && timingSafeEqual(expected, given);
   }
 
   /** Normalise, and say which channel this is. Refuses anything else. */
@@ -77,18 +100,45 @@ export class ContactVerificationService {
     });
 
     const code = String(randomInt(0, 10 ** CODE_DIGITS)).padStart(CODE_DIGITS, '0');
+    const id = newUuidV7Bin();
+    const hashVersion = this.hashVersion;
 
     await this.prisma.contactVerification.create({
       data: {
-        id: newUuidV7Bin(),
+        id,
         channel,
         destination,
-        codeHash: this.hash(destination, code),
+        codeHash: this.hash(destination, code, hashVersion),
+        hashVersion,
         expiresAt: new Date(Date.now() + TTL_MINUTES * 60 * 1000),
       },
     });
 
-    const result = await this.delivery.send({ channel, destination, code, language });
+    let result: Awaited<ReturnType<ContactDeliveryProvider['send']>>;
+    try {
+      result = await this.delivery.send({ channel, destination, code, language });
+    } catch (e) {
+      // Not sent: the code is dead at once — nobody can be waiting for it — and the refusal goes back as it is.
+      const detail = (e as { response?: { delivery?: unknown; code?: unknown } }).response;
+      await this.prisma.contactVerification.update({
+        where: { id },
+        data: {
+          consumedAt: new Date(),
+          deliveryState: 'failed',
+          deliveryProvider: this.delivery.name,
+          deliveryDetail: String(detail?.delivery ?? detail?.code ?? 'not sent').slice(0, 200),
+        },
+      });
+      throw e;
+    }
+    await this.prisma.contactVerification.update({
+      where: { id },
+      data: {
+        deliveryState: result.delivery === 'outbox' ? 'outbox' : 'accepted',
+        deliveryProvider: result.provider.slice(0, 40),
+        providerMessageId: result.providerMessageId ?? null,
+      },
+    });
 
     /*
      * The code comes back in the RESPONSE only during ordinary local
@@ -126,7 +176,7 @@ export class ContactVerificationService {
     if (!row) return false;
     if (row.attempts >= MAX_ATTEMPTS) return false;
 
-    if (row.codeHash !== this.hash(destination, code.trim())) {
+    if (!this.matches(row, code)) {
       await this.prisma.contactVerification.update({
         where: { id: row.id },
         data: { attempts: { increment: 1 } },
@@ -180,7 +230,7 @@ export class ContactVerificationService {
     if (row.expiresAt <= new Date()) return 'gone';
     if (row.attempts >= MAX_ATTEMPTS) return 'gone';
 
-    if (row.codeHash !== this.hash(row.destination, code.trim())) {
+    if (!this.matches(row, code)) {
       await this.prisma.contactVerification.update({
         where: { id: row.id },
         data: { attempts: { increment: 1 } },

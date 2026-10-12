@@ -1,16 +1,17 @@
-import { Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { ContactChannel } from '@prisma/client';
-import { WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel';
+import { DeliveryResult as ChannelResult, WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel';
 import { AUTH_OTP_TEMPLATE } from '../messaging/templates';
+import { EMAIL_CHANNEL, EmailChannel } from '../messaging/email-channel';
 
 /**
  * Sending a code to a contact.
  *
- * **No provider is configured, and this checkpoint does not add one.** An audit
- * of the codebase found no email or WhatsApp delivery adapter of any kind, so
- * what exists here is the boundary a real one will slot into — and a
- * development outbox so the flow can be exercised meanwhile.
+ * WhatsApp numbers go through the WhatsApp boundary; email addresses through the
+ * email boundary (`messaging/email-channel.ts`, 2026-10-12), which connects no
+ * provider until TSX-MR supplies one. Meanwhile a development outbox lets the
+ * flow be exercised.
  *
  * The rule that shapes the whole file: **never claim a message was sent when
  * nothing sent it.** A "verification code sent" screen in front of a provider
@@ -75,6 +76,8 @@ export interface DeliveryResult {
   /** What actually happened. `outbox` is not a claim of delivery. */
   delivery: 'sent' | 'outbox';
   provider: string;
+  /** The provider's own message id, when it gave one: recorded on the code's row (0093). */
+  providerMessageId?: string | null;
 }
 
 export abstract class ContactDeliveryProvider {
@@ -160,44 +163,72 @@ export class UnconfiguredDeliveryProvider extends ContactDeliveryProvider {
   }
 }
 
+/** A real channel: enabled, and not one that only writes to a development log. */
+export function isRealChannel(channel: { isEnabled: boolean; name: string }): boolean {
+  return channel.isEnabled && channel.name !== 'development-log';
+}
+
 /**
- * The real one for WhatsApp numbers (docs/64 §3).
+ * Send once, and once more only when the failure is temporary (a timeout, a 5xx, throttling) — under the SAME
+ * idempotency key, so a provider that did take the first one does not deliver it twice. A refusal, a credential
+ * problem or a missing channel is never retried.
+ */
+export async function sendWithOneRetry(send: (idempotencyKey: string) => Promise<ChannelResult>): Promise<ChannelResult> {
+  const key = randomUUID();
+  const first = await send(key);
+  if (first.status === 'accepted' || first.reason !== 'temporary') return first;
+  return send(key);
+}
+
+/**
+ * The real one (docs/64 §3): WhatsApp numbers through the WhatsApp boundary, email addresses through the email
+ * boundary — each with its approved text, its classification of failures, and one retry for a temporary one.
+ * A contact whose channel has no real provider is refused honestly.
  *
- * A registration code to a WhatsApp number goes through the same messaging
- * boundary as every other code — the same approved template, the same
- * classification of failures. An email destination still has no provider, so
- * it is handed to the unconfigured provider and refused honestly.
- *
- * A refused or failed delivery is a 503 with a stable code, never a 200 that
- * claims a message went out.
+ * A refused or failed delivery is a 503 with a stable code, never a 200 that claims a message went out — and the
+ * code is never shown instead.
  */
 @Injectable()
 export class WhatsAppContactDeliveryProvider extends ContactDeliveryProvider {
-  readonly name = 'whatsapp';
+  readonly name = 'channels';
 
   constructor(
     @Inject(WHATSAPP_CHANNEL) private readonly channel: WhatsAppChannel,
     private readonly unconfigured: UnconfiguredDeliveryProvider,
+    @Optional() @Inject(EMAIL_CHANNEL) private readonly email?: EmailChannel,
   ) {
     super();
   }
 
-  /** A WhatsApp number, while the channel is on. An email still has no provider. */
+  /** A WhatsApp number while WhatsApp is on; an email address while a real email provider is on. */
   canDeliver(channel: ContactChannel): boolean {
-    return channel === 'phone' && this.channel.isEnabled;
+    if (channel === 'phone') return this.channel.isEnabled;
+    return this.email !== undefined && isRealChannel(this.email);
   }
 
   async send(req: DeliveryRequest): Promise<DeliveryResult> {
-    if (req.channel !== 'phone') return this.unconfigured.send();
-
-    const result = await this.channel.send({
-      to: req.destination,
-      template: AUTH_OTP_TEMPLATE.key,
-      language: req.language,
-      variables: { code: req.code, ttlMinutes: '10' },
-      // A retried `start()` issues a NEW code, so each delivery is its own message.
-      idempotencyKey: randomUUID(),
-    });
+    if (!this.canDeliver(req.channel)) return this.unconfigured.send();
+    const result =
+      req.channel === 'phone'
+        ? await sendWithOneRetry((idempotencyKey) =>
+            this.channel.send({
+              to: req.destination,
+              template: AUTH_OTP_TEMPLATE.key,
+              language: req.language,
+              variables: { code: req.code, ttlMinutes: '10' },
+              // A retried `start()` issues a NEW code, so each start is its own message.
+              idempotencyKey,
+            }),
+          )
+        : await sendWithOneRetry((idempotencyKey) =>
+            this.email!.send({
+              to: req.destination,
+              template: 'contact.verification',
+              language: req.language,
+              variables: { code: req.code, ttlMinutes: '10' },
+              idempotencyKey,
+            }),
+          );
     if (result.status !== 'accepted') {
       throw new ServiceUnavailableException({
         code: 'delivery_failed',
@@ -206,6 +237,6 @@ export class WhatsAppContactDeliveryProvider extends ContactDeliveryProvider {
         message: 'The verification code could not be sent. Please try again in a moment.',
       });
     }
-    return { delivery: 'sent', provider: this.name };
+    return { delivery: 'sent', provider: `${req.channel === 'phone' ? 'whatsapp' : 'email'}:${result.provider}`, providerMessageId: result.providerMessageId };
   }
 }
