@@ -110,6 +110,11 @@ import { AgentModule } from './agent/agent.module';
               // presents at login. Redacted for parity with the password, so a
               // future body log cannot leak it while the password stays safe.
               'req.body.deviceCredential.deviceSecret',
+              // Administrator MFA (0094): the code, a recovery code, the enrolment token, the step-up's password.
+              'req.body.code',
+              'req.body.recoveryCode',
+              'req.body.enrolmentToken',
+              'req.body.confirmPassword',
               'res.headers["set-cookie"]',
             ],
             remove: true,

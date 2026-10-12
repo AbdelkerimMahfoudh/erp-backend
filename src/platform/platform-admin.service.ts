@@ -1,4 +1,6 @@
-import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, Injectable, Optional, UnauthorizedException } from '@nestjs/common';
+import { ClsService } from 'nestjs-cls';
+import type { AppClsStore } from '../common/context/request-context';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { HashingService } from '../common/security/hashing.service';
@@ -37,6 +39,23 @@ export interface AdminSessionResult {
   /** Returned once, set as an HttpOnly cookie by the controller. Never stored. */
   sessionToken: string;
   expiresAt: Date;
+  /**
+   * What the session still needs (0094): a code from the authenticator, or — with no factor enrolled yet — the
+   * enrolment token issued on the server. Until then the session reaches the MFA routes only.
+   */
+  mfa: 'required' | 'enrolment_required';
+}
+
+/** A session as the guard sees it: whose, which, and whether its second factor was verified. */
+export interface AdminSession {
+  admin: PlatformAdminIdentity;
+  sessionId: Buffer;
+  mfaVerified: boolean;
+}
+
+/** The interval within which a password-and-code step-up stays good, checked on the session. */
+export interface StepUpCheck {
+  assertFreshStepUp(sessionId: Buffer | undefined): Promise<void>;
 }
 
 @Injectable()
@@ -44,7 +63,17 @@ export class PlatformAdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly hashing: HashingService,
+    @Optional() private readonly cls?: ClsService<AppClsStore>,
   ) {}
+
+  /**
+   * Set once by the module: the MFA service checks a step-up's freshness. Not a constructor dependency, so the two
+   * services do not depend on each other at construction.
+   */
+  private stepUps: StepUpCheck | null = null;
+  useStepUpCheck(check: StepUpCheck): void {
+    this.stepUps = check;
+  }
 
   /** Session tokens are opaque and random. Only their hash is ever stored. */
   private hashToken(token: string): string {
@@ -101,6 +130,7 @@ export class PlatformAdminService {
       admin: { id: admin.id.toString('hex'), email: admin.email, name: admin.name },
       sessionToken: token,
       expiresAt,
+      mfa: admin.mfaEnabledAt && admin.mfaSecretEnc ? 'required' : 'enrolment_required',
     };
   }
 
@@ -111,7 +141,7 @@ export class PlatformAdminService {
    * was true at sign-in: disabling an administrator has to take effect now, not
    * whenever their session happens to expire.
    */
-  async resolve(token: string | undefined): Promise<PlatformAdminIdentity | null> {
+  async resolveSession(token: string | undefined): Promise<AdminSession | null> {
     if (!token) return null;
 
     const session = await this.prisma.platformAdminSession.findFirst({
@@ -126,10 +156,17 @@ export class PlatformAdminService {
     if (!session || !session.admin.isActive || session.admin.deletedAt) return null;
 
     return {
-      id: session.admin.id,
-      email: session.admin.email,
-      name: session.admin.name,
+      admin: { id: session.admin.id, email: session.admin.email, name: session.admin.name },
+      sessionId: session.id,
+      // Verified on THIS session, for an administrator whose factor is still enrolled: a reset voids it.
+      mfaVerified: Boolean(session.mfaVerifiedAt) && Boolean(session.admin.mfaEnabledAt),
     };
+  }
+
+  /** The administrator behind a session — only a session whose second factor was verified (0094). */
+  async resolve(token: string | undefined): Promise<PlatformAdminIdentity | null> {
+    const session = await this.resolveSession(token);
+    return session?.mfaVerified ? session.admin : null;
   }
 
   async signOut(token: string | undefined): Promise<void> {
@@ -156,6 +193,9 @@ export class PlatformAdminService {
    * session should be enough for — an administrator's laptop left open is the
    * ordinary case, not the exotic one. The password is re-typed and verified
    * against the acting administrator, and nothing about it is stored or logged.
+   *
+   * Since 0094 the password alone is not enough: THIS session must also hold a step-up — the password and a
+   * fresh code from the authenticator — made within the last five minutes (`PlatformMfaService.stepUp`).
    */
   async confirmPassword(adminId: Buffer, password: string | undefined): Promise<void> {
     if (!password) {
@@ -180,6 +220,10 @@ export class PlatformAdminService {
         message: 'That password did not match.',
       });
     }
+
+    // No checker wired is no step-up: refused, never waved through.
+    if (!this.stepUps) throw new ForbiddenException({ code: 'step_up_required', message: 'Administrator MFA is not available.' });
+    await this.stepUps.assertFreshStepUp(this.cls?.get('platformSessionId'));
   }
 
   /**

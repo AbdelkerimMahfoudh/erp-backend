@@ -139,6 +139,11 @@ export class AppConfigService {
    * creation refuses. That is deliberate — a missing pepper must degrade to
    * "no OTP" rather than to "OTP with a guessable hash".
    */
+  /** The raw administrator-MFA key (0094); parsed and checked by `mfa/secret-box.ts`. */
+  get platformMfaKey(): string {
+    return (this.config.get<string>('PLATFORM_MFA_KEY') ?? '').trim();
+  }
+
   get otpPepper(): string | null {
     const value = this.config.get<string>('OTP_PEPPER');
     return value && value.length >= 32 ? value : null;

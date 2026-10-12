@@ -1,4 +1,5 @@
 import { isIngressMode, isLoopbackAddress } from './ingress';
+import { parseMfaKey } from '../../platform/mfa/secret-box';
 
 /**
  * What production may not start with.
@@ -57,6 +58,7 @@ export interface ProductionGuardEnv {
   OTP_PEPPER?: string;
   APP_ENV?: string;
   PLATFORM_ADMIN_KEY?: string;
+  PLATFORM_MFA_KEY?: string;
   SEED_DEMO?: string;
 }
 
@@ -254,6 +256,14 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
       'PLATFORM_ADMIN_KEY is set. The static-key provisioning route is closed in production; ' +
         'use the platform administrator API and remove the key.',
     );
+  }
+
+  /*
+   * Administrator MFA is mandatory (0094): without its key no administrator session can complete, and the
+   * administration portal would be a password alone — the single layer the deployment must not rest on.
+   */
+  if (!parseMfaKey(env.PLATFORM_MFA_KEY)) {
+    problems.push('PLATFORM_MFA_KEY is missing or malformed. Production needs a 32-byte key (base64, or 64 hex characters) to seal administrator TOTP secrets.');
   }
 
   // Demo data is opt-in everywhere and refused here regardless (docs/48 risk R7).

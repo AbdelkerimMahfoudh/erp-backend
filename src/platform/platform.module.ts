@@ -1,4 +1,6 @@
-import { Module } from '@nestjs/common';
+import { Module, OnModuleInit } from '@nestjs/common';
+import { PlatformMfaService } from './platform-mfa.service';
+import { PlatformMfaController } from './platform-mfa.controller';
 import { PrismaModule } from '../prisma/prisma.module';
 import { HashingService } from '../common/security/hashing.service';
 import { PlatformController } from './platform.controller';
@@ -71,10 +73,11 @@ export function selectContactDelivery(
  */
 @Module({
   imports: [PrismaModule, EntitlementModule, AuthModule],
-  controllers: [PlatformController, SeatRequestsController],
+  controllers: [PlatformController, SeatRequestsController, PlatformMfaController],
   providers: [
     HashingService,
     PlatformAdminService,
+    PlatformMfaService,
     PlatformAdminGuard,
     PlatformAuditService,
     SubscriptionLifecycleService,
@@ -112,6 +115,7 @@ export function selectContactDelivery(
   ],
   exports: [
     PlatformAdminService,
+    PlatformMfaService,
     SubscriptionLifecycleService,
     RegistrationService,
     BillingService,
@@ -123,4 +127,14 @@ export function selectContactDelivery(
     StaffActivationService,
   ],
 })
-export class PlatformModule {}
+export class PlatformModule implements OnModuleInit {
+  constructor(
+    private readonly admins: PlatformAdminService,
+    private readonly mfa: PlatformMfaService,
+  ) {}
+
+  /** Every step-up confirmation checks the session's password-and-code step-up (0094). */
+  onModuleInit(): void {
+    this.admins.useStepUpCheck(this.mfa);
+  }
+}

@@ -18,6 +18,8 @@ export interface AppClsStore extends ClsStore {
   companyId?: Buffer;
   branchId?: Buffer;
   permissions?: ReadonlySet<string>;
+  /** The platform administrator session that authenticated this request (0094): where a step-up is recorded. */
+  platformSessionId?: Buffer;
 }
 
 export const CLS_KEY = {

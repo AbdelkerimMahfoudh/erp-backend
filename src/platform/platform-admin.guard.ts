@@ -1,6 +1,16 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, Optional, SetMetadata, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { ClsService } from 'nestjs-cls';
 import type { Request } from 'express';
+import type { AppClsStore } from '../common/context/request-context';
 import { PlatformAdminService, type PlatformAdminIdentity } from './platform-admin.service';
+
+/**
+ * The routes a session may reach BEFORE its second factor is verified (0094): completing it, enrolling, and
+ * signing out. Every other administrative route refuses such a session — there is no API path around the code.
+ */
+export const ALLOW_PENDING_MFA = 'platformAllowPendingMfa';
+export const AllowPendingMfa = (): MethodDecorator => SetMetadata(ALLOW_PENDING_MFA, true);
 
 /** The cookie the session token lives in. HttpOnly — script can never read it. */
 export { ADMIN_SESSION_COOKIE, readCookie } from '../common/http/cookies';
@@ -17,6 +27,10 @@ export interface AdminRequest extends Request {
    * particularly bad bug to ship on an administration portal.
    */
   platformSessionToken?: string;
+  /** The session's id, where a step-up is recorded (0094). */
+  platformSessionId?: Buffer;
+  /** False while the second factor is still to be verified — only the MFA routes see such a request. */
+  platformMfaVerified?: boolean;
 }
 
 /**
@@ -51,7 +65,11 @@ export interface AdminRequest extends Request {
  */
 @Injectable()
 export class PlatformAdminGuard implements CanActivate {
-  constructor(private readonly admins: PlatformAdminService) {}
+  constructor(
+    private readonly admins: PlatformAdminService,
+    @Optional() private readonly reflector: Reflector = new Reflector(),
+    @Optional() private readonly cls?: ClsService<AppClsStore>,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<AdminRequest>();
@@ -62,15 +80,22 @@ export class PlatformAdminGuard implements CanActivate {
       if (header?.startsWith('Bearer ')) token = header.slice('Bearer '.length);
     }
 
-    const admin = await this.admins.resolve(token);
-    if (!admin) {
+    const session = await this.admins.resolveSession(token);
+    if (!session) {
       // Generic, and identical whether the session is absent, expired, revoked,
       // or belongs to an administrator who has since been disabled.
       throw new UnauthorizedException('Not signed in');
     }
+    if (!session.mfaVerified && !this.reflector.get<boolean>(ALLOW_PENDING_MFA, context.getHandler())) {
+      // A password alone reaches nothing here: the second factor first (0094).
+      throw new UnauthorizedException({ code: 'mfa_required', message: 'Enter a code from your authenticator to continue.' });
+    }
 
-    req.platformAdmin = admin;
+    req.platformAdmin = session.admin;
     req.platformSessionToken = token;
+    req.platformSessionId = session.sessionId;
+    req.platformMfaVerified = session.mfaVerified;
+    this.cls?.set('platformSessionId', session.sessionId);
     return true;
   }
 }

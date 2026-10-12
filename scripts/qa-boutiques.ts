@@ -39,7 +39,9 @@
 
 import { config as loadEnv } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
-import { createHash as sha256 } from 'node:crypto';
+import { createHash as sha256, createHmac } from 'node:crypto';
+import { parseMfaKey, seal } from '../src/platform/mfa/secret-box';
+import { base32Encode, stepAt, totpForStep } from '../src/platform/mfa/totp';
 import { HashingService } from '../src/common/security/hashing.service';
 import { isValidImei, luhnValid } from '../src/inventory/imei.util';
 import { newUuidV7Bin } from '../src/common/utils/uuid.util';
@@ -231,17 +233,61 @@ function expectOk(r: Reply, what: string): any {
 
 // ── Steps ──────────────────────────────────────────────────────────────────
 
+// ── The administrator's second factor (0094) ──────────────────────────────
+//
+// The QA administrator's TOTP secret is DERIVED from the deployment's own PLATFORM_MFA_KEY, so a later --verify
+// run knows it without the secret ever being written down. Local QA only: a real administrator enrols with an
+// enrolment token from `prisma/platform-admin-mfa.ts` and an authenticator app.
+
+function mfaKey(): Buffer {
+  const key = parseMfaKey(process.env.PLATFORM_MFA_KEY);
+  if (!key) throw new Error('PLATFORM_MFA_KEY is not set: the administrator cannot complete a sign-in (0094).');
+  return key;
+}
+
+function qaAdminSecret(): string {
+  return base32Encode(createHmac('sha256', mfaKey()).update(`qa-admin-totp:${ADMIN_EMAIL}`).digest().subarray(0, 20));
+}
+
+let lastTotpStep = -1;
+/** A code for now — waiting for the next step when this one was already used (the server refuses a replay). */
+async function qaAdminCode(): Promise<string> {
+  while (stepAt(Date.now()) <= lastTotpStep) await new Promise((r) => setTimeout(r, 1_000));
+  lastTotpStep = stepAt(Date.now());
+  return totpForStep(qaAdminSecret(), lastTotpStep);
+}
+
+/** Password, then the code: the session reaches nothing until its second factor is verified. */
+async function adminSignIn(pw: string): Promise<{ status: number; cookie: string | null }> {
+  const signIn = await call('POST', 'platform/admin/sign-in', { body: { email: ADMIN_EMAIL, password: pw } });
+  const cookie = signIn.cookie ?? (signIn.json?.sessionToken ? `erp_platform_session=${signIn.json.sessionToken}` : null);
+  if (signIn.status !== 200 || !cookie) return { status: signIn.status, cookie: null };
+  const verified = await call('POST', 'platform/admin/mfa/verify', { cookie, body: { code: await qaAdminCode() } });
+  return { status: verified.status, cookie: verified.status === 200 ? cookie : null };
+}
+
+let steppedUpAt = 0;
+/** A high-impact action needs a step-up on the session, good five minutes: renewed a minute before it lapses. */
+async function ensureStepUp(cookie: string, pw: string): Promise<void> {
+  if (Date.now() - steppedUpAt < 4 * 60_000) return;
+  const r = await call('POST', 'platform/admin/step-up', { cookie, body: { password: pw, code: await qaAdminCode() } });
+  if (r.status !== 200) throw new Error(`administrator step-up: ${r.status}`);
+  steppedUpAt = Date.now();
+}
+
 async function ensureAdmin(prisma: PrismaClient, hashing: HashingService, pw: string): Promise<string> {
   const existing = await prisma.platformAdmin.findUnique({ where: { email: ADMIN_EMAIL } });
-  if (existing && existing.isActive && !existing.deletedAt && (await hashing.verify(existing.passwordHash, pw))) return 'present';
+  const enrolled = existing?.mfaEnabledAt != null && existing.mfaSecretEnc != null;
+  if (existing && existing.isActive && !existing.deletedAt && enrolled && (await hashing.verify(existing.passwordHash, pw))) return 'present';
   if (!APPLY) return existing ? 'would be reset' : 'would be created';
   const passwordHash = await hashing.hash(pw);
+  const factor = { mfaSecretEnc: seal(qaAdminSecret(), mfaKey()), mfaEnabledAt: new Date(), mfaLastStep: null, mfaFailedCount: 0, mfaLockedUntil: null };
   if (existing) {
-    await prisma.platformAdmin.update({ where: { email: ADMIN_EMAIL }, data: { passwordHash, name: ADMIN_NAME, isActive: true, deletedAt: null } });
+    await prisma.platformAdmin.update({ where: { email: ADMIN_EMAIL }, data: { passwordHash, name: ADMIN_NAME, isActive: true, deletedAt: null, ...factor } });
     await prisma.platformAdminSession.updateMany({ where: { adminId: existing.id, revokedAt: null }, data: { revokedAt: new Date() } });
     return 'reset';
   }
-  await prisma.platformAdmin.create({ data: { id: newUuidV7Bin(), email: ADMIN_EMAIL, name: ADMIN_NAME, passwordHash } });
+  await prisma.platformAdmin.create({ data: { id: newUuidV7Bin(), email: ADMIN_EMAIL, name: ADMIN_NAME, passwordHash, ...factor } });
   return 'created';
 }
 
@@ -250,11 +296,14 @@ async function codeFor(prisma: PrismaClient, destination: string): Promise<strin
   const row = await prisma.contactVerification.findFirstOrThrow({
     where: { destination, consumedAt: null },
     orderBy: { createdAt: 'desc' },
-    select: { codeHash: true },
+    select: { codeHash: true, hashVersion: true },
   });
+  // Version 2 is keyed with OTP_PEPPER (0093): the harness reads it from the same environment the API does.
+  const pepper = process.env.OTP_PEPPER ?? '';
+  const digest = (text: string) => (row.hashVersion === 2 ? createHmac('sha256', pepper) : sha256('sha256')).update(text).digest('hex');
   for (let i = 0; i < 1_000_000; i++) {
     const candidate = String(i).padStart(6, '0');
-    if (sha256('sha256').update(`${destination}:${candidate}`).digest('hex') === row.codeHash) return candidate;
+    if (digest(`${destination}:${candidate}`) === row.codeHash) return candidate;
   }
   throw new Error(`could not recover the code for ${destination}`);
 }
@@ -289,7 +338,7 @@ async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, ad
   const status = row.subscription?.status ?? row.status ?? row.subscriptionStatus;
   if (status !== 'activated') {
     expectOk(
-      await call('POST', `platform/businesses/${row.id}/activate-grant`, { cookie: adminCookie, body: { days: GRANT_DAYS, reason: GRANT_REASON, confirmPassword: pw } }),
+      await ensureStepUp(adminCookie, pw).then(() => call('POST', `platform/businesses/${row.id}/activate-grant`, { cookie: adminCookie, body: { days: GRANT_DAYS, reason: GRANT_REASON, confirmPassword: pw } })),
       `activate Boutique ${n}`,
     );
   }
@@ -439,9 +488,9 @@ async function verify(pw: string): Promise<boolean> {
   }
 
   // The administrator: the platform, and nothing of a shop.
-  const signIn = await call('POST', 'platform/admin/sign-in', { body: { email: ADMIN_EMAIL, password: pw } });
-  const cookie = signIn.cookie ?? (signIn.json?.sessionToken ? `erp_platform_session=${signIn.json.sessionToken}` : '');
-  check(`${ADMIN_EMAIL} signs in to the platform`, signIn.status === 200 && Boolean(cookie), String(signIn.status));
+  const signIn = await adminSignIn(pw);
+  const cookie = signIn.cookie ?? '';
+  check(`${ADMIN_EMAIL} signs in to the platform, password and code`, signIn.status === 200 && Boolean(cookie), String(signIn.status));
   const me = await call('GET', 'platform/admin/me', { cookie });
   const businesses = await call('GET', 'platform/businesses', { cookie });
   const qa = rowsOf(businesses.json).filter((b: any) => /^Boutique \d+$/.test(b.name));
@@ -505,9 +554,8 @@ async function main(): Promise<void> {
     }
 
     // The API must serve THIS schema: it has to accept the administrator just written here.
-    const signIn = await call('POST', 'platform/admin/sign-in', { body: { email: ADMIN_EMAIL, password: pw } });
-    const token = signIn.json?.sessionToken as string | undefined;
-    const adminCookie = signIn.cookie ?? (token ? `erp_platform_session=${token}` : null);
+    const signIn = await adminSignIn(pw);
+    const adminCookie = signIn.cookie;
     if (signIn.status !== 200 || !adminCookie) throw new Error(`Refusing: the API at ${QA_API} does not serve ${QA_DB} (administrator sign-in: ${signIn.status}).`);
 
     for (let n = 1; n <= BOUTIQUES; n++) {

@@ -40,6 +40,7 @@ import {
   type AdminRequest,
 } from './platform-admin.guard';
 import { PlatformAdminService, ADMIN_SESSION_TTL_HOURS } from './platform-admin.service';
+import { AllowPendingMfa } from './platform-admin.guard';
 import { PortalHandoffService, HANDOFF_TTL_SECONDS, PORTAL_SESSION_TTL_HOURS } from './portal-handoff.service';
 import { PORTAL_SESSION_COOKIE, cookieSecure } from '../common/http/cookies';
 import { paymentInstructions } from './payment-instructions';
@@ -453,12 +454,15 @@ export class PlatformController {
     return {
       admin: result.admin,
       expiresAt: result.expiresAt.toISOString(),
+      // The session is PENDING until its second factor is verified (0094): a code, or enrolment with the server's token.
+      mfa: result.mfa,
       ...(process.env.NODE_ENV !== 'production' ? { sessionToken: result.sessionToken } : {}),
     };
   }
 
   @Public()
   @UseGuards(PlatformAdminGuard)
+  @AllowPendingMfa()
   @Post('admin/sign-out')
   @HttpCode(HttpStatus.NO_CONTENT)
   async adminSignOut(@Req() req: AdminRequest, @Res({ passthrough: true }) res: Response) {

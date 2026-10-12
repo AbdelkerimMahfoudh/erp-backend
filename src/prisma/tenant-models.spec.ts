@@ -21,7 +21,7 @@ const GLOBAL_REFERENCE = ['Permission', 'TacCatalog', 'DeviceBrand', 'DeviceMode
 
 /** The platform realm (docs/15 §4): no company at all, reached only by platform code on the unscoped client. */
 // MessagingDeliveryProof (0093): the operator's proof that a channel delivers on this deployment — no company.
-const PLATFORM_REALM = ['PlatformAdmin', 'PlatformAdminSession', 'PlatformAuditEvent', 'ContactVerification', 'MessagingDeliveryProof'];
+const PLATFORM_REALM = ['PlatformAdmin', 'PlatformAdminSession', 'PlatformAuditEvent', 'ContactVerification', 'MessagingDeliveryProof', 'PlatformAdminRecoveryCode'];
 
 /**
  * Records that BELONG to a company but are keyed differently: the company row

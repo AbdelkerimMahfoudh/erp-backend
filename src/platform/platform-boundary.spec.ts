@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { RequestMethod, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { PlatformController } from './platform.controller';
-import { PlatformAdminGuard } from './platform-admin.guard';
+import { ALLOW_PENDING_MFA, PlatformAdminGuard } from './platform-admin.guard';
 import { IS_PUBLIC_KEY } from '../common/decorators/public.decorator';
 import { ALWAYS_ALLOWED, ALWAYS_READABLE } from '../entitlement/route-classification';
 import { SeatRequestsController } from './seat-requests.controller';
@@ -41,20 +41,23 @@ const MAIN = readFileSync('src/main.ts', 'utf8');
 
 const IDENTITY = { id: Buffer.alloc(16, 1), email: 'ops@example.test', name: 'Ops' };
 
-function guardWith(resolve: (token?: string) => Promise<typeof IDENTITY | null>) {
+const SESSION_ID = Buffer.alloc(16, 9);
+
+function guardWith(resolve: (token?: string) => Promise<typeof IDENTITY | null>, mfaVerified = true) {
   const seen: (string | undefined)[] = [];
   const guard = new PlatformAdminGuard({
-    resolve: async (token?: string) => {
+    resolveSession: async (token?: string) => {
       seen.push(token);
-      return resolve(token);
+      const admin = await resolve(token);
+      return admin ? { admin, sessionId: SESSION_ID, mfaVerified } : null;
     },
   } as never);
   return { guard, seen };
 }
 
-function requestWith(headers: Record<string, string>) {
+function requestWith(headers: Record<string, string>, handler: () => void = function ordinaryRoute() {}) {
   const req: Record<string, unknown> = { headers };
-  const context = { switchToHttp: () => ({ getRequest: () => req }) } as never;
+  const context = { switchToHttp: () => ({ getRequest: () => req }), getHandler: () => handler } as never;
   return { req, context };
 }
 
@@ -97,6 +100,28 @@ describe('the guard, from the shop’s side', () => {
     await expect(guard.canActivate(context)).resolves.toBe(true);
     expect(req.platformAdmin).toEqual(IDENTITY);
     expect(req.platformSessionToken).toBe('good-session');
+    expect(req.platformSessionId).toEqual(SESSION_ID);
+  });
+
+  it('a session whose second factor is not verified reaches nothing but the MFA routes (0094)', async () => {
+    const { guard } = guardWith(validOnly, false);
+    const pending = requestWith({ cookie: 'erp_platform_session=good-session' });
+    await expect(guard.canActivate(pending.context)).rejects.toMatchObject({ response: { code: 'mfa_required' } });
+    expect(pending.req.platformAdmin).toBeUndefined();
+    // A route marked for the pending session — verify, enrol, sign out — is reached, and knows it is pending.
+    const mfaRoute = function verify() {};
+    Reflect.defineMetadata(ALLOW_PENDING_MFA, true, mfaRoute);
+    const allowed = requestWith({ cookie: 'erp_platform_session=good-session' }, mfaRoute);
+    await expect(guard.canActivate(allowed.context)).resolves.toBe(true);
+    expect(allowed.req.platformMfaVerified).toBe(false);
+    // And the service never resolves an identity for a pending session.
+    expect(ADMINS).toMatch(/return session\?\.mfaVerified \? session\.admin : null;/);
+  });
+
+  it('only verify, enrolment and sign-out take a pending session', () => {
+    const MFA = readFileSync('src/platform/platform-mfa.controller.ts', 'utf8');
+    const pending = [...`${CONTROLLER}\n${MFA}`.matchAll(/@AllowPendingMfa\(\)[\s\S]*?@(?:Post|Get)\('([^']+)'\)/g)].map((m) => m[1]).sort();
+    expect(pending).toEqual(['admin/sign-out', 'mfa/enrolment/confirm', 'mfa/enrolment/start', 'mfa/verify']);
   });
 
   it('refuses a session whose administrator was disabled, expired or revoked — identically', async () => {

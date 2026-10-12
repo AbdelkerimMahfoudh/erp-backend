@@ -19,6 +19,8 @@ const SAFE = {
   CORS_ORIGINS: 'https://app.example.com',
   JWT_ACCESS_SECRET: 'PLQ7wq2mZk4tR9vXbN1sYdF6hJ3gC8aE',
   APP_DATABASE_URL: 'mysql://app:pw@db.internal:3306/erp',
+  // 32 bytes, base64 (0094) — a test value, not a key anyone uses.
+  PLATFORM_MFA_KEY: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=',
 };
 
 describe('outside production', () => {
@@ -405,5 +407,15 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
     expect(productionConfigProblems({ ...SAFE, WHATSAPP_APP_SECRET: 's' })).toHaveLength(1);
     expect(productionConfigProblems({ ...SAFE, WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'v' })).toHaveLength(1);
     expect(productionConfigProblems({ ...SAFE, WHATSAPP_APP_SECRET: 's', WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'v' })).toEqual([]);
+  });
+});
+
+describe('administrator MFA in production (0094)', () => {
+  it('refuses to start without a well-formed PLATFORM_MFA_KEY: the portal would be a password alone', () => {
+    for (const key of [undefined, '', 'short', 'z'.repeat(64)]) {
+      const problems = productionConfigProblems({ ...SAFE, PLATFORM_MFA_KEY: key });
+      expect(problems.join('\n')).toMatch(/PLATFORM_MFA_KEY is missing or malformed/);
+    }
+    expect(productionConfigProblems({ ...SAFE, PLATFORM_MFA_KEY: '00'.repeat(32) })).toEqual([]);
   });
 });

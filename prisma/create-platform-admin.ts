@@ -16,7 +16,9 @@
 // shell access to the server.
 //
 // Re-running for an existing address resets that administrator's password and
-// revokes their sessions, so it doubles as the recovery path.
+// revokes their sessions, so it doubles as the recovery path. It does NOT touch
+// the second factor (0094): every administrator then enrols, or re-enrols, with
+// a token from `npx ts-node prisma/platform-admin-mfa.ts enrolment-token <email>`.
 // ===========================================================================
 
 import { config as loadEnv } from 'dotenv';
@@ -76,6 +78,8 @@ async function main() {
   });
   console.log(`✓ Created platform administrator ${email}.`);
   console.log('  This account belongs to no company and holds no store role.');
+  console.log('  It reaches nothing until its second factor is enrolled (0094):');
+  console.log(`    npx ts-node prisma/platform-admin-mfa.ts enrolment-token ${email}`);
 }
 
 main()

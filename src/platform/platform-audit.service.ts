@@ -28,6 +28,14 @@ const NEVER_LOG = [
   'verificationCode',
   'secret',
   'deviceSecret',
+  // Administrator MFA (0094): never a factor, a sealed factor, a recovery code or an enrolment token.
+  'recoveryCode',
+  'recoveryCodes',
+  'enrolmentToken',
+  'otpauthUri',
+  'mfaSecretEnc',
+  'mfaPendingSecretEnc',
+  'mfaEnrolmentTokenHash',
 ];
 
 /**

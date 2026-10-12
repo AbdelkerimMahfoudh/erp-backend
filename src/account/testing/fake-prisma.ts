@@ -61,7 +61,14 @@ const DEFAULTS: Record<string, Row> = {
   },
   auditLog: { branchId: null, userId: null, entityId: null, before: null, after: null, reason: null, ip: null },
   subscriptionEvent: { note: null, periodEndAfter: null, branchesAfter: null, seatsAfter: null, actor: null },
+  platformAdminSession: { revokedAt: null, mfaVerifiedAt: null, stepUpAt: null, ip: null, userAgent: null },
+  platformAdminRecoveryCode: { usedAt: null, revokedAt: null },
   contactVerification: { attempts: 0, consumedAt: null, hashVersion: 1, deliveryState: 'not_sent', deliveryProvider: null, providerMessageId: null, deliveryDetail: null },
+};
+
+/** The relations an `include` may name, per model: the related model and the foreign key that points at it. */
+const RELATIONS: Record<string, Record<string, [string, string]>> = {
+  platformAdminSession: { admin: ['platformAdmin', 'adminId'] },
 };
 
 function same(a: unknown, b: unknown): boolean {
@@ -240,9 +247,17 @@ export class FakePrisma {
         const found = rows().find((r) => matches(r, where));
         return found ? project(found, select) : null;
       },
-      findFirst: async ({ where, select, orderBy }: { where?: Row; select?: Row; orderBy?: Row | Row[] }) => {
+      findFirst: async ({ where, select, orderBy, include }: { where?: Row; select?: Row; orderBy?: Row | Row[]; include?: Row }) => {
         const found = order(rows().filter((r) => matches(r, where ?? {})), orderBy)[0];
-        return found ? project(found, select) : null;
+        if (!found) return null;
+        const out = project(found, select);
+        for (const rel of Object.keys(include ?? {})) {
+          const [other, fk] = RELATIONS[model]?.[rel] ?? [];
+          if (!other) throw new Error(`fake-prisma: unsupported include "${rel}" on ${model}`);
+          const hit = this.rows(other).find((r) => same(r.id, found[fk]));
+          out[rel] = hit ? { ...hit } : null;
+        }
+        return out;
       },
       findMany: async ({ where, select, orderBy, take }: { where?: Row; select?: Row; orderBy?: Row | Row[]; take?: number }) => {
         const list = order(rows().filter((r) => matches(r, where ?? {})), orderBy);

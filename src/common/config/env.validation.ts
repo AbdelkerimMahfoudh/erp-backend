@@ -60,6 +60,9 @@ export const envValidationSchema = Joi.object({
   // code offline from a stolen database. Absent = OTP challenges refuse to
   // activate; the rest of the application still starts.
   OTP_PEPPER: Joi.string().min(32).optional(),
+  // Seals platform administrators' TOTP secrets (AES-256-GCM) and keys their recovery codes (0094): 32 bytes, as
+  // base64 or 64 hex characters. No default, deliberately — without it no administrator session can complete.
+  PLATFORM_MFA_KEY: Joi.string().allow('').default(''),
 
   // Security limits, not Owner-editable settings.
   OTP_TTL_SECONDS: Joi.number().integer().min(60).max(900).default(300),

@@ -4420,14 +4420,27 @@ model PlatformAdmin {
 
   passwordHash String @map("password_hash") @db.VarChar(255)
 
+  /// Mandatory TOTP (0094): the secret sealed with AES-256-GCM under PLATFORM_MFA_KEY; null until enrolled.
+  mfaSecretEnc          String?   @map("mfa_secret_enc") @db.VarChar(255)
+  mfaEnabledAt          DateTime? @map("mfa_enabled_at") @db.DateTime(6)
+  /// The last step accepted: a code at or before it is a replay.
+  mfaLastStep           BigInt?   @map("mfa_last_step")
+  mfaPendingSecretEnc   String?   @map("mfa_pending_secret_enc") @db.VarChar(255)
+  /// Issued only by the server CLI; its keyed digest, never the token.
+  mfaEnrolmentTokenHash String?   @map("mfa_enrolment_token_hash") @db.Char(64)
+  mfaEnrolmentExpiresAt DateTime? @map("mfa_enrolment_expires_at") @db.DateTime(6)
+  mfaFailedCount        Int       @default(0) @map("mfa_failed_count") @db.UnsignedInt
+  mfaLockedUntil        DateTime? @map("mfa_locked_until") @db.DateTime(6)
+
   isActive    Boolean   @default(true) @map("is_active")
   lastLoginAt DateTime? @map("last_login_at") @db.DateTime(6)
   createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt   DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
   deletedAt   DateTime? @map("deleted_at") @db.DateTime(6)
 
-  sessions PlatformAdminSession[]
-  events   PlatformAuditEvent[]
+  sessions      PlatformAdminSession[]
+  events        PlatformAuditEvent[]
+  recoveryCodes PlatformAdminRecoveryCode[]
 
   @@map("platform_admins")
 }
@@ -4444,11 +4457,15 @@ model PlatformAdminSession {
   /// Only ever the hash. The token itself exists in the response once.
   refreshTokenHash String @map("refresh_token_hash") @db.VarChar(255)
 
-  ip        String?   @db.VarChar(45)
-  userAgent String?   @map("user_agent") @db.VarChar(255)
-  expiresAt DateTime  @map("expires_at") @db.DateTime(6)
-  revokedAt DateTime? @map("revoked_at") @db.DateTime(6)
-  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  ip            String?   @db.VarChar(45)
+  userAgent     String?   @map("user_agent") @db.VarChar(255)
+  expiresAt     DateTime  @map("expires_at") @db.DateTime(6)
+  revokedAt     DateTime? @map("revoked_at") @db.DateTime(6)
+  /// The second factor (0094): until it is verified the session reaches the MFA routes only.
+  mfaVerifiedAt DateTime? @map("mfa_verified_at") @db.DateTime(6)
+  /// The last step-up (password + code), valid for five minutes, server-side.
+  stepUpAt      DateTime? @map("step_up_at") @db.DateTime(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.DateTime(6)
 
   admin PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
 
@@ -5502,4 +5519,20 @@ model MessagingDeliveryProof {
   @@unique([provider, providerMessageId], map: "ux_delivery_proof_message")
   @@index([channel, language, deliveredAt], map: "ix_delivery_proof_channel")
   @@map("messaging_delivery_proofs")
+}
+
+/// Single-use recovery codes for an administrator who lost the authenticator (0094): keyed digests only; a new
+/// set revokes the old one.
+model PlatformAdminRecoveryCode {
+  id        Bytes     @id @db.Binary(16)
+  adminId   Bytes     @map("admin_id") @db.Binary(16)
+  codeHash  String    @map("code_hash") @db.Char(64)
+  usedAt    DateTime? @map("used_at") @db.DateTime(6)
+  revokedAt DateTime? @map("revoked_at") @db.DateTime(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  admin PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade, map: "fk_admin_recovery_codes_admin")
+
+  @@unique([adminId, codeHash], map: "ux_admin_recovery_code")
+  @@map("platform_admin_recovery_codes")
 }
