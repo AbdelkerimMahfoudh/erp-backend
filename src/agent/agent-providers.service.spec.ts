@@ -144,34 +144,23 @@ const refusal = async (p: Promise<unknown>) => {
 };
 
 describe('the provider list', () => {
-  it('names each provider’s blanks: not ready until every required field of the version in force is filled', async () => {
+  it('lists each provider with its reference rule: nothing to set before it is used, so nothing is missing (D164)', async () => {
     const h = harness();
     const { providers } = await h.svc.list();
-    expect(providers).toEqual([
-      {
-        id: BANKILY,
-        kind: 'bankily',
-        label: 'Bankily',
-        isActive: true,
-        sortOrder: 1,
-        config: null,
-        readyForTransactions: false,
-        missing: ['rateInBp', 'rateOutBp', 'commissionDestination', 'principalFeeMode', 'referenceRule'],
-      },
-    ]);
+    expect(providers).toEqual([{ id: BANKILY, kind: 'bankily', label: 'Bankily', isActive: true, sortOrder: 1, referenceRule: 'optional', config: null }]);
   });
 
-  it('a complete version in force makes the provider ready; a later version with a blank takes it away again', async () => {
-    const h = harness({ configs: [fixtureVersion()] });
-    expect((await h.svc.list()).providers[0]).toMatchObject({ readyForTransactions: true, missing: [], config: { id: '01a0b1c2-0000-7000-8000-0000000000c1', rateInBp: 100, rateOutBp: 100, effectiveFrom: '2026-10-08T08:00:00.000Z' } });
-    h.configs.push(fixtureVersion({ id: uuidToBin('01a0b1c2-0000-7000-8000-0000000000c2'), commissionDestination: null, effectiveFrom: new Date('2026-10-08T09:00:00Z'), createdAt: new Date('2026-10-08T09:00:00Z') }));
-    expect((await h.svc.list()).providers[0]).toMatchObject({ readyForTransactions: false, missing: ['commissionDestination'] });
+  it('the version in force gives the rule; a legacy rate in it is history only, and a later version takes over', async () => {
+    const h = harness({ configs: [fixtureVersion({ referenceRule: 'required' })] });
+    expect((await h.svc.list()).providers[0]).toMatchObject({ referenceRule: 'required', config: { id: '01a0b1c2-0000-7000-8000-0000000000c1', legacy: { rateInBp: 100 }, effectiveFrom: '2026-10-08T08:00:00.000Z' } });
+    h.configs.push(fixtureVersion({ id: uuidToBin('01a0b1c2-0000-7000-8000-0000000000c2'), rateInBp: null, rateOutBp: null, commissionDestination: null, principalFeeMode: null, referenceRule: 'none', effectiveFrom: new Date('2026-10-08T09:00:00Z'), createdAt: new Date('2026-10-08T09:00:00Z') }));
+    expect((await h.svc.list()).providers[0]).toMatchObject({ referenceRule: 'none', config: { id: '01a0b1c2-0000-7000-8000-0000000000c2', legacy: null } });
   });
 
   it('a version dated in the future is not in force yet: the current one still decides', async () => {
-    const future = fixtureVersion({ id: uuidToBin('01a0b1c2-0000-7000-8000-0000000000c9'), rateInBp: 500, rateOutBp: 500, effectiveFrom: new Date('2099-01-01T00:00:00Z') });
+    const future = fixtureVersion({ id: uuidToBin('01a0b1c2-0000-7000-8000-0000000000c9'), referenceRule: 'none', effectiveFrom: new Date('2099-01-01T00:00:00Z') });
     const h = harness({ configs: [fixtureVersion(), future] });
-    expect((await configInForce(h.db as never, uuidToBin(BANKILY), new Date('2026-10-08T12:00:00Z')))?.rateInBp).toBe(100);
+    expect((await configInForce(h.db as never, uuidToBin(BANKILY), new Date('2026-10-08T12:00:00Z')))?.referenceRule).toBe('optional');
   });
 
   it('opens to any of the nine keys, resolving them for the branch when no guard did; nobody else reads it', async () => {
@@ -193,7 +182,7 @@ describe('adding and changing a provider', () => {
     const h = harness({ providers: [] });
     const created = await h.svc.create({ clientRequestId: KEY1, kind: 'sedad', label: '  Sedad ' });
     expect(h.db.agentProvider.create.mock.calls[0][0].data).toMatchObject({ companyId: COMPANY, kind: 'sedad', label: 'Sedad', sortOrder: 0 });
-    expect(created).toMatchObject({ kind: 'sedad', label: 'Sedad', isActive: true, readyForTransactions: false, replayed: false });
+    expect(created).toMatchObject({ kind: 'sedad', label: 'Sedad', isActive: true, referenceRule: 'optional', replayed: false });
     // The audit row moved inside the write's transaction (D160): a write that rolls back leaves no audit behind.
     expect(h.audit.recordTx).toHaveBeenCalledWith(h.db, expect.objectContaining({ entityType: 'AgentProvider', action: 'create' }));
     expect(h.audit.record).not.toHaveBeenCalled();
@@ -279,7 +268,7 @@ describe('a provider change is safe to retry (D160, docs/73 §11.3)', () => {
   it('a key used for another operation is a conflict too, whatever the body', async () => {
     const h = harness();
     await h.svc.update(BANKILY, { clientRequestId: KEY1, sortOrder: 2 });
-    const { body } = await refusal(h.svc.addConfig(BANKILY, { clientRequestId: KEY1, sameRateBothDirections: true, reason: 'x' }));
+    const { body } = await refusal(h.svc.addConfig(BANKILY, { clientRequestId: KEY1, referenceRule: 'optional', reason: 'x' }));
     expect(body?.code).toBe('idempotency_conflict');
     expect(h.configs).toEqual([]);
   });
@@ -353,9 +342,9 @@ describe('a provider change is safe to retry (D160, docs/73 §11.3)', () => {
     expect(h.db.agentRequestKey.create).toHaveBeenCalledTimes(2);
   });
 
-  it('config: the same key and body append one version — the retry answers with it, so phones holding its id stay current', async () => {
+  it('config: the same key and body append one version — the retry answers with it', async () => {
     const h = harness();
-    const body = { clientRequestId: KEY1, rateInBp: 100, sameRateBothDirections: true, commissionDestination: 'cash' as const, principalFeeMode: 'separate' as const, referenceRule: 'optional' as const, reason: 'the October schedule' };
+    const body = { clientRequestId: KEY1, referenceRule: 'optional' as const, reason: 'the October rule' };
     const first = await h.svc.addConfig(BANKILY, body);
     const again = await h.svc.addConfig(BANKILY, { ...body });
     expect(again).toEqual({ ...first, replayed: true });
@@ -364,11 +353,11 @@ describe('a provider change is safe to retry (D160, docs/73 §11.3)', () => {
     expect(h.audits).toHaveLength(1);
   });
 
-  it('config: the same key with another rate, reason or blank is idempotency_conflict, and no version is appended', async () => {
+  it('config: the same key with another rule or reason is idempotency_conflict, and no version is appended', async () => {
     const h = harness();
-    const body = { clientRequestId: KEY1, rateInBp: 100, sameRateBothDirections: true, reason: 'the October schedule' };
+    const body = { clientRequestId: KEY1, referenceRule: 'optional' as const, reason: 'the October rule' };
     await h.svc.addConfig(BANKILY, body);
-    for (const changed of [{ ...body, rateInBp: 101 }, { ...body, reason: 'another' }, { ...body, referenceRule: 'none' as const }]) {
+    for (const changed of [{ ...body, referenceRule: 'none' as const }, { ...body, reason: 'another' }]) {
       const { error, body: answer } = await refusal(h.svc.addConfig(BANKILY, changed));
       expect(error).toBeInstanceOf(ConflictException);
       expect(answer?.code).toBe('idempotency_conflict');
@@ -378,7 +367,7 @@ describe('a provider change is safe to retry (D160, docs/73 §11.3)', () => {
 
   it('config: two identical requests at once — one version and one audit; the loser waits on the lock, fails on the key, rolls back and replays', async () => {
     const h = harness({ concurrent: 2 });
-    const body = { clientRequestId: KEY1, rateInBp: 100, sameRateBothDirections: true, reason: 'the October schedule' };
+    const body = { clientRequestId: KEY1, referenceRule: 'optional' as const, reason: 'the October rule' };
     const answers = await Promise.all([h.svc.addConfig(BANKILY, body), h.svc.addConfig(BANKILY, { ...body })]);
     expect(answers.map((a) => a.replayed).sort()).toEqual([false, true]);
     expect(answers[0].config.id).toBe(answers[1].config.id);
@@ -388,9 +377,9 @@ describe('a provider change is safe to retry (D160, docs/73 §11.3)', () => {
     expect(h.audits).toHaveLength(1);
   });
 
-  it('config: a new key is a new version, even with the same figures — the key is the request, not the content', async () => {
+  it('config: a new key is a new version, even with the same content — the key is the request, not the content', async () => {
     const h = harness();
-    const body = { rateInBp: 100, sameRateBothDirections: true, reason: 'the October schedule' };
+    const body = { referenceRule: 'optional' as const, reason: 'the October rule' };
     await h.svc.addConfig(BANKILY, { clientRequestId: KEY1, ...body });
     await h.svc.addConfig(BANKILY, { clientRequestId: KEY2, ...body });
     expect(h.configs).toHaveLength(2);
@@ -419,44 +408,38 @@ describe('the request fingerprint', () => {
   });
 });
 
-describe('a configuration version (the blanks, docs/73 §1.2)', () => {
-  it('is appended in force from the server’s clock, under the provider’s lock, with the one rate copied to both directions', async () => {
+describe('a configuration version (D164: the reference rule only, never a rate)', () => {
+  it('is appended in force from the server’s clock, under the provider’s lock, with no rate, destination or fee mode', async () => {
     const h = harness();
     const before = Date.now();
-    const result = await h.svc.addConfig(BANKILY, { clientRequestId: KEY1, rateInBp: 150, rateOutBp: 20, sameRateBothDirections: true, commissionDestination: 'cash', principalFeeMode: 'separate', referenceRule: 'required', reason: 'the October schedule' });
+    const result = await h.svc.addConfig(BANKILY, { clientRequestId: KEY1, referenceRule: 'required', reason: 'Bankily asks for its reference' });
     expect(h.db.$queryRaw.mock.calls[0][0].sql).toMatch(/FROM agent_providers WHERE id = \? AND company_id = \?\s+FOR UPDATE/);
     const data = h.db.agentProviderConfig.create.mock.calls[0][0].data;
-    expect(data).toMatchObject({ companyId: COMPANY, providerId: uuidToBin(BANKILY), rateInBp: 150, rateOutBp: 150, sameRateBothDirections: true, commissionDestination: 'cash', principalFeeMode: 'separate', referenceRule: 'required', recordedById: USER, recordedByName: 'Owner', reason: 'the October schedule' });
+    expect(data).toMatchObject({ companyId: COMPANY, providerId: uuidToBin(BANKILY), rateInBp: null, rateOutBp: null, commissionDestination: null, principalFeeMode: null, referenceRule: 'required', recordedById: USER, recordedByName: 'Owner', reason: 'Bankily asks for its reference' });
     expect(data.effectiveFrom.getTime()).toBeGreaterThanOrEqual(before);
-    expect(result.config).toMatchObject({ id: binToUuid(data.id), rateInBp: 150, rateOutBp: 150, recordedByName: 'Owner', reason: 'the October schedule' });
-    expect(result.provider).toMatchObject({ readyForTransactions: true, missing: [] });
+    expect(result.config).toEqual({ id: binToUuid(data.id), referenceRule: 'required', effectiveFrom: data.effectiveFrom.toISOString(), recordedByName: 'Owner', reason: 'Bankily asks for its reference', legacy: null });
+    expect(result.provider).toMatchObject({ referenceRule: 'required' });
+    expect(result.provider).not.toHaveProperty('readyForTransactions');
     expect(result.replayed).toBe(false);
-    expect(h.audit.recordTx).toHaveBeenCalledWith(h.db, expect.objectContaining({ entityType: 'AgentProviderConfig', action: 'create', reason: 'the October schedule' }));
+    expect(h.audit.recordTx).toHaveBeenCalledWith(h.db, expect.objectContaining({ entityType: 'AgentProviderConfig', action: 'create', reason: 'Bankily asks for its reference', after: { providerId: BANKILY, label: 'Bankily', referenceRule: 'required' } }));
     expect(h.keys[0]).toMatchObject({ operation: 'provider_config', targetId: uuidToBin(BANKILY) });
   });
 
-  it('two rates stay two; a blank stays a blank and the provider is not ready', async () => {
+  it('a rate sent by an older phone is never stored: the version carries the reference rule alone', async () => {
     const h = harness();
-    const result = await h.svc.addConfig(BANKILY, { clientRequestId: KEY1, rateInBp: 150, rateOutBp: 20, sameRateBothDirections: false, reason: 'two rates' });
-    expect(h.db.agentProviderConfig.create.mock.calls[0][0].data).toMatchObject({ rateInBp: 150, rateOutBp: 20, commissionDestination: null, principalFeeMode: null, referenceRule: null });
-    expect(result.provider).toMatchObject({ readyForTransactions: false, missing: ['commissionDestination', 'principalFeeMode', 'referenceRule'] });
+    const old = { clientRequestId: KEY1, referenceRule: 'optional' as const, reason: 'old phone', rateInBp: 150, commissionDestination: 'cash' } as never;
+    await h.svc.addConfig(BANKILY, old);
+    expect(h.db.agentProviderConfig.create.mock.calls[0][0].data).toMatchObject({ rateInBp: null, rateOutBp: null, commissionDestination: null, principalFeeMode: null });
   });
 
-  it('a fee deducted from the principal anywhere but the float is refused by name, and nothing is written', async () => {
-    for (const destination of ['cash', 'held_separately', null] as const) {
-      const h = harness();
-      const { error, body } = await refusal(h.svc.addConfig(BANKILY, { clientRequestId: KEY1, rateInBp: 100, sameRateBothDirections: true, commissionDestination: destination, principalFeeMode: 'deducted', referenceRule: 'none', reason: 'x' }));
-      expect(error).toBeInstanceOf(BadRequestException);
-      expect(body?.code).toBe('config_invalid');
-      expect(h.db.agentProviderConfig.create).not.toHaveBeenCalled();
-      expect(h.keys).toEqual([]);
-    }
-    await expect(harness().svc.addConfig(BANKILY, { clientRequestId: KEY1, rateInBp: 100, sameRateBothDirections: true, commissionDestination: 'provider_float', principalFeeMode: 'deducted', referenceRule: 'none', reason: 'ok' })).resolves.toBeDefined();
+  it('an earlier version that held a rate is read back as history, under legacy, unchanged', async () => {
+    const h = harness({ configs: [fixtureVersion()] });
+    const { configs } = await h.svc.listConfigs(BANKILY);
+    expect(configs[0]).toMatchObject({ referenceRule: 'optional', legacy: { rateInBp: 100, rateOutBp: 100, sameRateBothDirections: true, commissionDestination: 'provider_float', principalFeeMode: 'separate' } });
   });
-
   it('a blank reason is refused (reason_required) before anything is looked up or written', async () => {
     const h = harness();
-    const { body } = await refusal(h.svc.addConfig(BANKILY, { clientRequestId: KEY1, sameRateBothDirections: true, reason: '   ' }));
+    const { body } = await refusal(h.svc.addConfig(BANKILY, { clientRequestId: KEY1, referenceRule: 'optional', reason: '   ' }));
     expect(body?.code).toBe('reason_required');
     expect(h.db.agentRequestKey.findFirst).not.toHaveBeenCalled();
     expect(h.configs).toEqual([]);
@@ -464,7 +447,7 @@ describe('a configuration version (the blanks, docs/73 §1.2)', () => {
 
   it('an unknown provider is not found, and keeps no key', async () => {
     const h = harness();
-    const { error } = await refusal(h.svc.addConfig('01a0b1c2-0000-7000-8000-0000000000ff', { clientRequestId: KEY1, sameRateBothDirections: true, reason: 'x' }));
+    const { error } = await refusal(h.svc.addConfig('01a0b1c2-0000-7000-8000-0000000000ff', { clientRequestId: KEY1, referenceRule: 'optional', reason: 'x' }));
     expect(error).toBeInstanceOf(NotFoundException);
     expect(h.keys).toEqual([]);
     expect(h.configs).toEqual([]);

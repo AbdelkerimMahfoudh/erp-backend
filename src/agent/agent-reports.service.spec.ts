@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { uuidToBin } from '../common/utils/uuid.util';
 import { dateValue } from '../common/business-day/business-day.service';
 import { AgentReportsService } from './agent-reports.service';
+import { exchangeLegs } from './agent-rules';
 
 /**
  * The reports route around the pure aggregation (D157): the period's rows read
@@ -46,19 +47,24 @@ function harness(opts: { activity?: string; transactions?: Row[]; legs?: Row[]; 
   return { svc, db, businessDay };
 }
 
-const tx = (over: Row = {}): Row => ({
-  id: Buffer.alloc(16, 9),
-  providerId: uuidToBin(BANKILY),
-  provider: { label: 'Bankily' },
-  direction: 'cash_in_credit_out',
-  amount: new Prisma.Decimal(20_000),
-  commissionAmount: new Prisma.Decimal(200),
-  status: 'completed',
-  recordedById: Buffer.alloc(16, 5),
-  recordedByName: 'Aicha',
-  businessDate: dateValue(TODAY),
-  ...over,
-});
+/** A stored exchange with the principal and commission legs it wrote: D164 legs unless a test gives the legs a legacy row wrote. */
+const tx = (over: Row = {}): Row => {
+  const row: Row = {
+    id: Buffer.alloc(16, 9),
+    providerId: uuidToBin(BANKILY),
+    provider: { label: 'Bankily' },
+    direction: 'cash_in_credit_out',
+    amount: new Prisma.Decimal(20_000),
+    commissionAmount: new Prisma.Decimal(200),
+    status: 'completed',
+    recordedById: Buffer.alloc(16, 5),
+    recordedByName: 'Aicha',
+    businessDate: dateValue(TODAY),
+    ...over,
+  };
+  const legs = exchangeLegs({ direction: row.direction, amount: Number(row.amount), commission: Number(row.commissionAmount), providerId: BANKILY });
+  return { movements: legs.map((l) => ({ accountKind: l.account, direction: l.direction, amount: new Prisma.Decimal(l.amount) })), ...row };
+};
 
 describe('GET agent/reports', () => {
   it('a day: the rows of that business date, aggregated; floats as of now; the drawer never read here', async () => {
@@ -78,11 +84,13 @@ describe('GET agent/reports', () => {
     expect(h.db.agentMovement.findMany.mock.calls[0][0]).toMatchObject({ where: { branchId: BRANCH, kind: 'reversal', businessDate: day, transactionId: { not: null } }, distinct: ['transactionId'] });
     expect(h.db.agentTransaction.findMany.mock.calls[0][0].where).toEqual({ branchId: BRANCH, OR: [{ businessDate: day }, { id: { in: [Buffer.alloc(16, 0x13)] } }] });
     expect(h.db.agentMovement.findMany.mock.calls[1][0].where).toEqual({ branchId: BRANCH, kind: 'rebalancing', businessDate: day });
+    // Each exchange's money effects come from the legs it stored, never from a rule applied again (D164).
+    expect(h.db.agentTransaction.findMany.mock.calls[0][0].select.movements).toEqual({ where: { kind: { in: ['principal', 'commission'] } }, select: { accountKind: true, direction: true, amount: true } });
     expect(report).toMatchObject({
       period: 'day',
       from: TODAY,
       to: TODAY,
-      totals: { count: 2, volume: 35_000, cashReceived: 20_000, cashPaid: 15_000, creditSent: 20_000, creditReceived: 15_000, commission: 350, reversals: { count: 1, volume: 20_000, commission: 200 }, rebalancings: { count: 1, cashIn: 0, cashOut: 100_000, floatIn: 100_000, floatOut: 0 } },
+      totals: { count: 2, volume: 35_000, cashReceived: 20_200, cashPaid: 14_850, creditSent: 20_000, creditReceived: 15_000, commission: 350, routes: { cash_in_credit_out: { count: 1, volume: 20_000, commission: 200 }, cash_out_credit_in: { count: 1, volume: 15_000, commission: 150 } }, reversals: { count: 1, volume: 20_000, commission: 200 }, rebalancings: { count: 1, cashIn: 0, cashOut: 100_000, floatIn: 100_000, floatOut: 0 } },
     });
     expect(report.byProvider.map((p) => [p.label, p.count, p.reversals.count])).toEqual([['Bankily', 1, 1], ['Sedad', 1, 0]]);
     expect(report.byEmployee).toEqual([{ userId: expect.any(String), name: 'Aicha', count: 2, volume: 35_000, commission: 350, reversals: { count: 1 } }]);
@@ -120,7 +128,19 @@ describe('GET agent/reports', () => {
     // Its own day: the reversal leg is not that day's, so the exchange stands there as the locked closing showed it.
     const recordedDay = harness({ transactions: [late], reversals: [] });
     const before = await recordedDay.svc.report({ period: 'day', date: '2026-10-07' });
-    expect(before.totals).toMatchObject({ count: 1, cashReceived: 20_000, commission: 200, reversals: { count: 0 } });
+    expect(before.totals).toMatchObject({ count: 1, cashReceived: 20_200, commission: 200, reversals: { count: 0 } });
+  });
+
+  it('an exchange recorded under the rate reports the legs it stored: a commission once credited to the float stays on the credit', async () => {
+    const legacy = tx({
+      movements: [
+        { accountKind: 'cash', direction: 'inflow', amount: new Prisma.Decimal(20_000) },
+        { accountKind: 'provider', direction: 'outflow', amount: new Prisma.Decimal(20_000) },
+        { accountKind: 'provider', direction: 'inflow', amount: new Prisma.Decimal(200) },
+      ],
+    });
+    const report = await harness({ transactions: [legacy] }).svc.report({ period: 'day' });
+    expect(report.totals).toMatchObject({ count: 1, volume: 20_000, commission: 200, cashReceived: 20_000, creditSent: 19_800 });
   });
 
   it('the float counts of the period whose difference is not zero, with the question’s status', async () => {

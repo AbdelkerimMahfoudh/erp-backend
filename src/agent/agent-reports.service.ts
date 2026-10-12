@@ -6,7 +6,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { binToUuid } from '../common/utils/uuid.util';
 import { isDateString } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
-import { aggregateAgentReport, periodRangeOf, type ReportRebalancingLeg, type ReportTransaction } from './agent-report-rules';
+import { aggregateAgentReport, effectsOfLegs, periodRangeOf, type ReportRebalancingLeg, type ReportTransaction } from './agent-report-rules';
 import { accountsWithMoney, floatKey, readFloat, type FloatProvider, type FloatView } from './float-positions';
 import { AgentReportQueryDto } from './dto/report.dto';
 
@@ -51,7 +51,20 @@ export class AgentReportsService {
     const [transactions, legs, providers, withMoney, counts] = await Promise.all([
       this.db.agentTransaction.findMany({
         where: { branchId, OR: [{ businessDate: range }, { id: { in: reversalLegs.map((l) => l.transactionId as Buffer) } }] },
-        select: { id: true, providerId: true, provider: { select: { label: true } }, direction: true, amount: true, commissionAmount: true, status: true, recordedById: true, recordedByName: true, businessDate: true },
+        select: {
+          id: true,
+          providerId: true,
+          provider: { select: { label: true } },
+          direction: true,
+          amount: true,
+          commissionAmount: true,
+          status: true,
+          recordedById: true,
+          recordedByName: true,
+          businessDate: true,
+          // The exchange's own legs (not a reversal's): what it moved, as recorded — never recomputed (D164).
+          movements: { where: { kind: { in: ['principal', 'commission'] } }, select: { accountKind: true, direction: true, amount: true } },
+        },
       }),
       this.db.agentMovement.findMany({
         where: { branchId, kind: 'rebalancing', businessDate: range },
@@ -81,6 +94,7 @@ export class AgentReportsService {
       direction: t.direction,
       amount: num(t.amount),
       commission: num(t.commissionAmount),
+      effects: effectsOfLegs(t.movements.map((m) => ({ account: m.accountKind, direction: m.direction, amount: num(m.amount) }))),
       recordedById: binToUuid(t.recordedById),
       recordedByName: t.recordedByName,
       businessDate: dateKey(t.businessDate),

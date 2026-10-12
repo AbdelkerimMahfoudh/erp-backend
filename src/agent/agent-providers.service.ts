@@ -11,7 +11,7 @@ import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { permissionDenied } from '../rbac/refusals';
 import { AGENT_PERMISSIONS, hasAnyAgentPermission } from './agent-access';
 import { isUniqueViolation, withRequestKey } from './agent-request-keys';
-import { configRefusal, missingConfigFields, readyForTransactions, reasonGiven, withSameRate } from './agent-rules';
+import { reasonGiven, referenceRuleOf } from './agent-rules';
 import { CreateAgentProviderConfigDto, CreateAgentProviderDto, UpdateAgentProviderDto } from './dto/provider.dto';
 
 /** A configuration version as the phone and the transaction snapshot read it. */
@@ -49,22 +49,35 @@ export async function configInForce(client: ConfigReader, providerId: Buffer, no
   });
 }
 
+/**
+ * A configuration version as the phone reads it (D164): its reference rule, when and why it was set. A version
+ * written before D164 also carries the rate, destination and fee mode it was written with — as `legacy`, history
+ * only; nothing prices an exchange from it.
+ */
 export function configView(row: ConfigRow) {
+  const priced = row.rateInBp !== null || row.rateOutBp !== null || row.commissionDestination !== null || row.principalFeeMode !== null;
   return {
     id: binToUuid(row.id),
-    rateInBp: row.rateInBp,
-    rateOutBp: row.rateOutBp,
-    sameRateBothDirections: row.sameRateBothDirections,
-    commissionDestination: row.commissionDestination,
-    principalFeeMode: row.principalFeeMode,
-    referenceRule: row.referenceRule,
+    referenceRule: referenceRuleOf(row),
     effectiveFrom: row.effectiveFrom.toISOString(),
     recordedByName: row.recordedByName,
     reason: row.reason,
+    legacy: priced
+      ? {
+          rateInBp: row.rateInBp,
+          rateOutBp: row.rateOutBp,
+          sameRateBothDirections: row.sameRateBothDirections,
+          commissionDestination: row.commissionDestination,
+          principalFeeMode: row.principalFeeMode,
+        }
+      : null,
   };
 }
 
-/** The provider with its version in force, and whether it may post: the blanks are named, never silently zero. */
+/**
+ * The provider with its version in force (D164): a provider is usable at the counter as soon as it is switched on —
+ * there is nothing to configure before an exchange; the reference rule defaults to optional.
+ */
 export function providerView(row: ProviderRow, config: ConfigRow | null) {
   return {
     id: binToUuid(row.id),
@@ -72,9 +85,8 @@ export function providerView(row: ProviderRow, config: ConfigRow | null) {
     label: row.label,
     isActive: row.isActive,
     sortOrder: row.sortOrder,
+    referenceRule: referenceRuleOf(config),
     config: config ? configView(config) : null,
-    readyForTransactions: readyForTransactions(config),
-    missing: missingConfigFields(config),
   };
 }
 
@@ -168,31 +180,22 @@ export class AgentProvidersService {
   }
 
   /**
-   * A new version, in force from this instant, once per request key (D160):
-   * a retry never appends a second version, so the phones holding this one's
-   * id are not refused as stale. Append-only: the version an exchange used is
-   * never edited. A fee deducted from the principal can only land on the float
-   * (`config_invalid`); a blank stays a blank and keeps the provider from
-   * posting until the Owner fills it.
+   * A new version, in force from this instant, once per request key (D160): a retry never appends a second version.
+   * Append-only: an earlier version is never edited. Since D164 a version sets only the reference rule; it writes no
+   * rate, destination or fee mode.
    */
   async addConfig(id: string, dto: CreateAgentProviderConfigDto) {
     const providerId = uuidToBin(id);
     const userId = this.tenant.requireUserId();
     const reason = reasonGiven(dto.reason);
-    const fields = withSameRate({
-      rateInBp: dto.rateInBp ?? null,
-      rateOutBp: dto.rateOutBp ?? null,
-      sameRateBothDirections: dto.sameRateBothDirections,
-      commissionDestination: dto.commissionDestination ?? null,
-      principalFeeMode: dto.principalFeeMode ?? null,
-      referenceRule: dto.referenceRule ?? null,
-    });
-    if (configRefusal(fields)) {
-      throw new BadRequestException({
-        code: 'config_invalid',
-        message: 'A provider that deducts its fee from the principal can only credit it to its float: choose provider_float, or settle the fee separately.',
-      });
-    }
+    const fields = {
+      rateInBp: null,
+      rateOutBp: null,
+      sameRateBothDirections: true,
+      commissionDestination: null,
+      principalFeeMode: null,
+      referenceRule: dto.referenceRule,
+    };
     const companyId = this.tenant.companyId();
     return withRequestKey(this.db, { operation: 'provider_config', targetId: id, body: dto, companyId, userId }, async (tx) => {
       // The provider row, locked: an exchange being posted reads the version in force under this same lock.
@@ -218,7 +221,7 @@ export class AgentProvidersService {
         entityId: configId,
         action: 'create',
         reason: reason.slice(0, 255),
-        after: { providerId: id, label: provider.label, ...fields, missing: missingConfigFields(fields) },
+        after: { providerId: id, label: provider.label, referenceRule: fields.referenceRule },
       });
       const config = await tx.agentProviderConfig.findFirstOrThrow({ where: { id: configId }, select: configSelect });
       return { config: configView(config), provider: providerView(provider, await configInForce(tx, providerId, new Date())) };

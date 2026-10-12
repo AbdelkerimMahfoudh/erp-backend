@@ -6,7 +6,7 @@ import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { dateValue } from '../common/business-day/business-day.service';
 import { ClosingService } from '../closing/closing.service';
 import { AgentTransactionsService } from './agent-transactions.service';
-import { exchangeFingerprint } from './agent-rules';
+import { legacyExchangeFingerprint, manualExchangeFingerprint } from './agent-rules';
 import { CreateAgentTransactionDto } from './dto/transaction.dto';
 import { CreateAgentRebalancingDto } from './dto/rebalancing.dto';
 
@@ -27,20 +27,24 @@ const DAY = '2026-10-08';
 
 type Row = Record<string, any>;
 
+/** A version as D164 writes it: the reference rule only. */
 const fixtureConfig = (over: Row = {}): Row => ({
   id: uuidToBin(CONFIG),
   providerId: uuidToBin(BANKILY),
-  rateInBp: 100,
-  rateOutBp: 100,
+  rateInBp: null,
+  rateOutBp: null,
   sameRateBothDirections: true,
-  commissionDestination: 'provider_float',
-  principalFeeMode: 'separate',
+  commissionDestination: null,
+  principalFeeMode: null,
   referenceRule: 'optional',
   effectiveFrom: new Date('2026-10-08T08:00:00Z'),
   recordedByName: 'Owner',
-  reason: 'fixture rates (invented)',
+  reason: 'fixture rule (invented)',
   ...over,
 });
+
+/** A version written before D164, with a rate in it (INVENTED): history only, it prices nothing. */
+const legacyConfig = (over: Row = {}): Row => fixtureConfig({ rateInBp: 100, rateOutBp: 100, commissionDestination: 'provider_float', principalFeeMode: 'separate', reason: 'fixture rates (invented)', ...over });
 
 interface Options {
   activity?: string;
@@ -100,7 +104,7 @@ function harness(opts: Options = {}) {
           : transactions.find((t) => t.id.equals(where.id) && (!where.branchId || t.branchId.equals(where.branchId)));
         if (!hit) return null;
         // The replay reads the key and its fingerprint; the status lookup reads the masked row by the key.
-        return where.clientUuid && select?.clientRequestHash ? { id: hit.id, clientRequestHash: hit.clientRequestHash } : rowOf(hit, select);
+        return where.clientUuid && select?.clientRequestHash ? { id: hit.id, clientRequestHash: hit.clientRequestHash, commissionSource: hit.commissionSource } : rowOf(hit, select);
       }),
       findMany: jest.fn(async (args: Row) => transactions.map((t) => rowOf(t, args.select))),
       create: jest.fn(async ({ data }: { data: Row }) => {
@@ -194,7 +198,38 @@ const exchange = (over: Partial<CreateAgentTransactionDto> = {}): CreateAgentTra
   providerId: BANKILY,
   direction: 'cash_in_credit_out',
   amount: 20_000,
+  commissionAmount: 200,
   customerNumber: ' 36 12-34-56 ',
+  ...over,
+});
+
+/** An exchange already stored under KEY, as another request left it. */
+const storedExchange = (over: Row = {}): Row => ({
+  id: uuidToBin('01a0b1c2-0000-7000-8000-0000000000e1'),
+  branchId: BRANCH,
+  providerId: uuidToBin(BANKILY),
+  direction: 'cash_in_credit_out',
+  amount: 20_000,
+  customerNumber: '36123456',
+  customerNumberLast4: '3456',
+  providerReference: null,
+  commissionAmount: 200,
+  commissionSource: 'manual',
+  commissionRateBp: null,
+  configVersionId: null,
+  configSnapshot: null,
+  businessDate: dateValue(DAY),
+  recordedAt: new Date(),
+  deviceRecordedAt: null,
+  recordedById: USER,
+  recordedByName: 'Aicha',
+  clientUuid: uuidToBin(KEY),
+  status: 'completed',
+  reversedAt: null,
+  reversedByName: null,
+  reversalReason: null,
+  reversalClientUuid: null,
+  createdAt: new Date(),
   ...over,
 });
 
@@ -204,7 +239,7 @@ const refusal = async (p: Promise<unknown>) => {
 };
 
 describe('recording an exchange', () => {
-  it('writes the transaction with the session’s actor, the server’s day and the configuration snapshot, and its legs with it — in one transaction, under the day’s lock', async () => {
+  it('writes the transaction with the session’s actor, the server’s day, the commission typed and the version in force, and its legs with it — in one transaction, under the day’s lock', async () => {
     const h = harness();
     const before = Date.now();
     const view = await h.svc.record(exchange({ providerReference: ' TX-77 ', deviceRecordedAt: '2026-10-08T08:59:00.000Z' }));
@@ -220,7 +255,8 @@ describe('recording an exchange', () => {
       customerNumberLast4: '3456',
       providerReference: 'TX-77',
       commissionAmount: 200,
-      commissionRateBp: 100,
+      commissionSource: 'manual',
+      commissionRateBp: null,
       configVersionId: uuidToBin(CONFIG),
       businessDate: dateValue(DAY),
       deviceRecordedAt: new Date('2026-10-08T08:59:00.000Z'),
@@ -230,20 +266,20 @@ describe('recording an exchange', () => {
       status: 'completed',
     });
     expect(data.recordedAt.getTime()).toBeGreaterThanOrEqual(before);
-    expect(data.configSnapshot).toMatchObject({ id: CONFIG, rateInBp: 100, rateOutBp: 100, commissionDestination: 'provider_float', principalFeeMode: 'separate', referenceRule: 'optional', reason: 'fixture rates (invented)' });
+    expect(data.configSnapshot).toMatchObject({ id: CONFIG, referenceRule: 'optional', reason: 'fixture rule (invented)', legacy: null });
     // The business day from the posting instant, inside the transaction; then the day's lock.
     expect(h.businessDay.assign).toHaveBeenCalledWith(BRANCH, data.recordedAt, h.db);
     expect(h.closing.assertCounterOpen).toHaveBeenCalledWith(BRANCH, 'agent_exchange');
     expect(h.closing.assertCounterOpenTx).toHaveBeenCalledWith(h.db, { branchId: BRANCH, businessDate: DAY, operation: 'agent_exchange' });
-    // The legs, with the transaction: cash in A (the drawer's agentIn), the float out A, the float in C.
+    // The legs, with the transaction (D164): cash in A (the drawer's agentIn), the float out A, the commission in C on the drawer.
     const legs = h.db.agentMovement.createMany.mock.calls[0][0].data;
     expect(legs.map((l: Row) => [l.accountKind, l.providerId ? binToUuid(l.providerId) : null, l.direction, l.amount, l.kind])).toEqual([
       ['cash', null, 'inflow', 20_000, 'principal'],
       ['provider', BANKILY, 'outflow', 20_000, 'principal'],
-      ['provider', BANKILY, 'inflow', 200, 'commission'],
+      ['cash', null, 'inflow', 200, 'commission'],
     ]);
     expect(legs.every((l: Row) => l.companyId.equals(COMPANY) && l.branchId.equals(BRANCH) && l.transactionId.equals(data.id) && l.businessDate.getTime() === dateValue(DAY).getTime() && l.recordedAt === data.recordedAt)).toBe(true);
-    expect(h.audit.recordTx).toHaveBeenCalledWith(h.db, expect.objectContaining({ entityType: 'AgentTransaction', entityId: data.id, action: 'create', branchId: BRANCH }));
+    expect(h.audit.recordTx).toHaveBeenCalledWith(h.db, expect.objectContaining({ entityType: 'AgentTransaction', entityId: data.id, action: 'create', branchId: BRANCH, after: expect.objectContaining({ commission: 200, commissionSource: 'manual' }) }));
 
     expect(view).toMatchObject({
       id: binToUuid(data.id),
@@ -252,7 +288,7 @@ describe('recording an exchange', () => {
       amount: 20_000,
       customerNumberMasked: '•••• 3456',
       providerReference: 'TX-77',
-      commission: { amount: 200, rateBp: 100, destination: 'provider_float', principalFeeMode: 'separate', configVersionId: CONFIG },
+      commission: { amount: 200, source: 'manual', legacy: null },
       businessDate: DAY,
       recordedBy: { id: binToUuid(USER), name: 'Aicha' },
       status: 'completed',
@@ -264,14 +300,16 @@ describe('recording an exchange', () => {
     expect(view).not.toHaveProperty('customerNumber');
   });
 
-  it('the other direction, a deducted fee: cash out A, one netted float leg in A + C, no commission leg; the commission still recorded', async () => {
-    const h = harness({ config: fixtureConfig({ principalFeeMode: 'deducted', rateInBp: 50, rateOutBp: 150 }) });
-    await h.svc.record(exchange({ direction: 'cash_out_credit_in', amount: 10_000 }));
-    expect(h.db.agentTransaction.create.mock.calls[0][0].data).toMatchObject({ commissionAmount: 150, commissionRateBp: 150 });
+  it('the other direction: cash out A, the float in A, the commission in C on the drawer — the customer is handed A − C; the credit moves by A alone', async () => {
+    const h = harness();
+    const view = await h.svc.record(exchange({ direction: 'cash_out_credit_in', amount: 10_000, commissionAmount: 150 }));
+    expect(h.db.agentTransaction.create.mock.calls[0][0].data).toMatchObject({ commissionAmount: 150, commissionSource: 'manual', commissionRateBp: null });
     expect(h.db.agentMovement.createMany.mock.calls[0][0].data.map((l: Row) => [l.accountKind, l.direction, l.amount, l.kind])).toEqual([
       ['cash', 'outflow', 10_000, 'principal'],
-      ['provider', 'inflow', 10_150, 'principal'],
+      ['provider', 'inflow', 10_000, 'principal'],
+      ['cash', 'inflow', 150, 'commission'],
     ]);
+    expect(view.commission).toEqual({ amount: 150, source: 'manual', legacy: null });
   });
 
   describe('the refusals, in order, and nothing written', () => {
@@ -323,7 +361,7 @@ describe('recording an exchange', () => {
       });
     });
 
-    it('then the provider: unknown, switched off, not configured (the blanks named), or a stale version', async () => {
+    it('then the provider: unknown or switched off — and nothing to configure before it is used (D164)', async () => {
       const missing = await refusal(harness({ providerMissing: true }).svc.record(exchange()));
       expect(missing.error).toBeInstanceOf(NotFoundException);
       expect(missing.body?.code).toBe('provider_not_found');
@@ -334,17 +372,49 @@ describe('recording an exchange', () => {
       expect(inactive.body?.code).toBe('provider_inactive');
       expect(off.db.agentTransaction.create).not.toHaveBeenCalled();
 
-      const blank = harness({ config: fixtureConfig({ rateInBp: null, rateOutBp: null, referenceRule: null }) });
-      const notConfigured = await refusal(blank.svc.record(exchange()));
-      expect(notConfigured.error).toBeInstanceOf(ConflictException);
-      expect(notConfigured.body).toMatchObject({ code: 'provider_not_configured', missing: ['rateInBp', 'rateOutBp', 'referenceRule'] });
-      const none = await refusal(harness({ config: null }).svc.record(exchange()));
-      expect(none.body).toMatchObject({ code: 'provider_not_configured', missing: ['rateInBp', 'rateOutBp', 'commissionDestination', 'principalFeeMode', 'referenceRule'] });
+      // No version at all: recorded, the reference optional, no version named, no snapshot.
+      const bare = harness({ config: null });
+      await bare.svc.record(exchange());
+      expect(bare.db.agentTransaction.create.mock.calls[0][0].data).toMatchObject({ commissionAmount: 200, commissionSource: 'manual', commissionRateBp: null, configVersionId: null, configSnapshot: Prisma.DbNull });
 
-      const stale = await refusal(harness().svc.record(exchange({ configVersionId: '01a0b1c2-0000-7000-8000-0000000000c0' })));
-      expect(stale.error).toBeInstanceOf(ConflictException);
-      expect(stale.body).toMatchObject({ code: 'stale_configuration', expectedConfigVersionId: '01a0b1c2-0000-7000-8000-0000000000c0', currentConfigVersionId: CONFIG });
-      await expect(harness().svc.record(exchange({ configVersionId: CONFIG }))).resolves.toBeDefined();
+      // A version written before D164 with a rate in it prices nothing: the commission typed is the commission.
+      const priced = harness({ config: legacyConfig() });
+      await priced.svc.record(exchange({ amount: 10_000, commissionAmount: 35 }));
+      expect(priced.db.agentTransaction.create.mock.calls[0][0].data).toMatchObject({ commissionAmount: 35, commissionSource: 'manual', commissionRateBp: null });
+
+      // An older phone's version id is no gate any more: neither stale nor required.
+      await expect(harness().svc.record(exchange({ configVersionId: '01a0b1c2-0000-7000-8000-0000000000c0' }))).resolves.toMatchObject({ commission: { amount: 200, source: 'manual' } });
+    });
+
+    it('the commission the employee typed, after the key and before anything else is read: required, whole MRU, never negative, never more than the amount when cash is handed over', async () => {
+      const cases: [Partial<CreateAgentTransactionDto>, string][] = [
+        [{ commissionAmount: undefined }, 'commission_required'],
+        [{ commissionAmount: null }, 'commission_required'],
+        [{ commissionAmount: '' }, 'commission_required'],
+        [{ commissionAmount: -1 }, 'commission_invalid'],
+        [{ commissionAmount: 12.5 }, 'commission_invalid'],
+        [{ commissionAmount: '200' }, 'commission_invalid'],
+        [{ direction: 'cash_out_credit_in', amount: 1_000, commissionAmount: 1_001 }, 'commission_exceeds_amount'],
+      ];
+      for (const [over, code] of cases) {
+        const h = harness();
+        const { error, body } = await refusal(h.svc.record(exchange(over)));
+        expect(error).toBeInstanceOf(BadRequestException);
+        expect(body).toMatchObject({ code, message: expect.stringMatching(/Nothing was recorded\.$/) });
+        expect(h.db.branch.findFirst).not.toHaveBeenCalled();
+        expect(h.closing.assertCounterOpen).not.toHaveBeenCalled();
+        expect(h.db.$transaction).not.toHaveBeenCalled();
+      }
+    });
+
+    it('a typed zero is a commission: recorded, with no commission leg; a commission of the whole amount handed over is allowed', async () => {
+      const zero = harness();
+      await zero.svc.record(exchange({ commissionAmount: 0 }));
+      expect(zero.db.agentTransaction.create.mock.calls[0][0].data).toMatchObject({ commissionAmount: 0, commissionSource: 'manual' });
+      expect(zero.db.agentMovement.createMany.mock.calls[0][0].data.map((l: Row) => l.kind)).toEqual(['principal', 'principal']);
+      const whole = harness();
+      await whole.svc.record(exchange({ direction: 'cash_out_credit_in', amount: 1_000, commissionAmount: 1_000 }));
+      expect(whole.db.agentTransaction.create).toHaveBeenCalledTimes(1);
     });
 
     it('the reference follows the provider’s rule: required, optional, or left aside', async () => {
@@ -376,7 +446,7 @@ describe('recording an exchange', () => {
     it('the same key with a changed payload is refused: idempotency_conflict, nothing written', async () => {
       const h = harness();
       await h.svc.record(exchange());
-      for (const changed of [exchange({ amount: 20_001 }), exchange({ direction: 'cash_out_credit_in' }), exchange({ customerNumber: '36 12 34 57' })]) {
+      for (const changed of [exchange({ amount: 20_001 }), exchange({ commissionAmount: 201 }), exchange({ commissionAmount: undefined }), exchange({ direction: 'cash_out_credit_in' }), exchange({ customerNumber: '36 12 34 57' })]) {
         const { error, body } = await refusal(h.svc.record(changed));
         expect(error).toBeInstanceOf(ConflictException);
         expect(body?.code).toBe('idempotency_conflict');
@@ -390,38 +460,38 @@ describe('recording an exchange', () => {
         race: () => {
           if (raced) return false;
           raced = true;
-          h.transactions.push({
-            id: uuidToBin('01a0b1c2-0000-7000-8000-0000000000e1'),
-            branchId: BRANCH,
-            providerId: uuidToBin(BANKILY),
-            direction: 'cash_in_credit_out',
-            amount: 20_000,
-            customerNumber: '36123456',
-            customerNumberLast4: '3456',
-            providerReference: null,
-            commissionAmount: 200,
-            commissionRateBp: 100,
-            configVersionId: uuidToBin(CONFIG),
-            configSnapshot: {},
-            businessDate: dateValue(DAY),
-            recordedAt: new Date(),
-            deviceRecordedAt: null,
-            recordedById: USER,
-            recordedByName: 'Aicha',
-            clientUuid: uuidToBin(KEY),
-            clientRequestHash: exchangeFingerprint({ providerId: BANKILY, direction: 'cash_in_credit_out', amount: 20_000, customerNumber: '36123456' }),
-            status: 'completed',
-            reversedAt: null,
-            reversedByName: null,
-            reversalReason: null,
-            reversalClientUuid: null,
-            createdAt: new Date(),
-          });
+          h.transactions.push(
+            storedExchange({
+              clientRequestHash: manualExchangeFingerprint({ providerId: BANKILY, direction: 'cash_in_credit_out', amount: 20_000, commissionAmount: 200, customerNumber: '36123456' }),
+            }),
+          );
           return true;
         },
       });
       const view = await h.svc.record(exchange());
       expect(view.id).toBe('01a0b1c2-0000-7000-8000-0000000000e1');
+    });
+
+    it('an exchange recorded under the rate keeps its own fingerprint: an older phone’s retry is answered with it, never re-priced (D164)', async () => {
+      const h = harness({ config: legacyConfig() });
+      h.transactions.push(
+        storedExchange({
+          commissionSource: 'legacy_rate',
+          commissionRateBp: 100,
+          configVersionId: uuidToBin(CONFIG),
+          configSnapshot: { id: CONFIG, rateInBp: 100, rateOutBp: 100, commissionDestination: 'provider_float', principalFeeMode: 'separate', referenceRule: 'optional' },
+          clientRequestHash: legacyExchangeFingerprint({ providerId: BANKILY, direction: 'cash_in_credit_out', amount: 20_000, customerNumber: '36123456', configVersionId: CONFIG }),
+        }),
+      );
+      const again = await h.svc.record(exchange({ configVersionId: CONFIG, commissionAmount: undefined }));
+      expect(again).toMatchObject({
+        id: '01a0b1c2-0000-7000-8000-0000000000e1',
+        commission: { amount: 200, source: 'legacy_rate', legacy: { rateBp: 100, destination: 'provider_float', principalFeeMode: 'separate', configVersionId: CONFIG } },
+      });
+      expect(h.db.agentTransaction.create).not.toHaveBeenCalled();
+      const changed = await refusal(h.svc.record(exchange({ configVersionId: CONFIG, amount: 20_001 })));
+      expect(changed.body?.code).toBe('idempotency_conflict');
+      expect(h.db.agentTransaction.create).not.toHaveBeenCalled();
     });
 
     it('a retry sent under another branch header still answers with the record — never a false "not found" (D161)', async () => {
@@ -442,7 +512,7 @@ describe('recording an exchange', () => {
     const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true, transformOptions: { enableImplicitConversion: false } });
     const meta = { type: 'body' as const, metatype: CreateAgentTransactionDto };
     await expect(pipe.transform({ ...exchange(), customerNumber: '36123456' }, meta)).resolves.toBeInstanceOf(CreateAgentTransactionDto);
-    for (const field of ['employeeId', 'userId', 'recordedBy', 'recordedById']) {
+    for (const field of ['employeeId', 'userId', 'recordedBy', 'recordedById', 'recordedByName', 'employeeName', 'commissionSource', 'commissionRateBp']) {
       const e = await pipe.transform({ ...exchange(), customerNumber: '36123456', [field]: binToUuid(USER) }, meta).catch((err: unknown) => err);
       expect(e).toBeInstanceOf(BadRequestException);
       expect(JSON.stringify((e as BadRequestException).getResponse())).toContain(`property ${field} should not exist`);
@@ -505,7 +575,7 @@ describe('reversing an exchange (A7)', () => {
     expect(counter.map((l: Row) => [l.accountKind, l.direction, l.amount, l.kind])).toEqual([
       ['cash', 'outflow', 20_000, 'reversal'],
       ['provider', 'inflow', 20_000, 'reversal'],
-      ['provider', 'outflow', 200, 'reversal'],
+      ['cash', 'outflow', 200, 'reversal'],
     ]);
     expect(counter.every((l: Row) => l.transactionId.equals(uuidToBin(recorded.id)) && l.businessDate.getTime() === dateValue(DAY).getTime())).toBe(true);
     expect(h.db.agentTransaction.updateMany.mock.calls[0][0]).toMatchObject({ where: { id: uuidToBin(recorded.id), status: 'completed' }, data: { status: 'reversed', reversedById: USER, reversedByName: 'Aicha', reversalReason: 'wrong direction' } });
@@ -735,7 +805,7 @@ describe('what became of an exchange, by its client key (D161, docs/73 §11.4)',
 
   async function recorded(over: Options = {}) {
     const h = harness(over);
-    await h.svc.record(exchange({ configVersionId: CONFIG, deviceRecordedAt: '2026-10-08T08:59:00.000Z' }));
+    await h.svc.record(exchange({ deviceRecordedAt: '2026-10-08T08:59:00.000Z' }));
     return h;
   }
 
@@ -752,6 +822,7 @@ describe('what became of an exchange, by its client key (D161, docs/73 §11.4)',
         amount: 20_000,
         customerNumberMasked: '•••• 3456',
         commission: 200,
+        commissionSource: 'manual',
         businessDate: DAY,
         status: 'completed',
         configVersionId: CONFIG,
@@ -763,7 +834,7 @@ describe('what became of an exchange, by its client key (D161, docs/73 §11.4)',
     expect(JSON.stringify(answer)).not.toContain('36123456');
     // What became of it, and nothing written about it since: no reference, no legs, no notes, no reversal's reason.
     expect(Object.keys((answer as { transaction: Record<string, unknown> }).transaction).sort()).toEqual(
-      ['amount', 'branchId', 'businessDate', 'commission', 'configVersionId', 'customerNumberMasked', 'deviceRecordedAt', 'direction', 'id', 'providerId', 'providerLabel', 'recordedAt', 'recordedByName', 'status'],
+      ['amount', 'branchId', 'businessDate', 'commission', 'commissionSource', 'configVersionId', 'customerNumberMasked', 'deviceRecordedAt', 'direction', 'id', 'providerId', 'providerLabel', 'recordedAt', 'recordedByName', 'status'],
     );
     // The recorder is not asked about: their own record is theirs.
     expect(h.access.getEffectivePermissions).not.toHaveBeenCalled();

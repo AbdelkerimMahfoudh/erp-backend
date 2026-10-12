@@ -1,4 +1,5 @@
-import { aggregateAgentReport, periodRangeOf, REPORT_PERIODS, type ReportRebalancingLeg, type ReportTransaction } from './agent-report-rules';
+import { aggregateAgentReport, effectsOfLegs, periodRangeOf, REPORT_PERIODS, type ReportRebalancingLeg, type ReportTransaction } from './agent-report-rules';
+import { exchangeLegs } from './agent-rules';
 
 /**
  * The agent reports (D157), pure: the period's business dates, and the
@@ -9,18 +10,22 @@ import { aggregateAgentReport, periodRangeOf, REPORT_PERIODS, type ReportRebalan
 const BANKILY = 'b0000000-0000-7000-8000-000000000001';
 const SEDAD = 'b0000000-0000-7000-8000-000000000002';
 
-const tx = (over: Partial<ReportTransaction> = {}): ReportTransaction => ({
-  providerId: BANKILY,
-  providerLabel: 'Bankily',
-  direction: 'cash_in_credit_out',
-  amount: 10_000,
-  commission: 100,
-  recordedById: 'u1',
-  recordedByName: 'Aicha',
-  businessDate: '2026-10-08',
-  reversalDate: null,
-  ...over,
-});
+/** A row as the service reads it: its money effects from the legs it wrote (D164 legs unless a test gives others). */
+const tx = (over: Partial<ReportTransaction> = {}): ReportTransaction => {
+  const row = {
+    providerId: BANKILY,
+    providerLabel: 'Bankily',
+    direction: 'cash_in_credit_out' as const,
+    amount: 10_000,
+    commission: 100,
+    recordedById: 'u1',
+    recordedByName: 'Aicha',
+    businessDate: '2026-10-08',
+    reversalDate: null,
+    ...over,
+  };
+  return { ...row, effects: over.effects ?? effectsOfLegs(exchangeLegs({ direction: row.direction, amount: row.amount, commission: row.commission, providerId: row.providerId })) };
+};
 
 describe('the period’s business dates', () => {
   it('a day is itself; a week runs Monday to Sunday around the date; a month and a year are whole', () => {
@@ -60,11 +65,12 @@ describe('the figures of a period', () => {
     expect(report.totals).toEqual({
       count: 4,
       volume: 35_000.3,
-      cashReceived: 20_000,
-      cashPaid: 15_000.3,
+      cashReceived: 20_200,
+      cashPaid: 14_850.3,
       creditSent: 20_000,
       creditReceived: 15_000.3,
       commission: 350,
+      routes: { cash_in_credit_out: { count: 1, volume: 20_000, commission: 200 }, cash_out_credit_in: { count: 3, volume: 15_000.3, commission: 150 } },
       reversals: { count: 1, volume: 5_000, commission: 50 },
       rebalancings: { count: 3, cashIn: 50_300, cashOut: 100_000, floatIn: 100_000, floatOut: 0 },
     });
@@ -85,7 +91,7 @@ describe('the figures of a period', () => {
       ['Bankily', 3, 20_000.3, 200, 1],
       ['Sedad', 1, 15_000, 150, 0],
     ]);
-    expect(report.byProvider[0]).toMatchObject({ providerId: BANKILY, cashReceived: 20_000, cashPaid: 0.3, creditSent: 20_000, creditReceived: 0.3, reversals: { count: 1, volume: 5_000, commission: 50 } });
+    expect(report.byProvider[0]).toMatchObject({ providerId: BANKILY, cashReceived: 20_200, cashPaid: 0.3, creditSent: 20_000, creditReceived: 0.3, reversals: { count: 1, volume: 5_000, commission: 50 } });
   });
 
   it('by employee: what each recorded, and how many of theirs were reversed', () => {
@@ -102,7 +108,7 @@ describe('the figures of a period', () => {
       period: 'day',
       from: '2026-10-08',
       to: '2026-10-08',
-      totals: { count: 0, volume: 0, cashReceived: 0, cashPaid: 0, creditSent: 0, creditReceived: 0, commission: 0, reversals: { count: 0, volume: 0, commission: 0 }, rebalancings: { count: 0, cashIn: 0, cashOut: 0, floatIn: 0, floatOut: 0 } },
+      totals: { count: 0, volume: 0, cashReceived: 0, cashPaid: 0, creditSent: 0, creditReceived: 0, commission: 0, routes: { cash_in_credit_out: { count: 0, volume: 0, commission: 0 }, cash_out_credit_in: { count: 0, volume: 0, commission: 0 } }, reversals: { count: 0, volume: 0, commission: 0 }, rebalancings: { count: 0, cashIn: 0, cashOut: 0, floatIn: 0, floatOut: 0 } },
       byProvider: [],
       byEmployee: [],
     });
@@ -135,7 +141,7 @@ describe('a reversal belongs to the day it was made (docs/73 §4.3)', () => {
 
   it('the day it was recorded keeps it: the figures a locked closing showed never change afterwards', () => {
     const sep30 = report('day', '2026-09-30').totals;
-    expect([sep30.count, sep30.cashReceived, sep30.commission]).toEqual([1, 20_000, 200]);
+    expect([sep30.count, sep30.cashReceived, sep30.commission]).toEqual([1, 20_200, 200]);
     expect(sep30.reversals).toEqual({ count: 0, volume: 0, commission: 0 });
     expect(report('month', '2026-09-15').totals).toMatchObject({ count: 1, volume: 20_000, commission: 200 });
   });

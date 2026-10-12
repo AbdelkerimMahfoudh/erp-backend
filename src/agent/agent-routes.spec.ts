@@ -122,7 +122,7 @@ describe('the provider writes carry a request key (D160)', () => {
     for (const [metatype, body] of [
       [CreateAgentProviderDto, { kind: 'sedad', label: 'Sedad' }],
       [UpdateAgentProviderDto, { isActive: false }],
-      [CreateAgentProviderConfigDto, { sameRateBothDirections: true, reason: 'the October schedule' }],
+      [CreateAgentProviderConfigDto, { referenceRule: 'optional', reason: 'the October rule' }],
     ] as const) {
       const meta = { type: 'body' as const, metatype: metatype as never };
       await expect(pipe.transform({ ...body, clientRequestId: KEY }, meta)).resolves.toBeInstanceOf(metatype);
@@ -132,6 +132,18 @@ describe('the provider writes carry a request key (D160)', () => {
         expect(JSON.stringify((e as BadRequestException).getResponse())).toContain('clientRequestId must be a UUID');
       }
     }
+  });
+
+  it('a configuration version carries no rate (D164): a rate, a destination or a fee mode is refused by the pipe; the reference rule is required', async () => {
+    const meta = { type: 'body' as const, metatype: CreateAgentProviderConfigDto as never };
+    const body = { clientRequestId: KEY, referenceRule: 'optional', reason: 'the October rule' };
+    for (const field of ['rateInBp', 'rateOutBp', 'sameRateBothDirections', 'commissionDestination', 'principalFeeMode']) {
+      const e = await pipe.transform({ ...body, [field]: field === 'sameRateBothDirections' ? true : field.startsWith('rate') ? 100 : 'cash' }, meta).catch((err: unknown) => err);
+      expect([field, e]).toEqual([field, expect.any(BadRequestException)]);
+      expect(JSON.stringify((e as BadRequestException).getResponse())).toContain(`property ${field} should not exist`);
+    }
+    const { referenceRule: _rule, ...withoutRule } = body;
+    await expect(pipe.transform(withoutRule, meta)).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('a replay answers 200 — this request created nothing; a first write keeps its 201', async () => {
@@ -162,9 +174,11 @@ describe('the details the global filter lets through (docs/73)', () => {
     return captured;
   }
 
-  it('provider_not_configured names the blanks; stale_configuration names both versions; float_count_required lists the providers; activity_not_subscribed says which and what is needed', () => {
-    expect(runFilter(new ConflictException({ code: 'provider_not_configured', message: 'm', missing: ['rateInBp'] }))).toMatchObject({ statusCode: 409, code: 'provider_not_configured', missing: ['rateInBp'] });
-    expect(runFilter(new ConflictException({ code: 'stale_configuration', message: 'm', expectedConfigVersionId: 'a', currentConfigVersionId: 'b' }))).toMatchObject({ expectedConfigVersionId: 'a', currentConfigVersionId: 'b' });
+  it('permission_denied names the keys; float_count_required lists the providers; activity_not_subscribed says which and what is needed; the retired version ids are no longer passed (D164)', () => {
+    expect(runFilter(new ForbiddenException({ code: 'permission_denied', message: 'm', missing: ['agent.transaction.record'] }))).toMatchObject({ statusCode: 403, code: 'permission_denied', missing: ['agent.transaction.record'] });
+    const retired = runFilter(new ConflictException({ code: 'x', message: 'm', expectedConfigVersionId: 'a', currentConfigVersionId: 'b' }));
+    expect(retired).not.toHaveProperty('expectedConfigVersionId');
+    expect(retired).not.toHaveProperty('currentConfigVersionId');
     expect(runFilter(new ConflictException({ code: 'float_count_required', message: 'm', providers: [{ providerId: 'p', label: 'Bankily' }] }))).toMatchObject({ providers: [{ providerId: 'p', label: 'Bankily' }] });
     expect(runFilter(new ForbiddenException({ code: 'activity_not_subscribed', message: 'm', activity: 'electronics', required: 'money_agent' }))).toMatchObject({ statusCode: 403, activity: 'electronics', required: 'money_agent' });
   });

@@ -3,22 +3,28 @@ import { BadRequestException } from '@nestjs/common';
 import { parsePayerNumber } from '../sales/payer-number';
 
 /**
- * The rules of the agent ledger (docs/73 §4, D154): what a provider must have
- * configured before it can post, the commission of an exchange, the legs an
- * exchange moves between the drawer and the provider's float, the counter-legs
- * of a reversal, when a rebalancing balances, what a float holds, and the
- * customer number.
+ * The rules of the agent ledger (docs/73 §4, D154, D164): the commission an
+ * employee types for an exchange, the legs an exchange moves between the drawer
+ * and the provider's float, the counter-legs of a reversal, when a rebalancing
+ * balances, what a float holds, and the customer number.
+ *
+ * D164 (the owner, 2026-10-12) supersedes the configured rate of D154 and
+ * docs/73 §4.2: there is no rate. The customer pays the commission to the
+ * operator, the employee types it for every exchange, it is the business's
+ * revenue — in the drawer — and it never touches the provider's credit.
+ * Exchanges recorded under the rate keep exactly what they stored
+ * (`commission_source = legacy_rate`); nothing here recomputes them.
  *
  * Pure on purpose, like `channels.ts` and `money-positions.ts`: every figure a
  * transaction records is computed here from its inputs, so the accounting can
- * be checked without a database — and nothing here guesses. A blank rate is a
- * blank, never zero; a blank destination posts nothing (A4).
+ * be checked without a database — and nothing here guesses.
  */
 
 export type AgentDirection = 'cash_in_credit_out' | 'cash_out_credit_in';
 export type CommissionDestination = 'cash' | 'provider_float' | 'held_separately';
 export type PrincipalFeeMode = 'separate' | 'deducted';
 export type ReferenceRule = 'required' | 'optional' | 'none';
+export type CommissionSource = 'manual' | 'legacy_rate';
 export type LegAccount = 'cash' | 'provider' | 'commission_held' | 'external';
 export type LegDirection = 'inflow' | 'outflow';
 export type LegKind = 'principal' | 'commission' | 'reversal' | 'rebalancing';
@@ -28,11 +34,13 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
-/** A provider's configuration version as it is stored: NULL is "not supplied", never zero. */
+/**
+ * A provider's configuration version as it is stored. Since D164 the only field a new version sets is
+ * `referenceRule`; the rates, the destination and the fee mode remain on the versions written before it, read back
+ * for history only — never to price an exchange.
+ */
 export interface ProviderConfig {
-  /** Basis points on a Receive cash / Send credit exchange (the agent takes cash IN). */
   rateInBp: number | null;
-  /** Basis points on a Give cash / Receive credit exchange (cash goes OUT). */
   rateOutBp: number | null;
   sameRateBothDirections: boolean;
   commissionDestination: CommissionDestination | null;
@@ -40,60 +48,45 @@ export interface ProviderConfig {
   referenceRule: ReferenceRule | null;
 }
 
-/** Every field the Owner must fill from the real schedule before the provider posts (docs/73 §1.2). */
-export const REQUIRED_CONFIG_FIELDS = ['rateInBp', 'rateOutBp', 'commissionDestination', 'principalFeeMode', 'referenceRule'] as const;
-export type RequiredConfigField = (typeof REQUIRED_CONFIG_FIELDS)[number];
-
-/** The blanks of the version in force; all five when there is no version at all. */
-export function missingConfigFields(config: ProviderConfig | null | undefined): RequiredConfigField[] {
-  if (!config) return [...REQUIRED_CONFIG_FIELDS];
-  return REQUIRED_CONFIG_FIELDS.filter((field) => config[field] === null || config[field] === undefined);
+/**
+ * The provider's reference rule in force. A provider with no version, or one that left it blank, takes a reference
+ * when one is given and asks for none: a provider is usable as soon as it is switched on (D164).
+ */
+export function referenceRuleOf(config: Pick<ProviderConfig, 'referenceRule'> | null | undefined): ReferenceRule {
+  return config?.referenceRule ?? 'optional';
 }
 
-/** Computed, never stored: a provider posts only while nothing required is blank. */
-export function readyForTransactions(config: ProviderConfig | null | undefined): boolean {
-  return missingConfigFields(config).length === 0;
-}
+// ── The commission, typed for every exchange (D164) ─────────────────────────
+
+export type CommissionRefusal = 'commission_required' | 'commission_invalid' | 'commission_exceeds_amount';
 
 /**
- * One rate for both directions means the Owner typed one figure: it is the
- * figure of both, so a version never carries two rates that disagree with its
- * own flag.
+ * The commission the employee typed, refused when it is not one: absent (an empty field is never zero — the employee
+ * types 0), not a whole MRU amount, below zero, or — giving cash — more than the amount, which would hand the
+ * customer a negative sum. Receiving cash has no ceiling: the customer pays it on top of the amount.
  */
-export function withSameRate<T extends Pick<ProviderConfig, 'rateInBp' | 'rateOutBp' | 'sameRateBothDirections'>>(input: T): T {
-  return input.sameRateBothDirections ? { ...input, rateOutBp: input.rateInBp } : input;
-}
-
-export type ConfigRefusal = 'deducted_destination';
-
-/**
- * A provider cannot net its fee into the principal AND pay it somewhere else
- * (docs/73 §4.2): with `deducted` the commission only ever lands on the float,
- * so any other destination is refused as a configuration, and the Owner is
- * told why rather than left with a version that can post nothing coherent.
- */
-export function configRefusal(config: Pick<ProviderConfig, 'commissionDestination' | 'principalFeeMode'>): ConfigRefusal | null {
-  if (config.principalFeeMode === 'deducted' && config.commissionDestination !== 'provider_float') return 'deducted_destination';
+export function commissionRefusal(direction: AgentDirection, amount: number, commission: unknown): CommissionRefusal | null {
+  if (commission === undefined || commission === null || commission === '') return 'commission_required';
+  if (typeof commission !== 'number' || !Number.isInteger(commission) || commission < 0) return 'commission_invalid';
+  if (direction === 'cash_out_credit_in' && commission > amount) return 'commission_exceeds_amount';
   return null;
 }
 
-// ── Commission ──────────────────────────────────────────────────────────────
-
-/** The direction's own rate: a real schedule may charge the two directions differently (A4). */
-export function rateFor(direction: AgentDirection, config: Pick<ProviderConfig, 'rateInBp' | 'rateOutBp'>): number | null {
-  return direction === 'cash_in_credit_out' ? config.rateInBp : config.rateOutBp;
-}
+export const COMMISSION_REFUSAL_MESSAGES: Record<CommissionRefusal, string> = {
+  commission_required: 'Enter the commission the customer pays for this exchange; type 0 when there is none. Nothing was recorded.',
+  commission_invalid: 'The commission is a whole number of MRU, zero or more. Nothing was recorded.',
+  commission_exceeds_amount: 'The commission cannot be more than the amount: the customer would be handed a negative sum. Nothing was recorded.',
+};
 
 /**
- * The whole amount at the rate, never brackets (A4), to the cent, a half cent up. Counted in whole cents and basis
- * points, exactly: in floating point the same half cent rounded up or down with the amount's binary form, and at the
- * largest amounts the product no longer fits a double's integers.
+ * What one exchange does, as the review shows it before it is confirmed: receiving cash, the customer hands over the
+ * amount plus the commission and the credit sent is the amount; giving cash, the credit received is the amount and
+ * the customer is handed the amount less the commission. The commission is the business's revenue either way.
  */
-export function commissionOf(amount: number, rateBp: number): number {
-  const scaled = BigInt(Math.round(amount * 100)) * BigInt(rateBp);
-  const whole = scaled / 10_000n;
-  const cents = (scaled % 10_000n) * 2n >= 10_000n ? whole + 1n : whole;
-  return Number(cents) / 100;
+export function exchangeEffects(direction: AgentDirection, amount: number, commission: number): { cash: number; credit: number; commission: number } {
+  const a = round2(amount);
+  const c = round2(commission);
+  return { cash: direction === 'cash_in_credit_out' ? round2(a + c) : round2(a - c), credit: a, commission: c };
 }
 
 // ── Legs ────────────────────────────────────────────────────────────────────
@@ -110,41 +103,28 @@ export interface Leg {
 export interface ExchangeInput {
   direction: AgentDirection;
   amount: number;
+  /** The commission the employee typed (D164), in whole MRU. */
   commission: number;
   providerId: string;
-  commissionDestination: CommissionDestination;
-  principalFeeMode: PrincipalFeeMode;
 }
 
 /**
- * The legs an exchange posts at completion (docs/73 §4.2–4.3).
- *
- * Receive cash / Send credit (amount A, commission C): cash in A — the drawer's
- * `agentIn` — and the float out A. Give cash / Receive credit: cash out A — the
- * drawer's `agentOut` — and the float in A. Then the commission as configured:
- * settled apart, it is one more leg in on the float, on the drawer, or on the
- * commission the provider holds for the agent; deducted by the provider, the
- * float leg is netted instead (out A − C, in A + C) and no commission leg is
- * written — `commission_amount` on the transaction still records what was
- * earned. A leg of zero moves nothing and is not written.
+ * The legs an exchange posts at completion (D164, docs/73 §4.3). Receive cash / Send credit (amount A, commission
+ * C): cash in A — the drawer's `agentIn` — the float out A, and the commission in C on the drawer: the drawer gains
+ * A + C. Give cash / Receive credit: cash out A — the drawer's `agentOut` — the float in A, and the commission in C on
+ * the drawer: the drawer hands over A − C. The float moves by the amount only; the commission is only ever cash. A
+ * leg of zero moves nothing and is not written. An exchange recorded under the rate keeps the legs it wrote; they are
+ * never recomputed here.
  */
 export function exchangeLegs(input: ExchangeInput): Leg[] {
   const amount = round2(input.amount);
   const commission = round2(input.commission);
   const cashIn = input.direction === 'cash_in_credit_out';
-  const floatDirection: LegDirection = cashIn ? 'outflow' : 'inflow';
-  const legs: Leg[] = [{ account: 'cash', providerId: null, direction: cashIn ? 'inflow' : 'outflow', amount, kind: 'principal' }];
-  if (input.principalFeeMode === 'deducted') {
-    if (input.commissionDestination !== 'provider_float') {
-      // Refused when configured (`configRefusal`); reaching it here is a defect, never something to post.
-      throw new Error('A deducted commission can only land on the provider float');
-    }
-    legs.push({ account: 'provider', providerId: input.providerId, direction: floatDirection, amount: round2(cashIn ? amount - commission : amount + commission), kind: 'principal' });
-  } else {
-    legs.push({ account: 'provider', providerId: input.providerId, direction: floatDirection, amount, kind: 'principal' });
-    const account: LegAccount = input.commissionDestination === 'cash' ? 'cash' : input.commissionDestination === 'provider_float' ? 'provider' : 'commission_held';
-    legs.push({ account, providerId: account === 'cash' ? null : input.providerId, direction: 'inflow', amount: commission, kind: 'commission' });
-  }
+  const legs: Leg[] = [
+    { account: 'cash', providerId: null, direction: cashIn ? 'inflow' : 'outflow', amount, kind: 'principal' },
+    { account: 'provider', providerId: input.providerId, direction: cashIn ? 'outflow' : 'inflow', amount, kind: 'principal' },
+    { account: 'cash', providerId: null, direction: 'inflow', amount: commission, kind: 'commission' },
+  ];
   return legs.filter((leg) => leg.amount !== 0);
 }
 
@@ -342,11 +322,40 @@ const text = (s: string | null | undefined): string | null => s?.trim() || null;
 
 /**
  * The same key with the same exchange is a retry; with anything else it is a
- * second exchange wearing the first one's identity, refused as a conflict.
- * The number is bound in its normalised form, so a retry spaced differently is
- * still the same exchange; the phone's own time is part of its claim.
+ * second exchange wearing the first one's identity, refused as a conflict
+ * (D164): the commission the employee typed is part of the exchange, so the
+ * same key with another commission is a conflict. The number is bound in its
+ * normalised form, so a retry spaced differently is still the same exchange;
+ * the phone's own time is part of its claim. Versioned (`v: 2`), so it can
+ * never collide with an exchange recorded under the rate.
  */
-export function exchangeFingerprint(input: {
+export function manualExchangeFingerprint(input: {
+  providerId: string;
+  direction: AgentDirection;
+  amount: number;
+  commissionAmount: number;
+  customerNumber: string;
+  providerReference?: string | null;
+  deviceRecordedAt?: string | null;
+}): string {
+  return fingerprint({
+    v: 2,
+    providerId: input.providerId.toLowerCase(),
+    direction: input.direction,
+    amount: money(input.amount),
+    commissionAmount: money(input.commissionAmount),
+    customerNumber: input.customerNumber,
+    providerReference: text(input.providerReference),
+    deviceRecordedAt: input.deviceRecordedAt ?? null,
+  });
+}
+
+/**
+ * The fingerprint of an exchange recorded under the rate (before D164): kept
+ * so that a phone retrying such an exchange's own key, with its own payload,
+ * is still answered with what was recorded — never recomputed for anything else.
+ */
+export function legacyExchangeFingerprint(input: {
   providerId: string;
   direction: AgentDirection;
   amount: number;

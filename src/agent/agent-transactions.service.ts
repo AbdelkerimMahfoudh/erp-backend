@@ -15,17 +15,18 @@ import { permissionDenied } from '../rbac/refusals';
 import { requireAgentActivity } from './agent-access';
 import { configInForce, configView } from './agent-providers.service';
 import {
-  commissionOf,
+  COMMISSION_REFUSAL_MESSAGES,
+  commissionRefusal,
   customerNumberFor,
-  exchangeFingerprint,
   exchangeLegs,
   floatPosition,
+  legacyExchangeFingerprint,
+  manualExchangeFingerprint,
   maskedCustomerNumber,
   mistakeFingerprint,
-  missingConfigFields,
   negativesAfter,
-  rateFor,
   reasonGiven,
+  referenceRuleOf,
   rebalancingFingerprint,
   rebalancingLegs,
   reversalLegs,
@@ -53,6 +54,7 @@ const listSelect = {
   customerNumberLast4: true,
   providerReference: true,
   commissionAmount: true,
+  commissionSource: true,
   commissionRateBp: true,
   configVersionId: true,
   configSnapshot: true,
@@ -82,6 +84,7 @@ const lookupSelect = {
   amount: true,
   customerNumberLast4: true,
   commissionAmount: true,
+  commissionSource: true,
   configVersionId: true,
   businessDate: true,
   recordedAt: true,
@@ -135,10 +138,18 @@ export function toTransactionView(row: TransactionRow, reveal: boolean) {
     providerReference: row.providerReference,
     commission: {
       amount: num(row.commissionAmount),
-      rateBp: row.commissionRateBp,
-      destination: snapshot.commissionDestination ?? null,
-      principalFeeMode: snapshot.principalFeeMode ?? null,
-      configVersionId: binToUuid(row.configVersionId),
+      // D164: typed by the employee (`manual`), or what an exchange recorded under the rate stored (`legacy_rate`).
+      source: row.commissionSource,
+      // How a legacy exchange was priced, exactly as it was stored; a typed commission has none.
+      legacy:
+        row.commissionSource === 'legacy_rate'
+          ? {
+              rateBp: row.commissionRateBp,
+              destination: snapshot.commissionDestination ?? null,
+              principalFeeMode: snapshot.principalFeeMode ?? null,
+              configVersionId: row.configVersionId ? binToUuid(row.configVersionId) : null,
+            }
+          : null,
     },
     legs: row.movements.map(legView),
     businessDate: dateKey(row.businessDate),
@@ -184,11 +195,14 @@ export class AgentTransactionsService {
 
   /**
    * Record an exchange. In order: the body (the pipe, then the customer number),
-   * the branch's activity, the open-first rule, the provider and its version in
-   * force, then the write — the legs with the transaction, in one transaction,
-   * under the day's lock. A key already used answers with what it recorded,
-   * before any of that (D155: the same UUID is the same exchange, whatever the
-   * day has become since), or refuses a different payload under it.
+   * a key already used, the commission the employee typed (D164), the branch's
+   * activity, the open-first rule, the provider, then the write — the legs with
+   * the transaction, in one transaction, under the day's lock. A key already used
+   * answers with what it recorded, before any of that (D155: the same UUID is the
+   * same exchange, whatever the day has become since), or refuses a different
+   * payload under it — another commission included. The employee is the
+   * session's user: the body names nobody (the pipe refuses any field it does
+   * not declare).
    */
   async record(dto: CreateAgentTransactionDto) {
     const companyId = this.tenant.companyId();
@@ -196,17 +210,35 @@ export class AgentTransactionsService {
     const userId = this.tenant.requireUserId();
     const customer = customerNumberFor(dto.customerNumber);
     const clientUuid = uuidToBin(dto.clientUuid);
-    const hash = exchangeFingerprint({
-      providerId: dto.providerId,
-      direction: dto.direction,
-      amount: dto.amount,
-      customerNumber: customer.value,
-      providerReference: dto.providerReference,
-      configVersionId: dto.configVersionId,
-      deviceRecordedAt: dto.deviceRecordedAt,
-    });
-    const replay = await this.replayTransaction(clientUuid, hash);
+    const hashes = {
+      manual:
+        typeof dto.commissionAmount === 'number'
+          ? manualExchangeFingerprint({
+              providerId: dto.providerId,
+              direction: dto.direction,
+              amount: dto.amount,
+              commissionAmount: dto.commissionAmount,
+              customerNumber: customer.value,
+              providerReference: dto.providerReference,
+              deviceRecordedAt: dto.deviceRecordedAt,
+            })
+          : null,
+      legacy: legacyExchangeFingerprint({
+        providerId: dto.providerId,
+        direction: dto.direction,
+        amount: dto.amount,
+        customerNumber: customer.value,
+        providerReference: dto.providerReference,
+        configVersionId: dto.configVersionId,
+        deviceRecordedAt: dto.deviceRecordedAt,
+      }),
+    };
+    const replay = await this.replayTransaction(clientUuid, hashes);
     if (replay) return replay;
+    const refusal = commissionRefusal(dto.direction, dto.amount, dto.commissionAmount);
+    if (refusal) throw new BadRequestException({ code: refusal, message: COMMISSION_REFUSAL_MESSAGES[refusal] });
+    const commission = dto.commissionAmount as number;
+    const hash = hashes.manual as string;
     await requireAgentActivity(this.db, branchId);
     await this.closing.assertCounterOpen(branchId, 'agent_exchange');
 
@@ -222,34 +254,10 @@ export class AgentTransactionsService {
           throw new BadRequestException({ code: 'provider_inactive', message: `${provider.label} is switched off: nothing was exchanged with it.` });
         }
         const recordedAt = new Date();
+        // The version in force says only whether a reference is asked for; no version asks for none (D164).
         const config = await configInForce(tx, provider.id, recordedAt);
-        const missing = missingConfigFields(config);
-        if (!config || missing.length > 0) {
-          throw new ConflictException({
-            code: 'provider_not_configured',
-            message: `${provider.label} is not set up yet: its rate and settlement must be configured before an exchange is recorded. Nothing was recorded.`,
-            missing,
-          });
-        }
-        if (dto.configVersionId && !uuidToBin(dto.configVersionId).equals(config.id)) {
-          throw new ConflictException({
-            code: 'stale_configuration',
-            message: `${provider.label}'s configuration changed since this exchange was prepared. Review the rate in force before sending it again.`,
-            expectedConfigVersionId: dto.configVersionId,
-            currentConfigVersionId: binToUuid(config.id),
-          });
-        }
-        const reference = referenceFor(config.referenceRule as 'required' | 'optional' | 'none', dto.providerReference, provider.label);
-        const rateBp = rateFor(dto.direction, config) as number;
-        const commission = commissionOf(dto.amount, rateBp);
-        const legs = exchangeLegs({
-          direction: dto.direction,
-          amount: dto.amount,
-          commission,
-          providerId: dto.providerId,
-          commissionDestination: config.commissionDestination as 'cash' | 'provider_float' | 'held_separately',
-          principalFeeMode: config.principalFeeMode as 'separate' | 'deducted',
-        });
+        const reference = referenceFor(referenceRuleOf(config), dto.providerReference, provider.label);
+        const legs = exchangeLegs({ direction: dto.direction, amount: dto.amount, commission, providerId: dto.providerId });
         // The business day from the posting instant (D155), decided inside the transaction, then the day's lock.
         const businessDate = await this.businessDay.assign(branchId, recordedAt, tx as unknown as Prisma.TransactionClient);
         await this.closing.assertCounterOpenTx(tx, { branchId, businessDate, operation: 'agent_exchange' });
@@ -266,9 +274,10 @@ export class AgentTransactionsService {
             customerNumberLast4: customer.last4,
             providerReference: reference,
             commissionAmount: commission,
-            commissionRateBp: rateBp,
-            configVersionId: config.id,
-            configSnapshot: configView(config) as unknown as Prisma.InputJsonValue,
+            commissionSource: 'manual',
+            commissionRateBp: null,
+            configVersionId: config?.id ?? null,
+            configSnapshot: config ? (configView(config) as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
             businessDate: dateValue(businessDate),
             recordedAt,
             deviceRecordedAt: dto.deviceRecordedAt ? new Date(dto.deviceRecordedAt) : null,
@@ -290,8 +299,7 @@ export class AgentTransactionsService {
             direction: dto.direction,
             amount: dto.amount,
             commission,
-            rateBp,
-            configVersionId: binToUuid(config.id),
+            commissionSource: 'manual',
             businessDate,
             legs: legs.map((l) => [l.account, l.direction, l.amount, l.kind]),
           },
@@ -301,7 +309,7 @@ export class AgentTransactionsService {
     } catch (e) {
       // Two identical retries raced: the loser answers with the winner's record, or refuses a different payload.
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-        const winner = await this.replayTransaction(clientUuid, hash);
+        const winner = await this.replayTransaction(clientUuid, hashes);
         if (winner) return winner;
       }
       throw e;
@@ -309,10 +317,15 @@ export class AgentTransactionsService {
     return this.viewOf(id, false);
   }
 
-  private async replayTransaction(clientUuid: Buffer, hash: string) {
-    const prior = await this.db.agentTransaction.findFirst({ where: { clientUuid }, select: { id: true, clientRequestHash: true } });
+  /**
+   * A key already used: the record it made, when this is the same exchange — read with the fingerprint of the rule it
+   * was recorded under (an exchange recorded under the rate keeps its own, D164) — or a conflict.
+   */
+  private async replayTransaction(clientUuid: Buffer, hashes: { manual: string | null; legacy: string }) {
+    const prior = await this.db.agentTransaction.findFirst({ where: { clientUuid }, select: { id: true, clientRequestHash: true, commissionSource: true } });
     if (!prior) return null;
-    if (prior.clientRequestHash !== hash) {
+    const expected = prior.commissionSource === 'legacy_rate' ? hashes.legacy : hashes.manual;
+    if (prior.clientRequestHash !== expected) {
       throw new ConflictException({ code: 'idempotency_conflict', message: 'That request id already recorded a different exchange. Refresh and record it again with a new key.' });
     }
     // The record's own view, whatever branch the retry's header names (D161): the key is the exchange, and a
@@ -350,7 +363,8 @@ export class AgentTransactionsService {
         businessDate: dateKey(row.businessDate),
         recordedAt: row.recordedAt.toISOString(),
         recordedByName: row.recordedByName,
-        configVersionId: binToUuid(row.configVersionId),
+        commissionSource: row.commissionSource,
+        configVersionId: row.configVersionId ? binToUuid(row.configVersionId) : null,
         deviceRecordedAt: row.deviceRecordedAt?.toISOString() ?? null,
       },
     };

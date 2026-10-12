@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { AgentCommissionDestination, AgentPrincipalFeeMode, AgentProviderKind, AgentReferenceRule } from '@prisma/client';
-import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { AgentProviderKind, AgentReferenceRule } from '@prisma/client';
+import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, MinLength } from 'class-validator';
 
 /** A provider the company's agent counters exchange credit with (docs/73 §4.1). Company-wide; never deleted. */
 export class CreateAgentProviderDto {
@@ -53,10 +53,10 @@ export class UpdateAgentProviderDto {
 }
 
 /**
- * A new configuration version (docs/73 §1.2, §4.2): the Owner fills each field
- * from the provider's real schedule. A field left null is a blank — the
- * provider cannot post while any required one is blank — never a zero.
- * `effectiveFrom` is the server's clock, not a field.
+ * A new configuration version (D164): since the commission is typed per exchange, the only thing a provider's
+ * configuration still says is whether the provider issues a reference the counter must, may or need not enter.
+ * There is no rate, no destination and no fee mode — the pipe refuses those fields. `effectiveFrom` is the server's
+ * clock, not a field.
  */
 export class CreateAgentProviderConfigDto {
   /** One key per change, reused on every retry: the same key and body answer with the first answer (D160). */
@@ -64,38 +64,9 @@ export class CreateAgentProviderConfigDto {
   @IsUUID()
   clientRequestId: string;
 
-  @ApiPropertyOptional({ minimum: 0, maximum: 10_000, nullable: true, description: 'Basis points on Receive cash / Send credit; null = not supplied' })
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(10_000)
-  rateInBp?: number | null;
-
-  @ApiPropertyOptional({ minimum: 0, maximum: 10_000, nullable: true, description: 'Basis points on Give cash / Receive credit; copied from rateInBp when the rate is the same both ways' })
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  @Max(10_000)
-  rateOutBp?: number | null;
-
-  @ApiProperty({ description: 'One rate for both directions: rateInBp is copied to rateOutBp' })
-  @IsBoolean()
-  sameRateBothDirections: boolean;
-
-  @ApiPropertyOptional({ enum: AgentCommissionDestination, nullable: true })
-  @IsOptional()
-  @IsEnum(AgentCommissionDestination)
-  commissionDestination?: AgentCommissionDestination | null;
-
-  @ApiPropertyOptional({ enum: AgentPrincipalFeeMode, nullable: true })
-  @IsOptional()
-  @IsEnum(AgentPrincipalFeeMode)
-  principalFeeMode?: AgentPrincipalFeeMode | null;
-
-  @ApiPropertyOptional({ enum: AgentReferenceRule, nullable: true })
-  @IsOptional()
+  @ApiProperty({ enum: AgentReferenceRule, description: 'required: a reference for every exchange; optional: kept when given; none: never asked' })
   @IsEnum(AgentReferenceRule)
-  referenceRule?: AgentReferenceRule | null;
+  referenceRule: AgentReferenceRule;
 
   /** Why this version exists — the schedule it was read from, the change it records. Kept forever. */
   @ApiProperty({ maxLength: 255 })

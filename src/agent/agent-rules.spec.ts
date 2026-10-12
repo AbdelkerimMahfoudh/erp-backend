@@ -2,27 +2,24 @@ import { BadRequestException } from '@nestjs/common';
 import { PAYER_NUMBER_MAX_DIGITS } from '../sales/payer-number';
 import {
   assertFloatAmount,
-  commissionOf,
-  configRefusal,
+  COMMISSION_REFUSAL_MESSAGES,
+  commissionRefusal,
   customerNumberFor,
   dayMovementOf,
+  exchangeEffects,
   exchangeLegs,
   floatPosition,
   maskedCustomerNumber,
-  missingConfigFields,
   negativesAfter,
   parseCustomerNumber,
-  rateFor,
-  readyForTransactions,
   rebalancingLegs,
+  referenceRuleOf,
   reversalLegs,
   sumLegs,
-  withSameRate,
   type FloatAnchor,
   type Leg,
-  type ProviderConfig,
 } from './agent-rules';
-import { aggregateAgentReport, type ReportRebalancingLeg, type ReportTransaction } from './agent-report-rules';
+import { aggregateAgentReport, effectsOfLegs, type ReportRebalancingLeg, type ReportTransaction } from './agent-report-rules';
 
 /**
  * The agent ledger's rules (docs/73 §4), pure. The worked example of §4.7 is
@@ -32,15 +29,6 @@ import { aggregateAgentReport, type ReportRebalancingLeg, type ReportTransaction
 const BANKILY = 'b0000000-0000-7000-8000-000000000001';
 const SEDAD = 'b0000000-0000-7000-8000-000000000002';
 
-/** The fixture configuration (docs/73 §4.7): 1.00 % both directions, settled apart, credited to the float. INVENTED. */
-const fixture: ProviderConfig = {
-  rateInBp: 100,
-  rateOutBp: 100,
-  sameRateBothDirections: true,
-  commissionDestination: 'provider_float',
-  principalFeeMode: 'separate',
-  referenceRule: 'optional',
-};
 
 const refusal = (fn: () => unknown) => {
   try {
@@ -51,61 +39,63 @@ const refusal = (fn: () => unknown) => {
   return undefined;
 };
 
-describe('the configuration gates the provider (docs/73 §1.2)', () => {
-  it('no version at all: every required field is missing, and the provider is not ready', () => {
-    expect(missingConfigFields(null)).toEqual(['rateInBp', 'rateOutBp', 'commissionDestination', 'principalFeeMode', 'referenceRule']);
-    expect(readyForTransactions(null)).toBe(false);
+describe('the provider’s configuration: only its reference rule, and nothing to set before it is used (D164)', () => {
+  it('no version, or a version that left it blank, takes a reference when given and asks for none', () => {
+    expect(referenceRuleOf(null)).toBe('optional');
+    expect(referenceRuleOf(undefined)).toBe('optional');
+    expect(referenceRuleOf({ referenceRule: null })).toBe('optional');
   });
 
-  it('a blank is a blank, never zero: each missing field is named', () => {
-    expect(missingConfigFields({ ...fixture, rateInBp: null, commissionDestination: null })).toEqual(['rateInBp', 'commissionDestination']);
-    expect(readyForTransactions({ ...fixture, referenceRule: null })).toBe(false);
-    expect(readyForTransactions(fixture)).toBe(true);
-    // A rate of 0 is a figure the Owner typed, not a blank.
-    expect(readyForTransactions({ ...fixture, rateInBp: 0, rateOutBp: 0 })).toBe(true);
-  });
-
-  it('one rate for both directions copies the typed rate; two rates stay two', () => {
-    expect(withSameRate({ rateInBp: 150, rateOutBp: 20, sameRateBothDirections: true })).toEqual({ rateInBp: 150, rateOutBp: 150, sameRateBothDirections: true });
-    expect(withSameRate({ rateInBp: 150, rateOutBp: 20, sameRateBothDirections: false })).toEqual({ rateInBp: 150, rateOutBp: 20, sameRateBothDirections: false });
-    // A blank copied is still a blank.
-    expect(withSameRate({ rateInBp: null, rateOutBp: 20, sameRateBothDirections: true }).rateOutBp).toBeNull();
-  });
-
-  it('a fee deducted from the principal can only land on the float; anything else is refused as a configuration', () => {
-    expect(configRefusal({ principalFeeMode: 'deducted', commissionDestination: 'provider_float' })).toBeNull();
-    expect(configRefusal({ principalFeeMode: 'deducted', commissionDestination: 'cash' })).toBe('deducted_destination');
-    expect(configRefusal({ principalFeeMode: 'deducted', commissionDestination: 'held_separately' })).toBe('deducted_destination');
-    expect(configRefusal({ principalFeeMode: 'deducted', commissionDestination: null })).toBe('deducted_destination');
-    expect(configRefusal({ principalFeeMode: 'separate', commissionDestination: 'cash' })).toBeNull();
-    expect(configRefusal({ principalFeeMode: null, commissionDestination: null })).toBeNull();
+  it('a version that set it is read as set', () => {
+    for (const rule of ['required', 'optional', 'none'] as const) expect(referenceRuleOf({ referenceRule: rule })).toBe(rule);
   });
 });
 
-describe('commission: the whole amount at the direction’s rate, to the cent (A4)', () => {
-  it('reads the direction’s own rate', () => {
-    const two = { rateInBp: 100, rateOutBp: 75 };
-    expect(rateFor('cash_in_credit_out', two)).toBe(100);
-    expect(rateFor('cash_out_credit_in', two)).toBe(75);
-    expect(rateFor('cash_out_credit_in', { rateInBp: 100, rateOutBp: null })).toBeNull();
+describe('the commission the employee types, for every exchange (D164)', () => {
+  it('is required: absent, null or an empty field is never read as zero', () => {
+    for (const absent of [undefined, null, '']) {
+      expect(commissionRefusal('cash_in_credit_out', 1_000, absent)).toBe('commission_required');
+      expect(commissionRefusal('cash_out_credit_in', 1_000, absent)).toBe('commission_required');
+    }
   });
 
-  it('round2(amount × bp / 10 000): never brackets, never a guess', () => {
-    expect(commissionOf(20_000, 100)).toBe(200);
-    expect(commissionOf(15_000, 100)).toBe(150);
-    expect(commissionOf(1_234.56, 150)).toBe(18.52);
-    expect(commissionOf(333.33, 33)).toBe(1.1);
-    expect(commissionOf(0.01, 100)).toBe(0);
-    expect(commissionOf(50_000, 0)).toBe(0);
-    expect(commissionOf(50_000, 10_000)).toBe(50_000);
+  it('zero, typed, is a commission: the customer paid none', () => {
+    expect(commissionRefusal('cash_in_credit_out', 1_000, 0)).toBeNull();
+    expect(commissionRefusal('cash_out_credit_in', 1_000, 0)).toBeNull();
   });
 
-  it('a half cent always rounds up, whatever the amount’s binary form, and the largest amounts stay exact', () => {
-    // 837 × 0.50 % = 4.185 and 879 × 0.50 % = 4.395: in floating point the first rounded down and the second up.
-    expect(commissionOf(837, 50)).toBe(4.19);
-    expect(commissionOf(879, 50)).toBe(4.4);
-    expect(commissionOf(0.5, 100)).toBe(0.01);
-    expect(commissionOf(999_999_999_999.99, 9_999)).toBe(999_899_999_999.99);
+  it('is whole MRU, zero or more — never negative, never a fraction, never text', () => {
+    for (const bad of [-1, -0.5, 12.5, 0.01, '30', Number.NaN, Number.POSITIVE_INFINITY, {}]) {
+      expect({ bad, refusal: commissionRefusal('cash_in_credit_out', 1_000, bad) }).toEqual({ bad, refusal: 'commission_invalid' });
+    }
+  });
+
+  it('giving cash, never more than the amount: the customer would be handed a negative sum; equal is the whole amount', () => {
+    expect(commissionRefusal('cash_out_credit_in', 1_000, 1_001)).toBe('commission_exceeds_amount');
+    expect(commissionRefusal('cash_out_credit_in', 1_000, 1_000)).toBeNull();
+  });
+
+  it('receiving cash, no ceiling: the customer pays it on top of the amount', () => {
+    expect(commissionRefusal('cash_in_credit_out', 1_000, 1_500)).toBeNull();
+  });
+
+  it('every refusal has words, and each says nothing was recorded', () => {
+    for (const message of Object.values(COMMISSION_REFUSAL_MESSAGES)) expect(message).toMatch(/Nothing was recorded\./);
+  });
+});
+
+describe('what an exchange does, as the review shows it before it is confirmed (D164)', () => {
+  it('receiving cash: the customer hands over the amount plus the commission; the credit sent is the amount', () => {
+    expect(exchangeEffects('cash_in_credit_out', 20_000, 200)).toEqual({ cash: 20_200, credit: 20_000, commission: 200 });
+  });
+
+  it('giving cash: the credit received is the amount; the customer is handed the amount less the commission', () => {
+    expect(exchangeEffects('cash_out_credit_in', 15_000, 150)).toEqual({ cash: 14_850, credit: 15_000, commission: 150 });
+  });
+
+  it('a commission of the whole amount hands over nothing; zero changes nothing', () => {
+    expect(exchangeEffects('cash_out_credit_in', 500, 500).cash).toBe(0);
+    expect(exchangeEffects('cash_in_credit_out', 500, 0)).toEqual({ cash: 500, credit: 500, commission: 0 });
   });
 });
 
@@ -139,7 +129,7 @@ describe('a rebalancing taking a known position below zero (docs/73 §4.7 row 4)
   });
 });
 
-describe('the legs of an exchange (docs/73 §4.2–4.3)', () => {
+describe('the legs of an exchange (D164, docs/73 §4.3)', () => {
   const leg = (account: Leg['account'], direction: Leg['direction'], amount: number, kind: Leg['kind'], providerId: string | null = BANKILY): Leg => ({
     account,
     providerId,
@@ -148,72 +138,53 @@ describe('the legs of an exchange (docs/73 §4.2–4.3)', () => {
     kind,
   });
 
-  it('Receive cash / Send credit, settled apart on the float: cash in A, float out A, float in C', () => {
-    expect(exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission: 200, providerId: BANKILY, commissionDestination: 'provider_float', principalFeeMode: 'separate' })).toEqual([
+  it('Receive cash / Send credit: cash in A, float out A, the commission in C on the drawer', () => {
+    expect(exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission: 200, providerId: BANKILY })).toEqual([
       leg('cash', 'inflow', 20_000, 'principal', null),
       leg('provider', 'outflow', 20_000, 'principal'),
-      leg('provider', 'inflow', 200, 'commission'),
+      leg('cash', 'inflow', 200, 'commission', null),
     ]);
   });
 
-  it('Give cash / Receive credit, settled apart on the float: cash out A, float in A, float in C', () => {
-    expect(exchangeLegs({ direction: 'cash_out_credit_in', amount: 15_000, commission: 150, providerId: SEDAD, commissionDestination: 'provider_float', principalFeeMode: 'separate' })).toEqual([
+  it('Give cash / Receive credit: cash out A, float in A, the commission in C on the drawer — it hands over A − C', () => {
+    const legs = exchangeLegs({ direction: 'cash_out_credit_in', amount: 15_000, commission: 150, providerId: BANKILY });
+    expect(legs).toEqual([
       leg('cash', 'outflow', 15_000, 'principal', null),
-      leg('provider', 'inflow', 15_000, 'principal', SEDAD),
-      leg('provider', 'inflow', 150, 'commission', SEDAD),
+      leg('provider', 'inflow', 15_000, 'principal'),
+      leg('cash', 'inflow', 150, 'commission', null),
     ]);
+    expect(effectsOfLegs(legs)).toEqual({ cashReceived: 0, cashPaid: 14_850, creditSent: 0, creditReceived: 15_000 });
   });
 
-  it('commission to the drawer: the third leg is cash in C — the drawer’s agentIn', () => {
-    const legs = exchangeLegs({ direction: 'cash_in_credit_out', amount: 10_000, commission: 100, providerId: BANKILY, commissionDestination: 'cash', principalFeeMode: 'separate' });
-    expect(legs[2]).toEqual(leg('cash', 'inflow', 100, 'commission', null));
-  });
-
-  it('commission held by the provider: the third leg is on the commission_held account of that provider', () => {
-    const legs = exchangeLegs({ direction: 'cash_out_credit_in', amount: 10_000, commission: 100, providerId: BANKILY, commissionDestination: 'held_separately', principalFeeMode: 'separate' });
-    expect(legs[2]).toEqual(leg('commission_held', 'inflow', 100, 'commission'));
-  });
-
-  it('deducted by the provider: the float leg is netted (out A − C, in A + C) and no commission leg is written', () => {
-    expect(exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission: 200, providerId: BANKILY, commissionDestination: 'provider_float', principalFeeMode: 'deducted' })).toEqual([
-      leg('cash', 'inflow', 20_000, 'principal', null),
-      leg('provider', 'outflow', 19_800, 'principal'),
-    ]);
-    expect(exchangeLegs({ direction: 'cash_out_credit_in', amount: 20_000, commission: 200, providerId: BANKILY, commissionDestination: 'provider_float', principalFeeMode: 'deducted' })).toEqual([
-      leg('cash', 'outflow', 20_000, 'principal', null),
-      leg('provider', 'inflow', 20_200, 'principal'),
-    ]);
-  });
-
-  it('the same figure either way: deducted leaves the float where separate does, by one netted leg instead of two', () => {
-    const net = (legs: Leg[]) => legs.filter((l) => l.account === 'provider').reduce((n, l) => n + (l.direction === 'inflow' ? l.amount : -l.amount), 0);
-    const apart = exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission: 200, providerId: BANKILY, commissionDestination: 'provider_float', principalFeeMode: 'separate' });
-    const netted = exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission: 200, providerId: BANKILY, commissionDestination: 'provider_float', principalFeeMode: 'deducted' });
-    expect(50_000 + net(apart)).toBe(30_200);
-    expect(50_000 + net(netted)).toBe(30_200);
-    expect(apart.filter((l) => l.account === 'provider')).toHaveLength(2);
-    expect(netted.filter((l) => l.account === 'provider')).toHaveLength(1);
-  });
-
-  it('a refused configuration cannot post: deducted anywhere but the float is a defect, not a leg', () => {
-    expect(() => exchangeLegs({ direction: 'cash_in_credit_out', amount: 100, commission: 1, providerId: BANKILY, commissionDestination: 'cash', principalFeeMode: 'deducted' })).toThrow(/deducted commission/);
+  it('the provider’s credit moves by the amount only, in both directions: the commission is never on it', () => {
+    for (const direction of ['cash_in_credit_out', 'cash_out_credit_in'] as const) {
+      const legs = exchangeLegs({ direction, amount: 9_000, commission: 75, providerId: BANKILY });
+      expect(legs.filter((l) => l.account !== 'cash').map((l) => l.amount)).toEqual([9_000]);
+      expect(legs.some((l) => l.account === 'commission_held')).toBe(false);
+    }
   });
 
   it('a zero commission writes no leg; the principal legs stay', () => {
-    const legs = exchangeLegs({ direction: 'cash_in_credit_out', amount: 100, commission: 0, providerId: BANKILY, commissionDestination: 'cash', principalFeeMode: 'separate' });
+    const legs = exchangeLegs({ direction: 'cash_in_credit_out', amount: 100, commission: 0, providerId: BANKILY });
     expect(legs).toHaveLength(2);
     expect(legs.every((l) => l.kind === 'principal')).toBe(true);
   });
 
   it('a reversal counters every leg once: same account, same amount, opposite direction, kind reversal (A7)', () => {
-    const original = exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission: 200, providerId: BANKILY, commissionDestination: 'provider_float', principalFeeMode: 'separate' });
+    const original = exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission: 200, providerId: BANKILY });
     expect(reversalLegs(original)).toEqual([
       leg('cash', 'outflow', 20_000, 'reversal', null),
       leg('provider', 'inflow', 20_000, 'reversal'),
-      leg('provider', 'outflow', 200, 'reversal'),
+      leg('cash', 'outflow', 200, 'reversal', null),
     ]);
     // Reversing the reversal's legs would give the original back: nothing is lost in the mirror.
     expect(reversalLegs(reversalLegs(original)).map((l) => [l.account, l.direction, l.amount])).toEqual(original.map((l) => [l.account, l.direction, l.amount]));
+  });
+
+  it('a legacy exchange reports the legs it wrote, never the new rule: a commission credited to the float shows on the credit', () => {
+    // Recorded under the rate (settled apart, credited to the float): stored legs, read back as they are.
+    const stored = [leg('cash', 'inflow', 20_000, 'principal', null), leg('provider', 'outflow', 20_000, 'principal'), leg('provider', 'inflow', 200, 'commission')];
+    expect(effectsOfLegs(stored)).toEqual({ cashReceived: 20_000, cashPaid: 0, creditSent: 19_800, creditReceived: 0 });
   });
 });
 
@@ -383,26 +354,26 @@ describe('the worked example of docs/73 §4.7, event by event', () => {
     expect(float(SEDAD)).toMatchObject({ known: false, position: null, unknownReason: 'no_anchor' });
   });
 
-  it('1 — Receive cash 20 000 / send Bankily credit: drawer 30 000, Bankily 30 200, commission 200, 1 / 20 000', () => {
-    const commission = commissionOf(20_000, rateFor('cash_in_credit_out', fixture)!);
-    post(exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission, providerId: BANKILY, commissionDestination: 'provider_float', principalFeeMode: 'separate' }), t('09:00'));
-    transactions.push({ providerId: BANKILY, providerLabel: 'Bankily', direction: 'cash_in_credit_out', amount: 20_000, commission, recordedById: 'u1', recordedByName: 'Aicha', businessDate: DAY, reversalDate: null });
-    expect(commission).toBe(200);
-    expect(drawer()).toBe(30_000);
-    expect(float(BANKILY).position).toBe(30_200);
+  it('1 — Receive cash 20 000 / send Bankily credit, the customer pays 200: drawer 30 200, Bankily 30 000, commission 200, 1 / 20 000', () => {
+    const legs = exchangeLegs({ direction: 'cash_in_credit_out', amount: 20_000, commission: 200, providerId: BANKILY });
+    post(legs, t('09:00'));
+    transactions.push({ providerId: BANKILY, providerLabel: 'Bankily', direction: 'cash_in_credit_out', amount: 20_000, commission: 200, effects: effectsOfLegs(legs), recordedById: 'u1', recordedByName: 'Aicha', businessDate: DAY, reversalDate: null });
+    expect(drawer()).toBe(30_200);
+    expect(float(BANKILY).position).toBe(30_000);
     expect(float(SEDAD).position).toBeNull();
-    expect(figures()).toMatchObject({ count: 1, volume: 20_000, commission: 200, cashReceived: 20_000, creditSent: 20_000 });
+    expect(figures()).toMatchObject({ count: 1, volume: 20_000, commission: 200, cashReceived: 20_200, creditSent: 20_000 });
   });
 
-  it('2 — Give cash 15 000 / receive Sedad credit: drawer 15 000, Bankily 30 200, Sedad unknown with 15 150 moved today, commission 350, 2 / 35 000', () => {
-    const commission = commissionOf(15_000, rateFor('cash_out_credit_in', fixture)!);
-    post(exchangeLegs({ direction: 'cash_out_credit_in', amount: 15_000, commission, providerId: SEDAD, commissionDestination: 'provider_float', principalFeeMode: 'separate' }), t('10:00'));
-    transactions.push({ providerId: SEDAD, providerLabel: 'Sedad', direction: 'cash_out_credit_in', amount: 15_000, commission, recordedById: 'u1', recordedByName: 'Aicha', businessDate: DAY, reversalDate: null });
-    expect(drawer()).toBe(15_000);
-    expect(float(BANKILY).position).toBe(30_200);
+  it('2 — Give cash 15 000 / receive Sedad credit, the customer pays 150: drawer 15 350 (14 850 handed over), Bankily 30 000, Sedad unknown with 15 000 moved today, commission 350, 2 / 35 000', () => {
+    const legs = exchangeLegs({ direction: 'cash_out_credit_in', amount: 15_000, commission: 150, providerId: SEDAD });
+    post(legs, t('10:00'));
+    transactions.push({ providerId: SEDAD, providerLabel: 'Sedad', direction: 'cash_out_credit_in', amount: 15_000, commission: 150, effects: effectsOfLegs(legs), recordedById: 'u1', recordedByName: 'Aicha', businessDate: DAY, reversalDate: null });
+    expect(drawer()).toBe(15_350);
+    expect(float(BANKILY).position).toBe(30_000);
     expect(float(SEDAD)).toMatchObject({ known: false, position: null });
-    expect(sedadDay()).toEqual({ businessDate: DAY, inflows: 15_150, outflows: 0, net: 15_150 });
-    expect(figures()).toMatchObject({ count: 2, volume: 35_000, commission: 350, cashPaid: 15_000, creditReceived: 15_000 });
+    expect(sedadDay()).toEqual({ businessDate: DAY, inflows: 15_000, outflows: 0, net: 15_000 });
+    expect(figures()).toMatchObject({ count: 2, volume: 35_000, commission: 350, cashReceived: 20_200, cashPaid: 14_850, creditSent: 20_000, creditReceived: 15_000 });
+    expect(figures().routes).toEqual({ cash_in_credit_out: { count: 1, volume: 20_000, commission: 200 }, cash_out_credit_in: { count: 1, volume: 15_000, commission: 150 } });
   });
 
   /*
@@ -412,11 +383,11 @@ describe('the worked example of docs/73 §4.7, event by event', () => {
    * so the 35 000 is a slip in the table's cash column, carried into its rows 4, 4' and 6; the rows below follow the
    * rule, and the slip is reported for the doc to correct.
    */
-  it('3 — reversal of #1 (wrong direction): the drawer gives the 20 000 back (−5 000, shown as negative), Bankily 50 000, commission 150, 1 completed and 1 reversed / 15 000', () => {
+  it('3 — reversal of #1 (wrong direction): the drawer gives the 20 200 back (−4 850, shown as negative), Bankily 50 000, commission 150, 1 completed and 1 reversed / 15 000', () => {
     const original = ledger.filter((l) => l.recordedAt.getTime() === t('09:00').getTime());
     post(reversalLegs(original), t('11:00'));
     transactions[0] = { ...transactions[0], reversalDate: DAY };
-    expect(drawer()).toBe(-5_000);
+    expect(drawer()).toBe(-4_850);
     expect(float(BANKILY).position).toBe(50_000);
     expect(float(SEDAD).position).toBeNull();
     expect(figures()).toMatchObject({ count: 1, volume: 15_000, commission: 150, reversals: { count: 1, volume: 20_000, commission: 200 } });
@@ -425,7 +396,7 @@ describe('the worked example of docs/73 §4.7, event by event', () => {
   it('4 — buying 100 000 of Bankily float with cash: the rule balances; the drawer would go 100 000 further below zero, a figure shown as negative before the Owner confirms, never hidden', () => {
     const v = rebalancingLegs({ legs: [{ account: 'cash', direction: 'outflow', amount: 100_000 }, { account: 'provider', providerId: BANKILY, direction: 'inflow', amount: 100_000 }] });
     expect(v.ok).toBe(true);
-    expect(drawer() - 100_000).toBe(-105_000);
+    expect(drawer() - 100_000).toBe(-104_850);
     expect(figures()).toMatchObject({ count: 1, volume: 15_000, commission: 150 });
   });
 
@@ -438,15 +409,15 @@ describe('the worked example of docs/73 §4.7, event by event', () => {
     for (const [id, legs] of [['r1', capital.ok ? capital.legs : []], ['r2', buy.ok ? buy.legs : []]] as const) {
       rebalancings.push(...legs.map((l) => ({ rebalancingId: id, account: l.account, direction: l.direction, amount: l.amount, businessDate: DAY })));
     }
-    expect(drawer()).toBe(-5_000);
+    expect(drawer()).toBe(-4_850);
     expect(float(BANKILY).position).toBe(150_000);
     expect(figures()).toMatchObject({ count: 1, volume: 15_000, commission: 150, rebalancings: { count: 2, cashIn: 100_000, cashOut: 100_000, floatIn: 100_000, floatOut: 0 } });
   });
 
-  it('5 — Sedad set at 40 000 by the Owner at 14:00: 40 000 plus later movements; the morning’s 15 150 is inside the amount read', () => {
+  it('5 — Sedad set at 40 000 by the Owner at 14:00: 40 000 plus later movements; the morning’s 15 000 is inside the amount read', () => {
     anchors[SEDAD] = { amount: 40_000, at: t('14:00'), businessDate: DAY, byName: 'Owner', source: 'set' };
     expect(float(SEDAD)).toMatchObject({ known: true, position: 40_000, sinceAnchorNet: 0 });
-    expect(sedadDay().net).toBe(15_150);
+    expect(sedadDay().net).toBe(15_000);
   });
 
   it('6 — the closing counts the floats: Bankily 149 900 (−100, a discrepancy), Sedad 40 000 (0); the drawer is expected at its tracked figure, negative and said so', () => {

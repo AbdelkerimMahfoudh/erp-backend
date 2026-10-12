@@ -6,11 +6,13 @@ import { IsMoney } from '../../common/money/is-money.decorator';
 import { PAYER_NUMBER_MAX_INPUT } from '../../sales/payer-number';
 
 /**
- * One exchange at the counter (A5–A6, docs/73 §4.1). What the server derives
- * is not here: the person recording it comes from the session (the global pipe
- * refuses any `employeeId`, `userId` or `recordedBy` a body might carry), the
- * commission from the provider's configuration, the instant and the business
- * day from the server's clock.
+ * One exchange at the counter (A5–A6, docs/73 §4.1, D164). What the server
+ * derives is not here: the person recording it comes from the session (the
+ * global pipe refuses any `employeeId`, `userId` or `recordedBy` a body might
+ * carry), the company and branch from the session and its branch header, the
+ * instant and the business day from the server's clock, the cash and credit
+ * effects from the amount and the commission. The commission is the one figure
+ * the employee types besides the amount: the customer pays it, there is no rate.
  */
 export class CreateAgentTransactionDto {
   @ApiProperty({ format: 'uuid', description: 'The phone’s key for this exchange, kept across retries' })
@@ -44,8 +46,21 @@ export class CreateAgentTransactionDto {
   @MaxLength(120)
   providerReference?: string;
 
-  /** The configuration version the phone showed: a different one in force is refused as stale (D155). */
-  @ApiPropertyOptional({ format: 'uuid' })
+  /**
+   * The commission the customer pays, typed by the employee for every exchange (D164): whole MRU, zero or more, and,
+   * giving cash, never more than the amount. Required — an empty field is never read as zero; checked by the service
+   * (`commissionRefusal`) so a missing or wrong value answers with its own code. Optional here only so a phone's retry
+   * of an exchange recorded before D164, under its own key, is still answered with what was recorded.
+   */
+  @ApiProperty({ minimum: 0, description: 'Whole MRU, required for every new exchange; 0 when the customer pays none' })
+  @IsOptional()
+  commissionAmount?: unknown;
+
+  /**
+   * Read only to match a retry of an exchange recorded under the rate (before D164) with its own fingerprint; a new
+   * exchange is priced by nothing but the commission typed.
+   */
+  @ApiPropertyOptional({ format: 'uuid', deprecated: true })
   @IsOptional()
   @IsUUID()
   configVersionId?: string;

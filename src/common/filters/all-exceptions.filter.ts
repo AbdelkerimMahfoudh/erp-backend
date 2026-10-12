@@ -107,16 +107,14 @@ const DETAIL_KEYS = [
   // The drawer's tracked amount when an opening refuses to keep it (`opening_cash_negative`, 2026-10-08).
   'trackedCash',
   /*
-   * The Money Services Agent activity (docs/73, D154–D156). `provider_not_configured` names the blank fields
-   * (`missing`) so the Owner knows what to fill; `stale_configuration` names the version the phone showed and the
-   * one in force; `float_count_required` lists the providers still to count; `activity_not_subscribed` (D156) says
+   * The Money Services Agent activity (docs/73, D154–D156, D164). `float_count_required` lists the providers still
+   * to count (D164 removed `provider_not_configured` and `stale_configuration`: a provider has nothing to configure
+   * before use, and the commission is typed per exchange, so neither version id is sent any more); `activity_not_subscribed` (D156) says
    * what the branch IS subscribed to and what the route needed, so the app can say "this branch does not sell"
    * rather than "forbidden" — a flag, never a price. `permission_denied` (D161) names the keys the caller lacks
    * under the same `missing`.
    */
   'missing',
-  'expectedConfigVersionId',
-  'currentConfigVersionId',
   'providers',
   'activity',
   'required',

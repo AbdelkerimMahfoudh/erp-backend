@@ -41,12 +41,41 @@ function nextMonth(yearMonth: string): string {
   return month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`;
 }
 
+/** The cash and the credit one exchange moved, from its own legs (D164): never recomputed from a rule. */
+export interface ExchangeMoneyEffects {
+  cashReceived: number;
+  cashPaid: number;
+  creditSent: number;
+  creditReceived: number;
+}
+
+/**
+ * What an exchange's own legs (its principal and commission legs, not a reversal's) did to the drawer and to the
+ * provider's credit, netted per account: receiving cash under D164 is cash received A + C and credit sent A; giving
+ * cash is credit received A and cash paid A − C. An exchange recorded under the rate reports exactly the legs it
+ * wrote — a commission credited to the float, or netted into it, shows on the credit, as it moved then.
+ */
+export function effectsOfLegs(legs: readonly { account: LegAccount; direction: LegDirection; amount: number }[]): ExchangeMoneyEffects {
+  const net = (account: LegAccount) => round2(legs.filter((l) => l.account === account).reduce((n, l) => n + (l.direction === 'inflow' ? l.amount : -l.amount), 0));
+  const cash = net('cash');
+  const credit = net('provider');
+  return {
+    cashReceived: cash > 0 ? cash : 0,
+    cashPaid: cash < 0 ? -cash : 0,
+    creditSent: credit < 0 ? -credit : 0,
+    creditReceived: credit > 0 ? credit : 0,
+  };
+}
+
 export interface ReportTransaction {
   providerId: string;
   providerLabel: string;
   direction: AgentDirection;
   amount: number;
+  /** The stored commission (typed, or what an exchange recorded under the rate stored): summed, never recomputed. */
   commission: number;
+  /** From the exchange's own legs. */
+  effects: ExchangeMoneyEffects;
   recordedById: string;
   recordedByName: string;
   /** The business date the exchange was recorded on. */
@@ -73,8 +102,16 @@ export interface ExchangeTotals {
   creditReceived: number;
   /** Earned in the period: its standing exchanges' commission, less that of earlier exchanges reversed in it. */
   commission: number;
+  /** The standing exchanges by route: how many, the principal, the commission (D164). */
+  routes: Record<AgentDirection, RouteTotals>;
   /** Reversals made in the period, whatever day their exchange was recorded on: never in the figures above. */
   reversals: { count: number; volume: number; commission: number };
+}
+
+export interface RouteTotals {
+  count: number;
+  volume: number;
+  commission: number;
 }
 
 export interface ReportTotals extends ExchangeTotals {
@@ -121,6 +158,7 @@ const emptyExchanges = (): ExchangeTotals => ({
   creditSent: 0,
   creditReceived: 0,
   commission: 0,
+  routes: { cash_in_credit_out: { count: 0, volume: 0, commission: 0 }, cash_out_credit_in: { count: 0, volume: 0, commission: 0 } },
   reversals: { count: 0, volume: 0, commission: 0 },
 });
 
@@ -152,13 +190,14 @@ function addExchange(into: ExchangeTotals, t: ReportTransaction, w: Window): voi
   into.count += 1;
   into.volume = round2(into.volume + t.amount);
   into.commission = round2(into.commission + t.commission);
-  if (t.direction === 'cash_in_credit_out') {
-    into.cashReceived = round2(into.cashReceived + t.amount);
-    into.creditSent = round2(into.creditSent + t.amount);
-  } else {
-    into.cashPaid = round2(into.cashPaid + t.amount);
-    into.creditReceived = round2(into.creditReceived + t.amount);
-  }
+  into.cashReceived = round2(into.cashReceived + t.effects.cashReceived);
+  into.cashPaid = round2(into.cashPaid + t.effects.cashPaid);
+  into.creditSent = round2(into.creditSent + t.effects.creditSent);
+  into.creditReceived = round2(into.creditReceived + t.effects.creditReceived);
+  const route = into.routes[t.direction];
+  route.count += 1;
+  route.volume = round2(route.volume + t.amount);
+  route.commission = round2(route.commission + t.commission);
 }
 
 function rebalancingTotals(legs: readonly ReportRebalancingLeg[]): ReportTotals['rebalancings'] {

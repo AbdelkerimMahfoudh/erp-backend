@@ -81,7 +81,7 @@ enum SubscriptionEventKind {
   /// 0086: a seat request was refused or withdrawn, or a held seat was released.
   seat_closed
   /// 0086: an additional store was requested; its charge awaits payment.
-  store_requested  /// D154: a branch's activity change asked for, applied, or scheduled for the renewal; a
+  store_requested /// D154: a branch's activity change asked for, applied, or scheduled for the renewal; a
   /// renewal that opened a new billing period.
   activity_requested
   activity_changed
@@ -498,11 +498,11 @@ model Branch {
   priceChangeEvents    PriceChangeEvent[]
   supplierSettlements  SupplierSettlement[]
   rollupRequests       RollupRequest[]
-  seatAllocations      SeatAllocation[]       @relation("SeatAllocationBranch")
+  seatAllocations      SeatAllocation[]      @relation("SeatAllocationBranch")
   /// 0091: open store requests that reserved this archived branch's slot, and the replacements made.
-  replacementRequests  SeatAllocation[]       @relation("SeatAllocationReplaces")
-  replacedBy           BranchReplacement[]    @relation("BranchReplacementArchived")
-  replacementOf        BranchReplacement[]    @relation("BranchReplacementReplacement")
+  replacementRequests  SeatAllocation[]      @relation("SeatAllocationReplaces")
+  replacedBy           BranchReplacement[]   @relation("BranchReplacementArchived")
+  replacementOf        BranchReplacement[]   @relation("BranchReplacementReplacement")
 
   @@unique([companyId, name]) // company_id is the leftmost column → covers company scans
   @@map("branches")
@@ -610,61 +610,61 @@ model User {
 
   company Company @relation(fields: [companyId], references: [id])
 
-  userBranches          UserBranch[]
-  grantsMade            UserBranchPermission[] @relation("GrantsMade")
-  closingsFirstClosed   DailyClosing[]         @relation("ClosingFirstClosedBy")
-  closingsReopened      DailyClosing[]         @relation("ClosingReopenedBy")
-  closingEvents         ClosingEvent[]         @relation("ClosingEventActor")
-  moneyAnchorsRecorded  MoneyAnchor[]          @relation("MoneyAnchorRecordedBy")
-  openingDecisions      OpeningDecision[]      @relation("OpeningDecisionRecordedBy")
-  agentProviderConfigsRecorded AgentProviderConfig[] @relation("AgentProviderConfigRecordedBy")
-  agentPositionsRecorded       AgentPosition[]       @relation("AgentPositionRecordedBy")
-  agentTransactionsRecorded    AgentTransaction[]    @relation("AgentTransactionRecordedBy")
-  agentTransactionsReversed    AgentTransaction[]    @relation("AgentTransactionReversedBy")
-  agentRebalancingsRecorded    AgentRebalancing[]    @relation("AgentRebalancingRecordedBy")
-  agentMistakesReported        AgentMistakeReport[]  @relation("AgentMistakeReportedBy")
-  agentMistakesDecided         AgentMistakeReport[]  @relation("AgentMistakeDecidedBy")
-  agentFloatCountsCounted      AgentFloatCount[]     @relation("AgentFloatCountedBy")
-  branchPricesSet       BranchVariantPrice[]   @relation("BranchPriceSetBy")
-  unitPricesSet         UnitPriceOverride[]    @relation("UnitPriceSetBy")
-  priceChanges          PriceChangeEvent[]     @relation("PriceChangeActor")
-  unitsCreated          Unit[]                 @relation("UnitCreatedBy")
-  unitsUpdated          Unit[]                 @relation("UnitUpdatedBy")
-  stockReceipts         StockReceipt[]
-  purchases             Purchase[]
-  supplierPayments      SupplierPayment[]
-  sales                 Sale[]
-  returnsRequested      ReturnRequest[]        @relation("ReturnRequestedBy")
-  returnsReviewed       ReturnRequest[]        @relation("ReturnReviewedBy")
-  returnsDecided        ReturnRequest[]        @relation("ReturnDecidedBy")
-  returnsApproved       ReturnReversal[]       @relation("ReturnApprovedBy")
-  refundsReported       RefundPayout[]         @relation("RefundReportedBy")
-  refundsConfirmed      RefundPayout[]         @relation("RefundConfirmedBy")
-  returnAdjustmentsMade ReturnAdjustment[]     @relation("ReturnAdjustmentBy")
-  returnPolicyOverrides Sale[]                 @relation("SaleReturnPolicyOverride")
-  returns               Return[]
-  transfersSent         StockTransfer[]        @relation("TransferSentBy")
-  transfersReceived     StockTransfer[]        @relation("TransferReceivedBy")
-  transfersRequested    StockTransfer[]        @relation("TransferRequestedBy")
-  transfersApproved     StockTransfer[]        @relation("TransferApprovedBy")
-  transfersDecided      StockTransfer[]        @relation("TransferDecidedBy")
-  expenses              Expense[]
-  dailyClosings         DailyClosing[]
-  digestLines           DigestLine[]
-  notifications         Notification[]
-  importBatches         ImportBatch[]
-  reportDefinitions     ReportDefinition[]
-  auditLogs             AuditLog[]
-  syncDevices           SyncDevice[]
-  authSessions          AuthSession[]
-  userDevices           UserDevice[]
-  otpChallenges         OtpChallenge[]
-  verificationIntents   VerificationIntent[]
-  settlementsReported   SupplierSettlement[]   @relation("SettlementReportedBy")
-  settlementsConfirmed  SupplierSettlement[]   @relation("SettlementConfirmedBy")
-  anomalyDismissals     AnomalyDismissal[]     @relation("AnomalyDismissedBy")
-  seatAllocations       SeatAllocation[]
-  agentRequestKeys      AgentRequestKey[]
+  userBranches                 UserBranch[]
+  grantsMade                   UserBranchPermission[] @relation("GrantsMade")
+  closingsFirstClosed          DailyClosing[]         @relation("ClosingFirstClosedBy")
+  closingsReopened             DailyClosing[]         @relation("ClosingReopenedBy")
+  closingEvents                ClosingEvent[]         @relation("ClosingEventActor")
+  moneyAnchorsRecorded         MoneyAnchor[]          @relation("MoneyAnchorRecordedBy")
+  openingDecisions             OpeningDecision[]      @relation("OpeningDecisionRecordedBy")
+  agentProviderConfigsRecorded AgentProviderConfig[]  @relation("AgentProviderConfigRecordedBy")
+  agentPositionsRecorded       AgentPosition[]        @relation("AgentPositionRecordedBy")
+  agentTransactionsRecorded    AgentTransaction[]     @relation("AgentTransactionRecordedBy")
+  agentTransactionsReversed    AgentTransaction[]     @relation("AgentTransactionReversedBy")
+  agentRebalancingsRecorded    AgentRebalancing[]     @relation("AgentRebalancingRecordedBy")
+  agentMistakesReported        AgentMistakeReport[]   @relation("AgentMistakeReportedBy")
+  agentMistakesDecided         AgentMistakeReport[]   @relation("AgentMistakeDecidedBy")
+  agentFloatCountsCounted      AgentFloatCount[]      @relation("AgentFloatCountedBy")
+  branchPricesSet              BranchVariantPrice[]   @relation("BranchPriceSetBy")
+  unitPricesSet                UnitPriceOverride[]    @relation("UnitPriceSetBy")
+  priceChanges                 PriceChangeEvent[]     @relation("PriceChangeActor")
+  unitsCreated                 Unit[]                 @relation("UnitCreatedBy")
+  unitsUpdated                 Unit[]                 @relation("UnitUpdatedBy")
+  stockReceipts                StockReceipt[]
+  purchases                    Purchase[]
+  supplierPayments             SupplierPayment[]
+  sales                        Sale[]
+  returnsRequested             ReturnRequest[]        @relation("ReturnRequestedBy")
+  returnsReviewed              ReturnRequest[]        @relation("ReturnReviewedBy")
+  returnsDecided               ReturnRequest[]        @relation("ReturnDecidedBy")
+  returnsApproved              ReturnReversal[]       @relation("ReturnApprovedBy")
+  refundsReported              RefundPayout[]         @relation("RefundReportedBy")
+  refundsConfirmed             RefundPayout[]         @relation("RefundConfirmedBy")
+  returnAdjustmentsMade        ReturnAdjustment[]     @relation("ReturnAdjustmentBy")
+  returnPolicyOverrides        Sale[]                 @relation("SaleReturnPolicyOverride")
+  returns                      Return[]
+  transfersSent                StockTransfer[]        @relation("TransferSentBy")
+  transfersReceived            StockTransfer[]        @relation("TransferReceivedBy")
+  transfersRequested           StockTransfer[]        @relation("TransferRequestedBy")
+  transfersApproved            StockTransfer[]        @relation("TransferApprovedBy")
+  transfersDecided             StockTransfer[]        @relation("TransferDecidedBy")
+  expenses                     Expense[]
+  dailyClosings                DailyClosing[]
+  digestLines                  DigestLine[]
+  notifications                Notification[]
+  importBatches                ImportBatch[]
+  reportDefinitions            ReportDefinition[]
+  auditLogs                    AuditLog[]
+  syncDevices                  SyncDevice[]
+  authSessions                 AuthSession[]
+  userDevices                  UserDevice[]
+  otpChallenges                OtpChallenge[]
+  verificationIntents          VerificationIntent[]
+  settlementsReported          SupplierSettlement[]   @relation("SettlementReportedBy")
+  settlementsConfirmed         SupplierSettlement[]   @relation("SettlementConfirmedBy")
+  anomalyDismissals            AnomalyDismissal[]     @relation("AnomalyDismissedBy")
+  seatAllocations              SeatAllocation[]
+  agentRequestKeys             AgentRequestKey[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -2013,12 +2013,12 @@ enum DiscrepancyResolution {
 /// decision, no record of who was held responsible. So a shortage was either
 /// silently absorbed or settled verbally.
 model ClosingDiscrepancy {
-  id             Bytes  @id @db.Binary(16)
-  companyId      Bytes  @map("company_id") @db.Binary(16)
-  branchId       Bytes  @map("branch_id") @db.Binary(16)
-  closingId      Bytes  @map("closing_id") @db.Binary(16)
+  id                Bytes  @id @db.Binary(16)
+  companyId         Bytes  @map("company_id") @db.Binary(16)
+  branchId          Bytes  @map("branch_id") @db.Binary(16)
+  closingId         Bytes  @map("closing_id") @db.Binary(16)
   /// Which channel was out. NULL only for a legacy cash-only closing.
-  channelCountId Bytes? @map("channel_count_id") @db.Binary(16)
+  channelCountId    Bytes? @map("channel_count_id") @db.Binary(16)
   /// D154: a provider float counted at this closing, when the difference is a float's rather than a channel's.
   agentFloatCountId Bytes? @map("agent_float_count_id") @db.Binary(16)
 
@@ -4535,8 +4535,8 @@ model SubscriptionPayment {
 
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
-  company         Company          @relation(fields: [companyId], references: [id])
-  subscription    Subscription     @relation(fields: [subscriptionId], references: [id])
+  company         Company             @relation(fields: [companyId], references: [id])
+  subscription    Subscription        @relation(fields: [subscriptionId], references: [id])
   seatAllocations SeatAllocation[]
   replacements    BranchReplacement[]
 
@@ -4826,9 +4826,9 @@ model BillingPeriod {
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company      Company      @relation(fields: [companyId], references: [id])
-  subscription Subscription @relation(fields: [subscriptionId], references: [id])
-  planVersion  PlanVersion  @relation(fields: [planVersionId], references: [id])
+  company      Company             @relation(fields: [companyId], references: [id])
+  subscription Subscription        @relation(fields: [subscriptionId], references: [id])
+  planVersion  PlanVersion         @relation(fields: [planVersionId], references: [id])
   replacements BranchReplacement[]
 
   @@index([companyId, periodStart], map: "ix_billing_periods_company")
@@ -5025,6 +5025,7 @@ model AnomalyDismissal {
   @@index([dismissedAt])
   @@map("anomaly_dismissals")
 }
+
 // ─── The Money Services Agent activity (docs/73, D154–D157; migration 0089) ───────────────────
 
 enum AgentProviderKind {
@@ -5044,6 +5045,13 @@ enum AgentCommissionDestination {
 enum AgentPrincipalFeeMode {
   separate
   deducted
+}
+
+/// Where an exchange's commission came from (D164, migration 0092): typed by the employee, or computed from the
+/// provider's rate before D164 — kept exactly as stored, never recomputed.
+enum AgentCommissionSource {
+  manual
+  legacy_rate
 }
 
 enum AgentReferenceRule {
@@ -5212,10 +5220,15 @@ model AgentTransaction {
   customerNumber      String                 @map("customer_number") @db.VarChar(40)
   customerNumberLast4 String                 @map("customer_number_last4") @db.Char(4)
   providerReference   String?                @map("provider_reference") @db.VarChar(120)
+  /// The commission the customer paid (D164: typed by the employee; whole MRU, never above the amount when giving
+  /// cash). Immutable once recorded.
   commissionAmount    Decimal                @map("commission_amount") @db.Decimal(14, 2)
-  commissionRateBp    Int                    @map("commission_rate_bp") @db.UnsignedInt
-  configVersionId     Bytes                  @map("config_version_id") @db.Binary(16)
-  configSnapshot      Json                   @map("config_snapshot") @db.Json
+  commissionSource    AgentCommissionSource  @default(manual) @map("commission_source")
+  /// Only on exchanges recorded under the rate (legacy_rate); NULL for a typed commission.
+  commissionRateBp    Int?                   @map("commission_rate_bp") @db.UnsignedInt
+  /// The provider's version in force when recorded (its reference rule), NULL when it had none.
+  configVersionId     Bytes?                 @map("config_version_id") @db.Binary(16)
+  configSnapshot      Json?                  @map("config_snapshot") @db.Json
   businessDate        DateTime               @map("business_date") @db.Date
   /// The server clock at posting; the business day is assigned from it (D155).
   recordedAt          DateTime               @map("recorded_at") @db.DateTime(6)
@@ -5233,12 +5246,12 @@ model AgentTransaction {
   reversalClientUuid  Bytes?                 @map("reversal_client_uuid") @db.Binary(16)
   createdAt           DateTime               @default(now()) @map("created_at") @db.DateTime(6)
 
-  company        Company             @relation(fields: [companyId], references: [id], map: "fk_agent_transactions_company")
-  branch         Branch              @relation(fields: [branchId], references: [id], map: "fk_agent_transactions_branch")
-  provider       AgentProvider       @relation(fields: [providerId], references: [id], map: "fk_agent_transactions_provider")
-  config         AgentProviderConfig @relation(fields: [configVersionId], references: [id], map: "fk_agent_transactions_config")
-  recordedBy     User                @relation("AgentTransactionRecordedBy", fields: [recordedById], references: [id], map: "fk_agent_transactions_recorded_by")
-  reversedBy     User?               @relation("AgentTransactionReversedBy", fields: [reversedById], references: [id], map: "fk_agent_transactions_reversed_by")
+  company        Company              @relation(fields: [companyId], references: [id], map: "fk_agent_transactions_company")
+  branch         Branch               @relation(fields: [branchId], references: [id], map: "fk_agent_transactions_branch")
+  provider       AgentProvider        @relation(fields: [providerId], references: [id], map: "fk_agent_transactions_provider")
+  config         AgentProviderConfig? @relation(fields: [configVersionId], references: [id], onDelete: Restrict, map: "fk_agent_transactions_config")
+  recordedBy     User                 @relation("AgentTransactionRecordedBy", fields: [recordedById], references: [id], map: "fk_agent_transactions_recorded_by")
+  reversedBy     User?                @relation("AgentTransactionReversedBy", fields: [reversedById], references: [id], map: "fk_agent_transactions_reversed_by")
   movements      AgentMovement[]
   mistakeReports AgentMistakeReport[]
 
