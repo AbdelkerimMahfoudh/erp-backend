@@ -54,6 +54,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { randomBytes } from 'node:crypto';
 import { RegistrationFlowService } from './registration-flow.service';
 import { ContinueConfirmDto, ContinueStartDto, IsNotEmptyish, RegisterDto } from './registration.dto';
+import { trialFactsOf } from './trial/trial-rules';
 
 /**
  * The platform-control API.
@@ -83,6 +84,12 @@ import { ContinueConfirmDto, ContinueStartDto, IsNotEmptyish, RegisterDto } from
  * (`auth/register*`, 0095) by this same limit, so neither door is the cheaper one to hammer.
  */
 export const PUBLIC_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
+
+/** The free trial's facts as a company row carries them (0095) — what the console's states are computed with. */
+const TRIAL_FACTS = {
+  trialEligibility: { select: { closedAt: true } },
+  trialClaim: { select: { claimedAt: true, startedAt: true, endsAt: true } },
+} as const;
 
 class AdminSignInDto {
   @IsEmail() @MaxLength(160) email: string;
@@ -368,15 +375,17 @@ export class PlatformController {
         complimentaryUntil: true,
         subscribedBranchCount: true,
         additionalSeats: true,
+        company: { select: TRIAL_FACTS },
       },
     });
 
     // Counted from the SAME rules the app enforces, never a second
-    // interpretation of the dates.
+    // interpretation of the dates — the free trial's facts included (0095), so
+    // a business in its trial is counted as one, not as pending or expired.
     const tally: Record<string, number> = {};
-    for (const s of subs) {
+    for (const { company, ...s } of subs) {
       const e = buildEntitlement(
-        { ...s, status: s.status },
+        { ...s, status: s.status, trial: trialFactsOf(company.trialEligibility, company.trialClaim) },
         { seatsUsed: 0, activeBranchCount: 0 },
         now,
       );
@@ -403,6 +412,9 @@ export class PlatformController {
         expired: tally.expired ?? 0,
         cancelled: tally.cancelled ?? 0,
         rejected: tally.rejected ?? 0,
+        trial_available: tally.trial_available ?? 0,
+        trial_active: tally.trial_active ?? 0,
+        trial_expired: tally.trial_expired ?? 0,
       },
       businesses,
       branches,
@@ -464,6 +476,7 @@ export class PlatformController {
           city: true,
           createdAt: true,
           subscription: true,
+          ...TRIAL_FACTS,
           _count: { select: { branches: true, users: true } },
         },
       }),
@@ -473,9 +486,10 @@ export class PlatformController {
     const now = new Date();
     const mapped = rows.map((c) => {
       const sub = c.subscription;
+      // The free trial's facts with the row (0095): the state the shop itself is judged by, never a second reading.
       const ent = sub
         ? buildEntitlement(
-            { ...sub, status: sub.status },
+            { ...sub, status: sub.status, trial: trialFactsOf(c.trialEligibility, c.trialClaim) },
             { seatsUsed: 0, activeBranchCount: c._count.branches },
             now,
           )
@@ -523,8 +537,12 @@ export class PlatformController {
         publicStoreId: true,
         city: true,
         createdAt: true,
+        timezone: true,
         subscription: true,
         branches: { select: { id: true, name: true, type: true, activity: true, activityNext: true } },
+        // The free trial as recorded (0095): the eligibility and the claim, for the console to show — never to change.
+        trialEligibility: { select: { registrationMethod: true, createdAt: true, closedAt: true, closedReason: true } },
+        trialClaim: { select: { claimedAt: true, startedAt: true, endsAt: true, expiryRecordedAt: true } },
         /*
          * Owner CONTACT and verification state only.
          *
@@ -589,6 +607,31 @@ export class PlatformController {
       entitlement: ent,
       pricing,
       version: sub?.version ?? 0,
+      /*
+       * The free trial's recorded facts (0095): both null for a business the
+       * console created, or one that existed before the trial. The dates are
+       * UTC instants; `timeZone` is the business's own, for showing them. No
+       * console action creates, extends or shortens a trial.
+       */
+      trial: {
+        eligibility: company.trialEligibility
+          ? {
+              registrationMethod: company.trialEligibility.registrationMethod,
+              createdAt: company.trialEligibility.createdAt.toISOString(),
+              closedAt: company.trialEligibility.closedAt?.toISOString() ?? null,
+              closedReason: company.trialEligibility.closedReason,
+            }
+          : null,
+        claim: company.trialClaim
+          ? {
+              claimedAt: company.trialClaim.claimedAt.toISOString(),
+              startedAt: company.trialClaim.startedAt.toISOString(),
+              endsAt: company.trialClaim.endsAt.toISOString(),
+              expiryRecordedAt: company.trialClaim.expiryRecordedAt?.toISOString() ?? null,
+            }
+          : null,
+        timeZone: this.entitlement.trialZone(companyId, company.timezone),
+      },
       ...timeline,
     };
   }
