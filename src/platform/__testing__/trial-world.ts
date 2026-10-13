@@ -2,14 +2,21 @@ import { randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { EntitlementService } from '../../entitlement/entitlement.service';
 import { binToUuid, newUuidV7Bin } from '../../common/utils/uuid.util';
+import { TestWhatsAppChannel } from '../../messaging/channels';
+import type { EmailChannel, EmailMessage } from '../../messaging/email-channel';
+import { TRIAL_SETUP_TEMPLATE } from '../../messaging/templates';
+import type { DeliveryResult, WhatsAppChannel } from '../../messaging/whatsapp-channel';
 import { PlatformAuditService } from '../platform-audit.service';
 import { TrialService } from '../trial/trial.service';
+import { TrialSetupService } from '../trial/trial-setup.service';
 import type { TrialPrincipal } from '../trial/trial-facts';
 import { TRIAL_SETUP_LINK_TTL_HOURS, setupTokenHash, type TrialContact } from '../trial/trial-rules';
 
 /**
  * Businesses, their people, their subscriptions and their free trial rows, held in memory — with the REAL
- * `TrialService`, the real platform audit and the real entitlement's zone rule running on top (0095; docs/76).
+ * `TrialService` and `TrialSetupService`, the real platform audit and the real entitlement's zone rule running on top
+ * (0095; docs/76). The setup instructions go through a recording email channel and the test WhatsApp channel, both
+ * real providers by default; a test swaps either for another channel to make it fail, close or disappear.
  *
  * What a database does that a claim leans on is reproduced:
  *
@@ -17,7 +24,8 @@ import { TRIAL_SETUP_LINK_TTL_HOURS, setupTokenHash, type TrialContact } from '.
  *    `FOR UPDATE` gives every claim (each takes it first); reads outside a transaction interleave freely;
  *  - **all or nothing** — a callback that throws leaves every table as it found it;
  *  - **the unique keys** — one claim per company, one link per token hash — refuse a duplicate with P2002, and a
- *    stale version on the subscription refuses an update with P2025, as MySQL and Prisma would.
+ *    stale version on the subscription refuses an update with P2025, as MySQL and Prisma would;
+ *  - **newest first** — rows ordered by `createdAt` descending, ties by insertion (what time-ordered ids give).
  *
  * Payments, billing periods and seat allocations exist only to be counted: nothing a claim does may add to them.
  */
@@ -37,6 +45,10 @@ interface Tables {
   eligibilities: Row[];
   claims: Row[];
   links: Row[];
+  /** `trial_setup_messages`: every send attempt, append-only. */
+  messages: Row[];
+  /** `registration_attempts`: only the language the business registered in. */
+  registrations: Row[];
   events: Row[];
   audits: Row[];
   payments: Row[];
@@ -50,18 +62,53 @@ function same(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
-/** Equality and `not` — what the trial's writes filter on. Anything else is refused loudly. */
+/** Equality, `not`, `gt` on an instant and `OR` — what the trial's queries filter on. Anything else is refused loudly. */
 function matches(row: Row, where: Row): boolean {
   for (const [key, want] of Object.entries(where)) {
+    if (key === 'OR') {
+      if (!(want as Row[]).some((w) => matches(row, w))) return false;
+      continue;
+    }
     const have = row[key] ?? null;
     if (want !== null && typeof want === 'object' && !Buffer.isBuffer(want) && !(want instanceof Date)) {
-      if (!('not' in want)) throw new Error(`trial-world: unsupported filter on ${key}: ${JSON.stringify(want)}`);
-      if (same(have, want.not)) return false;
+      if ('not' in want) {
+        if (same(have, want.not)) return false;
+      } else if ('gt' in want && want.gt instanceof Date) {
+        if (!(have instanceof Date && have.getTime() > want.gt.getTime())) return false;
+      } else {
+        throw new Error(`trial-world: unsupported filter on ${key}: ${JSON.stringify(want)}`);
+      }
     } else if (!same(have, want)) {
       return false;
     }
   }
   return true;
+}
+
+/** Newest first: `createdAt` descending, ties by insertion — the only order the trial's queries ask for. */
+function newestFirst(rows: Row[], orderBy: unknown): Row[] {
+  const order = (Array.isArray(orderBy) ? orderBy : [orderBy]) as Row[];
+  if (order[0]?.createdAt !== 'desc') throw new Error(`trial-world: unsupported order ${JSON.stringify(orderBy)}`);
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) => b.row.createdAt.getTime() - a.row.createdAt.getTime() || b.index - a.index)
+    .map(({ row }) => row);
+}
+
+/**
+ * An email provider that records what it was asked to send and answers as a test needs: accepted unless `next` says
+ * otherwise. Named `resend`, so the sending treats it as the real provider it stands for.
+ */
+export class TestEmailChannel implements EmailChannel {
+  readonly name: string = 'resend';
+  readonly isEnabled: boolean = true;
+  readonly sent: EmailMessage[] = [];
+  next: DeliveryResult | null = null;
+
+  async send(message: EmailMessage): Promise<DeliveryResult> {
+    this.sent.push(message);
+    return this.next ?? { status: 'accepted', providerMessageId: `em-${this.sent.length}`, provider: this.name };
+  }
 }
 
 function pick(row: Row | null | undefined, select?: Row): Row | null {
@@ -97,6 +144,8 @@ export interface BusinessOptions {
   closed?: boolean;
   /** No subscription row at all — the demo company. */
   noSubscription?: boolean;
+  /** The language it registered in. */
+  language?: 'en' | 'fr' | 'ar';
 }
 
 export interface Business {
@@ -107,7 +156,21 @@ export interface Business {
   phone: string | null;
 }
 
-export function makeTrialWorld(options: { now?: Date } = {}) {
+export interface WorldOptions {
+  now?: Date;
+  /** The email channel the instructions go through; a recording real provider by default. */
+  email?: EmailChannel;
+  /** The WhatsApp channel; the test channel (a real provider) by default. */
+  whatsapp?: WhatsAppChannel;
+  /** PUBLIC_SITE_ORIGIN; `''` means no link can be built. */
+  siteOrigin?: string;
+  /** WHATSAPP_TEMPLATE_TRIAL_SETUP; `''` means WhatsApp cannot carry the instructions. */
+  whatsappTemplate?: string;
+}
+
+export const SITE_ORIGIN = 'https://dukan.example.test';
+
+export function makeTrialWorld(options: WorldOptions = {}) {
   let now = options.now ?? NOW;
   const clock = { now: () => now };
   const t: Tables = {
@@ -117,6 +180,8 @@ export function makeTrialWorld(options: { now?: Date } = {}) {
     eligibilities: [],
     claims: [],
     links: [],
+    messages: [],
+    registrations: [],
     events: [],
     audits: [],
     payments: [],
@@ -191,11 +256,33 @@ export function makeTrialWorld(options: { now?: Date } = {}) {
     },
     trialSetupLink: {
       findUnique: async ({ where, select }: Row) => pick(t.links.find((x) => x.tokenHash === where.tokenHash), select),
+      findFirst: async ({ where, orderBy, select }: Row) => pick(newestFirst(t.links.filter((x) => matches(x, where)), orderBy)[0], select),
+      create: async ({ data }: Row) => {
+        if (t.links.some((x) => x.tokenHash === data.tokenHash)) throw duplicate('ux_trial_setup_link_token');
+        t.links.push({ consumedAt: null, revokedAt: null, revokedReason: null, ...data });
+        return { ...data };
+      },
       updateMany: async ({ where, data }: Row) => {
         const hits = t.links.filter((x) => matches(x, where));
         for (const h of hits) Object.assign(h, data);
         return { count: hits.length };
       },
+    },
+    trialSetupMessage: {
+      // Append-only, as its triggers keep it: no update, no delete.
+      create: async ({ data }: Row) => (t.messages.push({ ...data }), data),
+      findFirst: async ({ where, orderBy, select }: Row) =>
+        pick(newestFirst(t.messages.filter((x) => matches(x, where)), orderBy ?? { createdAt: 'desc' })[0], select),
+      findMany: async ({ where, orderBy, take, select }: Row) =>
+        newestFirst(t.messages.filter((x) => matches(x, where)), orderBy ?? { createdAt: 'desc' })
+          .slice(0, take ?? undefined)
+          .map((r) => pick(r, select)),
+    },
+    trialEligibility: {
+      findUnique: async ({ where, select }: Row) => pick(t.eligibilities.find((x) => same(x.companyId, where.companyId)), select),
+    },
+    registrationAttempt: {
+      findFirst: async ({ where, select }: Row) => pick(t.registrations.find((x) => same(x.companyId, where.companyId)), select),
     },
     subscriptionEvent: {
       create: async ({ data }: Row) => (t.events.push({ ...data }), data),
@@ -237,8 +324,18 @@ export function makeTrialWorld(options: { now?: Date } = {}) {
 
   const entitlement = new EntitlementService(db as never, {} as never, clock);
   const audit = new PlatformAuditService(db as never);
-  const config = { otpPepper: PEPPER as string | null };
-  const service = new TrialService(db as never, entitlement, audit, config as never, clock);
+  const config = {
+    otpPepper: PEPPER as string | null,
+    publicSiteOrigin: options.siteOrigin ?? SITE_ORIGIN,
+    templates: { [TRIAL_SETUP_TEMPLATE.configKey]: options.whatsappTemplate ?? 'erp_trial_setup' } as Record<string, string>,
+    whatsappTemplateName(configKey: string): string {
+      return this.templates[configKey] ?? '';
+    },
+  };
+  const email = options.email ?? new TestEmailChannel();
+  const whatsapp = options.whatsapp ?? new TestWhatsAppChannel();
+  const setup = new TrialSetupService(db as never, entitlement, audit, config as never, whatsapp, email, clock);
+  const service = new TrialService(db as never, entitlement, audit, config as never, setup, clock);
 
   let counter = 0;
   /** A business as registration (or the console) leaves it, with its Owner. */
@@ -257,6 +354,7 @@ export function makeTrialWorld(options: { now?: Date } = {}) {
       isActive: !opts.closed,
       closedAt: opts.closed ? REGISTERED_AT : null,
     });
+    t.registrations.push({ companyId, language: opts.language ?? 'en' });
     t.users.push({
       id: ownerId,
       companyId,
@@ -342,6 +440,9 @@ export function makeTrialWorld(options: { now?: Date } = {}) {
 
   return {
     service,
+    setup,
+    email,
+    whatsapp,
     db,
     t,
     locks,
@@ -365,6 +466,7 @@ export function makeTrialWorld(options: { now?: Date } = {}) {
     claims: (b: Business) => of(t.claims, b),
     links: (b: Business) => of(t.links, b),
     link: (token: string) => t.links.find((x) => x.tokenHash === setupTokenHash(token))!,
+    messages: (b: Business) => of(t.messages, b),
     events: (b: Business) => of(t.events, b),
     audits: (b: Business) => t.audits.filter((r) => same(r.targetId, b.companyId)),
   };

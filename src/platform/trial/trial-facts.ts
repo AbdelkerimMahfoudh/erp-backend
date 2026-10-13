@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import type { SubscriptionRecord } from '../../entitlement/entitlement-rules';
+import { stateOf, type SubscriptionRecord } from '../../entitlement/entitlement-rules';
 import { trialFactsOf, type OwnerContacts } from './trial-rules';
 
 /**
@@ -94,4 +94,13 @@ export function subscriptionRecordOf(row: TrialFactsRow): SubscriptionRecord {
 /** Closed for good: the company was closed or deactivated, or its subscription cancelled. */
 export function isClosed(row: TrialFactsRow): boolean {
   return !row.isActive || row.closedAt !== null || row.subscription?.status === 'cancelled';
+}
+
+/**
+ * Whether the business may still start its trial: `trial_available` by the rules every request is judged by — an open
+ * eligibility, nothing claimed, nothing given — and not closed. A closed or deactivated company keeps its rows and
+ * starts nothing, so nothing is sent to it either.
+ */
+export function mayClaimNow(row: TrialFactsRow, now: Date): boolean {
+  return !isClosed(row) && row.trialEligibility !== null && stateOf(subscriptionRecordOf(row), now) === 'trial_available';
 }

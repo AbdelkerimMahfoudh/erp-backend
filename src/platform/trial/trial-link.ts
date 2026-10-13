@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import type { Prisma, TrialSetupLinkRevokedReason } from '@prisma/client';
 
 /**
  * What a setup link is worth to the signed-in Owner who presents it (0095; docs/76) — pure.
@@ -67,7 +68,11 @@ export function bindingDigest(key: string, owner: LinkBinding): string {
  * (`bindingKey`), and then no link can be issued or trusted. The setup instructions issue with it and the claim checks
  * with it: one function, so the two can never compute it differently.
  */
-export function linkBindingOf(pepper: string | null, owner: LinkBinding, env: NodeJS.ProcessEnv = process.env): string | null {
+export function linkBindingOf(
+  pepper: string | null,
+  owner: LinkBinding,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
   const key = bindingKey(pepper, env);
   return key ? bindingDigest(key, owner) : null;
 }
@@ -121,3 +126,23 @@ export const LINK_REFUSAL = {
   revoked: 'link_revoked',
   other_account: 'link_other_account',
 } as const satisfies Record<Exclude<TrialLinkOutcome, 'valid'>, string>;
+
+/**
+ * The write that retires every link that could still be used — unconsumed and unrevoked — among those named, with
+ * the reason it stops working: a new send (`reissued`), the claim (`claimed`), the Owner signing out everywhere, a
+ * contact or the password changing, the Owner's login deleted, the business closed. A link already used or revoked
+ * keeps the reason it has; the first one is the one that is true.
+ *
+ * Arguments for `updateMany`, not a call: it runs on whichever client the caller holds — a transaction, the tenant's
+ * scoped client, a batch — with the caller's own instant.
+ */
+export function revokeUsableLinks(
+  where: { companyId?: Buffer; userId?: Buffer },
+  reason: TrialSetupLinkRevokedReason,
+  now: Date,
+) {
+  return {
+    where: { ...where, consumedAt: null, revokedAt: null },
+    data: { revokedAt: now, revokedReason: reason },
+  } satisfies Prisma.TrialSetupLinkUpdateManyArgs;
+}

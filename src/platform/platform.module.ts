@@ -23,6 +23,8 @@ import { RegistrationFlowService } from './registration-flow.service';
 import { AppRegistrationController } from './app-registration.controller';
 import { TrialService } from './trial/trial.service';
 import { TrialController } from './trial/trial.controller';
+import { TrialSetupService } from './trial/trial-setup.service';
+import { TrialSetupController } from './trial/trial-setup.controller';
 import {
   ContactDeliveryProvider,
   outboxAllowed,
@@ -82,7 +84,14 @@ export function selectContactDelivery(
  */
 @Module({
   imports: [PrismaModule, EntitlementModule, AuthModule],
-  controllers: [PlatformController, SeatRequestsController, PlatformMfaController, AppRegistrationController, TrialController],
+  controllers: [
+    PlatformController,
+    SeatRequestsController,
+    PlatformMfaController,
+    AppRegistrationController,
+    TrialController,
+    TrialSetupController,
+  ],
   providers: [
     HashingService,
     PlatformAdminService,
@@ -98,6 +107,7 @@ export function selectContactDelivery(
     RegistrationFlowService,
     OwnerInvitationService,
     TrialService,
+    TrialSetupService,
     SeatAllocationService,
     StaffActivationService,
     {
@@ -141,6 +151,8 @@ export function selectContactDelivery(
     OutboxDeliveryProvider,
     SeatAllocationService,
     StaffActivationService,
+    // For the account module (0095): the free trial's setup instructions follow a WhatsApp number verified in the app.
+    TrialSetupService,
   ],
 })
 export class PlatformModule implements OnModuleInit {

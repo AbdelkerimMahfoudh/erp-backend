@@ -1,6 +1,5 @@
 import 'reflect-metadata';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { RequestMethod, ValidationPipe, VersioningType, type INestApplication } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA, ROUTE_ARGS_METADATA } from '@nestjs/common/constants';
 import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
@@ -10,9 +9,11 @@ import { IS_PUBLIC_KEY } from '../../common/decorators/public.decorator';
 import { TenantContext } from '../../common/tenant/tenant-context.service';
 import { PlatformAdminGuard } from '../platform-admin.guard';
 import { makeTrialWorld, type TrialWorld } from '../__testing__/trial-world';
+import { codeOf as CODE, routeTable } from '../__testing__/route-table';
 import { TrialController } from './trial.controller';
 import type { TrialPrincipal } from './trial-facts';
 import { TrialService } from './trial.service';
+import { TrialSetupService } from './trial-setup.service';
 import { TRIAL_TERMS_VERSION } from './trial-rules';
 
 /**
@@ -26,10 +27,6 @@ import { TRIAL_TERMS_VERSION } from './trial-rules';
  */
 
 const SOURCE = readFileSync('src/platform/trial/trial.controller.ts', 'utf8');
-const CODE = (file: string) =>
-  readFileSync(file, 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\/\/.*$/gm, '');
 
 const proto = TrialController.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
 const handlers = Object.getOwnPropertyNames(proto).filter(
@@ -37,7 +34,7 @@ const handlers = Object.getOwnPropertyNames(proto).filter(
 );
 
 describe('the trial routes, as Nest sees them', () => {
-  it('are exactly the card, the link check and the claim — under platform/my-subscription, never account/ or auth/', () => {
+  it('are exactly the card, the link check, the claim and the resend — under platform/my-subscription, never account/ or auth/', () => {
     const routes = handlers
       .map((name) => {
         const method = RequestMethod[Reflect.getMetadata(METHOD_METADATA, proto[name]) as RequestMethod];
@@ -48,6 +45,7 @@ describe('the trial routes, as Nest sees them', () => {
       'GET platform/my-subscription/trial',
       'POST platform/my-subscription/trial/claim',
       'POST platform/my-subscription/trial/link',
+      'POST platform/my-subscription/trial/setup/resend',
     ]);
   });
 
@@ -60,8 +58,8 @@ describe('the trial routes, as Nest sees them', () => {
     expect(Reflect.getMetadata(IS_PUBLIC_KEY, TrialController)).toBeUndefined();
   });
 
-  it('the claim and the link check are throttled like the account’s sensitive routes', () => {
-    for (const name of ['claim', 'checkLink']) {
+  it('the claim, the link check and the resend are throttled like the account’s sensitive routes', () => {
+    for (const name of ['claim', 'checkLink', 'resendSetup']) {
       expect(Reflect.getMetadata('THROTTLER:LIMITdefault', proto[name])).toBe(Number(process.env.ACCOUNT_THROTTLE_LIMIT) || 5);
       expect(Reflect.getMetadata('THROTTLER:TTLdefault', proto[name])).toBe(60_000);
     }
@@ -86,23 +84,6 @@ describe('the trial routes, as Nest sees them', () => {
 });
 
 describe('no trial action under account/ or auth/, and no route that takes a token from a URL', () => {
-  /** Every route the source declares: the controller's path and each handler's, with its method. */
-  function routeTable(): string[] {
-    const files = (readdirSync('src', { recursive: true }) as string[]).filter((f) => f.endsWith('.controller.ts'));
-    const routes: string[] = [];
-    for (const file of files) {
-      const code = CODE(join('src', file));
-      for (const cls of code.split(/(?=@Controller\()/).slice(1)) {
-        const head = cls.match(/^@Controller\((?:'([^']*)'|\{[^}]*?path:\s*'([^']*)'[^}]*\}|\{[^}]*\})?\)/);
-        const base = head?.[1] ?? head?.[2] ?? '';
-        for (const m of cls.matchAll(/@(Get|Post|Put|Patch|Delete)\((?:'([^']*)')?\)/g)) {
-          routes.push(`${m[1].toUpperCase()} ${[base, m[2] ?? ''].filter(Boolean).join('/')}`);
-        }
-      }
-    }
-    return routes;
-  }
-
   it('finds the routes it is about — so it cannot pass by reading nothing', () => {
     const routes = routeTable();
     expect(routes).toEqual(expect.arrayContaining(['POST auth/login', 'GET account', 'POST platform/my-subscription/trial/claim']));
@@ -142,6 +123,7 @@ describe('Origin and Referer change nothing — through the real Nest pipeline',
       controllers: [TrialController],
       providers: [
         { provide: TrialService, useValue: world.service },
+        { provide: TrialSetupService, useValue: world.setup },
         // The session's company and person, as the JWT guard leaves them — the only identity a route ever reads.
         { provide: TenantContext, useValue: { companyId: () => caller.companyId, requireUserId: () => caller.userId } },
       ],

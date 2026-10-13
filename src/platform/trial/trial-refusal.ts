@@ -20,6 +20,12 @@ const REFUSALS = {
   link_used: { status: HttpStatus.CONFLICT, message: 'This link has already been used.' },
   link_revoked: { status: HttpStatus.CONFLICT, message: 'This link no longer works.' },
   link_other_account: { status: HttpStatus.FORBIDDEN, message: 'This link belongs to another business account.' },
+  // The website's resend of the setup instructions: asked again too soon, or no channel can carry them now.
+  too_many_requests: { status: HttpStatus.TOO_MANY_REQUESTS, message: 'The setup instructions were sent a moment ago. You can ask again later.' },
+  setup_delivery_unavailable: {
+    status: HttpStatus.SERVICE_UNAVAILABLE,
+    message: 'The setup instructions cannot be sent right now. Your free trial is not affected.',
+  },
 } as const;
 
 export type TrialRefusalCode = keyof typeof REFUSALS;
@@ -29,6 +35,8 @@ interface RefusalDetails {
   missingContacts?: TrialContact[];
   termsVersion?: string;
   trial?: TrialView | null;
+  /** When the website may ask for the setup instructions again (UTC ISO). */
+  resendAvailableAt?: string;
 }
 
 /** A refusal of a trial route: its code, its words, and nothing a caller could not already know. */

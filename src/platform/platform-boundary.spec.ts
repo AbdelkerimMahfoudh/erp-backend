@@ -440,8 +440,9 @@ describe('a closed business stays closed on the server', () => {
     // to be allowed (docs/21, 2026-10-05); nothing is granted by asking. Asking for another
     // activity for a branch (D154, 2026-10-08) is the same kind of request: an upgrade waits for
     // its payment, a downgrade waits for the renewal, and nothing changes by asking.
-    // The free trial (0095): a business that has not started must be able to read its card, check a setup link and
-    // claim — only the Owner, and a claim writes the trial itself, nothing paid or billed.
+    // The free trial (0095): a business that has not started must be able to read its card, check a setup link,
+    // claim and ask for its setup instructions again — only the Owner, and a claim writes the trial itself, nothing
+    // paid or billed.
     expect(allowedWrites).toEqual([
       'platform/my-subscription/seat-requests',
       'platform/my-subscription/store-requests',
@@ -450,6 +451,7 @@ describe('a closed business stays closed on the server', () => {
       'platform/portal-handoff',
       'platform/my-subscription/trial/claim',
       'platform/my-subscription/trial/link',
+      'platform/my-subscription/trial/setup/resend',
     ]);
     expect(allowedReads).toEqual(['platform/my-subscription', 'platform/payment-instructions', 'platform/my-subscription/trial']);
   });

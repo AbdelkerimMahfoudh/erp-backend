@@ -24,8 +24,10 @@ import {
   type TrialView,
 } from './trial-rules';
 import { LINK_REFUSAL, linkBindingOf, linkOutcomeOf, type LinkBinding, type TrialLinkOutcome } from './trial-link';
-import { isClosed, readFacts, readOwner, subscriptionRecordOf, type TrialFactsRow, type TrialPrincipal } from './trial-facts';
+import { isClosed, mayClaimNow, readFacts, readOwner, subscriptionRecordOf, type TrialFactsRow, type TrialPrincipal } from './trial-facts';
 import { TrialRefusal } from './trial-refusal';
+import { TrialSetupService } from './trial-setup.service';
+import type { WebsiteSetup } from './trial-setup-rules';
 
 /**
  * The website-only seven-day free trial: the Owner's offer, the setup link check, and the claim (0095; docs/76).
@@ -59,10 +61,10 @@ export interface TrialStatus {
   trial: TrialView | null;
   offer: TrialOffer | null;
   /**
-   * The setup instructions' delivery status. This server does not send them yet, so there is none to report and the
-   * value is always null — and the offer never depends on it: delivery is never a condition for claiming.
+   * Where the setup instructions stand, with their history and when the Owner may ask again — while the business may
+   * claim (`trial_available`), else null. Never a condition for claiming: the offer does not read it.
    */
-  setup: null;
+  setup: WebsiteSetup | null;
   calculatedAt: string;
 }
 
@@ -96,13 +98,14 @@ export class TrialService {
     private readonly entitlement: EntitlementService,
     private readonly audit: PlatformAuditService,
     private readonly config: AppConfigService,
+    private readonly setup: TrialSetupService,
     @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
   // ── The rules, over one reading ──────────────────────────────────────────
 
   /** The card: the state, the trial's view, and the offer — all from the one reading given. */
-  private statusOf(companyId: Buffer, row: TrialFactsRow, owner: OwnerContacts, now: Date): TrialStatus {
+  private statusOf(companyId: Buffer, row: TrialFactsRow, owner: OwnerContacts, now: Date): Omit<TrialStatus, 'setup'> {
     const record = subscriptionRecordOf(row);
     const state = stateOf(record, now);
     const zone = this.entitlement.trialZone(companyId, row.timezone);
@@ -114,7 +117,6 @@ export class TrialService {
         now,
         zone,
       ),
-      setup: null,
       calculatedAt: now.toISOString(),
     };
   }
@@ -123,14 +125,26 @@ export class TrialService {
 
   /**
    * The Owner's trial card. Readable in every state — a business that has not started is exactly who reads it — and
-   * by the Owner alone (403 `owner_only` for everyone else, before anything is read about the trial).
+   * by the Owner alone (403 `owner_only` for everyone else, before anything is read about the trial). While the
+   * business may claim, it also says where the setup instructions stand: the offer beside it is the same either way.
    */
   async status(who: TrialPrincipal): Promise<TrialStatus> {
     const now = this.clock.now();
     const owner = await readOwner(this.prisma, who);
     const row = owner ? await readFacts(this.prisma, who.companyId) : null;
     if (!owner || !row) throw new TrialRefusal('owner_only');
-    return this.statusOf(who.companyId, row, owner, now);
+    const card = this.statusOf(who.companyId, row, owner, now);
+    const eligibility = row.trialEligibility;
+    return {
+      state: card.state,
+      trial: card.trial,
+      offer: card.offer,
+      setup:
+        eligibility && mayClaimNow(row, now)
+          ? await this.setup.websiteSetup(who.companyId, owner, eligibility.registrationMethod, now)
+          : null,
+      calculatedAt: card.calculatedAt,
+    };
   }
 
   /**

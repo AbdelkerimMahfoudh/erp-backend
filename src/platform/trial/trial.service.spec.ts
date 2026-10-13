@@ -548,7 +548,19 @@ describe('the offer the website shows', () => {
         requiredContacts: ['email', 'phone'],
         missingContacts: [],
       },
-      setup: null,
+      // Where the setup instructions stand — shown beside the offer, never a condition of it.
+      setup: {
+        delivery: 'not_sent',
+        sentTo: [],
+        destinations: [
+          { channel: 'email', masked: 'o•••@shop.test' },
+          { channel: 'whatsapp', masked: '+222••••0001' },
+        ],
+        lastAttemptAt: null,
+        canResendNow: true,
+        resendAvailableAt: null,
+        history: [],
+      },
       calculatedAt: NOW.toISOString(),
     });
   });
