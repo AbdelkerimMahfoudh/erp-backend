@@ -1,4 +1,4 @@
-# Optional local MySQL 8.4 for the Phone Store ERP — for machines WITHOUT a
+# Optional local MySQL 8.4 for Dukan ERP — for machines WITHOUT a
 # local MySQL. If you already run MySQL 8.0+ (e.g. WAMP on port 3306), you do
 # NOT need this: just point DATABASE_URL at your instance.
 #

@@ -8,6 +8,9 @@
 //
 //   QA_DB   the QA schema (default `prisma_qa`; anything else starting `prisma_qa`)
 //   QA_API  the QA API serving that schema (default http://127.0.0.1:3020/api/v1)
+//   PLATFORM_MFA_KEY        the QA API's own key: the administrator's second factor is sealed and derived with it
+//   QA_ADMIN_RECOVERY_CODE  only when the administrator was enrolled with an authenticator app, whose codes this script
+//                           cannot compute: one of its recovery codes, spent on one --verify sign-in; never printed
 //
 // Every boutique is its own company with one branch and one Owner
 // (`boutique1@test.com` … `boutique10@test.com`), registered, verified and
@@ -40,7 +43,7 @@
 import { config as loadEnv } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { createHash as sha256, createHmac } from 'node:crypto';
-import { parseMfaKey, seal } from '../src/platform/mfa/secret-box';
+import { open, parseMfaKey, seal } from '../src/platform/mfa/secret-box';
 import { base32Encode, stepAt, totpForStep } from '../src/platform/mfa/totp';
 import { HashingService } from '../src/common/security/hashing.service';
 import { isValidImei, luhnValid } from '../src/inventory/imei.util';
@@ -200,19 +203,31 @@ interface Reply {
   cookie: string | null;
 }
 
+/**
+ * Reading a contact code back blocks this script for seconds (up to a million hashes), longer than the API keeps an
+ * idle connection: the next request can go out on the socket the API just closed, and fails with ECONNRESET before
+ * the server reads it. Such a request is sent once more; any other failure is reported as it is.
+ */
+function closedSocket(e: unknown): boolean {
+  const code = (e as { cause?: { code?: string } })?.cause?.code;
+  return code === 'ECONNRESET' || code === 'UND_ERR_SOCKET' || code === 'EPIPE';
+}
+
 async function call(method: string, path: string, opts: { body?: unknown; token?: string; branch?: string; cookie?: string } = {}): Promise<Reply> {
   for (let attempt = 0; attempt < 12; attempt++) {
-    const res = await fetch(`${QA_API}/${path}`, {
-      method,
-      headers: {
-        ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
-        ...(opts.branch ? { 'X-Branch-Id': opts.branch } : {}),
-        ...(opts.cookie ? { Cookie: opts.cookie } : {}),
-        'User-Agent': 'qa-boutiques',
-      },
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    });
+    const send = () =>
+      fetch(`${QA_API}/${path}`, {
+        method,
+        headers: {
+          ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+          ...(opts.branch ? { 'X-Branch-Id': opts.branch } : {}),
+          ...(opts.cookie ? { Cookie: opts.cookie } : {}),
+          'User-Agent': 'qa-boutiques',
+        },
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      });
+    const res = await send().catch((e: unknown) => (closedSocket(e) ? send() : Promise.reject(e)));
     if (res.status === 429) {
       const wait = Number(res.headers.get('retry-after')) || 15;
       await new Promise((r) => setTimeout(r, Math.min(60, wait) * 1000));
@@ -257,12 +272,33 @@ async function qaAdminCode(): Promise<string> {
   return totpForStep(qaAdminSecret(), lastTotpStep);
 }
 
-/** Password, then the code: the session reaches nothing until its second factor is verified. */
+/**
+ * Whose second factor the administrator holds: `derived`, the one this script provisions (or none yet), or `app`,
+ * an authenticator app a person enrolled with a server token — its codes cannot be computed here, and this script
+ * never overwrites it.
+ */
+let adminFactor: 'derived' | 'app' = 'derived';
+async function readAdminFactor(prisma: PrismaClient): Promise<void> {
+  const admin = await prisma.platformAdmin.findUnique({ where: { email: ADMIN_EMAIL }, select: { mfaSecretEnc: true, mfaEnabledAt: true } });
+  const enrolled = admin?.mfaEnabledAt != null && admin.mfaSecretEnc != null;
+  adminFactor = enrolled && open(admin.mfaSecretEnc, mfaKey()) !== qaAdminSecret() ? 'app' : 'derived';
+}
+
+function recoveryCode(): string {
+  const value = process.env.QA_ADMIN_RECOVERY_CODE?.trim();
+  if (!value) {
+    throw new Error(`${ADMIN_EMAIL} was enrolled with an authenticator app (or under another PLATFORM_MFA_KEY), whose codes this script cannot compute: set QA_ADMIN_RECOVERY_CODE to one of its recovery codes — it is spent on this sign-in.`);
+  }
+  return value;
+}
+
+/** Password, then the second factor — the derived code, or a recovery code of an app-enrolled administrator. */
 async function adminSignIn(pw: string): Promise<{ status: number; cookie: string | null }> {
   const signIn = await call('POST', 'platform/admin/sign-in', { body: { email: ADMIN_EMAIL, password: pw } });
   const cookie = signIn.cookie ?? (signIn.json?.sessionToken ? `erp_platform_session=${signIn.json.sessionToken}` : null);
   if (signIn.status !== 200 || !cookie) return { status: signIn.status, cookie: null };
-  const verified = await call('POST', 'platform/admin/mfa/verify', { cookie, body: { code: await qaAdminCode() } });
+  const factor = adminFactor === 'derived' ? { code: await qaAdminCode() } : { recoveryCode: recoveryCode() };
+  const verified = await call('POST', 'platform/admin/mfa/verify', { cookie, body: factor });
   return { status: verified.status, cookie: verified.status === 200 ? cookie : null };
 }
 
@@ -276,6 +312,11 @@ async function ensureStepUp(cookie: string, pw: string): Promise<void> {
 }
 
 async function ensureAdmin(prisma: PrismaClient, hashing: HashingService, pw: string): Promise<string> {
+  if (adminFactor === 'app') {
+    // Protected actions need a fresh code from that app: provisioning cannot proceed, and a person's enrolment is theirs.
+    if (!APPLY) return 'enrolled with an authenticator app — left as it is; --apply would refuse';
+    throw new Error(`Refusing: ${ADMIN_EMAIL} was enrolled with an authenticator app, and provisioning needs step-up codes this script cannot compute. Reset that factor on the server first — npx ts-node prisma/platform-admin-mfa.ts enrolment-token ${ADMIN_EMAIL}, the token left unused — and run --apply again: the script then provisions its own.`);
+  }
   const existing = await prisma.platformAdmin.findUnique({ where: { email: ADMIN_EMAIL } });
   const enrolled = existing?.mfaEnabledAt != null && existing.mfaSecretEnc != null;
   if (existing && existing.isActive && !existing.deletedAt && enrolled && (await hashing.verify(existing.passwordHash, pw))) return 'present';
@@ -330,7 +371,7 @@ async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, ad
     const code = await codeFor(prisma, email);
     const done = expectOk(await call('POST', 'platform/register/verify/confirm', { body: { continuation: reg.continuation.token, code } }), `verify ${email}`);
     // Completion signs the Owner in; the fixture is signed into later, so that session is closed at once.
-    if (done?.accessToken) await call('POST', 'auth/logout-all', { token: done.accessToken, body: {} });
+    if (done?.accessToken) await call('POST', 'auth/logout', { token: done.accessToken, body: { refreshToken: done.refreshToken } });
   }
   const found = expectOk(await call('GET', `platform/businesses?q=${encodeURIComponent(email)}`, { cookie: adminCookie }), `find ${email}`);
   const row = (found.rows ?? []).find((r: any) => r.name === `Boutique ${n}`);
@@ -345,17 +386,19 @@ async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, ad
   return { companyId: row.id, created: Boolean(reg.created) };
 }
 
-async function signIn(email: string, pw: string): Promise<{ token: string; branch: string }> {
+async function signIn(email: string, pw: string): Promise<{ token: string; refresh: string; branch: string }> {
   const login = expectOk(await call('POST', 'auth/login', { body: { identifier: email, password: pw } }), `sign in ${email}`);
   const branches = expectOk(await call('GET', 'auth/branches', { token: login.accessToken }), `branches ${email}`);
   if (!Array.isArray(branches) || branches.length !== 1) throw new Error(`${email}: expected one branch, got ${Array.isArray(branches) ? branches.length : '?'}`);
-  return { token: login.accessToken, branch: branches[0].id };
+  return { token: login.accessToken, refresh: login.refreshToken, branch: branches[0].id };
 }
 
 async function stockBoutique(n: number, pw: string): Promise<{ products: number; phones: number; accessories: number; stocked: boolean }> {
   const email = `boutique${n}@test.com`;
-  const { token, branch } = await signIn(email, pw);
+  const { token, refresh, branch } = await signIn(email, pw);
   const as = { token, branch };
+  // The Owner's session opened for this receipt is closed again — that one only, never a phone's.
+  const close = () => call('POST', 'auth/logout', { token, body: { refreshToken: refresh } });
 
   // A registered shop starts with no categories; its Owner creates them (Catalogue → Categories) — the two used here.
   const categories = expectOk(await call('GET', 'categories', as), 'categories');
@@ -410,7 +453,10 @@ async function stockBoutique(n: number, pw: string): Promise<{ products: number;
   const accessories = ACCESSORIES.reduce((s, a) => s + a.quantity, 0);
   // Already received (the fixture's first IMEI is on the shelf or was sold from it): no day is opened, nothing sent.
   const firstImei = (items[0] as { units: { identifier: string }[] }).units[0].identifier;
-  if ((await call('GET', `units/${firstImei}`, as)).status === 200) return { products: products.length, phones, accessories, stocked: true };
+  if ((await call('GET', `units/${firstImei}`, as)).status === 200) {
+    await close();
+    return { products: products.length, phones, accessories, stocked: true };
+  }
 
   // Receipts wait for the day's opening (docs/63): open it — before 06:00 start today early — keeping the amounts.
   const day = expectOk(await call('GET', 'closings/business-day', as), 'business day');
@@ -430,6 +476,7 @@ async function stockBoutique(n: number, pw: string): Promise<{ products: number;
     body: { clientUuid: keyFor(`boutique-${n}-stock-v1`), paymentMethod: 'cash', referenceNo: `QA-B${n}-STOCK`, items },
   });
   expectOk(receipt, `receipt Boutique ${n}`);
+  await close();
   return { products: products.length, phones, accessories, stocked: false };
 }
 
@@ -447,7 +494,7 @@ async function verify(pw: string): Promise<boolean> {
   };
   const rowsOf = (j: any): any[] => (Array.isArray(j) ? j : j?.rows ?? j?.items ?? []);
 
-  const owners: { n: number; token: string; branch: string; productId: string; imei: string }[] = [];
+  const owners: { n: number; token: string; refresh: string; branch: string; productId: string; imei: string }[] = [];
   for (let n = 1; n <= BOUTIQUES; n++) {
     const email = `boutique${n}@test.com`;
     const login = await call('POST', 'auth/login', { body: { identifier: email, password: pw } });
@@ -464,7 +511,7 @@ async function verify(pw: string): Promise<boolean> {
     const list = (await call('GET', 'inventory?status=in_stock&limit=1', { token, branch })).json;
     const firstPhone = summary.find((r: any) => r.trackingType === 'imei');
     const unitList = rowsOf((await call('GET', `inventory?productId=${firstPhone?.productId}&limit=1`, { token, branch })).json);
-    owners.push({ n, token, branch, productId: firstPhone?.productId, imei: unitList[0]?.identifier ?? unitList[0]?.imeiPrimary });
+    owners.push({ n, token, refresh: login.json.refreshToken, branch, productId: firstPhone?.productId, imei: unitList[0]?.identifier ?? unitList[0]?.imeiPrimary });
     check(`${email}: the unit list agrees (${list?.totals?.units} phones in stock)`, list?.totals?.units === phones, JSON.stringify(list?.totals ?? null));
   }
 
@@ -490,7 +537,7 @@ async function verify(pw: string): Promise<boolean> {
   // The administrator: the platform, and nothing of a shop.
   const signIn = await adminSignIn(pw);
   const cookie = signIn.cookie ?? '';
-  check(`${ADMIN_EMAIL} signs in to the platform, password and code`, signIn.status === 200 && Boolean(cookie), String(signIn.status));
+  check(`${ADMIN_EMAIL} signs in to the platform, password and ${adminFactor === 'derived' ? 'code' : 'recovery code'}`, signIn.status === 200 && Boolean(cookie), String(signIn.status));
   const me = await call('GET', 'platform/admin/me', { cookie });
   const businesses = await call('GET', 'platform/businesses', { cookie });
   const qa = rowsOf(businesses.json).filter((b: any) => /^Boutique \d+$/.test(b.name));
@@ -500,8 +547,8 @@ async function verify(pw: string): Promise<boolean> {
   check('the administrator has no shop access: no shop session, no shop account', shop.status === 401 && shopLogin.status === 401, `${shop.status} / ${shopLogin.status}`);
   await call('POST', 'platform/admin/sign-out', { cookie, body: {} });
 
-  // The sessions opened here are closed again.
-  for (const o of owners) await call('POST', 'auth/logout-all', { token: o.token, body: {} });
+  // The sessions opened here are closed again — only those: a phone signed in to a boutique stays signed in.
+  for (const o of owners) await call('POST', 'auth/logout', { token: o.token, body: { refreshToken: o.refresh } });
   console.log(`\n  ${failed === 0 ? 'all checks passed' : `${failed} check(s) FAILED`}\n`);
   return failed === 0;
 }
@@ -542,6 +589,7 @@ async function main(): Promise<void> {
   console.log(`  plan: ${BOUTIQUES} boutiques × (80 phones + 20 accessories); ${all.size} distinct identifiers (IMEIs and barcodes)`);
 
   try {
+    await readAdminFactor(prisma);
     if (VERIFY) {
       if (!(await verify(pw))) process.exitCode = 1;
       return;
@@ -571,7 +619,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  console.error(`\n  failed: ${e instanceof Error ? e.message : String(e)}\n`);
+  const cause = (e as { cause?: { code?: string } })?.cause?.code;
+  console.error(`\n  failed: ${e instanceof Error ? e.message : String(e)}${cause ? ` (${cause})` : ''}\n`);
   process.exit(1);
 });
 

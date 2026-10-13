@@ -1,6 +1,6 @@
-# Electronics Retail Management System — Backend
+# Dukan ERP — Backend
 
-NestJS + Prisma + **MySQL 8 (InnoDB)** backend for an **Electronics Retail Management System** (products tracked by IMEI, serial, or quantity). *(Repo folder is `PhoneStoreERP` for path stability.)*
+NestJS + Prisma + **MySQL 8 (InnoDB)** backend for **Dukan ERP**, developed and operated by TSX-MR — retail management for electronics shops (products tracked by IMEI, serial, or quantity). *(The database, its users and some folders keep the earlier `phonestore` name: they are technical identifiers, not the product's name.)*
 
 Design of record: [`../docs/06_TECHNICAL_ARCHITECTURE.md`](../docs/06_TECHNICAL_ARCHITECTURE.md) · [`../docs/10_DATABASE_SCHEMA.md`](../docs/10_DATABASE_SCHEMA.md) · [`../docs/15_SECURITY_ARCHITECTURE.md`](../docs/15_SECURITY_ARCHITECTURE.md)
 
