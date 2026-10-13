@@ -5,6 +5,7 @@ import { SessionsService } from '../auth/sessions.service';
 import { TokensService } from '../auth/tokens.service';
 import { VerificationIntentService } from '../auth/otp/verification-intent.service';
 import { ContactVerificationService } from './contact-verification.service';
+import { TrialSetupService } from './trial/trial-setup.service';
 import { binToUuid } from '../common/utils/uuid.util';
 
 /**
@@ -82,6 +83,7 @@ export class RegistrationContinuationService {
     private readonly verification: ContactVerificationService,
     private readonly sessions: SessionsService,
     private readonly tokens: TokensService,
+    private readonly trialSetup: TrialSetupService,
   ) {}
 
   /**
@@ -244,6 +246,13 @@ export class RegistrationContinuationService {
     });
 
     if (!consumed.ok) return { ok: false, reason: 'consumed' };
+
+    /*
+     * The contact is proved and committed. A business that registered itself may now be owed the free trial's setup
+     * instructions (0095): sent here, once, if every contact it gave is verified — with both, only after the number
+     * is too. Awaited, and it never throws: the Owner's session below is issued whatever the sending did.
+     */
+    await this.trialSetup.onContactsVerified(user.companyId, user.id);
 
     const access = this.tokens.signAccessToken(
       binToUuid(user.id),

@@ -158,12 +158,16 @@ function makeWorld() {
     signAccessToken: jest.fn(() => ({ token: 'access.token', expiresIn: 900 })),
   };
 
+  /** The free trial's setup instructions (0095): told once the registration's contact is proved, never asked first. */
+  const trialSetup = { onContactsVerified: jest.fn(async () => undefined) };
+
   const service = new RegistrationContinuationService(
     prisma,
     intentService,
     verification,
     sessionsService,
     tokensService,
+    trialSetup as never,
   );
 
   function addOwner(over: Partial<any> = {}) {
@@ -184,7 +188,7 @@ function makeWorld() {
     return user;
   }
 
-  return { service, prisma, intents, challenges, users, sessions, verification, sessionsService, addOwner, intentService };
+  return { service, prisma, intents, challenges, users, sessions, verification, sessionsService, addOwner, intentService, trialSetup };
 }
 
 /** Register → send code → the code that was actually sent. */
@@ -207,6 +211,23 @@ describe('a registration is finished by proving THIS attempt, not an address', (
     // From SessionsService, like any password sign-in — not minted in place.
     expect(w.sessionsService.create).toHaveBeenCalledTimes(1);
     expect(w.sessions[0].userId).toEqual(owner.id);
+  });
+
+  it('hands the proved Owner to the free trial’s setup instructions — after the commit, and only on success', async () => {
+    const w = makeWorld();
+    const owner = w.addOwner();
+    const { token, code } = await upToCode(w, owner);
+    expect((await w.service.complete(token, '000000')).ok).toBe(false);
+    expect(w.trialSetup.onContactsVerified).not.toHaveBeenCalled();
+
+    w.trialSetup.onContactsVerified.mockImplementationOnce(async () => {
+      // By then the contact is marked proved and the session exists: the instructions follow the verification.
+      expect(w.users.get(owner.id.toString('hex')).emailVerifiedAt).toBeInstanceOf(Date);
+      expect(w.sessions).toHaveLength(1);
+    });
+    expect((await w.service.complete(token, code)).ok).toBe(true);
+    expect(w.trialSetup.onContactsVerified).toHaveBeenCalledTimes(1);
+    expect(w.trialSetup.onContactsVerified).toHaveBeenCalledWith(owner.companyId, owner.id);
   });
 
   it('marks the contact proved on the Owner, which is what stops a second continuation', async () => {

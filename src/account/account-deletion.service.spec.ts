@@ -79,7 +79,9 @@ function harness(opts: { pepper?: string | null; withOtherOwner?: boolean; whats
   const otpAudit = { record: jest.fn(async (p: Record<string, unknown>) => void audits.push(p)) };
   const otp = new OtpService(prisma as never, config as never, otpAudit as never, sender);
   const service = new AccountDeletionService(prisma as never, hashing as never, otp, sender, opts.storage as never);
-  const account = new AccountService(prisma as never, hashing as never, otp, service);
+  /** The free trial's setup instructions (0095): told after a number is verified, and nothing else. */
+  const trialSetup = { onContactsVerified: jest.fn(async () => undefined) };
+  const account = new AccountService(prisma as never, hashing as never, otp, service, trialSetup as never);
 
   prisma.seed('company', { id: C1, name: 'Boutique Un', isActive: true, closedAt: null, publicPhone: '+22200000001', logoRef: 'logo', isDiscoverable: true });
   prisma.seed('company', { id: C2, name: 'Boutique Deux', isActive: true, closedAt: null, publicPhone: null, logoRef: null, isDiscoverable: false });
@@ -132,7 +134,7 @@ function harness(opts: { pepper?: string | null; withOtherOwner?: boolean; whats
   const lastCode = () => channel.messages.filter((m) => m.template === ACCOUNT_DELETION_TEMPLATE.key).slice(-1)[0]?.variables.code;
   const row = (model: string, key: Buffer) => prisma.rows(model).find((r) => (r.id as Buffer).equals(key))!;
 
-  return { prisma, channel, service, account, otp, audits, principal, lastCode, row };
+  return { prisma, channel, service, account, otp, audits, principal, lastCode, row, trialSetup };
 }
 
 const codeOf = (e: unknown) => (e as HttpException).getResponse() as { code: string; [k: string]: unknown };
@@ -426,6 +428,29 @@ describe('the code', () => {
     );
     expect(request.status).toBe('failed');
     expect(h.row('user', EMPLOYEE).deletedAt).toBeNull();
+  });
+});
+
+describe('a WhatsApp number verified in the app (0095)', () => {
+  it('is handed to the free trial’s setup instructions once it is saved — and a wrong code hands over nothing', async () => {
+    const h = harness();
+    const started = await h.account.startPhoneVerification(h.principal(NO_PHONE), { password: 'fatou-pw', phone: '+22231234569' });
+    const code = h.channel.last!.variables.code;
+    const wrong = code === '000000' ? '111111' : '000000';
+    await expect(h.account.confirmPhoneVerification(h.principal(NO_PHONE), { challengeId: started.challengeId, code: wrong })).rejects.toSatisfy(
+      (e: unknown) => codeOf(e).code === 'invalid_code',
+    );
+    expect(h.trialSetup.onContactsVerified).not.toHaveBeenCalled();
+
+    h.trialSetup.onContactsVerified.mockImplementationOnce(async () => {
+      // The number is verified and saved before the instructions are considered: they follow it, never gate it.
+      expect(h.row('user', NO_PHONE).phoneVerifiedAt).toBeInstanceOf(Date);
+    });
+    await expect(h.account.confirmPhoneVerification(h.principal(NO_PHONE), { challengeId: started.challengeId, code })).resolves.toMatchObject({
+      phone: '+22231234569',
+    });
+    expect(h.trialSetup.onContactsVerified).toHaveBeenCalledTimes(1);
+    expect(h.trialSetup.onContactsVerified).toHaveBeenCalledWith(C1, NO_PHONE);
   });
 });
 

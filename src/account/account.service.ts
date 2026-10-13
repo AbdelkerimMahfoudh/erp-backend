@@ -8,6 +8,7 @@ import { normalisePhone } from '../auth/identifier';
 import { toE164 } from '../users/contact.util';
 import type { MessageLanguage } from '../messaging/templates';
 import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
+import { TrialSetupService } from '../platform/trial/trial-setup.service';
 import { AccountDeletionService, DeletionPrincipal, DeletionRequestView } from './account-deletion.service';
 
 /**
@@ -58,6 +59,7 @@ export class AccountService {
     private readonly hashing: HashingService,
     private readonly otp: OtpService,
     private readonly deletion: AccountDeletionService,
+    private readonly trialSetup: TrialSetupService,
   ) {}
 
   async me(p: DeletionPrincipal): Promise<AccountView> {
@@ -220,6 +222,9 @@ export class AccountService {
       { phone: maskPhone(challenge.candidatePhone), phoneVerifiedAt: now.toISOString() },
       'WhatsApp number verified by its holder',
     );
+    // The free trial (0095): an Owner who registered with an email and a number is owed the setup instructions once
+    // the number is verified too — sent now, once. Awaited, and it never throws: the number stays verified regardless.
+    await this.trialSetup.onContactsVerified(p.companyId, p.userId);
     return { phone: challenge.candidatePhone, phoneVerifiedAt: now.toISOString() };
   }
 
