@@ -48,6 +48,9 @@ interface ErrorBody {
   report?: unknown;
   channels?: unknown;
   floats?: unknown;
+  missingContacts?: unknown;
+  termsVersion?: unknown;
+  trial?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -134,6 +137,15 @@ const DETAIL_KEYS = [
   'report',
   'channels',
   'floats',
+  /*
+   * The free trial's claim refusals (0095), each with what the website needs to say something truer than "no":
+   * `contact_unverified` names which contacts are still to verify (`email`, `phone` — the kinds, never a value);
+   * `terms_changed` carries the terms version now in force; `trial_already_claimed` carries the trial that was
+   * started, with its own instants, so the page can show it instead.
+   */
+  'missingContacts',
+  'termsVersion',
+  'trial',
 ] as const;
 
 /**

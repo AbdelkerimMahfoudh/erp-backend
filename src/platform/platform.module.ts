@@ -21,6 +21,8 @@ import { RegistrationContinuationService } from './registration-continuation.ser
 import { OwnerInvitationService } from './owner-invitation.service';
 import { RegistrationFlowService } from './registration-flow.service';
 import { AppRegistrationController } from './app-registration.controller';
+import { TrialService } from './trial/trial.service';
+import { TrialController } from './trial/trial.controller';
 import {
   ContactDeliveryProvider,
   outboxAllowed,
@@ -75,7 +77,7 @@ export function selectContactDelivery(
  */
 @Module({
   imports: [PrismaModule, EntitlementModule, AuthModule],
-  controllers: [PlatformController, SeatRequestsController, PlatformMfaController, AppRegistrationController],
+  controllers: [PlatformController, SeatRequestsController, PlatformMfaController, AppRegistrationController, TrialController],
   providers: [
     HashingService,
     PlatformAdminService,
@@ -90,6 +92,7 @@ export function selectContactDelivery(
     RegistrationContinuationService,
     RegistrationFlowService,
     OwnerInvitationService,
+    TrialService,
     SeatAllocationService,
     StaffActivationService,
     {

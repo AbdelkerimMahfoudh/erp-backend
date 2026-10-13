@@ -93,6 +93,12 @@ export const envValidationSchema = Joi.object({
   RESEND_API_BASE_URL: Joi.string().uri({ scheme: ['https', 'http'] }).default('https://api.resend.com'),
   EMAIL_SEND_TIMEOUT_MS: Joi.number().integer().min(1000).max(60_000).default(10_000),
 
+  // ── The free trial's setup links (0095; docs/76) ──────────────────────────
+  // The Dukan ERP website's origin (e.g. https://dukan.tsx-mr.com), used ONLY to build the links the setup
+  // instructions carry. Never compared with a request: an Origin or Referer header is whatever a client says, and no
+  // check rests on one. Empty: no link can be built.
+  PUBLIC_SITE_ORIGIN: Joi.string().allow('').default(''),
+
   // File upload foundation.
   UPLOAD_MAX_BYTES: Joi.number().integer().min(1).default(10 * 1024 * 1024),
   UPLOAD_DIR: Joi.string().default('./uploads'),

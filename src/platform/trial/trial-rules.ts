@@ -170,6 +170,74 @@ export function missingContacts(method: TrialRegistrationMethod, owner: OwnerCon
   );
 }
 
+/** Why an Owner whose business could still claim cannot claim right now. Anything else that stops a claim is no offer. */
+export type TrialOfferReason = 'contact_unverified' | 'business_suspended';
+
+/**
+ * The website's offer: what a claim made now would record, shown before the Owner confirms
+ * (GET platform/my-subscription/trial). The start and end are the server's — the instant asked, and exactly 168 hours
+ * later — so the end a website shows is the end a claim at that moment would get; it refreshes them, never computes
+ * them.
+ */
+export interface TrialOffer {
+  available: boolean;
+  /** Null when available. */
+  reason: TrialOfferReason | null;
+  /** The terms the website must show, and send back with the claim. */
+  termsVersion: string;
+  durationHours: typeof TRIAL_DURATION_HOURS;
+  wouldStartAt: string;
+  wouldEndAt: string;
+  /** The business's configured IANA time zone, for display only. */
+  timeZone: string;
+  requiredContacts: TrialContact[];
+  missingContacts: TrialContact[];
+}
+
+/** What the offer is decided from — the trial's rows, the business and its Owner, read together. */
+export interface OfferFacts {
+  /** The business's eligibility, open or closed; null when it never had one (console-created, or before 0095). */
+  eligibility: { registrationMethod: TrialRegistrationMethod; closedAt: Date | null } | null;
+  /** A claim exists. One trial per business, ever — whether it is running or ended. */
+  claimed: boolean;
+  /** The company is closed or deactivated, or its subscription cancelled. */
+  closed: boolean;
+  /** The state computed from the same facts. */
+  state: EntitlementState;
+  /** The Owner asking — the only person an offer is ever made to. */
+  owner: OwnerContacts;
+}
+
+/**
+ * The offer, or null when there is nothing the Owner could ever claim: already claimed, closed, refused, cancelled,
+ * never eligible, or eligibility closed because access was given — no control is shown for those.
+ *
+ * Two things keep the offer but not its availability, in the claim's own order: a suspension (it blocks, never closes:
+ * a reinstated business may still claim) and a required contact not yet verified. Nothing else is asked: not whether
+ * the setup instructions were delivered, not whether a link exists or was used — an Owner whose messages were lost
+ * sees the same offer as one who never had any (the owner's clarification of 2026-10-13).
+ */
+export function trialOfferOf(facts: OfferFacts, now: Date, timeZone: string): TrialOffer | null {
+  const { eligibility } = facts;
+  if (facts.claimed || facts.closed || !eligibility || eligibility.closedAt !== null) return null;
+  let reason: TrialOfferReason | null = null;
+  if (facts.state === 'suspended') reason = 'business_suspended';
+  else if (facts.state !== 'trial_available') return null;
+  const missing = missingContacts(eligibility.registrationMethod, facts.owner);
+  if (!reason && missing.length > 0) reason = 'contact_unverified';
+  return {
+    available: reason === null,
+    reason,
+    termsVersion: TRIAL_TERMS_VERSION,
+    durationHours: TRIAL_DURATION_HOURS,
+    wouldStartAt: now.toISOString(),
+    wouldEndAt: trialEndFor(now).toISOString(),
+    timeZone,
+    requiredContacts: requiredContacts(eligibility.registrationMethod),
+    missingContacts: missing,
+  };
+}
+
 /**
  * A verified contact as its own Owner is shown it: enough to recognise, never the value — `a•••@example.com`,
  * `+222••••1234`. A number too short to keep a middle hidden shows its last two digits only.

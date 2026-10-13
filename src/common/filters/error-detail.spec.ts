@@ -213,6 +213,19 @@ describe('per-item detail survives the filter', () => {
     expect(runFilter(new ConflictException({ code: 'report_changed', message: 'no', report }))).toMatchObject({ code: 'report_changed', report });
   });
 
+  it('a refused free trial claim says which contacts, which terms, or which trial (0095) — never a contact’s value', () => {
+    const view = { status: 'active', durationHours: 168, durationDays: 7, claimedAt: 'c', startedAt: 's', endsAt: 'e', timeZone: 'Africa/Nouakchott' };
+    expect(runFilter(new ConflictException({ code: 'contact_unverified', message: 'm', missingContacts: ['phone'] }))).toMatchObject({
+      statusCode: 409,
+      code: 'contact_unverified',
+      missingContacts: ['phone'],
+    });
+    expect(runFilter(new ConflictException({ code: 'terms_changed', message: 'm', termsVersion: '2026-10-13' }))).toMatchObject({
+      termsVersion: '2026-10-13',
+    });
+    expect(runFilter(new ConflictException({ code: 'trial_already_claimed', message: 'm', trial: view }))).toMatchObject({ trial: view });
+  });
+
   it('still reveals nothing about an unexpected error', () => {
     const body = runFilter(new Error('connect ECONNREFUSED 127.0.0.1:3306'));
     expect(body.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);

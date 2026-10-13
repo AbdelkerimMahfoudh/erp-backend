@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
 import type { PlatformAdminIdentity } from './platform-admin.service';
@@ -78,14 +79,24 @@ export interface AuditInput {
   before?: unknown;
   after?: unknown;
   ip?: string | null;
+  /**
+   * When it happened, from the caller's clock. Absent, the row is stamped when it is written; a record written
+   * inside a transaction that took its instant under a lock — a free trial's claim (0095) — passes that instant, so
+   * the audit and the fact it records carry the same time.
+   */
+  at?: Date;
 }
 
 @Injectable()
 export class PlatformAuditService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async record(input: AuditInput): Promise<void> {
-    await this.prisma.platformAuditEvent.create({
+  /**
+   * Write one row. With `db`, inside the caller's transaction: the row then commits or rolls back with what it
+   * records — written last, after every row it describes (the lock order every subscription writer keeps).
+   */
+  async record(input: AuditInput, db: Prisma.TransactionClient = this.prisma): Promise<void> {
+    await db.platformAuditEvent.create({
       data: {
         id: newUuidV7Bin(),
         adminId: input.admin?.id ?? null,
@@ -99,6 +110,7 @@ export class PlatformAuditService {
         beforeJson: (redact(input.before) ?? undefined) as never,
         afterJson: (redact(input.after) ?? undefined) as never,
         ip: input.ip ?? null,
+        createdAt: input.at,
       },
     });
   }

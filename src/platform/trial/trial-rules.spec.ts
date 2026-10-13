@@ -19,7 +19,9 @@ import {
   setupTokenHash,
   trialEndFor,
   trialFactsOf,
+  trialOfferOf,
   trialViewOf,
+  type OfferFacts,
 } from './trial-rules';
 
 /**
@@ -213,5 +215,63 @@ describe('the claim’s canonical request', () => {
     expect(claimRequestHash('2026-10-13', 'tok')).toBe(claimRequestHash('2026-10-13', 'tok'));
     expect(claimRequestHash('2026-10-13', 'tok')).not.toBe(claimRequestHash('2026-10-13', 'other'));
     expect(claimRequestHash('2026-10-13')).not.toBe(claimRequestHash('2026-10-14'));
+  });
+});
+
+/**
+ * The website's offer (GET platform/my-subscription/trial): what a claim made now would record, and whether the Owner
+ * can make it now. Kept but unavailable while something can still be fixed; absent when nothing could ever be
+ * claimed; never asked about delivery or links.
+ */
+describe('the offer the Owner is shown before confirming', () => {
+  const NOW = new Date('2026-10-13T10:00:00.000Z');
+  const verified = { email: 'o@shop.test', emailVerifiedAt: NOW, phone: '+22236001234', phoneVerifiedAt: NOW };
+  const facts = (over: Partial<OfferFacts> = {}): OfferFacts => ({
+    eligibility: { registrationMethod: 'email', closedAt: null },
+    claimed: false,
+    closed: false,
+    state: 'trial_available',
+    owner: verified,
+    ...over,
+  });
+
+  it('available: the terms in force, 168 hours from the instant asked, in the business’s zone', () => {
+    expect(trialOfferOf(facts(), NOW, 'Asia/Dubai')).toEqual({
+      available: true,
+      reason: null,
+      termsVersion: TRIAL_TERMS_VERSION,
+      durationHours: 168,
+      wouldStartAt: NOW.toISOString(),
+      wouldEndAt: new Date(NOW.getTime() + 168 * HOUR).toISOString(),
+      timeZone: 'Asia/Dubai',
+      requiredContacts: ['email'],
+      missingContacts: [],
+    });
+  });
+
+  it('asks for the contacts given at registration, and names the ones still to verify', () => {
+    const both = facts({ eligibility: { registrationMethod: 'both', closedAt: null }, owner: { ...verified, phoneVerifiedAt: null } });
+    expect(trialOfferOf(both, NOW, 'UTC')).toMatchObject({
+      available: false,
+      reason: 'contact_unverified',
+      requiredContacts: ['email', 'phone'],
+      missingContacts: ['phone'],
+    });
+  });
+
+  it('a suspension keeps the offer and blocks it — before any contact is asked about', () => {
+    const suspended = facts({ state: 'suspended', owner: { ...verified, emailVerifiedAt: null } });
+    expect(trialOfferOf(suspended, NOW, 'UTC')).toMatchObject({ available: false, reason: 'business_suspended', missingContacts: ['email'] });
+  });
+
+  it('none once claimed, closed, never eligible, eligibility closed, or any other state', () => {
+    expect(trialOfferOf(facts({ claimed: true, state: 'trial_active' }), NOW, 'UTC')).toBeNull();
+    expect(trialOfferOf(facts({ claimed: true, state: 'trial_expired' }), NOW, 'UTC')).toBeNull();
+    expect(trialOfferOf(facts({ closed: true }), NOW, 'UTC')).toBeNull();
+    expect(trialOfferOf(facts({ eligibility: null, state: 'pending' }), NOW, 'UTC')).toBeNull();
+    expect(trialOfferOf(facts({ eligibility: { registrationMethod: 'email', closedAt: NOW }, state: 'active' }), NOW, 'UTC')).toBeNull();
+    for (const state of ['pending', 'active', 'grace', 'expired', 'complimentary', 'cancelled', 'rejected'] as const) {
+      expect([state, trialOfferOf(facts({ state }), NOW, 'UTC')]).toEqual([state, null]);
+    }
   });
 });

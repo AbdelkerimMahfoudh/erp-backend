@@ -637,6 +637,10 @@ describe('route classification fails closed', () => {
       'POST platform/my-subscription/seat-requests',
       'POST platform/my-subscription/seat-requests/:rid/withdraw',
       'POST platform/my-subscription/store-requests',
+      // 0095: the free trial — a business that has not started claims it and checks its setup link; the claim writes
+      // the trial itself and nothing paid or billed, and only the Owner may make it.
+      'POST platform/my-subscription/trial/claim',
+      'POST platform/my-subscription/trial/link',
       'POST platform/portal-handoff',
     ]);
   });
@@ -693,6 +697,9 @@ describe('route classification fails closed', () => {
       'platform/my-subscription/seat-requests/:rid/withdraw',
       'platform/my-subscription/activity-requests',
       'platform/portal-handoff',
+      // 0095: claiming the free trial and checking a setup link — nothing paid, nothing granted beyond the trial.
+      'platform/my-subscription/trial/claim',
+      'platform/my-subscription/trial/link',
     ]);
     // Minting a ticket is not spending one, and neither moves money.
     for (const r of platform) expect(r.method).toBe('POST');
@@ -723,6 +730,8 @@ describe('what a pending or suspended shop may still read', () => {
       'entitlement',
       'health',
       'platform/my-subscription',
+      // 0095: the Owner's free trial card, read by a business that has not started yet.
+      'platform/my-subscription/trial',
       'platform/payment-instructions',
     ]);
   });

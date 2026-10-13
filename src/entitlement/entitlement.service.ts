@@ -174,8 +174,12 @@ export class EntitlementService {
    * The zone the trial's dates are shown in: the company's own, validated. An
    * unknown name reads as UTC and is reported once — never replaced by a zone
    * guessed for the country (trial-rules `displayTimeZone`).
+   *
+   * Shared with the website's trial routes and the console (0095), so a
+   * business's zone is checked by one rule and reported once per process,
+   * wherever it is read.
    */
-  private trialZone(companyId: Buffer, stored: string): string {
+  trialZone(companyId: Buffer, stored: string): string {
     return displayTimeZone(stored, (refused) => {
       const key = companyId.toString('hex');
       if (this.unknownZones.has(key)) return;

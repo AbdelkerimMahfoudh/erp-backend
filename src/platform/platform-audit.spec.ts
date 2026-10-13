@@ -1,4 +1,4 @@
-import { redact } from './platform-audit.service';
+import { PlatformAuditService, redact } from './platform-audit.service';
 
 /**
  * What may never reach the platform audit log.
@@ -78,5 +78,23 @@ describe('the audit log never keeps a secret', () => {
     let deep: Record<string, unknown> = { password: 'x' };
     for (let i = 0; i < 40; i++) deep = { nested: deep };
     expect(() => redact(deep)).not.toThrow();
+  });
+});
+
+describe('a record written inside the caller’s transaction (0095)', () => {
+  it('goes through the client it is given, stamped with the instant it is given', async () => {
+    const own: Record<string, unknown>[] = [];
+    const inTx: Record<string, unknown>[] = [];
+    const service = new PlatformAuditService({ platformAuditEvent: { create: async ({ data }: never) => own.push(data) } } as never);
+    const tx = { platformAuditEvent: { create: async ({ data }: { data: Record<string, unknown> }) => inTx.push(data) } };
+    const at = new Date('2026-10-13T10:00:00.123Z');
+
+    await service.record({ admin: null, actor: 'user:x', action: 'trial.claim', targetType: 'Company', after: { token: 't' }, at }, tx as never);
+    expect(own).toHaveLength(0);
+    expect(inTx).toEqual([expect.objectContaining({ actor: 'user:x', action: 'trial.claim', createdAt: at, afterJson: { token: '[redacted]' } })]);
+
+    // Without either, the service's own client and the column's default — exactly as before.
+    await service.record({ admin: null, action: 'x', targetType: 'Company' });
+    expect(own).toEqual([expect.objectContaining({ action: 'x', actor: 'system', createdAt: undefined })]);
   });
 });

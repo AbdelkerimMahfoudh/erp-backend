@@ -97,6 +97,20 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
   allow('POST', 'account/deletion/cancel', 'Withdrawing a deletion request changes nothing but the request'),
   allow('POST', 'account/whatsapp/verify/start', 'Proving the number a deletion code can be sent to; a pending shop must be able to do this before it is approved'),
   allow('POST', 'account/whatsapp/verify/confirm', 'Completes the number proof; writes one contact on the caller own row and nothing else'),
+  /*
+   * The free trial on the website (0095). A business that may claim it is, by
+   * definition, one that has not started — closed like a pending one — so
+   * refusing these would make the trial unreachable for the only businesses
+   * it exists for. Neither writes business truth: checking a link changes
+   * nothing, and a claim writes one immutable trial row with nothing paid,
+   * billed or granted besides — only by the Owner, with verified contacts.
+   */
+  allow(
+    'POST',
+    'platform/my-subscription/trial/claim',
+    'Starting the free trial is done by a business that has not started yet; the claim writes the trial itself and nothing paid or billed, by the Owner alone',
+  ),
+  allow('POST', 'platform/my-subscription/trial/link', 'Checking a setup link changes nothing; a business waiting to start its trial is exactly who holds one'),
 ] as const;
 
 const key = (method: string, path: string): string =>
@@ -179,6 +193,11 @@ export const ALWAYS_READABLE: readonly ReadRule[] = [
    * The mobile app never reads it.
    */
   readable('platform/payment-instructions', 'How to pay, for a shop that has not paid: the other half of the account page, and no operational data'),
+  /*
+   * The Owner's free trial card on the website (0095): a business that has not
+   * started is exactly who reads it. The trial, the offer, nothing operational.
+   */
+  readable('platform/my-subscription/trial', 'The Owner’s free trial card: read by a business that has not started yet, and holding no operational data'),
   /*
    * The person's own account page and the state of their deletion request
    * (docs/64). Where somebody goes to find their sign-in identifier, verify
