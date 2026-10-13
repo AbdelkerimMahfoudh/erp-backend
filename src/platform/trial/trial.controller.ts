@@ -4,7 +4,8 @@ import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { TenantContext } from '../../common/tenant/tenant-context.service';
 import { ClaimTrialDto, TrialLinkDto } from './trial.dto';
-import { TrialService, type TrialPrincipal } from './trial.service';
+import type { TrialPrincipal } from './trial-facts';
+import { TrialService } from './trial.service';
 
 /*
  * The account's sensitive-route limit, read the way `account.controller.ts` reads it: a decorator is evaluated before

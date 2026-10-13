@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppConfigService } from '../../common/config/app-config.service';
@@ -6,7 +6,7 @@ import { actorRef } from '../../common/privacy/audit-contact';
 import { binToUuid, newUuidV7Bin } from '../../common/utils/uuid.util';
 import { CLOCK, type Clock } from '../../entitlement/clock';
 import { EntitlementService } from '../../entitlement/entitlement.service';
-import { stateOf, type EntitlementState, type SubscriptionRecord } from '../../entitlement/entitlement-rules';
+import { stateOf, type EntitlementState } from '../../entitlement/entitlement-rules';
 import { lockSubscription } from '../../billing/renewal';
 import { PlatformAuditService } from '../platform-audit.service';
 import {
@@ -16,16 +16,16 @@ import {
   missingContacts,
   setupTokenHash,
   trialEndFor,
-  trialFactsOf,
   trialOfferOf,
   trialViewOf,
   type OwnerContacts,
-  type TrialContact,
   type TrialFacts,
   type TrialOffer,
   type TrialView,
 } from './trial-rules';
-import { LINK_REFUSAL, bindingDigest, bindingKey, linkOutcomeOf, type LinkBinding, type TrialLinkOutcome } from './trial-link';
+import { LINK_REFUSAL, linkBindingOf, linkOutcomeOf, type LinkBinding, type TrialLinkOutcome } from './trial-link';
+import { isClosed, readFacts, readOwner, subscriptionRecordOf, type TrialFactsRow, type TrialPrincipal } from './trial-facts';
+import { TrialRefusal } from './trial-refusal';
 
 /**
  * The website-only seven-day free trial: the Owner's offer, the setup link check, and the claim (0095; docs/76).
@@ -43,12 +43,6 @@ import { LINK_REFUSAL, bindingDigest, bindingKey, linkOutcomeOf, type LinkBindin
  * records the event and the audit. No payment, billing period, seat, renewal, status or period end — a trial that
  * ends leaves the business read-only, exactly as it was before, plus seven days of history.
  */
-
-/** Who asks: the company and the person of the authenticated session — never anything the request says about itself. */
-export interface TrialPrincipal {
-  companyId: Buffer;
-  userId: Buffer;
-}
 
 export interface ClaimInput {
   /** The website's key for one attempt, kept for that attempt's retries. */
@@ -90,102 +84,6 @@ export interface ClaimAnswer {
   subscriptionVersion: number;
 }
 
-/**
- * Every refusal of the trial routes, with its status and its plain words. The website says each in its own words from
- * the code; nothing here is a reason to parse English.
- */
-const REFUSALS = {
-  owner_only: { status: HttpStatus.FORBIDDEN, message: 'Only the business owner can see or start the free trial.' },
-  idempotency_conflict: { status: HttpStatus.CONFLICT, message: 'This request key was already used for a different request.' },
-  trial_already_claimed: { status: HttpStatus.CONFLICT, message: 'This business has already used its free trial.' },
-  business_closed: { status: HttpStatus.CONFLICT, message: 'This business is closed.' },
-  business_suspended: { status: HttpStatus.CONFLICT, message: 'This business is suspended, so the free trial cannot start.' },
-  business_refused: { status: HttpStatus.CONFLICT, message: 'This registration was not approved, so the free trial cannot start.' },
-  trial_not_available: { status: HttpStatus.CONFLICT, message: 'This business cannot start a free trial.' },
-  terms_changed: { status: HttpStatus.CONFLICT, message: 'The free trial terms have changed. Read them again before starting.' },
-  contact_unverified: { status: HttpStatus.CONFLICT, message: 'Verify your contact details before starting the free trial.' },
-  link_invalid: { status: HttpStatus.BAD_REQUEST, message: 'This link is not valid.' },
-  link_expired: { status: HttpStatus.GONE, message: 'This link has expired.' },
-  link_used: { status: HttpStatus.CONFLICT, message: 'This link has already been used.' },
-  link_revoked: { status: HttpStatus.CONFLICT, message: 'This link no longer works.' },
-  link_other_account: { status: HttpStatus.FORBIDDEN, message: 'This link belongs to another business account.' },
-} as const;
-
-export type TrialRefusalCode = keyof typeof REFUSALS;
-
-/** The only details a refusal carries — each safe for the Owner to read, and allowlisted by the error filter. */
-interface RefusalDetails {
-  missingContacts?: TrialContact[];
-  termsVersion?: string;
-  trial?: TrialView | null;
-}
-
-/** A refusal of a trial route: its code, its words, and nothing a caller could not already know. */
-export class TrialRefusal extends HttpException {
-  constructor(
-    readonly code: TrialRefusalCode,
-    readonly details: RefusalDetails = {},
-  ) {
-    super({ code, message: REFUSALS[code].message, ...details }, REFUSALS[code].status);
-  }
-}
-
-/** The business, its subscription and its trial rows — read together, on the connection given. */
-function readFacts(db: Prisma.TransactionClient, companyId: Buffer) {
-  return db.company.findUnique({
-    where: { id: companyId },
-    select: {
-      name: true,
-      timezone: true,
-      isActive: true,
-      closedAt: true,
-      subscription: {
-        select: {
-          id: true,
-          status: true,
-          currentPeriodEnd: true,
-          isComplimentary: true,
-          complimentaryUntil: true,
-          subscribedBranchCount: true,
-          additionalSeats: true,
-        },
-      },
-      trialEligibility: { select: { id: true, registrationMethod: true, closedAt: true } },
-      trialClaim: {
-        select: {
-          claimedAt: true,
-          startedAt: true,
-          endsAt: true,
-          idempotencyKey: true,
-          requestHash: true,
-          subscriptionVersionAfter: true,
-        },
-      },
-    },
-  });
-}
-
-/** One reading of a business for the trial. */
-type Facts = NonNullable<Awaited<ReturnType<typeof readFacts>>>;
-
-/**
- * The caller as the trial knows them: an active, undeleted person of THIS company holding the Owner role — or null.
- * The role itself, not a permission: a permission can be delegated, and the trial is the Owner's alone. A Manager,
- * an Employee or a legacy administrator is refused before anything about the trial is read or told.
- */
-function readOwner(db: Prisma.TransactionClient, who: TrialPrincipal): Promise<OwnerContacts | null> {
-  return db.user.findFirst({
-    where: {
-      id: who.userId,
-      companyId: who.companyId,
-      isActive: true,
-      deletedAt: null,
-      userBranches: { some: { role: { key: 'owner' } } },
-    },
-    select: { email: true, emailVerifiedAt: true, phone: true, phoneVerifiedAt: true },
-  });
-}
-
 /** A link as a claim may use it: the valid one, with its id — or the outcome that refuses it. */
 export type ResolvedLink = { outcome: 'valid'; linkId: Buffer } | { outcome: Exclude<TrialLinkOutcome, 'valid'>; linkId: null };
 
@@ -203,39 +101,16 @@ export class TrialService {
 
   // ── The rules, over one reading ──────────────────────────────────────────
 
-  /**
-   * The subscription as the entitlement rules read it, with the trial's facts — the same rules every request is
-   * judged by, so the state here is the state everywhere. No subscription row reads as never subscribed, with no
-   * trial: exactly as the entitlement reads it.
-   */
-  private recordOf(row: Facts): SubscriptionRecord {
-    const sub = row.subscription;
-    return {
-      subscribedBranchCount: sub?.subscribedBranchCount ?? 0,
-      additionalSeats: sub?.additionalSeats ?? 0,
-      currentPeriodEnd: sub?.currentPeriodEnd ?? null,
-      isComplimentary: sub?.isComplimentary ?? false,
-      complimentaryUntil: sub?.complimentaryUntil ?? null,
-      status: sub?.status ?? 'activated',
-      trial: sub ? trialFactsOf(row.trialEligibility, row.trialClaim) : null,
-    };
-  }
-
-  /** Closed for good: the company was closed or deactivated, or its subscription cancelled. */
-  private closed(row: Facts): boolean {
-    return !row.isActive || row.closedAt !== null || row.subscription?.status === 'cancelled';
-  }
-
   /** The card: the state, the trial's view, and the offer — all from the one reading given. */
-  private statusOf(companyId: Buffer, row: Facts, owner: OwnerContacts, now: Date): TrialStatus {
-    const record = this.recordOf(row);
+  private statusOf(companyId: Buffer, row: TrialFactsRow, owner: OwnerContacts, now: Date): TrialStatus {
+    const record = subscriptionRecordOf(row);
     const state = stateOf(record, now);
     const zone = this.entitlement.trialZone(companyId, row.timezone);
     return {
       state,
       trial: trialViewOf(record.trial, state, now, zone),
       offer: trialOfferOf(
-        { eligibility: row.trialEligibility, claimed: row.trialClaim !== null, closed: this.closed(row), state, owner },
+        { eligibility: row.trialEligibility, claimed: row.trialClaim !== null, closed: isClosed(row), state, owner },
         now,
         zone,
       ),
@@ -289,11 +164,10 @@ export class TrialService {
 
   /**
    * The digest a setup link is bound with, for this Owner as the account holds them now; null when no key exists
-   * (trial-link `bindingKey`), and then no link can be issued or trusted. Issuing and checking use this one function.
+   * (trial-link `linkBindingOf`, which issuing uses too), and then no link can be issued or trusted.
    */
   bindingDigestFor(owner: LinkBinding): string | null {
-    const key = bindingKey(this.config.otpPepper);
-    return key ? bindingDigest(key, owner) : null;
+    return linkBindingOf(this.config.otpPepper, owner);
   }
 
   /**
@@ -378,7 +252,7 @@ export class TrialService {
   /** Step 3: a claim exists. The same attempt is replayed with what it recorded; anything else is refused. */
   private answerToExisting(
     companyId: Buffer,
-    row: Facts,
+    row: TrialFactsRow,
     owner: OwnerContacts,
     input: ClaimInput,
     requestHash: string,
@@ -393,17 +267,17 @@ export class TrialService {
 
   /** Step 4, in order. Returns what the claim attaches to; throws the first refusal that applies. */
   private claimable(
-    row: Facts,
+    row: TrialFactsRow,
     owner: OwnerContacts,
     input: ClaimInput,
     now: Date,
   ): { subscriptionId: Buffer; eligibilityId: Buffer } {
     const status = row.subscription?.status;
-    if (this.closed(row)) throw new TrialRefusal('business_closed');
+    if (isClosed(row)) throw new TrialRefusal('business_closed');
     if (status === 'suspended') throw new TrialRefusal('business_suspended');
     if (status === 'rejected') throw new TrialRefusal('business_refused');
     const eligibility = row.trialEligibility;
-    if (!row.subscription || !eligibility || stateOf(this.recordOf(row), now) !== 'trial_available') {
+    if (!row.subscription || !eligibility || stateOf(subscriptionRecordOf(row), now) !== 'trial_available') {
       throw new TrialRefusal('trial_not_available');
     }
     if (input.termsVersion !== TRIAL_TERMS_VERSION) {
@@ -425,7 +299,7 @@ export class TrialService {
   private async start(
     tx: Prisma.TransactionClient,
     who: TrialPrincipal,
-    row: Facts,
+    row: TrialFactsRow,
     refs: { subscriptionId: Buffer; eligibilityId: Buffer; linkId: Buffer | null },
     input: ClaimInput,
     requestHash: string,
@@ -513,7 +387,7 @@ export class TrialService {
     );
 
     const trial: TrialFacts = { eligible: true, claim: { claimedAt: now, startedAt, endsAt } };
-    const state = stateOf({ ...this.recordOf(row), trial }, now);
+    const state = stateOf({ ...subscriptionRecordOf(row), trial }, now);
     const view = trialViewOf(trial, state, now, this.entitlement.trialZone(who.companyId, row.timezone))!;
     return { claimed: true, replayed: false, state, trial: view, subscriptionVersion: version };
   }

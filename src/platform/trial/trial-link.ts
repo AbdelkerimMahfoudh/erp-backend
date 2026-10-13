@@ -62,6 +62,16 @@ export function bindingDigest(key: string, owner: LinkBinding): string {
   return createHmac('sha256', key).update(material, 'utf8').digest('hex');
 }
 
+/**
+ * The digest a link is bound with, for this Owner as the account holds them now — or null when no key exists
+ * (`bindingKey`), and then no link can be issued or trusted. The setup instructions issue with it and the claim checks
+ * with it: one function, so the two can never compute it differently.
+ */
+export function linkBindingOf(pepper: string | null, owner: LinkBinding, env: NodeJS.ProcessEnv = process.env): string | null {
+  const key = bindingKey(pepper, env);
+  return key ? bindingDigest(key, owner) : null;
+}
+
 /** A stored link, as the outcome needs it. */
 export interface SetupLinkFacts {
   companyId: Buffer;

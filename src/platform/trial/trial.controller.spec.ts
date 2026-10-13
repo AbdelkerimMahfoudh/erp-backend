@@ -11,7 +11,8 @@ import { TenantContext } from '../../common/tenant/tenant-context.service';
 import { PlatformAdminGuard } from '../platform-admin.guard';
 import { makeTrialWorld, type TrialWorld } from '../__testing__/trial-world';
 import { TrialController } from './trial.controller';
-import { TrialService, type TrialPrincipal } from './trial.service';
+import type { TrialPrincipal } from './trial-facts';
+import { TrialService } from './trial.service';
 import { TRIAL_TERMS_VERSION } from './trial-rules';
 
 /**

@@ -7,7 +7,8 @@ import { PlatformAuditService } from '../platform-audit.service';
 import { SubscriptionLifecycleService } from '../subscription-lifecycle.service';
 import { NOW, REGISTERED_AT, makeTrialWorld, type Business, type TrialWorld } from '../__testing__/trial-world';
 import { TRIAL_TERMS_VERSION, claimRequestHash } from './trial-rules';
-import { TrialRefusal, type ClaimInput } from './trial.service';
+import { TrialRefusal } from './trial-refusal';
+import type { ClaimInput } from './trial.service';
 
 /**
  * The free trial on the website: the Owner's card, the setup link, and the claim (0095; docs/76; the owner's

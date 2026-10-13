@@ -3,7 +3,8 @@ import { Prisma } from '@prisma/client';
 import { EntitlementService } from '../../entitlement/entitlement.service';
 import { binToUuid, newUuidV7Bin } from '../../common/utils/uuid.util';
 import { PlatformAuditService } from '../platform-audit.service';
-import { TrialService, type TrialPrincipal } from '../trial/trial.service';
+import { TrialService } from '../trial/trial.service';
+import type { TrialPrincipal } from '../trial/trial-facts';
 import { TRIAL_SETUP_LINK_TTL_HOURS, setupTokenHash, type TrialContact } from '../trial/trial-rules';
 
 /**

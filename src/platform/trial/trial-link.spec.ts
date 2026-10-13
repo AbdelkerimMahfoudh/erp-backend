@@ -1,4 +1,4 @@
-import { LINK_REFUSAL, bindingDigest, bindingKey, linkOutcomeOf, type LinkBinding, type SetupLinkFacts } from './trial-link';
+import { LINK_REFUSAL, bindingDigest, bindingKey, linkBindingOf, linkOutcomeOf, type LinkBinding, type SetupLinkFacts } from './trial-link';
 
 /**
  * What a setup link is worth to the signed-in Owner who presents it (0095; docs/76 §5.3) — pure.
@@ -48,6 +48,16 @@ describe('the key a link is bound under', () => {
     expect(bindingKey(null, { NODE_ENV: 'development', APP_ENV: 'production' } as NodeJS.ProcessEnv)).toBeNull();
     expect(bindingKey(null, { NODE_ENV: 'production', APP_ENV: 'staging' } as NodeJS.ProcessEnv)).toBeNull();
     expect(bindingKey(null, { NODE_ENV: 'development', APP_ENV: 'Staging' } as NodeJS.ProcessEnv)).toBeNull();
+  });
+});
+
+describe('the binding a link is issued with and checked against', () => {
+  it('is the digest under the key — one function for issuing and checking — or null when there is no key', () => {
+    expect(linkBindingOf(KEY, OWNER_AS_SENT, { NODE_ENV: 'production' } as NodeJS.ProcessEnv)).toBe(current);
+    expect(linkBindingOf(null, OWNER_AS_SENT, { NODE_ENV: 'production' } as NodeJS.ProcessEnv)).toBeNull();
+    expect(linkBindingOf(null, OWNER_AS_SENT, { NODE_ENV: 'development' } as NodeJS.ProcessEnv)).toBe(
+      bindingDigest(bindingKey(null, { NODE_ENV: 'development' } as NodeJS.ProcessEnv)!, OWNER_AS_SENT),
+    );
   });
 });
 
