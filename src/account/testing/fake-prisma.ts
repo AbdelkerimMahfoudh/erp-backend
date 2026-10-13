@@ -3,7 +3,8 @@
  *
  * It implements the subset of the query API the account services use —
  * equality and a few operators in `where`, `select` as a projection,
- * `orderBy` on one column, `increment`, and interactive transactions — and it
+ * `orderBy` on one column, `increment`, interactive transactions, and the
+ * subscription lock as the one raw statement it accepts — and it
  * enforces the two constraints the deletion design leans on: the UNIQUE
  * `active_key` on deletion requests and on OTP challenges. A double that
  * always succeeds would let a broken race guard pass here and fail in a shop.
@@ -154,6 +155,8 @@ function apply(row: Row, data: Row): void {
 
 export class FakePrisma {
   readonly tables = new Map<string, Row[]>();
+  /** Every subscription lock taken (`SELECT … FOR UPDATE`), in order — the only raw statement the services run here. */
+  readonly locks: string[] = [];
   private counter = 0;
 
   constructor() {
@@ -203,6 +206,13 @@ export class FakePrisma {
       }
     }
     return Promise.all(arg) as Promise<T>;
+  }
+
+  async $queryRaw(query: { strings?: readonly string[] }): Promise<unknown[]> {
+    const text = (query.strings ?? []).join('?').replace(/\s+/g, ' ').trim();
+    if (!/FOR UPDATE$/.test(text)) throw new Error(`fake-prisma: unsupported raw query "${text}"`);
+    this.locks.push(text);
+    return [];
   }
 
   private assertUnique(model: string, candidate: Row, exceptRow?: Row): void {

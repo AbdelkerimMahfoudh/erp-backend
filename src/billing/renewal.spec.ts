@@ -38,16 +38,17 @@ describe('is a roll due?', () => {
   });
 });
 
-function makeWorld(opts: { now: Date; activityNext?: 'money_agent' | null; currentPeriodEnd?: Date }) {
+function makeWorld(opts: { now: Date; activityNext?: 'money_agent' | null; currentPeriodEnd?: Date; unbilled?: boolean }) {
   const sub = { id: SUB, companyId: COMPANY, status: 'activated', currentPeriodEnd: opts.currentPeriodEnd ?? NEW_END };
-  const periods: { id: Buffer; periodStart: Date; periodEnd: Date | null }[] = [
-    { id: newUuidV7Bin(), periodStart: new Date(OLD_END.getTime() - 30 * DAY), periodEnd: OLD_END },
-  ];
+  const periods: { id: Buffer; periodStart: Date; periodEnd: Date | null }[] = opts.unbilled
+    ? []
+    : [{ id: newUuidV7Bin(), periodStart: new Date(OLD_END.getTime() - 30 * DAY), periodEnd: OLD_END }];
   const branch = { id: MAIN, name: 'Main', activity: 'both', activityNext: opts.activityNext === undefined ? 'money_agent' : opts.activityNext, activityChangedAt: null as Date | null };
   const events: { kind: string; note: string; actor: string }[] = [];
   const allocations = [{ kind: 'activity', status: 'granted', branchId: MAIN, activityTo: 'money_agent', confirmedAt: null as Date | null, confirmedBy: null as string | null, reason: null as string | null }];
   const locks: string[] = [];
   const opened: { startsAt: Date | undefined; end: Date | null }[] = [];
+  const closed: Date[] = [];
   const db: Record<string, any> = {
     subscription: { findFirst: async () => ({ ...sub }) },
     branch: {
@@ -72,9 +73,13 @@ function makeWorld(opts: { now: Date; activityNext?: 'money_agent' | null; curre
       opened.push({ startsAt: o.startsAt, end });
       periods.push({ id: newUuidV7Bin(), periodStart: o.startsAt ?? opts.now, periodEnd: end });
     },
+    closeCurrentPeriod: async (_c: Buffer, at: Date) => {
+      closed.push(at);
+      return periods.length > 0;
+    },
   } as unknown as BillingService;
   const renewal = new SubscriptionRenewal(db as never, billing, clock);
-  return { renewal, branch, events, allocations, locks, opened, periods };
+  return { renewal, branch, events, allocations, locks, opened, closed, periods };
 }
 
 describe('the roll due at the end of a prepaid period', () => {
@@ -106,6 +111,42 @@ describe('the roll due at the end of a prepaid period', () => {
     const w = makeWorld({ now: new Date(OLD_END.getTime() + DAY), currentPeriodEnd: OLD_END });
     await expect(w.renewal.rollIfDue(COMPANY)).resolves.toBeNull();
     expect(w.opened).toEqual([]);
+  });
+});
+
+describe('a roll now, at the instant paid access starts (0095)', () => {
+  const NOW = new Date('2026-10-14T09:00:00.000Z');
+  const TRIAL_END = new Date('2026-10-20T10:00:00.000Z');
+
+  it('without an instant it begins now, and says it opened', async () => {
+    const w = makeWorld({ now: NOW, unbilled: true });
+    const rolled = await w.renewal.rollNow(COMPANY, SUB, NEW_END, 'ops@example.test');
+    expect(rolled).toMatchObject({ at: NOW.toISOString(), closedPeriod: false });
+    expect(w.opened).toEqual([{ startsAt: NOW, end: NEW_END }]);
+    expect(w.events.map((e) => e.note)).toContain("First billing period opened at today's size and prices.");
+  });
+
+  it('at a free trial’s end it begins there — the period, the downgrade it applies, and the timeline says so', async () => {
+    const w = makeWorld({ now: NOW, unbilled: true });
+    const rolled = await w.renewal.rollNow(COMPANY, SUB, NEW_END, 'ops@example.test', TRIAL_END);
+    expect(rolled).toMatchObject({ at: TRIAL_END.toISOString(), closedPeriod: false });
+    expect(w.closed).toEqual([TRIAL_END]);
+    expect(w.opened).toEqual([{ startsAt: TRIAL_END, end: NEW_END }]);
+    // A downgrade scheduled for this renewal is stamped with the renewal's instant, as a roll when due stamps its own.
+    expect(w.branch.activityChangedAt).toEqual(TRIAL_END);
+    expect(w.allocations[0]).toMatchObject({ confirmedAt: TRIAL_END, reason: 'Applied at the renewal.' });
+    expect(w.events.map((e) => e.kind)).toEqual(['activity_changed', 'renewed']);
+    expect(w.events[1].note).toBe(`First billing period opens on ${TRIAL_END.toISOString()}, at today's size and the prices in force then.`);
+    expect(w.locks).toHaveLength(1);
+  });
+
+  it('a deferred roll over an earlier period closes it at that instant and says the next one opens then', async () => {
+    const w = makeWorld({ now: NOW, activityNext: null });
+    await w.renewal.rollNow(COMPANY, SUB, NEW_END, 'ops@example.test', TRIAL_END);
+    expect(w.closed).toEqual([TRIAL_END]);
+    expect(w.events.map((e) => e.note)).toEqual([
+      `Renewed: the billing period closes and a new one opens on ${TRIAL_END.toISOString()}, at today's size and the prices in force then.`,
+    ]);
   });
 });
 

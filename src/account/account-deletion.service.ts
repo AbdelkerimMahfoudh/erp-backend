@@ -15,6 +15,7 @@ import { ACCOUNT_DELETED_TEMPLATE, MessageLanguage } from '../messaging/template
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { generatePersonalId } from '../auth/identifier';
 import { STORAGE_PROVIDER, type StorageProvider } from '../storage/storage.types';
+import { lockSubscription } from '../billing/renewal';
 import {
   DELETED_USER_NAME,
   UNUSABLE_PASSWORD_HASH,
@@ -499,6 +500,10 @@ export class AccountDeletionService {
     now: Date,
   ): Promise<{ summary: Record<string, unknown>; receiptKeys: string[] }> {
     const companyId = request.companyId;
+    // The subscription first, as every writer that touches it takes it (billing/renewal.ts): a free trial claimed at
+    // this very moment (0095) waits for the closure and then finds the business closed — rather than deadlocking with
+    // it over the rows this transaction is about to change.
+    await lockSubscription(tx, companyId);
     const people = await tx.user.findMany({ where: { companyId, deletedAt: null }, select: { id: true, email: true, phone: true } });
     const forgotten = await this.forgetPeople(tx, companyId, people, now, request.userId);
     await tx.notification.deleteMany({ where: { companyId } });
@@ -547,6 +552,16 @@ export class AccountDeletionService {
         },
       });
     }
+    // The free trial (0095): a closed business can never start one, and no setup link it was sent works any more.
+    // The claim, if there was one, is kept as it is: a fact, like the rest of the subscription's history.
+    await tx.trialEligibility.updateMany({
+      where: { companyId, closedAt: null },
+      data: { closedAt: now, closedReason: 'cancelled' },
+    });
+    await tx.trialSetupLink.updateMany({
+      where: { companyId, consumedAt: null, revokedAt: null },
+      data: { revokedAt: now, revokedReason: 'closed' },
+    });
 
     await tx.company.update({
       where: { id: companyId },

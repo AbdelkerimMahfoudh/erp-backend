@@ -58,23 +58,41 @@ export class SubscriptionRenewal {
     private readonly clock: Clock,
   ) {}
 
-  /** Roll now: the next period begins at this instant. For the Super Admin's approval, grant, or a lapsed shop's renewal. */
-  async rollNow(companyId: Buffer, subscriptionId: Buffer, periodEnd: Date | null, actor: string): Promise<RenewalOutcome> {
-    const at = this.clock.now();
+  /**
+   * Roll now: the next period begins at this instant. For the Super Admin's approval, grant, or a lapsed shop's
+   * renewal.
+   *
+   * `at` moves the beginning: paid access approved while a free trial runs starts when the trial ends (0095), so the
+   * period opens there — sized as the shop is today, priced by the plan in force then — and the timeline says when.
+   * The changes scheduled for this renewal are applied as the roll runs, dated `at`.
+   */
+  async rollNow(
+    companyId: Buffer,
+    subscriptionId: Buffer,
+    periodEnd: Date | null,
+    actor: string,
+    at: Date = this.clock.now(),
+  ): Promise<RenewalOutcome> {
+    const deferred = at.getTime() > this.clock.now().getTime();
     return this.prisma.$transaction(async (tx) => {
       await lockSubscription(tx, companyId);
       const activityChanges = await applyScheduledActivityChanges(tx, companyId, subscriptionId, at, actor);
       const closedPeriod = await this.billing.closeCurrentPeriod(companyId, at, tx);
       await this.billing.openPeriod(companyId, subscriptionId, periodEnd, { db: tx, startsAt: at });
+      const opens = `on ${at.toISOString()}, at today's size and the prices in force then.`;
       await tx.subscriptionEvent.create({
         data: {
           id: newUuidV7Bin(),
           companyId,
           subscriptionId,
           kind: 'renewed',
-          note: closedPeriod
-            ? 'Renewed: the billing period closed and a new one opened at today\'s size and prices.'
-            : 'First billing period opened at today\'s size and prices.',
+          note: deferred
+            ? closedPeriod
+              ? `Renewed: the billing period closes and a new one opens ${opens}`
+              : `First billing period opens ${opens}`
+            : closedPeriod
+              ? 'Renewed: the billing period closed and a new one opened at today\'s size and prices.'
+              : 'First billing period opened at today\'s size and prices.',
           periodEndAfter: periodEnd,
           actor: actor.slice(0, 120),
         },

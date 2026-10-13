@@ -124,6 +124,16 @@ export function periodRunning(period: Pick<PeriodState, 'periodEnd'> | null, now
   return period !== null && (period.periodEnd === null || period.periodEnd.getTime() > now.getTime());
 }
 
+/**
+ * The newest period first — for every reader of a company's periods.
+ *
+ * Two periods can share a `periodStart` (0095): a grant or a correction made while a deferred period waits for a
+ * free trial to end closes that period at the instant it starts and opens the next at the same instant. The one
+ * opened later must win, every time and for every reader: ids are UUIDv7, time-ordered to the millisecond, so
+ * `id desc` breaks the tie in favour of the newer row.
+ */
+const NEWEST_PERIOD_FIRST: Prisma.BillingPeriodOrderByWithRelationInput[] = [{ periodStart: 'desc' }, { id: 'desc' }];
+
 /** An applicant may describe at most this many stores in one estimate. */
 export const ESTIMATE_MAX_STORES = 50;
 export const ESTIMATE_MAX_STAFF_PER_STORE = 500;
@@ -210,11 +220,14 @@ export class BillingService {
     };
   }
 
-  /** The latest billing period, or null for a business never billed. */
+  /**
+   * The latest billing period, or null for a business never billed. A period opened for the end of a free trial
+   * starts in the future and is already the latest: it is the one paid for (0095).
+   */
   async latestPeriod(companyId: Buffer, db: BillingDb = this.prisma): Promise<PeriodState | null> {
     return db.billingPeriod.findFirst({
       where: { companyId },
-      orderBy: { periodStart: 'desc' },
+      orderBy: NEWEST_PERIOD_FIRST,
       select: {
         id: true,
         periodStart: true,
@@ -361,7 +374,7 @@ export class BillingService {
 
     const period = await this.prisma.billingPeriod.findFirst({
       where: { companyId },
-      orderBy: { periodStart: 'desc' },
+      orderBy: NEWEST_PERIOD_FIRST,
     });
 
     /*
@@ -439,7 +452,7 @@ export class BillingService {
   async assessNow(companyId: Buffer, db: BillingDb = this.prisma): Promise<void> {
     const period = await db.billingPeriod.findFirst({
       where: { companyId },
-      orderBy: { periodStart: 'desc' },
+      orderBy: NEWEST_PERIOD_FIRST,
     });
     if (!period) return;
     // A period that already ended is history: nothing is ever added to it. A change confirmed after it ended is
@@ -534,7 +547,7 @@ export class BillingService {
   async replacementSlots(companyId: Buffer, db: BillingDb = this.prisma): Promise<{ period: PeriodState; slots: ReplacementSlot[] } | null> {
     const sub = await db.subscription.findFirst({ where: { companyId }, select: { status: true } });
     if (sub?.status !== 'activated') return null;
-    const period = await db.billingPeriod.findFirst({ where: { companyId }, orderBy: { periodStart: 'desc' } });
+    const period = await db.billingPeriod.findFirst({ where: { companyId }, orderBy: NEWEST_PERIOD_FIRST });
     if (!period || !periodRunning(period, this.clock.now())) return null;
     const fees = feesFrom(period.assessedActivityFeeByBranch) ?? {};
     const billed = Object.keys(fees).filter((id) => isUuid(id));
@@ -635,7 +648,7 @@ export class BillingService {
   async closeCurrentPeriod(companyId: Buffer, at: Date, db: BillingDb = this.prisma): Promise<boolean> {
     const period = await db.billingPeriod.findFirst({
       where: { companyId },
-      orderBy: { periodStart: 'desc' },
+      orderBy: NEWEST_PERIOD_FIRST,
       select: { id: true, periodEnd: true },
     });
     if (!period) return false;

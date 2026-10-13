@@ -1,11 +1,12 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, type SubscriptionStatus } from '@prisma/client';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma, type SubscriptionStatus, type TrialEligibilityClosedReason } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin, uuidToBin, binToUuid, isUuid } from '../common/utils/uuid.util';
 import { PlatformAuditService } from './platform-audit.service';
 import { BillingService, periodRunning } from '../billing/billing.service';
-import { SubscriptionRenewal, type RenewalOutcome } from '../billing/renewal';
-import { systemClock } from '../entitlement/clock';
+import { SubscriptionRenewal, lockSubscription, type RenewalOutcome } from '../billing/renewal';
+import { CLOCK, type Clock } from '../entitlement/clock';
+import { runningTrialEnd } from './trial/trial-rules';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
 /**
@@ -31,6 +32,12 @@ import type { PlatformAdminIdentity } from './platform-admin.service';
  * extension or a correction that moves the period end FORWARD applies every
  * downgrade scheduled for it, closes the current billing period and opens the
  * next at the shop's new size — see {@link SubscriptionLifecycleService.renew}.
+ *
+ * **The free trial's fence** (0095): every decision that makes a business
+ * paid, granted, refused or cancelled closes its trial eligibility under the
+ * subscription lock, and paid access given while the trial runs starts when
+ * it ends — see {@link SubscriptionLifecycleService.fenced}. Suspension and
+ * reinstatement close nothing. No action here writes a claim.
  */
 
 export type LifecycleAction =
@@ -55,9 +62,33 @@ function monthsFrom(from: Date, months: number): Date {
   return end;
 }
 
+/**
+ * A note that keeps the fact the server adds, and the administrator's reason as far as it still fits: the column
+ * holds 255 characters, and the fact is the part a reader must not lose.
+ */
+function noteWith(reason: string | undefined, fact: string | null): string | null {
+  if (!fact) return reason?.slice(0, 255) ?? null;
+  const lead = reason?.trim().slice(0, Math.max(0, 255 - fact.length - 1)) ?? '';
+  return lead ? `${lead} ${fact}` : fact;
+}
+
+/** A period that would end inside the free trial it waits for: refused, with the end it must pass. */
+function endsBeforeTrial(trialEndsAt: Date): BadRequestException {
+  return new BadRequestException({
+    code: 'period_ends_before_trial_end',
+    message: `The end date must be after the free trial ends on ${trialEndsAt.toISOString()}.`,
+  });
+}
+
 interface ActorContext {
   admin: PlatformAdminIdentity;
   ip?: string | null;
+}
+
+/** What the trial fence found under the lock: its instant, and the end of a free trial still running then. */
+interface TrialFence {
+  now: Date;
+  trialEndsAt: Date | null;
 }
 
 @Injectable()
@@ -69,8 +100,9 @@ export class SubscriptionLifecycleService {
     private readonly prisma: PrismaService,
     private readonly audit: PlatformAuditService,
     private readonly billing: BillingService,
+    @Inject(CLOCK) private readonly clock: Clock,
   ) {
-    this.renewal = new SubscriptionRenewal(prisma, billing, systemClock);
+    this.renewal = new SubscriptionRenewal(prisma, billing, clock);
   }
 
   /**
@@ -81,7 +113,7 @@ export class SubscriptionLifecycleService {
    * paid for before its month is over.
    */
   private async periodStillRunning(companyId: Buffer): Promise<boolean> {
-    return periodRunning(await this.billing.latestPeriod(companyId), new Date());
+    return periodRunning(await this.billing.latestPeriod(companyId), this.clock.now());
   }
 
   private companyIdOf(companyId: string): Buffer {
@@ -137,13 +169,14 @@ export class SubscriptionLifecycleService {
     companyId: Buffer,
     expectedVersion: number | undefined,
     data: T,
+    db: Prisma.TransactionClient = this.prisma,
   ) {
     const where: Prisma.SubscriptionWhereUniqueInput & { version?: number } = {
       companyId,
     } as never;
 
     try {
-      return await this.prisma.subscription.update({
+      return await db.subscription.update({
         where:
           expectedVersion === undefined
             ? ({ companyId } as never)
@@ -160,6 +193,35 @@ export class SubscriptionLifecycleService {
       throw e;
     }
     void where;
+  }
+
+  /**
+   * The free trial's fence (0095), and the decision it guards, in one transaction under the subscription lock.
+   *
+   * The fence closes the trial eligibility — NULL → value, once, with the decision's reason — and reads the claim:
+   * a trial still running is when paid access starts, never sooner (the owner's decision of 2026-10-13: the trial is
+   * not shortened and nothing paid runs beside it). Closing under the lock serialises with a claim, which re-checks
+   * the eligibility under the same lock: once fenced, no trial can start, and one that started first is the one
+   * read here.
+   *
+   * `decide` runs in the same transaction — the trial-dependent checks, then the version-guarded transition — so a
+   * refusal (a stale `expectedVersion`, a period that would end inside the trial) leaves the eligibility untouched.
+   */
+  private async fenced<R>(
+    companyId: Buffer,
+    reason: TrialEligibilityClosedReason,
+    decide: (tx: Prisma.TransactionClient, fence: TrialFence) => Promise<R>,
+  ): Promise<R> {
+    return this.prisma.$transaction(async (tx) => {
+      await lockSubscription(tx, companyId);
+      const now = this.clock.now();
+      await tx.trialEligibility.updateMany({
+        where: { companyId, closedAt: null },
+        data: { closedAt: now, closedReason: reason },
+      });
+      const claim = await tx.trialClaim.findUnique({ where: { companyId }, select: { endsAt: true } });
+      return decide(tx, { now, trialEndsAt: runningTrialEnd(claim, now) });
+    });
   }
 
   /**
@@ -185,32 +247,48 @@ export class SubscriptionLifecycleService {
     const id = this.companyIdOf(companyId);
     const before = await this.loadOrThrow(id);
 
-    const until = new Date(Date.now() + input.days * 24 * 60 * 60 * 1000);
-
     /*
-     * Idempotent retry.
-     *
-     * If this business is already granted, already activated, and the grant
-     * runs to about the same moment, the call has already happened — almost
-     * certainly a retry after a dropped response. Return the winning state
-     * rather than stacking a second grant on top.
+     * Fenced (0095): a grant closes the trial eligibility, and a grant given
+     * while the trial runs starts when it ends — its days are counted from
+     * there, never spent inside the trial.
      */
-    const alreadyDone =
-      before.status === 'activated' &&
-      before.isComplimentary &&
-      before.complimentaryUntil !== null &&
-      Math.abs(before.complimentaryUntil.getTime() - until.getTime()) < 60_000;
+    const granted = await this.fenced(id, 'granted', async (tx, { now, trialEndsAt }) => {
+      const from = trialEndsAt ?? now;
+      const until = new Date(from.getTime() + input.days * 24 * 60 * 60 * 1000);
 
-    if (alreadyDone) {
+      /*
+       * Idempotent retry.
+       *
+       * If this business is already granted, already activated, and the grant
+       * runs to about the same moment, the call has already happened — almost
+       * certainly a retry after a dropped response. Return the winning state
+       * rather than stacking a second grant on top.
+       */
+      const alreadyDone =
+        before.status === 'activated' &&
+        before.isComplimentary &&
+        before.complimentaryUntil !== null &&
+        Math.abs(before.complimentaryUntil.getTime() - until.getTime()) < 60_000;
+      if (alreadyDone) return null;
+
+      const after = await this.transition(
+        id,
+        input.expectedVersion,
+        {
+          status: 'activated' as SubscriptionStatus,
+          isComplimentary: true,
+          complimentaryReason: input.reason.slice(0, 255),
+          complimentaryUntil: until,
+        },
+        tx,
+      );
+      return { after, from, trialEndsAt };
+    });
+
+    if (!granted) {
       return { subscription: before, applied: false };
     }
-
-    const after = await this.transition(id, input.expectedVersion, {
-      status: 'activated' as SubscriptionStatus,
-      isComplimentary: true,
-      complimentaryReason: input.reason.slice(0, 255),
-      complimentaryUntil: until,
-    });
+    const { after, from, trialEndsAt } = granted;
 
     await this.prisma.subscriptionEvent.create({
       data: {
@@ -236,7 +314,13 @@ export class SubscriptionLifecycleService {
       targetLabel: before.company.name,
       reason: input.reason,
       before: this.snapshot(before),
-      after: { ...this.snapshot(after), grantDays: input.days, paymentRecorded: false },
+      after: {
+        ...this.snapshot(after),
+        grantDays: input.days,
+        grantFrom: from.toISOString(),
+        trialEndsAt: trialEndsAt?.toISOString() ?? null,
+        paymentRecorded: false,
+      },
       ip: ctx.ip ?? null,
     });
 
@@ -246,9 +330,10 @@ export class SubscriptionLifecycleService {
      * grant's period opens at today's size and prices — never a second period
      * overlapping the first. Done here rather than at registration: a pending
      * business has never been billed, and a period snapshot for one would be a
-     * billing history it does not have.
+     * billing history it does not have. During a free trial, "this instant" is
+     * the trial's end (0095).
      */
-    await this.renewal.rollNow(id, before.id, after.complimentaryUntil, ctx.admin.email);
+    await this.renewal.rollNow(id, before.id, after.complimentaryUntil, ctx.admin.email, from);
 
     return { subscription: after, applied: true };
   }
@@ -266,6 +351,10 @@ export class SubscriptionLifecycleService {
    * A refused registration may be approved after all — the decision was
    * recorded, and so is its reversal. A suspended or cancelled business is
    * not pending and is refused here; reinstatement is its own audited act.
+   *
+   * Approved while the free trial runs (0095), paid access starts when the
+   * trial ends: the months are counted from there, an exact end date must lie
+   * beyond it, and the first billing period opens there.
    */
   async approve(
     companyId: string,
@@ -280,7 +369,7 @@ export class SubscriptionLifecycleService {
     if (hasMonths && (!Number.isInteger(input.months) || input.months! < 1 || input.months! > MAX_PERIOD_MONTHS)) {
       throw new BadRequestException(`Approve for between 1 and ${MAX_PERIOD_MONTHS} months.`);
     }
-    if (hasEnd && (Number.isNaN(input.periodEnd!.getTime()) || input.periodEnd!.getTime() <= Date.now())) {
+    if (hasEnd && (Number.isNaN(input.periodEnd!.getTime()) || input.periodEnd!.getTime() <= this.clock.now().getTime())) {
       throw new BadRequestException('The end date must be in the future.');
     }
 
@@ -295,12 +384,17 @@ export class SubscriptionLifecycleService {
       );
     }
 
-    const now = new Date();
-    const end = hasEnd ? new Date(input.periodEnd!) : monthsFrom(now, input.months!);
-
-    const after = await this.transition(id, input.expectedVersion, {
-      status: 'activated' as SubscriptionStatus,
-      currentPeriodEnd: end,
+    const { after, now, paidFrom, trialEndsAt, end } = await this.fenced(id, 'approved', async (tx, { now, trialEndsAt }) => {
+      if (hasEnd && trialEndsAt && input.periodEnd!.getTime() <= trialEndsAt.getTime()) throw endsBeforeTrial(trialEndsAt);
+      const paidFrom = trialEndsAt ?? now;
+      const end = hasEnd ? new Date(input.periodEnd!) : monthsFrom(paidFrom, input.months!);
+      const after = await this.transition(
+        id,
+        input.expectedVersion,
+        { status: 'activated' as SubscriptionStatus, currentPeriodEnd: end },
+        tx,
+      );
+      return { after, now, paidFrom, trialEndsAt, end };
     });
 
     await this.prisma.subscriptionEvent.create({
@@ -309,7 +403,10 @@ export class SubscriptionLifecycleService {
         companyId: id,
         subscriptionId: before.id,
         kind: 'approved',
-        note: input.reason?.slice(0, 255) ?? null,
+        note: noteWith(
+          input.reason,
+          trialEndsAt ? `Paid access starts when the free trial ends at ${trialEndsAt.toISOString()}.` : null,
+        ),
         periodEndAfter: end,
         branchesAfter: after.subscribedBranchCount,
         seatsAfter: after.additionalSeats,
@@ -319,8 +416,9 @@ export class SubscriptionLifecycleService {
 
     // The first billing period, at today's prices — see `activateByGrant`.
     // Through the renewal routine, so a refused-then-approved shop that
-    // scheduled a downgrade meanwhile starts at the size it asked for.
-    const renewal = await this.renewal.rollNow(id, before.id, end, ctx.admin.email);
+    // scheduled a downgrade meanwhile starts at the size it asked for. It
+    // opens where paid access starts: now, or at the free trial's end.
+    const renewal = await this.renewal.rollNow(id, before.id, end, ctx.admin.email, paidFrom);
 
     await this.audit.record({
       admin: ctx.admin,
@@ -334,6 +432,8 @@ export class SubscriptionLifecycleService {
         ...this.snapshot(after),
         ...(hasMonths ? { months: input.months } : {}),
         approvedAt: now.toISOString(),
+        paidFrom: paidFrom.toISOString(),
+        trialEndsAt: trialEndsAt?.toISOString() ?? null,
         paymentRecorded: false,
         renewal,
       },
@@ -368,9 +468,10 @@ export class SubscriptionLifecycleService {
       );
     }
 
-    const after = await this.transition(id, input.expectedVersion, {
-      status: 'rejected' as SubscriptionStatus,
-    });
+    // Fenced (0095): a refused business can never start the free trial — approving it later does not reopen it.
+    const after = await this.fenced(id, 'refused', (tx) =>
+      this.transition(id, input.expectedVersion, { status: 'rejected' as SubscriptionStatus }, tx),
+    );
 
     await this.prisma.subscriptionEvent.create({
       data: {
@@ -412,6 +513,10 @@ export class SubscriptionLifecycleService {
    * Grace is not set here and cannot be: it is always the seventy-two hours
    * after this date, derived and never stored, so a corrected period carries
    * its grace with it.
+   *
+   * While a free trial still runs (0095) — a business suspended during it and
+   * reinstated keeps its clock — the end must lie beyond the trial's, and a
+   * new period starts at the trial's end.
    */
   async setPeriodEnd(
     companyId: string,
@@ -419,7 +524,7 @@ export class SubscriptionLifecycleService {
     ctx: ActorContext,
   ) {
     if (Number.isNaN(input.periodEnd.getTime())) throw new BadRequestException('Give a real date.');
-    if (input.periodEnd.getTime() > monthsFrom(new Date(), MAX_PERIOD_MONTHS).getTime()) {
+    if (input.periodEnd.getTime() > monthsFrom(this.clock.now(), MAX_PERIOD_MONTHS).getTime()) {
       throw new BadRequestException(`A period may run at most ${MAX_PERIOD_MONTHS} months from today.`);
     }
 
@@ -441,8 +546,11 @@ export class SubscriptionLifecycleService {
       throw new BadRequestException('Shortening a period needs a reason.');
     }
 
-    const after = await this.transition(id, input.expectedVersion, {
-      currentPeriodEnd: input.periodEnd,
+    // Fenced like every decision that makes a business paid; a no-op once its approval closed the eligibility.
+    const { after, now, trialEndsAt } = await this.fenced(id, 'paid_period', async (tx, { now, trialEndsAt }) => {
+      if (trialEndsAt && input.periodEnd.getTime() <= trialEndsAt.getTime()) throw endsBeforeTrial(trialEndsAt);
+      const after = await this.transition(id, input.expectedVersion, { currentPeriodEnd: input.periodEnd }, tx);
+      return { after, now, trialEndsAt };
     });
 
     await this.prisma.subscriptionEvent.create({
@@ -470,8 +578,8 @@ export class SubscriptionLifecycleService {
     let renewal: RenewalOutcome | null = null;
     if (running) {
       await this.billing.redateRunningPeriod(id, input.periodEnd);
-    } else if (!shortened && input.periodEnd.getTime() > Date.now()) {
-      renewal = await this.renewal.rollNow(id, before.id, input.periodEnd, ctx.admin.email);
+    } else if (!shortened && input.periodEnd.getTime() > now.getTime()) {
+      renewal = await this.renewal.rollNow(id, before.id, input.periodEnd, ctx.admin.email, trialEndsAt ?? now);
     }
 
     await this.audit.record({
@@ -496,6 +604,7 @@ export class SubscriptionLifecycleService {
    * business whose period has ended, at the old end for one still running —
    * the Owner who pays November on the 20th of October keeps October's
    * activities until the 31st, and the roll is applied then (billing/renewal.ts).
+   * During a free trial (0095), "at once" is the trial's end.
    */
   async extend(
     companyId: string,
@@ -509,18 +618,24 @@ export class SubscriptionLifecycleService {
     const id = this.companyIdOf(companyId);
     const before = await this.loadOrThrow(id);
 
-    // From the later of now and the current end, so extending a lapsed
-    // subscription does not silently backdate the new period into the past.
-    const from =
-      before.currentPeriodEnd && before.currentPeriodEnd.getTime() > Date.now()
-        ? new Date(before.currentPeriodEnd)
-        : new Date();
-    const end = new Date(from);
-    end.setMonth(end.getMonth() + input.months);
-
-    const after = await this.transition(id, input.expectedVersion, {
-      status: 'activated' as SubscriptionStatus,
-      currentPeriodEnd: end,
+    // Fenced (0095): an extension makes the business paid, so no trial can start after it.
+    const { after, end, accessFrom, trialEndsAt } = await this.fenced(id, 'paid_period', async (tx, { now, trialEndsAt }) => {
+      const accessFrom = trialEndsAt ?? now;
+      // From the later of the current end and the moment access may start, so
+      // extending a lapsed subscription does not silently backdate the new
+      // period into the past — nor start one inside a running free trial.
+      const from =
+        before.currentPeriodEnd && before.currentPeriodEnd.getTime() > accessFrom.getTime()
+          ? before.currentPeriodEnd
+          : accessFrom;
+      const end = monthsFrom(from, input.months);
+      const after = await this.transition(
+        id,
+        input.expectedVersion,
+        { status: 'activated' as SubscriptionStatus, currentPeriodEnd: end },
+        tx,
+      );
+      return { after, end, accessFrom, trialEndsAt };
     });
 
     await this.prisma.subscriptionEvent.create({
@@ -537,7 +652,9 @@ export class SubscriptionLifecycleService {
       },
     });
 
-    const renewal = (await this.periodStillRunning(id)) ? null : await this.renewal.rollNow(id, before.id, end, ctx.admin.email);
+    const renewal = (await this.periodStillRunning(id))
+      ? null
+      : await this.renewal.rollNow(id, before.id, end, ctx.admin.email, accessFrom);
 
     await this.audit.record({
       admin: ctx.admin,
@@ -547,7 +664,13 @@ export class SubscriptionLifecycleService {
       targetLabel: before.company.name,
       reason: input.reason ?? null,
       before: this.snapshot(before),
-      after: { ...this.snapshot(after), months: input.months, renewal, renewalDueAt: renewal ? null : before.currentPeriodEnd?.toISOString() ?? null },
+      after: {
+        ...this.snapshot(after),
+        months: input.months,
+        renewal,
+        renewalDueAt: renewal ? null : before.currentPeriodEnd?.toISOString() ?? null,
+        trialEndsAt: trialEndsAt?.toISOString() ?? null,
+      },
       ip: ctx.ip ?? null,
     });
 
@@ -603,7 +726,11 @@ export class SubscriptionLifecycleService {
     return { subscription: after, applied: true };
   }
 
-  /** Undo a suspension. The dates decide again from here. */
+  /**
+   * Undo a suspension. The dates decide again from here — and so does a free
+   * trial's own end (0095): a business suspended during its trial resumes the
+   * same trial, never a longer one. Nothing about the trial is touched.
+   */
   async reinstate(
     companyId: string,
     input: { reason?: string; expectedVersion?: number },
@@ -661,9 +788,10 @@ export class SubscriptionLifecycleService {
     const before = await this.loadOrThrow(id);
     if (before.status === 'cancelled') return { subscription: before, applied: false };
 
-    const after = await this.transition(id, input.expectedVersion, {
-      status: 'cancelled' as SubscriptionStatus,
-    });
+    // Fenced (0095): a cancelled business can never start the free trial.
+    const after = await this.fenced(id, 'cancelled', (tx) =>
+      this.transition(id, input.expectedVersion, { status: 'cancelled' as SubscriptionStatus }, tx),
+    );
 
     await this.prisma.subscriptionEvent.create({
       data: {
@@ -738,7 +866,7 @@ export class SubscriptionLifecycleService {
         note: input.note?.slice(0, 500) ?? null,
         recordedBy: ctx.admin.email,
         confirmedBy: input.confirm ? ctx.admin.email : null,
-        confirmedAt: input.confirm ? new Date() : null,
+        confirmedAt: input.confirm ? this.clock.now() : null,
       },
     });
 

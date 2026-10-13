@@ -658,6 +658,49 @@ describe('closing the business', () => {
     expect(notice.language).toBe('ar');
     expect(notice.variables.what).toBe('متجرك وجميع حسابات الدخول فيه');
   });
+
+  it('ends the free trial for good: the eligibility closed, every unused setup link revoked, the claim kept as it was (0095)', async () => {
+    const h = harness();
+    const at = new Date('2026-09-28T10:00:00Z');
+    const trialRow = (rowId: Buffer, companyId: Buffer, owner: Buffer) => ({
+      id: rowId,
+      companyId,
+      ownerUserId: owner,
+      registrationMethod: 'phone',
+      basis: 'self_registration',
+      createdAt: at,
+      closedAt: null,
+      closedReason: null,
+    });
+    h.prisma.seed('trialEligibility', trialRow(id('6201'), C1, OWNER), trialRow(id('6207'), C2, STRANGER));
+    const claim = { id: id('6202'), companyId: C1, eligibilityId: id('6201'), claimantUserId: OWNER, claimedAt: at, startedAt: at, endsAt: new Date(at.getTime() + 168 * 3600_000), expiryRecordedAt: null };
+    h.prisma.seed('trialClaim', claim);
+    h.prisma.seed(
+      'trialSetupLink',
+      { id: id('6203'), companyId: C1, userId: OWNER, consumedAt: null, revokedAt: null, revokedReason: null },
+      { id: id('6204'), companyId: C1, userId: OWNER, consumedAt: at, revokedAt: null, revokedReason: null },
+      { id: id('6205'), companyId: C1, userId: OWNER, consumedAt: null, revokedAt: at, revokedReason: 'reissued' },
+      { id: id('6206'), companyId: C2, userId: STRANGER, consumedAt: null, revokedAt: null, revokedReason: null },
+    );
+
+    await h.service.start(h.principal(OWNER), { password: 'owner-pw' });
+    expect((await h.service.confirm(h.principal(OWNER), h.lastCode()!)).status).toBe('completed');
+
+    const closedAt = h.row('company', C1).closedAt as Date;
+    expect(closedAt).toBeInstanceOf(Date);
+    expect(h.row('trialEligibility', id('6201'))).toMatchObject({ closedAt, closedReason: 'cancelled' });
+    expect(h.row('trialSetupLink', id('6203'))).toMatchObject({ revokedAt: closedAt, revokedReason: 'closed' });
+    // A link a claim used, and one already revoked, keep what they say.
+    expect(h.row('trialSetupLink', id('6204'))).toMatchObject({ consumedAt: at, revokedAt: null, revokedReason: null });
+    expect(h.row('trialSetupLink', id('6205'))).toMatchObject({ revokedAt: at, revokedReason: 'reissued' });
+    // The claim is history: untouched.
+    expect(h.row('trialClaim', id('6202'))).toEqual(claim);
+    // Another business: untouched.
+    expect(h.row('trialEligibility', id('6207'))).toMatchObject({ closedAt: null, closedReason: null });
+    expect(h.row('trialSetupLink', id('6206'))).toMatchObject({ revokedAt: null });
+    // Under the subscription lock, as every writer of the subscription takes it.
+    expect(h.prisma.locks).toEqual(['SELECT id FROM subscriptions WHERE company_id = ? FOR UPDATE']);
+  });
 });
 
 

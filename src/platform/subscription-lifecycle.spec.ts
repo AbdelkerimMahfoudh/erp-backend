@@ -3,6 +3,8 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { stateOf } from '../entitlement/entitlement-rules';
+import { trialFactsOf } from './trial/trial-rules';
 
 /**
  * Approval, refusal and a corrected period (0075), against a subscription
@@ -35,7 +37,16 @@ interface BranchRow {
   activityChangedAt: Date | null;
 }
 
-function makeWorld(status: Status, over: Record<string, unknown> = {}, branches: BranchRow[] = []) {
+/** The free trial's rows (0095), as the fence reads and closes them, and the clock it reads them by. */
+interface TrialWorld {
+  eligibility?: { closedAt: Date | null; closedReason: string | null } | null;
+  claim?: { claimedAt: Date; startedAt: Date; endsAt: Date } | null;
+  now?: Date;
+  /** Never billed at all: a pending business suspended during its trial and reinstated is `activated` with no period. */
+  unbilled?: boolean;
+}
+
+function makeWorld(status: Status, over: Record<string, unknown> = {}, branches: BranchRow[] = [], trial: TrialWorld = {}) {
   const sub: Record<string, any> = {
     id: newUuidV7Bin(),
     companyId: uuidToBin(COMPANY),
@@ -57,9 +68,17 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
   const redates: Date[] = [];
   /** What happened in which order: a renewal must apply downgrades, close, then open. */
   const order: string[] = [];
+  /** The fence's own steps, in order: every lock taken, the eligibility closed, the claim read, the transition. */
+  const steps: string[] = [];
+  /** Where each opened period starts (`openPeriod`'s `startsAt`). */
+  const starts: (Date | null)[] = [];
+  const eligibility = trial.eligibility ? { ...trial.eligibility } : null;
+  const claim = trial.claim ? { ...trial.claim } : null;
+  const clock = { now: () => trial.now ?? new Date() };
   const allocations: any[] = [];
   // A running business has a period, ending where its subscription ends; a pending one has nothing yet.
-  let latest: { periodEnd: Date | null } | null = status === 'activated' ? { periodEnd: (sub.currentPeriodEnd as Date | null) ?? null } : null;
+  let latest: { periodEnd: Date | null } | null =
+    status === 'activated' && !trial.unbilled ? { periodEnd: (sub.currentPeriodEnd as Date | null) ?? null } : null;
 
   const prisma: Record<string, any> = {
     branch: {
@@ -91,6 +110,7 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
     subscription: {
       findFirst: async () => ({ ...sub }),
       update: async ({ where, data }: any) => {
+        steps.push('transition');
         if (where.version !== undefined && where.version !== sub.version) {
           throw new Prisma.PrismaClientKnownRequestError('gone', { code: 'P2025', clientVersion: 'test' });
         }
@@ -106,10 +126,38 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
         return data;
       },
     },
+    // The fence closes an open eligibility, once, and reads the claim. Nothing here ever writes a claim.
+    trialEligibility: {
+      updateMany: async ({ where, data }: any) => {
+        steps.push('eligibility');
+        if (!eligibility || !where.companyId.equals(sub.companyId) || eligibility.closedAt !== where.closedAt) return { count: 0 };
+        Object.assign(eligibility, data);
+        return { count: 1 };
+      },
+    },
+    trialClaim: {
+      findUnique: async () => {
+        steps.push('claim');
+        return claim ? { endsAt: claim.endsAt } : null;
+      },
+    },
   };
-  // The renewal runs in one transaction that first locks the subscription row.
-  prisma.$transaction = async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma);
-  prisma.$queryRaw = async () => [];
+  // One transaction at a time, all or nothing for the rows the fence decides on: a refusal inside it — a stale
+  // version, an end inside the trial — leaves the subscription and the eligibility as they were.
+  prisma.$transaction = async (fn: (tx: unknown) => Promise<unknown>) => {
+    const saved = { sub: { ...sub }, eligibility: eligibility ? { ...eligibility } : null };
+    try {
+      return await fn(prisma);
+    } catch (e) {
+      Object.assign(sub, saved.sub);
+      if (eligibility && saved.eligibility) Object.assign(eligibility, saved.eligibility);
+      throw e;
+    }
+  };
+  prisma.$queryRaw = async () => {
+    steps.push('lock');
+    return [];
+  };
   const audit = {
     record: async (e: unknown) => {
       audits.push(e);
@@ -117,8 +165,9 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
   };
   const billing = {
     latestPeriod: async () => (latest ? { ...latest } : null),
-    openPeriod: async (_c: Buffer, _s: Buffer, end: Date | null) => {
+    openPeriod: async (_c: Buffer, _s: Buffer, end: Date | null, opts: { startsAt?: Date } = {}) => {
       periods.push(end);
+      starts.push(opts.startsAt ?? null);
       order.push('open');
       latest = { periodEnd: end };
     },
@@ -136,8 +185,24 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
       return true;
     },
   };
-  const service = new SubscriptionLifecycleService(prisma as never, audit as never, billing as never);
-  return { service, sub, events, audits, periods, closes, redates, order, branches, allocations, latest: () => latest };
+  const service = new SubscriptionLifecycleService(prisma as never, audit as never, billing as never, clock);
+  return {
+    service,
+    sub,
+    events,
+    audits,
+    periods,
+    starts,
+    closes,
+    redates,
+    order,
+    steps,
+    eligibility,
+    claim,
+    branches,
+    allocations,
+    latest: () => latest,
+  };
 }
 
 describe('approving a pending registration', () => {
@@ -438,9 +503,214 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
   });
 });
 
+/**
+ * The free trial's fence and the deferred paid start (0095; the owner's decision of 2026-10-13).
+ *
+ * Every Super Admin decision that makes a business paid, granted, refused or cancelled closes its trial eligibility
+ * under the subscription lock; paid access given while the trial runs starts when it ends — the trial is never
+ * shortened, extended or rewritten, and nothing paid runs beside it.
+ */
+describe('the free trial’s fence, and paid access that waits for the trial’s end (0095)', () => {
+  const NOW = new Date('2026-10-14T09:00:00.000Z');
+  const START = new Date('2026-10-13T10:00:00.000Z');
+  const END = new Date(START.getTime() + 168 * 60 * 60 * 1000);
+  const running = { claimedAt: START, startedAt: START, endsAt: END };
+  const open = () => ({ closedAt: null, closedReason: null });
+  const months = (from: Date, n: number) => {
+    const d = new Date(from);
+    d.setMonth(d.getMonth() + n);
+    return d;
+  };
+
+  it('approved before any claim: the eligibility closes and paid access starts now', async () => {
+    const w = makeWorld('pending_activation', {}, [], { eligibility: open(), now: NOW });
+    await w.service.approve(COMPANY, { months: 1, reason: 'Paid by transfer' }, CTX);
+
+    expect(w.eligibility).toEqual({ closedAt: NOW, closedReason: 'approved' });
+    // Subscription first, then the eligibility, then the claim, then the decision — one transaction.
+    expect(w.steps.slice(0, 4)).toEqual(['lock', 'eligibility', 'claim', 'transition']);
+    expect(w.sub.currentPeriodEnd).toEqual(months(NOW, 1));
+    expect(w.starts).toEqual([NOW]);
+    expect(w.closes).toEqual([NOW]);
+    expect(w.events[0]).toMatchObject({ kind: 'approved', note: 'Paid by transfer' });
+    expect(w.audits[0].after).toMatchObject({ paidFrom: NOW.toISOString(), trialEndsAt: null });
+  });
+
+  it('approved during a running trial: paid access starts at its end — the months counted from there, the first period opened there', async () => {
+    const w = makeWorld('pending_activation', {}, [], { eligibility: open(), claim: running, now: NOW });
+    await w.service.approve(COMPANY, { months: 1, reason: 'Paid by transfer' }, CTX);
+
+    expect(w.sub).toMatchObject({ status: 'activated', currentPeriodEnd: months(END, 1) });
+    expect(w.closes).toEqual([END]);
+    expect(w.starts).toEqual([END]);
+    expect(w.periods).toEqual([months(END, 1)]);
+    expect(w.events.map((e) => e.kind)).toEqual(['approved', 'renewed']);
+    expect(w.events[0].note).toBe(`Paid by transfer Paid access starts when the free trial ends at ${END.toISOString()}.`);
+    expect(w.events[1].note).toBe(`First billing period opens on ${END.toISOString()}, at today's size and the prices in force then.`);
+    expect(w.audits[0]).toMatchObject({
+      action: 'subscription.approve',
+      after: { paidFrom: END.toISOString(), trialEndsAt: END.toISOString(), paymentRecorded: false },
+    });
+    expect(w.eligibility).toEqual({ closedAt: NOW, closedReason: 'approved' });
+    // The trial is untouched: the same three instants, and the state is the trial's until its last millisecond.
+    expect(w.claim).toEqual(running);
+    const record = { ...w.sub, trial: trialFactsOf(w.eligibility, w.claim) } as never;
+    expect(stateOf(record, new Date(END.getTime() - 1))).toBe('trial_active');
+    expect(stateOf(record, END)).toBe('active');
+  });
+
+  it('an exact end date inside the trial is refused, and the refusal leaves the eligibility as it was', async () => {
+    const w = makeWorld('pending_activation', {}, [], { eligibility: open(), claim: running, now: NOW });
+    const refused = await w.service.approve(COMPANY, { periodEnd: new Date(END) }, CTX).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(BadRequestException);
+    expect((refused as BadRequestException).getResponse()).toEqual({
+      code: 'period_ends_before_trial_end',
+      message: `The end date must be after the free trial ends on ${END.toISOString()}.`,
+    });
+    expect(w.eligibility).toEqual(open());
+    expect(w.sub.status).toBe('pending_activation');
+    expect(w.events).toEqual([]);
+
+    // One millisecond past the trial's end is a period: it opens at the end and runs that millisecond.
+    await w.service.approve(COMPANY, { periodEnd: new Date(END.getTime() + 1) }, CTX);
+    expect(w.starts).toEqual([END]);
+    expect(w.periods).toEqual([new Date(END.getTime() + 1)]);
+  });
+
+  it('granted during a running trial: the grant’s days start at the trial’s end', async () => {
+    const w = makeWorld('pending_activation', {}, [], { eligibility: open(), claim: running, now: NOW });
+    await w.service.activateByGrant(COMPANY, { days: 30, reason: 'Pilot partner' }, CTX);
+
+    const until = new Date(END.getTime() + 30 * DAY);
+    expect(w.sub).toMatchObject({ status: 'activated', isComplimentary: true, complimentaryUntil: until });
+    expect(w.starts).toEqual([END]);
+    expect(w.periods).toEqual([until]);
+    expect(w.eligibility).toEqual({ closedAt: NOW, closedReason: 'granted' });
+    expect(w.audits[0].after).toMatchObject({ grantDays: 30, grantFrom: END.toISOString(), trialEndsAt: END.toISOString() });
+    const record = { ...w.sub, trial: trialFactsOf(w.eligibility, w.claim) } as never;
+    expect(stateOf(record, new Date(END.getTime() - 1))).toBe('trial_active');
+    expect(stateOf(record, END)).toBe('complimentary');
+  });
+
+  it('a grant’s retry is recognised by the same deferred end, and stacks nothing', async () => {
+    const w = makeWorld('pending_activation', {}, [], { eligibility: open(), claim: running, now: NOW });
+    await w.service.activateByGrant(COMPANY, { days: 30, reason: 'Pilot partner' }, CTX);
+    const again = await w.service.activateByGrant(COMPANY, { days: 30, reason: 'Pilot partner' }, CTX);
+    expect(again.applied).toBe(false);
+    expect(w.periods).toHaveLength(1);
+  });
+
+  it('extended during a running trial with nothing paid yet: the new period starts at the trial’s end', async () => {
+    const w = makeWorld('pending_activation', {}, [], { eligibility: open(), claim: running, now: NOW });
+    await w.service.extend(COMPANY, { months: 2 }, CTX);
+    expect(w.sub).toMatchObject({ status: 'activated', currentPeriodEnd: months(END, 2) });
+    expect(w.starts).toEqual([END]);
+    expect(w.eligibility).toEqual({ closedAt: NOW, closedReason: 'paid_period' });
+    expect(w.audits[0].after).toMatchObject({ trialEndsAt: END.toISOString() });
+  });
+
+  it('extended after an approval deferred to the trial’s end: only the end moves — the deferred period is the one running', async () => {
+    const paidEnd = months(END, 1);
+    const closed = { closedAt: START, closedReason: 'approved' };
+    const w = makeWorld('activated', { currentPeriodEnd: paidEnd }, [], { eligibility: closed, claim: running, now: NOW });
+    await w.service.extend(COMPANY, { months: 1 }, CTX);
+    expect(w.sub.currentPeriodEnd).toEqual(months(paidEnd, 1));
+    expect(w.order).toEqual([]);
+    // Closed once, by the approval: the extension changes nothing about it.
+    expect(w.eligibility).toEqual(closed);
+  });
+
+  it('a period set while a reinstated business’s trial still runs must end after it, and opens at its end', async () => {
+    // Suspended mid-trial and reinstated: `activated` with no period, the trial clock still running.
+    const w = makeWorld('activated', { currentPeriodEnd: null }, [], { eligibility: open(), claim: running, now: NOW, unbilled: true });
+    await expect(w.service.setPeriodEnd(COMPANY, { periodEnd: new Date(END) }, CTX)).rejects.toMatchObject({
+      response: { code: 'period_ends_before_trial_end' },
+    });
+    expect(w.eligibility).toEqual(open());
+
+    const end = new Date(END.getTime() + 10 * DAY);
+    await w.service.setPeriodEnd(COMPANY, { periodEnd: end }, CTX);
+    expect(w.starts).toEqual([END]);
+    expect(w.periods).toEqual([end]);
+    expect(w.eligibility).toEqual({ closedAt: NOW, closedReason: 'paid_period' });
+  });
+
+  it('refusing and cancelling close the eligibility; suspending and reinstating close nothing', async () => {
+    const refused = makeWorld('pending_activation', {}, [], { eligibility: open(), now: NOW });
+    await refused.service.reject(COMPANY, { reason: 'Duplicate of an existing shop' }, CTX);
+    expect(refused.eligibility).toEqual({ closedAt: NOW, closedReason: 'refused' });
+
+    const cancelled = makeWorld('pending_activation', {}, [], { eligibility: open(), now: NOW });
+    await cancelled.service.cancel(COMPANY, { reason: 'Asked to stop' }, CTX);
+    expect(cancelled.eligibility).toEqual({ closedAt: NOW, closedReason: 'cancelled' });
+
+    const paused = makeWorld('pending_activation', {}, [], { eligibility: open(), claim: running, now: NOW });
+    await paused.service.suspend(COMPANY, { reason: 'Checking the documents' }, CTX);
+    await paused.service.reinstate(COMPANY, {}, CTX);
+    expect(paused.eligibility).toEqual(open());
+    expect(paused.steps).not.toContain('eligibility');
+    // Reinstated mid-trial: the same trial resumes, to the same end.
+    const record = { ...paused.sub, trial: trialFactsOf(paused.eligibility, paused.claim) } as never;
+    expect(stateOf(record, new Date(END.getTime() - 1))).toBe('trial_active');
+    expect(stateOf(record, END)).toBe('trial_expired');
+  });
+
+  it('a closed eligibility stays closed: a refused business approved later gets no second reason, and never a trial', async () => {
+    const w = makeWorld('pending_activation', {}, [], { eligibility: open(), now: NOW });
+    await w.service.reject(COMPANY, { reason: 'Incomplete' }, CTX);
+    await w.service.approve(COMPANY, { months: 1 }, CTX);
+    expect(w.eligibility).toEqual({ closedAt: NOW, closedReason: 'refused' });
+  });
+
+  it('no claim can start after the fence: the business is no longer trial_available once the decision is made', async () => {
+    const w = makeWorld('pending_activation', {}, [], { eligibility: open(), now: NOW });
+    expect(stateOf({ ...w.sub, trial: trialFactsOf(w.eligibility, null) } as never, NOW)).toBe('trial_available');
+    await w.service.cancel(COMPANY, { reason: 'Asked to stop' }, CTX);
+    // The claim re-checks the eligibility under the same lock; closed, it finds nothing to claim.
+    expect(trialFactsOf(w.eligibility, null).eligible).toBe(false);
+    expect(w.steps.indexOf('lock')).toBeLessThan(w.steps.indexOf('eligibility'));
+  });
+
+  it('an approval racing a claim: whichever holds the lock first decides — the claim that won defers the paid start', async () => {
+    // The claim committed first: the fence reads it under the lock and paid access waits for its end.
+    const claimFirst = makeWorld('pending_activation', {}, [], { eligibility: open(), claim: running, now: NOW });
+    await claimFirst.service.approve(COMPANY, { months: 1 }, CTX);
+    expect(claimFirst.starts).toEqual([END]);
+
+    // The approval committed first: the eligibility is closed, so the claim that follows has nothing to claim.
+    const approvalFirst = makeWorld('pending_activation', {}, [], { eligibility: open(), now: NOW });
+    await approvalFirst.service.approve(COMPANY, { months: 1 }, CTX);
+    expect(approvalFirst.starts).toEqual([NOW]);
+    expect(trialFactsOf(approvalFirst.eligibility, null).eligible).toBe(false);
+  });
+
+  it('an action prepared before a claim — the claim bumped the version — is refused, and changes nothing', async () => {
+    // Version 3 when the page loaded; the claim made it 4.
+    const w = makeWorld('pending_activation', { version: 4 }, [], { eligibility: open(), claim: running, now: NOW });
+    for (const attempt of [
+      () => w.service.approve(COMPANY, { months: 1, expectedVersion: 3 }, CTX),
+      () => w.service.activateByGrant(COMPANY, { days: 30, reason: 'Pilot', expectedVersion: 3 }, CTX),
+      () => w.service.extend(COMPANY, { months: 1, expectedVersion: 3 }, CTX),
+      () => w.service.reject(COMPANY, { reason: 'x', expectedVersion: 3 }, CTX),
+      () => w.service.cancel(COMPANY, { reason: 'x', expectedVersion: 3 }, CTX),
+    ]) {
+      await expect(attempt()).rejects.toMatchObject({ constructor: ConflictException, response: { code: 'subscription_changed' } });
+    }
+    expect(w.eligibility).toEqual(open());
+    expect(w.sub).toMatchObject({ status: 'pending_activation', version: 4, currentPeriodEnd: null });
+    expect(w.events).toEqual([]);
+    expect(w.periods).toEqual([]);
+  });
+});
+
 describe('what the lifecycle never does', () => {
   it('deletes nothing — every ending is a status and an event', () => {
     expect(SERVICE).not.toMatch(/\.delete(Many)?\(/);
+  });
+
+  it('never writes a trial claim, and reads no clock but the injected one (0095)', () => {
+    expect(SERVICE).not.toMatch(/trialClaim\.(create|update|upsert|delete)/);
+    expect(SERVICE).not.toMatch(/new Date\(\)|Date\.now\(|systemClock/);
   });
 
   it('stores no grace: it is derived from the period end, so a corrected period carries its grace', () => {
