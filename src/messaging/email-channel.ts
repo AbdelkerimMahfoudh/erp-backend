@@ -18,7 +18,7 @@ import type { DeliveryFailureReason, DeliveryResult, MessageLanguage } from './w
  * configuration only.
  */
 
-export type EmailTemplateKey = 'contact.verification' | 'staff.invitation' | 'password.recovery' | 'security.alert';
+export type EmailTemplateKey = 'contact.verification' | 'staff.invitation' | 'password.recovery' | 'security.alert' | 'trial.setup';
 
 export interface EmailMessage {
   /** Normalised, lowercased address. */
@@ -91,6 +91,27 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
       en: '{what} on your Dukan ERP account at {when}. If this was not you, change your password and contact your business owner.',
       fr: '{what} sur votre compte Dukan ERP le {when}. Si ce n’était pas vous, changez votre mot de passe et contactez le propriétaire de votre commerce.',
       ar: '{what} على حسابك في Dukan ERP بتاريخ {when}. إن لم تكن أنت، فغيّر كلمة مرورك وتواصل مع مالك متجرك.',
+    },
+  },
+  /*
+   * The free trial's setup instructions (0095; docs/76): sent once the Owner's required contacts are verified, and
+   * again only when the Owner, signed in on the website, asks. `{link}` is the website's page with the one-time setup
+   * token in its fragment: it opens a page and starts nothing — the trial starts only on the Owner's explicit
+   * confirmation there, and an Owner who signs in without the link sees the same offer. No price, no amount, no
+   * payment instruction: the one sentence about money says that none is required.
+   */
+  'trial.setup': {
+    variables: ['business', 'link'],
+    wired: true,
+    subject: {
+      en: 'Your Dukan ERP free trial is ready to start',
+      fr: 'Votre essai gratuit Dukan ERP est prêt à démarrer',
+      ar: 'فترتك التجريبية المجانية في Dukan ERP جاهزة للبدء',
+    },
+    body: {
+      en: '{business} is eligible for a 7-day free trial of Dukan ERP. Your trial has not started.\n\nTo start it, open this link, sign in, and confirm "Start my 7-day free trial" on the Dukan ERP website:\n{link}\n\nThe trial lasts 7 days from the moment you confirm it. No payment is required. The link expires in 24 hours and works for your account only; after it expires, sign in on the Dukan ERP website to start your trial or to get a new link. If you did not create this account, ignore this email.\n\nNeed help? Contact Dukan ERP support.\n\nDukan ERP is developed and operated by TSX-MR.',
+      fr: '{business} peut bénéficier d’un essai gratuit de 7 jours de Dukan ERP. Votre essai n’a pas commencé.\n\nPour le démarrer, ouvrez ce lien, connectez-vous et confirmez « Démarrer mon essai gratuit de 7 jours » sur le site Dukan ERP :\n{link}\n\nL’essai dure 7 jours à partir de votre confirmation. Aucun paiement n’est demandé. Le lien expire dans 24 heures et ne fonctionne que pour votre compte ; ensuite, connectez-vous sur le site Dukan ERP pour démarrer votre essai ou recevoir un nouveau lien. Si vous n’avez pas créé ce compte, ignorez cet e-mail.\n\nBesoin d’aide ? Contactez l’assistance Dukan ERP.\n\nDukan ERP est développé et exploité par TSX-MR.',
+      ar: '{business} مؤهل لفترة تجريبية مجانية من Dukan ERP مدتها 7 أيام. لم تبدأ فترتك التجريبية بعد.\n\nلبدئها، افتح هذا الرابط وسجّل الدخول ثم أكّد «ابدأ فترتي التجريبية المجانية لمدة 7 أيام» على موقع Dukan ERP:\n{link}\n\nتستمر الفترة التجريبية 7 أيام من لحظة تأكيدك. لا يلزم أي دفع. تنتهي صلاحية الرابط خلال 24 ساعة ويعمل لحسابك فقط، وبعد ذلك سجّل الدخول على موقع Dukan ERP لبدء فترتك التجريبية أو للحصول على رابط جديد. إن لم تُنشئ هذا الحساب، فتجاهل هذه الرسالة.\n\nهل تحتاج إلى مساعدة؟ تواصل مع دعم Dukan ERP.\n\nتطوّر TSX-MR منصة Dukan ERP وتشغّلها.',
     },
   },
 };

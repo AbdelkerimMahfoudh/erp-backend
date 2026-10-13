@@ -54,6 +54,12 @@ export interface TemplateDefinition {
   readonly providerKind: ProviderKind;
   /** The environment variable holding the provider's approved template name. */
   readonly configKey: string;
+  /**
+   * The variable that is the dynamic suffix of the template's URL button, when it has one (0095). The approved
+   * button already holds the address; only this suffix is sent, as the button's own parameter — never in the body,
+   * where it would be shown as text.
+   */
+  readonly urlButton?: string;
 }
 
 /**
@@ -151,6 +157,24 @@ export const DELIVERY_CHECK_TEMPLATE: TemplateDefinition = {
   configKey: 'WHATSAPP_TEMPLATE_DELIVERY_CHECK',
 };
 
+/**
+ * The free trial's setup instructions (0095; docs/76): the business is eligible for a 7-day free trial that has not
+ * started, and the button leads to the Dukan ERP website, where the Owner signs in and confirms it. A utility
+ * template: the body carries the business's name and nothing else; the one-time setup token is the URL button's
+ * dynamic suffix (the approved button URL is `<website>/account/trial?t={{1}}`), so it is never shown as text. No
+ * price, no amount, no payment instruction. Optional in production — without its approved name WhatsApp simply
+ * cannot carry these instructions. The proposed approved copy, in EN/FR/AR, is in docs/76.
+ */
+export const TRIAL_SETUP_TEMPLATE: TemplateDefinition = {
+  key: 'trial.setup',
+  category: 'account',
+  variables: ['business', 'token'],
+  languages: ['en', 'ar', 'fr'],
+  providerKind: 'utility',
+  configKey: 'WHATSAPP_TEMPLATE_TRIAL_SETUP',
+  urlButton: 'token',
+};
+
 const REGISTRY: Record<string, TemplateDefinition> = {
   [AUTH_OTP_TEMPLATE.key]: AUTH_OTP_TEMPLATE,
   [ACCOUNT_DELETION_TEMPLATE.key]: ACCOUNT_DELETION_TEMPLATE,
@@ -159,6 +183,7 @@ const REGISTRY: Record<string, TemplateDefinition> = {
   [CLOSING_SALE_TEMPLATE.key]: CLOSING_SALE_TEMPLATE,
   [CLOSING_RECLOSED_TEMPLATE.key]: CLOSING_RECLOSED_TEMPLATE,
   [DELIVERY_CHECK_TEMPLATE.key]: DELIVERY_CHECK_TEMPLATE,
+  [TRIAL_SETUP_TEMPLATE.key]: TRIAL_SETUP_TEMPLATE,
 };
 
 export type TemplateKey = keyof typeof REGISTRY & string;

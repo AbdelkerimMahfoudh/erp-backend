@@ -73,3 +73,59 @@ describe('choosing the channel', () => {
     expect(maskEmail('nonsense')).toBe('***');
   });
 });
+
+describe('the free trial’s setup instructions (0095; docs/76)', () => {
+  const link = 'https://dukan.example.com/account/trial#t=Zp3k9QeR7xVb2LmN8sTq4WyH6jUc1AfD0gKoEiPrS5v';
+  const setup = (language: 'en' | 'fr' | 'ar') =>
+    composeEmail({ template: 'trial.setup', language, variables: { business: 'Boutique Aicha', link } });
+
+  it('composes the approved text in each language: eligible, not started, the link, 24 hours, 7 days from confirming', () => {
+    expect(setup('en')).toEqual({
+      subject: 'Your Dukan ERP free trial is ready to start',
+      text:
+        'Boutique Aicha is eligible for a 7-day free trial of Dukan ERP. Your trial has not started.\n\n' +
+        'To start it, open this link, sign in, and confirm "Start my 7-day free trial" on the Dukan ERP website:\n' +
+        `${link}\n\n` +
+        'The trial lasts 7 days from the moment you confirm it. No payment is required. The link expires in 24 hours and ' +
+        'works for your account only; after it expires, sign in on the Dukan ERP website to start your trial or to get a ' +
+        'new link. If you did not create this account, ignore this email.\n\n' +
+        'Need help? Contact Dukan ERP support.\n\n' +
+        'Dukan ERP is developed and operated by TSX-MR.',
+    });
+    expect(setup('fr').subject).toBe('Votre essai gratuit Dukan ERP est prêt à démarrer');
+    expect(setup('fr').text).toContain('« Démarrer mon essai gratuit de 7 jours »');
+    expect(setup('fr').text).toContain('connectez-vous sur le site Dukan ERP pour démarrer votre essai ou recevoir un nouveau lien');
+    expect(setup('ar').subject).toBe('فترتك التجريبية المجانية في Dukan ERP جاهزة للبدء');
+    expect(setup('ar').text).toContain('«ابدأ فترتي التجريبية المجانية لمدة 7 أيام»');
+    for (const language of ['en', 'fr', 'ar'] as const) {
+      const { text } = setup(language);
+      expect(text.startsWith('Boutique Aicha ')).toBe(true);
+      // The link once, on a line of its own, exactly as given.
+      expect(text.split(link)).toHaveLength(2);
+      expect(text).toContain(`\n${link}\n`);
+      expect(text).toMatch(/TSX-MR/);
+    }
+  });
+
+  it('names no price, no amount and no way to pay: the one sentence about money says none is required', () => {
+    const negation = { en: 'No payment is required.', fr: 'Aucun paiement n’est demandé.', ar: 'لا يلزم أي دفع.' };
+    for (const language of ['en', 'fr', 'ar'] as const) {
+      const { subject, text } = setup(language);
+      const words = `${subject}\n${text.replace(link, '')}`;
+      expect({ language, negation: words.includes(negation[language]) }).toEqual({ language, negation: true });
+      const rest = words.replace(negation[language], '');
+      expect({ language, money: rest.match(/pay|paie|payer|دفع|سداد|price|prix|tarif|سعر|MRU|\bUM\b|ouguiya|أوقية|bankily|masrivi|sedad|virement|transfer|تحويل/gi) }).toEqual({
+        language,
+        money: null,
+      });
+      // The only numbers are the trial's 7 days and the link's 24 hours — no amount.
+      expect({ language, numbers: [...new Set(rest.match(/\d+/g))].sort() }).toEqual({ language, numbers: ['24', '7'] });
+    }
+  });
+
+  it('is wired, and refuses anything but its business and its link', () => {
+    expect(() => composeEmail({ template: 'trial.setup', language: 'en', variables: { business: 'B' } })).toThrow(/needs exactly: business, link/);
+    expect(() => composeEmail({ template: 'trial.setup', language: 'en', variables: { business: 'B', link, token: 't' } })).toThrow(/needs exactly/);
+    expect(() => composeEmail({ template: 'trial.setup', language: 'en', variables: { business: 'B', link: ' ' } })).toThrow(/needs exactly/);
+  });
+});

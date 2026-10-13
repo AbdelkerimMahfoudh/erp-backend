@@ -9,6 +9,7 @@ import {
   assertLanguageSupported,
   getTemplate,
   MessageLanguage,
+  TemplateDefinition,
   validateTemplateVariables,
 } from './templates';
 import { maskDestination } from './channels';
@@ -71,6 +72,28 @@ export function classifyGraphFailure(httpStatus: number, code?: number): Deliver
   return 'rejected';
 }
 
+/**
+ * A utility template's components: its body parameters in the registry's declared order and, when the template has
+ * a URL button, the button's dynamic suffix as the button's own parameter (0095) — kept out of the body, so a setup
+ * token is never shown as text, and never sent twice.
+ */
+function utilityComponents(template: TemplateDefinition, variables: Record<string, string>): object[] {
+  const body = template.variables.filter((name) => name !== template.urlButton);
+  const components: object[] = [];
+  if (body.length > 0) {
+    components.push({ type: 'body', parameters: body.map((name) => ({ type: 'text', text: variables[name] })) });
+  }
+  if (template.urlButton) {
+    components.push({
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: variables[template.urlButton] }],
+    });
+  }
+  return components;
+}
+
 export class CloudApiWhatsAppChannel implements WhatsAppChannel {
   readonly name = 'cloud-api';
   readonly isEnabled = true;
@@ -103,14 +126,7 @@ export class CloudApiWhatsAppChannel implements WhatsAppChannel {
               parameters: [{ type: 'text', text: message.variables.code }],
             },
           ]
-        : template.variables.length > 0
-          ? [
-              {
-                type: 'body',
-                parameters: template.variables.map((name) => ({ type: 'text', text: message.variables[name] })),
-              },
-            ]
-          : [];
+        : utilityComponents(template, message.variables);
 
     const body = {
       messaging_product: 'whatsapp',

@@ -9,7 +9,9 @@ import {
 import {
   ACCOUNT_DELETED_TEMPLATE,
   ACCOUNT_DELETION_TEMPLATE,
+  ALL_TEMPLATES,
   AUTH_OTP_TEMPLATE,
+  TRIAL_SETUP_TEMPLATE,
   assertLanguageSupported,
   getTemplate,
   validateTemplateVariables,
@@ -195,6 +197,29 @@ describe('template registry', () => {
     expect(AUTH_OTP_TEMPLATE.configKey).toBe('WHATSAPP_TEMPLATE_AUTH_OTP');
     expect(AUTH_OTP_TEMPLATE.providerKind).toBe('authentication');
     expect(AUTH_OTP_TEMPLATE.category).toBe('authentication');
+  });
+});
+
+describe('the free trial’s setup template (0095)', () => {
+  it('is a utility message in every product language, whose token is its URL button and never body text', () => {
+    expect(TRIAL_SETUP_TEMPLATE).toMatchObject({
+      key: 'trial.setup',
+      category: 'account',
+      providerKind: 'utility',
+      configKey: 'WHATSAPP_TEMPLATE_TRIAL_SETUP',
+      variables: ['business', 'token'],
+      urlButton: 'token',
+    });
+    expect([...TRIAL_SETUP_TEMPLATE.languages].sort()).toEqual(['ar', 'en', 'fr']);
+    expect(getTemplate('trial.setup')).toBe(TRIAL_SETUP_TEMPLATE);
+    expect(validateTemplateVariables(TRIAL_SETUP_TEMPLATE, { business: 'Boutique Aicha', token: 't'.repeat(43) })).toBeTruthy();
+    expect(() => validateTemplateVariables(TRIAL_SETUP_TEMPLATE, { business: 'Boutique Aicha', token: 't', link: 'x' })).toThrow(/does not accept: link/);
+  });
+
+  it('is the only template with a URL button, and its button variable is one of its own', () => {
+    // An authentication template's copy button is the provider's own shape, not a declared URL button.
+    expect(ALL_TEMPLATES.filter((t) => t.urlButton).map((t) => t.key)).toEqual(['trial.setup']);
+    for (const t of ALL_TEMPLATES.filter((x) => x.urlButton)) expect(t.variables).toContain(t.urlButton);
   });
 });
 
