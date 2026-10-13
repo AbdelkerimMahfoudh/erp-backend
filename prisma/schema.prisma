@@ -5593,6 +5593,8 @@ enum TrialSetupLinkRevokedReason {
   password_changed
   deleted
   closed
+  /// 0096: the trial was claimed — with another link, or with none — so this one has nothing left to start.
+  claimed
 }
 
 /// 0095: what sent the setup instructions — the Owner's required contacts all verified (automatic, once), or the
