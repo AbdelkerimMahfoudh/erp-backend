@@ -87,11 +87,18 @@ enum SubscriptionEventKind {
   activity_changed
   activity_scheduled
   renewed
+  /// 0095: a self-registered business became eligible for one free trial — not started.
+  trial_eligible
+  /// 0095: the Owner started the free trial on the website: 168 hours, nothing charged.
+  trial_claimed
+  /// 0095: the free trial ended; recorded once, by the first evaluation after its end.
+  trial_expired
 }
 
 /// Where a subscription sits in its lifecycle (0056).
 enum SubscriptionStatus {
-  /// Registered, never activated. No operational access, and no free trial.
+  /// Registered, never activated. No operational access — unless its Owner started the free trial (0095), which
+  /// leaves this status as it is: the trial is a fact of its own (`trial_claims`), never a status.
   pending_activation
   /// Normal. The dates decide whether it is active, in grace, or expired.
   activated
@@ -435,6 +442,10 @@ model Company {
   seatAllocations                SeatAllocation[]
   branchReplacements             BranchReplacement[]
   agentRequestKeys               AgentRequestKey[]
+  trialEligibility               TrialEligibility?
+  trialClaim                     TrialClaim?
+  trialSetupLinks                TrialSetupLink[]
+  trialSetupMessages             TrialSetupMessage[]
 
   @@map("companies")
 }
@@ -665,6 +676,10 @@ model User {
   anomalyDismissals            AnomalyDismissal[]     @relation("AnomalyDismissedBy")
   seatAllocations              SeatAllocation[]
   agentRequestKeys             AgentRequestKey[]
+  trialEligibilities           TrialEligibility[]
+  trialClaims                  TrialClaim[]
+  trialSetupLinks              TrialSetupLink[]
+  trialSetupMessages           TrialSetupMessage[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -5535,4 +5550,167 @@ model PlatformAdminRecoveryCode {
 
   @@unique([adminId, codeHash], map: "ux_admin_recovery_code")
   @@map("platform_admin_recovery_codes")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// The website-only seven-day free trial (0095; docs/76)
+//
+// Facts, never a status: the subscription keeps its own, and available, active
+// and expired are computed from these rows and the server clock on every
+// request. Every instant here is written by the API from the server clock, in
+// UTC. Nothing here is a payment, a billing period or a renewal.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// 0095: which contacts the business gave when it registered itself — the ones its Owner must have verified before
+/// the trial can be claimed. Both given, both verified.
+enum TrialRegistrationMethod {
+  email
+  phone
+  both
+}
+
+/// 0095: why a business may claim the trial. Its own registration, and nothing else: a business the Super Admin
+/// created is never eligible.
+enum TrialEligibilityBasis {
+  self_registration
+}
+
+/// 0095: what closed an eligibility — approved, granted, given a paid period, refused, or cancelled (by the Super
+/// Admin, or by the Owner closing the business). Once closed, no trial can start.
+enum TrialEligibilityClosedReason {
+  approved
+  granted
+  paid_period
+  refused
+  cancelled
+}
+
+/// 0095: why a setup link stopped working before a claim used it.
+enum TrialSetupLinkRevokedReason {
+  reissued
+  signed_out_everywhere
+  contact_changed
+  password_changed
+  deleted
+  closed
+}
+
+/// 0095: what sent the setup instructions — the Owner's required contacts all verified (automatic, once), or the
+/// Owner, signed in on the website, asking again.
+enum TrialSetupTrigger {
+  verified
+  resend
+}
+
+/// 0095: what one channel did with one attempt. `not_applicable`: not a verified contact of the Owner;
+/// `unavailable`: verified, but the channel cannot carry this message; `failed`: the provider refused or errored;
+/// `accepted`: the provider took it.
+enum TrialSetupOutcome {
+  accepted
+  failed
+  unavailable
+  not_applicable
+}
+
+/// 0095: a self-registered business may claim one free trial. One row per company, ever, written in the public
+/// registration transaction and never backfilled. Only the closure moves, once, NULL → value (trigger; a CHECK keeps
+/// `closedAt` and `closedReason` together). Open and unclaimed is what makes a pending business `trial_available`.
+model TrialEligibility {
+  id                 Bytes                         @id @db.Binary(16)
+  companyId          Bytes                         @unique(map: "ux_trial_eligibility_company") @map("company_id") @db.Binary(16)
+  ownerUserId        Bytes                         @map("owner_user_id") @db.Binary(16)
+  registrationMethod TrialRegistrationMethod       @map("registration_method")
+  basis              TrialEligibilityBasis         @default(self_registration)
+  createdAt          DateTime                      @default(now()) @map("created_at") @db.DateTime(6)
+  closedAt           DateTime?                     @map("closed_at") @db.DateTime(6)
+  closedReason       TrialEligibilityClosedReason? @map("closed_reason")
+
+  company Company      @relation(fields: [companyId], references: [id], map: "fk_trial_eligibilities_company")
+  owner   User         @relation(fields: [ownerUserId], references: [id], map: "fk_trial_eligibilities_owner")
+  claims  TrialClaim[]
+
+  @@map("trial_eligibilities")
+}
+
+/// 0095: the free trial — one per company, ever (UNIQUE), and immutable (triggers). Claimed and started at the same
+/// server instant, taken under the subscription lock; it ends exactly 168 hours later (two CHECKs). The only later
+/// write is `expiryRecordedAt`, NULL → value, once.
+model TrialClaim {
+  id                       Bytes     @id @db.Binary(16)
+  companyId                Bytes     @unique(map: "ux_trial_claim_company") @map("company_id") @db.Binary(16)
+  eligibilityId            Bytes     @map("eligibility_id") @db.Binary(16)
+  /// The Owner who confirmed it on the website.
+  claimantUserId           Bytes     @map("claimant_user_id") @db.Binary(16)
+  claimedAt                DateTime  @map("claimed_at") @db.DateTime(6)
+  /// Always `claimedAt`: the trial starts the instant it is claimed.
+  startedAt                DateTime  @map("started_at") @db.DateTime(6)
+  /// Always `startedAt` + 168 hours, computed from the same instant.
+  endsAt                   DateTime  @map("ends_at") @db.DateTime(6)
+  /// The terms version the website showed.
+  termsVersion             String    @map("terms_version") @db.VarChar(40)
+  idempotencyKey           String    @map("idempotency_key") @db.VarChar(80)
+  /// SHA-256 of the canonical request: the terms version and the setup link's hash.
+  requestHash              String    @map("request_hash") @db.Char(64)
+  /// `subscriptions.version` after the claim's own increment.
+  subscriptionVersionAfter Int       @map("subscription_version_after") @db.UnsignedInt
+  /// The setup link the claim consumed, when the Owner came from one.
+  setupLinkId              Bytes?    @map("setup_link_id") @db.Binary(16)
+  /// Set by the first evaluation at or after `endsAt`, with the `trial_expired` event and its audit.
+  expiryRecordedAt         DateTime? @map("expiry_recorded_at") @db.DateTime(6)
+  createdAt                DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  company     Company          @relation(fields: [companyId], references: [id], map: "fk_trial_claims_company")
+  eligibility TrialEligibility @relation(fields: [eligibilityId], references: [id], map: "fk_trial_claims_eligibility")
+  claimant    User             @relation(fields: [claimantUserId], references: [id], map: "fk_trial_claims_claimant")
+  /// RESTRICT, not the SET NULL an optional relation defaults to: a cascaded change runs no trigger.
+  setupLink   TrialSetupLink?  @relation(fields: [setupLinkId], references: [id], onDelete: Restrict, map: "fk_trial_claims_setup_link")
+
+  @@map("trial_claims")
+}
+
+/// 0095: a single-purpose website link carried by the setup instructions. Only the token's SHA-256 is stored; the
+/// token exists in the message sent and nowhere else. Bound to the Owner by a keyed digest of their credentials and
+/// contacts at issue, so a password or contact change makes it stale. 24 hours; consumed only by a claim.
+model TrialSetupLink {
+  id            Bytes                        @id @db.Binary(16)
+  companyId     Bytes                        @map("company_id") @db.Binary(16)
+  /// The Owner it was sent to.
+  userId        Bytes                        @map("user_id") @db.Binary(16)
+  tokenHash     String                       @unique(map: "ux_trial_setup_link_token") @map("token_hash") @db.Char(64)
+  bindingDigest String                       @map("binding_digest") @db.Char(64)
+  expiresAt     DateTime                     @map("expires_at") @db.DateTime(6)
+  consumedAt    DateTime?                    @map("consumed_at") @db.DateTime(6)
+  revokedAt     DateTime?                    @map("revoked_at") @db.DateTime(6)
+  revokedReason TrialSetupLinkRevokedReason? @map("revoked_reason")
+  createdAt     DateTime                     @default(now()) @map("created_at") @db.DateTime(6)
+
+  company  Company             @relation(fields: [companyId], references: [id], map: "fk_trial_setup_links_company")
+  user     User                @relation(fields: [userId], references: [id], map: "fk_trial_setup_links_user")
+  claims   TrialClaim[]
+  messages TrialSetupMessage[]
+
+  @@index([companyId, createdAt], map: "ix_trial_setup_links_company")
+  @@map("trial_setup_links")
+}
+
+/// 0095: every attempt to send the setup instructions, append-only (triggers) — what each channel did, never a
+/// destination, a token or a code. Its rows are also the durable resend throttle.
+model TrialSetupMessage {
+  id                Bytes             @id @db.Binary(16)
+  companyId         Bytes             @map("company_id") @db.Binary(16)
+  /// The Owner, for a resend; null for the automatic send after verification.
+  requestedByUserId Bytes?            @map("requested_by_user_id") @db.Binary(16)
+  trigger           TrialSetupTrigger
+  /// The link this attempt carried; null when nothing could be sent.
+  linkId            Bytes?            @map("link_id") @db.Binary(16)
+  emailOutcome      TrialSetupOutcome @map("email_outcome")
+  whatsappOutcome   TrialSetupOutcome @map("whatsapp_outcome")
+  createdAt         DateTime          @default(now()) @map("created_at") @db.DateTime(6)
+
+  company     Company         @relation(fields: [companyId], references: [id], map: "fk_trial_setup_messages_company")
+  requestedBy User?           @relation(fields: [requestedByUserId], references: [id], onDelete: Restrict, map: "fk_trial_setup_messages_requested_by")
+  link        TrialSetupLink? @relation(fields: [linkId], references: [id], onDelete: Restrict, map: "fk_trial_setup_messages_link")
+
+  @@index([companyId, createdAt], map: "ix_trial_setup_messages_company")
+  @@map("trial_setup_messages")
 }
