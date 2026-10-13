@@ -49,6 +49,7 @@ export interface ProductionGuardEnv {
   WHATSAPP_TEMPLATE_ACCOUNT_DELETION?: string;
   WHATSAPP_TEMPLATE_ACCOUNT_DELETED?: string;
   WHATSAPP_TEMPLATE_DELIVERY_CHECK?: string;
+  WHATSAPP_TEMPLATE_TRIAL_SETUP?: string;
   EMAIL_CHANNEL?: string;
   EMAIL_FROM?: string;
   RESEND_API_KEY?: string;
@@ -60,6 +61,7 @@ export interface ProductionGuardEnv {
   PLATFORM_ADMIN_KEY?: string;
   PLATFORM_MFA_KEY?: string;
   SEED_DEMO?: string;
+  PUBLIC_SITE_ORIGIN?: string;
 }
 
 /** A `.env` value that means "yes", matching `cookieSecure()`. */
@@ -71,6 +73,17 @@ const falsy = (v: string | undefined): boolean => {
   const s = v?.trim().toLowerCase();
   return s === 'false' || s === '0';
 };
+
+/** `https://host[:port]` and nothing more: exactly what the URL parser gives back as the value's own origin. */
+function isHttpsOrigin(value: string | undefined): boolean {
+  const v = value?.trim() ?? '';
+  try {
+    const url = new URL(v);
+    return url.protocol === 'https:' && url.origin === v;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Every reason this environment must not run as production.
@@ -217,6 +230,8 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
           'delivery proof) and WHATSAPP_TEMPLATE_ACCOUNT_DELETED (the deletion completion notice).',
       );
     }
+    // WHATSAPP_TEMPLATE_TRIAL_SETUP is deliberately NOT required: without it the free trial's setup instructions do
+    // not go by WhatsApp, the Owner's status says so honestly, and the Owner can still start the trial on the website.
   }
 
   // Email (messaging/email-channel.ts): the same rules as WhatsApp — nothing faked, nothing in clear text.
@@ -269,6 +284,19 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
   // Demo data is opt-in everywhere and refused here regardless (docs/48 risk R7).
   if (truthy(env.SEED_DEMO)) {
     problems.push('SEED_DEMO is true. No demo company, demo owner or fixture password may exist in production.');
+  }
+
+  /*
+   * The free trial's setup links (0095; docs/76) are built from the website's origin: one per message, carrying the
+   * Owner's one-time token. A plain-http origin would send that token across the network in clear text, and a path
+   * or a trailing slash builds a link to a page that does not exist — so production takes an https:// origin and
+   * nothing after it. It builds links and nothing else: no request is ever compared with it.
+   */
+  if (!isHttpsOrigin(env.PUBLIC_SITE_ORIGIN)) {
+    problems.push(
+      "PUBLIC_SITE_ORIGIN must be the Dukan ERP website's https:// origin with no path, e.g. https://dukan.tsx-mr.com: " +
+        "the free trial's setup links are built from it.",
+    );
   }
 
   /*

@@ -102,6 +102,15 @@ export class AppConfigService {
     return (this.config.get<string>(configKey) ?? '').trim();
   }
 
+  /**
+   * The Dukan ERP website's origin, for building the free trial's setup links (0095) — and for nothing else: no
+   * request is ever compared with it. Empty when unset, and then no link can be built. Production refuses anything
+   * but an https:// origin with no path (`production-guard.ts`); elsewhere a trailing slash is forgiven.
+   */
+  get publicSiteOrigin(): string {
+    return (this.config.get<string>('PUBLIC_SITE_ORIGIN') ?? '').trim().replace(/\/+$/, '');
+  }
+
   get whatsappApiBaseUrl(): string {
     return this.get('WHATSAPP_API_BASE_URL');
   }

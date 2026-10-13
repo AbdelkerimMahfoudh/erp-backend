@@ -81,6 +81,9 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_TEMPLATE_CLOSING_SALE: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_CLOSING_RECLOSED: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_DELIVERY_CHECK: Joi.string().allow('').default(''),
+  // The free trial's setup instructions (0095; docs/76): a utility template with a URL button. Optional — production
+  // does not require it; while it is empty WhatsApp simply cannot carry these instructions, and says so.
+  WHATSAPP_TEMPLATE_TRIAL_SETUP: Joi.string().allow('').default(''),
 
   // ── Email (correction phase, 2026-10-12; messaging/email-channel.ts) ─────
   // "disabled" is the default. "development-log" is refused in production. "resend" needs a key and a sender on a
@@ -96,7 +99,8 @@ export const envValidationSchema = Joi.object({
   // ── The free trial's setup links (0095; docs/76) ──────────────────────────
   // The Dukan ERP website's origin (e.g. https://dukan.tsx-mr.com), used ONLY to build the links the setup
   // instructions carry. Never compared with a request: an Origin or Referer header is whatever a client says, and no
-  // check rests on one. Empty: no link can be built.
+  // check rests on one. Empty: no link can be built. Production refuses anything but an https:// origin with no path
+  // (production-guard.ts).
   PUBLIC_SITE_ORIGIN: Joi.string().allow('').default(''),
 
   // File upload foundation.

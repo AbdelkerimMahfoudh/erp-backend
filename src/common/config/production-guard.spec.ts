@@ -21,6 +21,8 @@ const SAFE = {
   APP_DATABASE_URL: 'mysql://app:pw@db.internal:3306/erp',
   // 32 bytes, base64 (0094) — a test value, not a key anyone uses.
   PLATFORM_MFA_KEY: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=',
+  // The website the free trial's setup links point to (0095).
+  PUBLIC_SITE_ORIGIN: 'https://dukan.example.com',
 };
 
 describe('outside production', () => {
@@ -417,5 +419,65 @@ describe('administrator MFA in production (0094)', () => {
       expect(problems.join('\n')).toMatch(/PLATFORM_MFA_KEY is missing or malformed/);
     }
     expect(productionConfigProblems({ ...SAFE, PLATFORM_MFA_KEY: '00'.repeat(32) })).toEqual([]);
+  });
+});
+
+describe("the website's origin, for the free trial's setup links (0095; docs/76)", () => {
+  /*
+   * Every setup message carries a link built from PUBLIC_SITE_ORIGIN with the Owner's one-time token in it. Over
+   * plain http the token crosses the network in clear text; with a path or a trailing slash the link leads to a page
+   * that does not exist. It builds links and nothing else — no request is compared with it, so nothing here is an
+   * Origin check.
+   */
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['plain http', 'http://dukan.example.com'],
+    ['a path', 'https://dukan.example.com/account'],
+    ['a trailing slash', 'https://dukan.example.com/'],
+    ['a query', 'https://dukan.example.com?x=1'],
+    ['credentials', 'https://user:pass@dukan.example.com'],
+    ['no scheme', 'dukan.example.com'],
+  ])('refuses %s', (_name, origin) => {
+    const problems = productionConfigProblems({ ...SAFE, PUBLIC_SITE_ORIGIN: origin });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/PUBLIC_SITE_ORIGIN must be the Dukan ERP website's https:\/\/ origin with no path/);
+  });
+
+  it.each(['https://dukan.tsx-mr.com', 'https://staging.dukan.example:8443'])('accepts the bare https origin %p', (origin) => {
+    expect(productionConfigProblems({ ...SAFE, PUBLIC_SITE_ORIGIN: origin })).toEqual([]);
+  });
+
+  it('is not required outside production, where an empty value only means no link can be built', () => {
+    expect(productionConfigProblems({ NODE_ENV: 'development', PUBLIC_SITE_ORIGIN: '' })).toEqual([]);
+    expect(productionConfigProblems({ NODE_ENV: 'development', PUBLIC_SITE_ORIGIN: 'http://localhost:5173' })).toEqual([]);
+  });
+
+  it('never requires the WhatsApp setup template: without it the instructions do not go by WhatsApp, and say so', () => {
+    const complete = {
+      ...SAFE,
+      WHATSAPP_CHANNEL: 'cloud-api',
+      WHATSAPP_PHONE_NUMBER_ID: '1234567890',
+      WHATSAPP_ACCESS_TOKEN: 'EAAB-real-token',
+      WHATSAPP_TEMPLATE_AUTH_OTP: 'erp_auth_code',
+      WHATSAPP_TEMPLATE_ACCOUNT_DELETION: 'erp_delete_code',
+      WHATSAPP_TEMPLATE_ACCOUNT_DELETED: 'erp_deleted',
+      WHATSAPP_TEMPLATE_DELIVERY_CHECK: 'erp_delivery_check',
+      WHATSAPP_APP_SECRET: 'app-secret',
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-token',
+      OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+    };
+    expect(productionConfigProblems({ ...complete, WHATSAPP_TEMPLATE_TRIAL_SETUP: '' })).toEqual([]);
+    expect(productionConfigProblems({ ...complete, WHATSAPP_TEMPLATE_TRIAL_SETUP: 'erp_trial_setup' })).toEqual([]);
+  });
+
+  it('is declared, optional, in the schema and the example files — with no value committed', () => {
+    const schema = readFileSync('src/common/config/env.validation.ts', 'utf8');
+    expect(schema).toMatch(/PUBLIC_SITE_ORIGIN: Joi\.string\(\)\.allow\(''\)\.default\(''\)/);
+    expect(schema).toMatch(/WHATSAPP_TEMPLATE_TRIAL_SETUP: Joi\.string\(\)\.allow\(''\)\.default\(''\)/);
+    for (const file of ['.env.example', '.env.staging.example']) {
+      expect({ file, line: readFileSync(file, 'utf8').match(/^PUBLIC_SITE_ORIGIN=(.*)$/m)?.[1] }).toEqual({ file, line: '' });
+    }
+    expect(readFileSync('.env.example', 'utf8')).toMatch(/^WHATSAPP_TEMPLATE_TRIAL_SETUP=$/m);
   });
 });
