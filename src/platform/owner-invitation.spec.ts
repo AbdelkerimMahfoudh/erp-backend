@@ -33,6 +33,11 @@ function makeWorld(opts: { ownerActive?: boolean } = {}) {
   const invitations: any[] = [];
   const audits: any[] = [];
   const revoked: Buffer[] = [];
+  /** The free trial's setup links (0095): the Owner's, one still usable and one already spent. */
+  const links: any[] = [
+    { userId: OWNER_ID, consumedAt: null, revokedAt: null, revokedReason: null },
+    { userId: OWNER_ID, consumedAt: new Date('2026-10-01T00:00:00.000Z'), revokedAt: null, revokedReason: null },
+  ];
 
   const rowMatches = (row: any, where: any) =>
     (where.id === undefined || row.id.equals(where.id)) &&
@@ -41,6 +46,15 @@ function makeWorld(opts: { ownerActive?: boolean } = {}) {
     (!('revokedAt' in where) || row.revokedAt === where.revokedAt);
 
   const prisma = {
+    trialSetupLink: {
+      updateMany: async ({ where, data }: any) => {
+        const hits = links.filter(
+          (l) => l.userId.equals(where.userId) && (where.consumedAt !== null || l.consumedAt === null) && (where.revokedAt !== null || l.revokedAt === null),
+        );
+        for (const l of hits) Object.assign(l, data);
+        return { count: hits.length };
+      },
+    },
     company: {
       findUnique: async ({ where }: any) =>
         where.id.equals(COMPANY_ID) ? { id: COMPANY_ID, name: 'Shop', publicStoreId: 'ABCDEF1234' } : null,
@@ -102,7 +116,7 @@ function makeWorld(opts: { ownerActive?: boolean } = {}) {
     },
   };
   const service = new OwnerInvitationService(prisma as never, hashing as never, sessions as never, audit as never);
-  return { service, users, invitations, audits, revoked };
+  return { service, users, invitations, audits, revoked, links };
 }
 
 describe('issuing an invitation', () => {
@@ -164,6 +178,14 @@ describe('accepting an invitation', () => {
       action: 'owner_invitation.accept',
       ip: '10.0.0.5',
     });
+  });
+
+  it('retires the free trial setup links sent before the password was set — the usable ones (0095)', async () => {
+    const { service, links } = makeWorld();
+    const issued = await service.issue(COMPANY, { admin: ADMIN });
+    await service.accept(issued.token, 'NewPassw0rd!', {});
+    expect(links[0]).toMatchObject({ revokedAt: expect.any(Date), revokedReason: 'password_changed' });
+    expect(links[1]).toMatchObject({ revokedAt: null, revokedReason: null });
   });
 
   it('works exactly once', async () => {

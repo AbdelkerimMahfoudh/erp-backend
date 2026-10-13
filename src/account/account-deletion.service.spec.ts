@@ -729,6 +729,30 @@ describe('closing the business', () => {
 });
 
 
+describe('an Owner who leaves a business another Owner keeps (0095)', () => {
+  it('takes their free trial setup links with them: the usable ones revoked as deleted, nobody else’s touched', async () => {
+    const h = harness({ withOtherOwner: true });
+    const at = new Date('2026-09-28T10:00:00Z');
+    h.prisma.seed(
+      'trialSetupLink',
+      { id: id('6301'), companyId: C1, userId: OWNER, consumedAt: null, revokedAt: null, revokedReason: null },
+      { id: id('6302'), companyId: C1, userId: OWNER, consumedAt: at, revokedAt: null, revokedReason: null },
+      { id: id('6303'), companyId: C1, userId: OTHER_OWNER, consumedAt: null, revokedAt: null, revokedReason: null },
+    );
+
+    expect((await h.service.start(h.principal(OWNER), { password: 'owner-pw' })).kind).toBe('personal_login');
+    expect((await h.service.confirm(h.principal(OWNER), h.lastCode()!)).status).toBe('completed');
+
+    const deletedAt = h.row('user', OWNER).deletedAt as Date;
+    expect(deletedAt).toBeInstanceOf(Date);
+    expect(h.row('trialSetupLink', id('6301'))).toMatchObject({ revokedAt: deletedAt, revokedReason: 'deleted' });
+    expect(h.row('trialSetupLink', id('6302'))).toMatchObject({ consumedAt: at, revokedAt: null });
+    expect(h.row('trialSetupLink', id('6303'))).toMatchObject({ revokedAt: null, revokedReason: null });
+    // The business stays open: nothing closed, nothing else revoked.
+    expect(h.row('company', C1).isActive).toBe(true);
+  });
+});
+
 describe('what a deletion leaves of the person, wherever it was copied (privacy correction, 2026-10-12)', () => {
   const seedCopies = (h: ReturnType<typeof harness>) => {
     h.prisma.seed(

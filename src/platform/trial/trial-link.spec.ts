@@ -1,4 +1,13 @@
-import { LINK_REFUSAL, bindingDigest, bindingKey, linkBindingOf, linkOutcomeOf, type LinkBinding, type SetupLinkFacts } from './trial-link';
+import {
+  LINK_REFUSAL,
+  bindingDigest,
+  bindingKey,
+  linkBindingOf,
+  linkOutcomeOf,
+  revokeUsableLinks,
+  type LinkBinding,
+  type SetupLinkFacts,
+} from './trial-link';
 
 /**
  * What a setup link is worth to the signed-in Owner who presents it (0095; docs/76 §5.3) — pure.
@@ -127,6 +136,21 @@ describe('a link’s outcome, in its order', () => {
       used: 'link_used',
       revoked: 'link_revoked',
       other_account: 'link_other_account',
+    });
+  });
+});
+
+describe('retiring links', () => {
+  it('touches only links that could still be used, and says why they stop working', () => {
+    expect(revokeUsableLinks({ userId: OWNER }, 'contact_changed', NOW)).toEqual({
+      where: { userId: OWNER, consumedAt: null, revokedAt: null },
+      data: { revokedAt: NOW, revokedReason: 'contact_changed' },
+    });
+    expect(revokeUsableLinks({ companyId: COMPANY, userId: OWNER }, 'deleted', NOW).where).toEqual({
+      companyId: COMPANY,
+      userId: OWNER,
+      consumedAt: null,
+      revokedAt: null,
     });
   });
 });

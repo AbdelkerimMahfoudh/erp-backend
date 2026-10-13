@@ -84,12 +84,22 @@ interface SessionRow {
   revokedAt: Date | null;
 }
 
+interface LinkRow {
+  companyId: Buffer;
+  userId: Buffer;
+  consumedAt: Date | null;
+  revokedAt: Date | null;
+  revokedReason: string | null;
+}
+
 function makeService(
   opts: {
     users?: UserRow[];
     companyId?: Buffer;
     selfId?: string;
     sessions?: SessionRow[];
+    /** The free trial's setup links (0095), as `trial_setup_links` rows. */
+    links?: LinkRow[];
     /** Set false to simulate a database behind the code (0022 not applied). */
     permissionExists?: boolean;
     /** Seat availability, so the limit path can be exercised. */
@@ -99,6 +109,7 @@ function makeService(
   const companyId = opts.companyId ?? COMPANY;
   const users: UserRow[] = opts.users ?? [];
   const sessions: SessionRow[] = opts.sessions ?? [];
+  const links: LinkRow[] = opts.links ?? [];
   const audits: any[] = [];
   const grantRows: any[] = [];
 
@@ -210,6 +221,21 @@ function makeService(
             (w.revokedAt === undefined || (w.revokedAt === null ? s.revokedAt === null : false)),
         );
         for (const s of hits) if ('revokedAt' in data) s.revokedAt = data.revokedAt;
+        return { count: hits.length };
+      }),
+    },
+    // The free trial's setup links (0095): scoped like every tenant model, and only the usable ones are retired.
+    trialSetupLink: {
+      updateMany: jest.fn(async ({ where, data }: any) => {
+        const w = scoped(where ?? {});
+        const hits = links.filter(
+          (l) =>
+            l.companyId.equals(w.companyId) &&
+            l.userId.equals(w.userId) &&
+            (w.consumedAt !== null || l.consumedAt === null) &&
+            (w.revokedAt !== null || l.revokedAt === null),
+        );
+        for (const l of hits) Object.assign(l, data);
         return { count: hits.length };
       }),
     },
@@ -768,6 +794,24 @@ describe('changing a login contact is a security event (CP1)', () => {
     await service.update(binToUuid(u.id), { email: 'new@shop.mr', currentPassword: 'actor-password' });
 
     expect(sessions.every((s) => s.revokedAt !== null)).toBe(true);
+  });
+
+  it('retires the free trial setup links sent to the old contact — the target’s only, the usable ones only (0095)', async () => {
+    const u = user({ email: 'old@shop.mr' });
+    const other = user({ email: 'other@shop.mr' });
+    const link = (userId: Buffer, over: Partial<LinkRow> = {}): LinkRow => ({ companyId: COMPANY, userId, consumedAt: null, revokedAt: null, revokedReason: null, ...over });
+    const used = new Date('2026-10-12T08:00:00.000Z');
+    const links = [link(u.id), link(u.id, { consumedAt: used }), link(other.id), link(u.id, { companyId: OTHER_COMPANY })];
+    const { service } = makeService({ users: [u, other], links });
+
+    await service.update(binToUuid(u.id), { name: 'Renamed' });
+    expect(links.every((l) => l.revokedAt === null)).toBe(true);
+
+    await service.update(binToUuid(u.id), { email: 'new@shop.mr', currentPassword: 'actor-password' });
+    expect(links[0]).toMatchObject({ revokedAt: expect.any(Date), revokedReason: 'contact_changed' });
+    expect(links[1]).toMatchObject({ consumedAt: used, revokedAt: null });
+    expect(links[2].revokedAt).toBeNull();
+    expect(links[3].revokedAt).toBeNull();
   });
 
   it('a duplicate email is refused by name, not as a phone clash', async () => {

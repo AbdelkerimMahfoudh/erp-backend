@@ -10,6 +10,7 @@ import { TokensService } from './tokens.service';
 import { SessionsService } from './sessions.service';
 import { DevicesService, type DeviceEnrollment } from './devices.service';
 import { LoginDto } from './dto/login.dto';
+import { revokeUsableLinks } from '../platform/trial/trial-link';
 
 export interface AuthTokenResponse {
   tokenType: 'Bearer';
@@ -288,7 +289,15 @@ export class AuthService {
     return { success: true };
   }
 
+  /**
+   * Sign out everywhere: every session of this person ends.
+   *
+   * So does every free trial setup link still waiting in their mailbox or on their phone (0095): signing out
+   * everywhere is what somebody does after losing one, and a link there must not outlive it. The links go first — a
+   * failure there leaves the sessions alive for the person to try again, never the other way round.
+   */
   async logoutAll(userId: Buffer): Promise<{ revoked: number }> {
+    await this.prisma.trialSetupLink.updateMany(revokeUsableLinks({ userId }, 'signed_out_everywhere', new Date()));
     return { revoked: await this.sessions.revokeAll(userId) };
   }
 

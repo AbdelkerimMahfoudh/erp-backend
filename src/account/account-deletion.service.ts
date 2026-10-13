@@ -16,6 +16,7 @@ import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { generatePersonalId } from '../auth/identifier';
 import { STORAGE_PROVIDER, type StorageProvider } from '../storage/storage.types';
 import { lockSubscription } from '../billing/renewal';
+import { revokeUsableLinks } from '../platform/trial/trial-link';
 import {
   DELETED_USER_NAME,
   UNUSABLE_PASSWORD_HASH,
@@ -475,6 +476,8 @@ export class AccountDeletionService {
     const people = await tx.user.findMany({ where: { id: userId, companyId }, select: { id: true, email: true, phone: true } });
     const forgotten = await this.forgetPeople(tx, companyId, people, now, userId);
     await tx.notification.deleteMany({ where: { companyId, targetUserId: userId } });
+    // An Owner who leaves a business another Owner keeps: no free trial setup link sent to them works any more (0095).
+    await tx.trialSetupLink.updateMany(revokeUsableLinks({ companyId, userId }, 'deleted', now));
 
     const [ledgerEntries, auditRows] = await Promise.all([
       tx.employeeDebtEntry.count({ where: { companyId, userId } }),
