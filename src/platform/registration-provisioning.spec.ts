@@ -1,6 +1,8 @@
 import { RegistrationService } from './registration.service';
-import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
+import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { ALL_PERMISSION_KEYS, ROLE_PERMISSIONS, STORE_FACING_ROLES } from '../rbac/role-permissions';
+import { stateOf } from '../entitlement/entitlement-rules';
+import { trialFactsOf } from './trial/trial-rules';
 
 /**
  * What a self-service registration must leave behind.
@@ -29,6 +31,8 @@ function makeStore(failOn?: string) {
     userBranch: [],
     subscription: [],
     subscriptionEvent: [],
+    trialEligibility: [],
+    trialClaim: [],
   };
   const permissions = ALL_PERMISSION_KEYS.map((key) => ({ id: newUuidV7Bin(), key }));
 
@@ -39,7 +43,8 @@ function makeStore(failOn?: string) {
         // Lets a test fail one specific write partway through the transaction,
         // after roles and permissions have already been written.
         if (failOn === name) throw new Error(`${name} insert failed`);
-        t[name].push({ ...data, createdAt: new Date() });
+        // The instant the service passes wins; the column default stands in only when it passes none.
+        t[name].push({ createdAt: new Date(), ...data });
         return data;
       }),
       findMany: jest.fn(async () => t[name]),
@@ -106,6 +111,19 @@ function makeStore(failOn?: string) {
       userBranch: simple('userBranch'),
       subscription: simple('subscription'),
       subscriptionEvent: simple('subscriptionEvent'),
+      // The free trial's rows (0095): one eligibility per company, and the claim the Owner may make later.
+      trialEligibility: {
+        // The columns' defaults: an eligibility is created open, on the only basis there is.
+        create: jest.fn(async ({ data }: any) => {
+          if (failOn === 'trialEligibility') throw new Error('trialEligibility insert failed');
+          t.trialEligibility.push({ basis: 'self_registration', closedAt: null, closedReason: null, ...data });
+          return data;
+        }),
+        findUnique: jest.fn(async ({ where }: any) => t.trialEligibility.find((e) => e.companyId.equals(where.companyId)) ?? null),
+      },
+      trialClaim: {
+        findUnique: jest.fn(async ({ where }: any) => t.trialClaim.find((c) => c.companyId.equals(where.companyId)) ?? null),
+      },
 
       /**
        * A real transaction, in the one way that matters here: the callback
@@ -126,9 +144,11 @@ function makeStore(failOn?: string) {
 }
 
 const hashing = { hash: jest.fn(async (p: string) => `hashed:${p}`) };
+const REGISTERED_AT = new Date('2026-10-13T08:30:00.250Z');
+const clock = { now: () => REGISTERED_AT };
 
 function makeService(store: ReturnType<typeof makeStore>) {
-  return new RegistrationService(store.client as any, hashing as any);
+  return new RegistrationService(store.client as any, hashing as any, clock);
 }
 
 const INPUT = {
@@ -273,5 +293,120 @@ describe('self-service registration provisions a usable tenant', () => {
 
     const companies = store.tables.company.map((c: any) => binToUuid(c.id));
     expect(new Set(companies).size).toBe(2);
+  });
+});
+
+/**
+ * The free trial's eligibility (0095; the owner's decisions of 2026-10-13).
+ *
+ * A business that registers ITSELF — the public routes, on the website or in the app — is eligible for one free
+ * trial: eligible, never started. A business the Super Admin creates is not, and nothing else that creates people or
+ * stores makes anybody eligible. The registration itself starts nothing.
+ */
+describe('a business that registers itself may claim one free trial — and registering starts nothing', () => {
+  /** The state the shop is told, from the registration's own rows, by the rules every request is judged by. */
+  function stateAfter(store: ReturnType<typeof makeStore>, companyId: string, now = REGISTERED_AT) {
+    const id = uuidToBin(companyId);
+    const sub = store.tables.subscription.find((r: any) => r.companyId.equals(id));
+    const eligibility = store.tables.trialEligibility.find((r: any) => r.companyId.equals(id)) ?? null;
+    return stateOf({ ...sub, trial: trialFactsOf(eligibility, null) }, now);
+  }
+
+  it('public self-registration: one open eligibility, by the contact given, at the server instant — and no claim', async () => {
+    const store = makeStore();
+    const result = await makeService(store).register({ ...INPUT, trialEligible: true });
+
+    expect(result.trialEligible).toBe(true);
+    expect(store.tables.trialEligibility).toHaveLength(1);
+    const eligibility = store.tables.trialEligibility[0];
+    expect(eligibility.companyId.equals(uuidToBin(result.companyId))).toBe(true);
+    expect(eligibility.ownerUserId.equals(uuidToBin(result.ownerUserId))).toBe(true);
+    expect(eligibility.registrationMethod).toBe('email');
+    expect(eligibility.createdAt).toEqual(REGISTERED_AT);
+    expect(eligibility).toMatchObject({ basis: 'self_registration', closedAt: null, closedReason: null });
+    // Nothing started: no claim, the subscription still pending with no period, and the state "not started".
+    expect(store.tables.trialClaim).toHaveLength(0);
+    expect(store.tables.subscription[0]).toMatchObject({ status: 'pending_activation', currentPeriodEnd: null });
+    expect(stateAfter(store, result.companyId)).toBe('trial_available');
+  });
+
+  it('the timeline says eligible and not started — after the registration it belongs to', async () => {
+    const store = makeStore();
+    await makeService(store).register({ ...INPUT, trialEligible: true });
+
+    expect(store.tables.subscriptionEvent.map((e: any) => e.kind)).toEqual(['registered', 'trial_eligible']);
+    const [registered, eligible] = store.tables.subscriptionEvent;
+    expect(registered.note).toBe('Self-service registration. Nothing is active yet.');
+    expect(eligible).toMatchObject({
+      note: 'Eligible for one 7-day free trial, to be claimed by the Owner on the Dukan ERP website. Not started.',
+      actor: 'self-service',
+      createdAt: REGISTERED_AT,
+    });
+    expect(eligible.subscriptionId.equals(store.tables.subscription[0].id)).toBe(true);
+  });
+
+  it('records which contacts were given: both given, both required', async () => {
+    const both = makeStore();
+    await makeService(both).register({ ...INPUT, phone: '+22236001234', trialEligible: true });
+    expect(both.tables.trialEligibility[0].registrationMethod).toBe('both');
+
+    const phoneOnly = makeStore();
+    await makeService(phoneOnly).register({ ...INPUT, email: undefined, phone: '+22236001234', trialEligible: true });
+    expect(phoneOnly.tables.trialEligibility[0].registrationMethod).toBe('phone');
+  });
+
+  it('a business the Super Admin creates is not eligible: no eligibility, no trial event, pending', async () => {
+    const store = makeStore();
+    const result = await makeService(store).register({
+      ...INPUT,
+      idempotencyKey: 'admin:key-1',
+      actor: 'ops@example.test',
+      note: 'Created by the platform for the shop. Awaiting approval.',
+    });
+
+    expect(result.trialEligible).toBe(false);
+    expect(store.tables.trialEligibility).toHaveLength(0);
+    expect(store.tables.subscriptionEvent.map((e: any) => e.kind)).toEqual(['registered']);
+    expect(stateAfter(store, result.companyId)).toBe('pending');
+  });
+
+  it('eligibility is never the default: a caller that says nothing makes nobody eligible', async () => {
+    const store = makeStore();
+    const result = await makeService(store).register(INPUT);
+    expect(result.trialEligible).toBe(false);
+    expect(store.tables.trialEligibility).toHaveLength(0);
+    expect(store.tables.subscriptionEvent[0].note).toBe('Self-service registration. Awaiting activation.');
+  });
+
+  it('a retry creates no second eligibility, and says what the business holds now', async () => {
+    const store = makeStore();
+    const service = makeService(store);
+    const first = await service.register({ ...INPUT, trialEligible: true });
+    const again = await service.register({ ...INPUT, trialEligible: true });
+
+    expect(again).toMatchObject({ companyId: first.companyId, created: false, trialEligible: true });
+    expect(store.tables.trialEligibility).toHaveLength(1);
+    expect(store.tables.subscriptionEvent.filter((e: any) => e.kind === 'trial_eligible')).toHaveLength(1);
+
+    // Once the trial was claimed, the same retry no longer reports an unused trial.
+    store.tables.trialClaim.push({ companyId: uuidToBin(first.companyId), claimedAt: REGISTERED_AT });
+    expect((await service.register({ ...INPUT, trialEligible: true })).trialEligible).toBe(false);
+  });
+
+  it('a closed eligibility is no trial to report', async () => {
+    const store = makeStore();
+    const service = makeService(store);
+    const first = await service.register({ ...INPUT, trialEligible: true });
+    store.tables.trialEligibility[0].closedAt = new Date('2026-10-14T00:00:00.000Z');
+    expect((await service.register({ ...INPUT, trialEligible: true })).trialEligible).toBe(false);
+    expect(first.trialEligible).toBe(true);
+  });
+
+  it('the eligibility rolls back with the tenant it belongs to', async () => {
+    const store = makeStore('trialEligibility');
+    await expect(makeService(store).register({ ...INPUT, trialEligible: true })).rejects.toThrow('trialEligibility insert failed');
+    expect(store.tables.company).toHaveLength(0);
+    expect(store.tables.trialEligibility).toHaveLength(0);
+    expect(store.tables.subscriptionEvent).toHaveLength(0);
   });
 });

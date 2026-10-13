@@ -10,13 +10,11 @@ import {
   Query,
   Req,
   Res,
-  ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
-import type { ContactChannel } from '@prisma/client';
 import {
   IsEmail,
   IsIn,
@@ -44,10 +42,6 @@ import { AllowPendingMfa } from './platform-admin.guard';
 import { PortalHandoffService, HANDOFF_TTL_SECONDS, PORTAL_SESSION_TTL_HOURS } from './portal-handoff.service';
 import { PORTAL_SESSION_COOKIE, cookieSecure } from '../common/http/cookies';
 import { paymentInstructions } from './payment-instructions';
-import {
-  RegistrationContinuationService,
-  CONTINUATION_TTL_SECONDS,
-} from './registration-continuation.service';
 import { PlatformAuditService } from './platform-audit.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { RegistrationService } from './registration.service';
@@ -55,10 +49,11 @@ import { OwnerInvitationService, OWNER_PASSWORD_MIN_LENGTH } from './owner-invit
 import { BillingService } from '../billing/billing.service';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { ContactVerificationService } from './contact-verification.service';
-import { ContactDeliveryProvider } from './contact-delivery';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { randomBytes } from 'node:crypto';
+import { RegistrationFlowService } from './registration-flow.service';
+import { ContinueConfirmDto, ContinueStartDto, IsNotEmptyish, RegisterDto } from './registration.dto';
 
 /**
  * The platform-control API.
@@ -83,26 +78,11 @@ import { randomBytes } from 'node:crypto';
  * carry no `PlatformAdminGuard` and are both rate-limited.
  */
 
-/** Registration and admin sign-in are both unauthenticated. Both are throttled. */
-const PUBLIC_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
-
-export class RegisterDto {
-  /** The client's own key, so a retry cannot create a second business. */
-  @IsString() @IsNotEmptyish() @MaxLength(80) idempotencyKey: string;
-
-  @IsString() @MinLength(1) @MaxLength(160) ownerName: string;
-  @IsString() @MinLength(1) @MaxLength(160) businessName: string;
-  @IsString() @MinLength(1) @MaxLength(160) branchName: string;
-  /** What the first branch does (D154): electronics when not said. */
-  @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
-
-  @IsOptional() @IsString() @MaxLength(120) city?: string;
-  @IsOptional() @IsString() @MaxLength(160) email?: string;
-  @IsOptional() @IsString() @MaxLength(24) phone?: string;
-
-  @IsString() @MinLength(8) @MaxLength(200) password: string;
-  @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
-}
+/**
+ * Registration and admin sign-in are both unauthenticated. Both are throttled — and the app's registration routes
+ * (`auth/register*`, 0095) by this same limit, so neither door is the cheaper one to hammer.
+ */
+export const PUBLIC_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
 class AdminSignInDto {
   @IsEmail() @MaxLength(160) email: string;
@@ -194,17 +174,6 @@ class PaymentDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
-class ContinueStartDto {
-  /** The opaque continuation minted by registration. Never logged. */
-  @IsString() @MinLength(16) @MaxLength(200) continuation: string;
-  @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
-}
-
-class ContinueConfirmDto {
-  @IsString() @MinLength(16) @MaxLength(200) continuation: string;
-  @IsString() @MinLength(1) @MaxLength(12) code: string;
-}
-
 class VerifyStartDto {
   @IsString() @MinLength(3) @MaxLength(160) destination: string;
   @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
@@ -229,11 +198,6 @@ export class PlanVersionDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
-/** `@IsNotEmpty` under a name that reads in this file. */
-function IsNotEmptyish() {
-  return MinLength(1);
-}
-
 @ApiExcludeController()
 @Controller({ path: 'platform', version: '1' })
 export class PlatformController {
@@ -248,135 +212,45 @@ export class PlatformController {
     private readonly entitlement: EntitlementService,
     private readonly tenant: TenantContext,
     private readonly handoff: PortalHandoffService,
-    private readonly continuation: RegistrationContinuationService,
     private readonly invitations: OwnerInvitationService,
-    private readonly delivery: ContactDeliveryProvider,
+    private readonly flow: RegistrationFlowService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
+
+  /*
+   * The three registration routes hand their bodies to the one flow they share
+   * with the app's `auth/register*` (0095): the same refusal before anything is
+   * saved, the same continuation, the same session, and the same free trial
+   * eligibility — eligible, never started.
+   */
 
   @Public()
   @Throttle(PUBLIC_THROTTLE)
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   async register(@Body() dto: RegisterDto) {
-    /*
-     * Before anything is created (2026-10-05). A registration can only finish
-     * by proving the contact, so a server that cannot send that code must
-     * refuse here — not create a pending business whose Owner then waits for a
-     * code that is never coming, and can sign in to *Waiting for activation*
-     * meanwhile (`docs/67` RC-02). The same rule the deletion flow follows
-     * (`56bddbe`): refused up front, and nothing was saved. The channel is the
-     * one the Owner record will carry: the email when one is given, else the
-     * number.
-     */
-    const channel: ContactChannel = dto.email?.trim() ? 'email' : 'phone';
-    if (!this.delivery.canDeliver(channel)) {
-      throw new ServiceUnavailableException({
-        code: 'registration_unavailable',
-        message: 'Registration cannot be completed right now: no verification code can be sent. Nothing was saved.',
-      });
-    }
-
-    const result = await this.registration.register({
-      idempotencyKey: dto.idempotencyKey,
-      ownerName: dto.ownerName,
-      businessName: dto.businessName,
-      branchName: dto.branchName,
-      activity: dto.activity,
-      city: dto.city,
-      email: dto.email,
-      phone: dto.phone,
-      password: dto.password,
-      language: dto.language,
-    });
-
-    /*
-     * A continuation, never a session.
-     *
-     * Registration proves somebody filled a form. It does not prove they can
-     * read the address they typed, so it cannot be the thing that signs them
-     * in. The continuation carries the attempt forward and buys exactly one
-     * thing: the completion of THIS registration, once, after the code bound to
-     * it is proved.
-     *
-     * Issued only for a registration that is still incomplete. A retry that
-     * recognises an already-completed registration gets no new credential —
-     * otherwise a public idempotency key would be a way to mint one.
-     */
-    const owner = await this.registration.pendingOwnerFor(result.companyId);
-    const continuation = owner
-      ? await this.continuation.issue(owner.companyId, owner.userId)
-      : null;
-
-    return {
-      status: result.status,
-      created: result.created,
-      publicStoreId: result.publicStoreId,
-      /** The first branch's activity as recorded (D154) — on a retry, what the winner recorded. */
-      activity: result.activity,
-      /** Where the code will go. From the OWNER RECORD, not from the request. */
-      verification: owner ? { destination: owner.destinationMasked, channel: owner.channel } : null,
-      continuation: continuation
-        ? {
-            token: continuation.token,
-            expiresAt: continuation.expiresAt,
-            expiresInSeconds: CONTINUATION_TTL_SECONDS,
-          }
-        : null,
-      next: continuation ? 'verify_contact' : 'sign_in',
-    };
+    return this.flow.register(dto);
   }
 
   // ── Finishing a registration ─────────────────────────────────────────────
 
-  /**
-   * Send the code for THIS registration, and bind the challenge to it.
-   *
-   * Public because it runs before any session exists, but not open: it does
-   * nothing without a valid continuation, and the destination comes from the
-   * Owner record rather than the request, so a stolen continuation cannot
-   * redirect a code somewhere else.
-   */
+  /** Send the code for THIS registration, and bind the challenge to it. */
   @Public()
   @Throttle(PUBLIC_THROTTLE)
   @Post('register/verify/start')
   @HttpCode(HttpStatus.OK)
   async continueStart(@Body() dto: ContinueStartDto) {
-    const result = await this.continuation.startChallenge(dto.continuation, dto.language);
-    if (!result.ok) {
-      // One shape for every refusal: a caller must not be able to tell an
-      // expired continuation from an unknown one, or probe which addresses
-      // exist.
-      throw new BadRequestException('That registration cannot be continued.');
-    }
-    return { delivery: result.delivery };
+    return this.flow.startVerification(dto);
   }
 
-  /**
-   * Prove the code and finish, receiving one ordinary Owner session.
-   *
-   * The session comes from `SessionsService` exactly as a password sign-in
-   * would. It carries no extra authority, no platform-administrator rights, and
-   * the subscription stays `pending` — being signed in is not being entitled.
-   */
+  /** Prove the code and finish, receiving one ordinary Owner session. */
   @Public()
   @Throttle(PUBLIC_THROTTLE)
   @Post('register/verify/confirm')
   @HttpCode(HttpStatus.OK)
   async continueConfirm(@Body() dto: ContinueConfirmDto, @Req() req: Request) {
-    const result = await this.continuation.complete(dto.continuation, dto.code, {
-      ip: req.ip,
-      userAgent: req.headers['user-agent'],
-    });
-    if (!result.ok) {
-      throw new BadRequestException('That code did not match.');
-    }
-    return {
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
-      expiresIn: result.expiresIn,
-    };
+    return this.flow.confirmVerification(dto, { ip: req.ip, userAgent: req.headers['user-agent'] });
   }
 
   // ── Contact verification ─────────────────────────────────────────────────

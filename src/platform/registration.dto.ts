@@ -1,0 +1,43 @@
+import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { ACTIVITIES, type Activity } from '../entitlement/activity';
+
+/**
+ * A business registering itself, and finishing its registration (docs/68; 0095).
+ *
+ * One set of bodies for both doors to the same flow — the website's `platform/register*` and the app's
+ * `auth/register*` — so the two can never accept different things.
+ */
+
+/** `@IsNotEmpty` under a name that reads in these files. */
+export function IsNotEmptyish() {
+  return MinLength(1);
+}
+
+export class RegisterDto {
+  /** The client's own key, so a retry cannot create a second business. */
+  @IsString() @IsNotEmptyish() @MaxLength(80) idempotencyKey: string;
+
+  @IsString() @MinLength(1) @MaxLength(160) ownerName: string;
+  @IsString() @MinLength(1) @MaxLength(160) businessName: string;
+  @IsString() @MinLength(1) @MaxLength(160) branchName: string;
+  /** What the first branch does (D154): electronics when not said. */
+  @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
+
+  @IsOptional() @IsString() @MaxLength(120) city?: string;
+  @IsOptional() @IsString() @MaxLength(160) email?: string;
+  @IsOptional() @IsString() @MaxLength(24) phone?: string;
+
+  @IsString() @MinLength(8) @MaxLength(200) password: string;
+  @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
+}
+
+export class ContinueStartDto {
+  /** The opaque continuation minted by registration. Never logged. */
+  @IsString() @MinLength(16) @MaxLength(200) continuation: string;
+  @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
+}
+
+export class ContinueConfirmDto {
+  @IsString() @MinLength(16) @MaxLength(200) continuation: string;
+  @IsString() @MinLength(1) @MaxLength(12) code: string;
+}

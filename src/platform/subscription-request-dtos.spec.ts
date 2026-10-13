@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { ActivityRequestDto, QuoteDto, StoreRequestDto } from './seat-requests.controller';
-import { CreateBusinessDto, PlanVersionDto, RegisterDto } from './platform.controller';
+import { CreateBusinessDto, PlanVersionDto } from './platform.controller';
+// One body for the website's and the app's registration (0095): it lives beside the flow both doors share.
+import { RegisterDto } from './registration.dto';
 
 /**
  * What the subscription routes accept (D154): an activity is one of three

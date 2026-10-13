@@ -1,11 +1,13 @@
-import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { BadRequestException, ConflictException, Inject, Injectable } from '@nestjs/common';
+import { Prisma, type TrialRegistrationMethod } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { HashingService } from '../common/security/hashing.service';
 import type { Activity } from '../entitlement/activity';
 import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { provisionDefaultRoles } from '../rbac/role-provisioning';
+import { CLOCK, type Clock } from '../entitlement/clock';
+import { TRIAL_DURATION_DAYS } from './trial/trial-rules';
 import {
   generatePersonalId,
   isEmail,
@@ -26,10 +28,14 @@ import {
  * asking somebody to invent or remember our identifiers is how the old sign-in
  * became unusable.
  *
- * **2. There is no free trial.** Registration creates the company, its first
- * branch, its Owner and a subscription in `pending_activation`. Nothing about
- * succeeding at registration grants operational access; a person decides that,
- * and the decision is recorded.
+ * **2. Registering starts nothing.** Registration creates the company, its
+ * first branch, its Owner and a subscription in `pending_activation`, and
+ * succeeding at it grants no operational access. A business that registers
+ * ITSELF — the public routes, on the website or in the app — is also made
+ * eligible for one seven-day free trial (0095): eligible, not started. Only its
+ * Owner starts it, on the Dukan ERP website, by confirming it explicitly. A
+ * business the Super Admin creates is not eligible, and paid access is still a
+ * person's decision, recorded.
  *
  * **3. A retry must not create a second business.** Everything happens in one
  * transaction, keyed by an idempotency key the client generates. A dropped
@@ -61,6 +67,13 @@ export interface RegistrationInput {
    */
   actor?: string;
   note?: string;
+  /**
+   * Make the business eligible for its one free trial (0095). Only the public
+   * self-registration routes pass true; the Super Admin's console and every
+   * script leave it out, and absent is false — a business is never made
+   * eligible by default.
+   */
+  trialEligible?: boolean;
 }
 
 export interface RegistrationResult {
@@ -74,7 +87,16 @@ export interface RegistrationResult {
   status: 'pending_activation';
   /** True when this call did the work; false when it recognised a retry. */
   created: boolean;
+  /**
+   * Whether the business holds an unused free trial: eligible, still open, and
+   * not claimed. Said again on a retry, as it stands then.
+   */
+  trialEligible: boolean;
 }
+
+/** What the timeline says when a business becomes eligible for its free trial. Never "started": it has not. */
+const TRIAL_ELIGIBLE_NOTE =
+  `Eligible for one ${TRIAL_DURATION_DAYS}-day free trial, to be claimed by the Owner on the Dukan ERP website. Not started.`;
 
 /** Ten uppercase hex characters, matching the existing Store Account ID shape. */
 function newPublicStoreId(): string {
@@ -97,11 +119,18 @@ function maskDestination(value: string): string {
   return value.length > 4 ? '***' + value.slice(-4) : '***';
 }
 
+/** Which contacts the business gave — and so which its Owner must have verified before the trial can start. */
+function registrationMethodOf(email: string | null, phone: string | null): TrialRegistrationMethod {
+  if (email && phone) return 'both';
+  return email ? 'email' : 'phone';
+}
+
 @Injectable()
 export class RegistrationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly hashing: HashingService,
+    @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
   async register(input: RegistrationInput): Promise<RegistrationResult> {
@@ -237,7 +266,8 @@ export class RegistrationService {
           data: {
             id: subscriptionId,
             companyId,
-            // No trial. Nothing is granted by registering.
+            // Nothing is granted by registering — and an eligible business's
+            // trial starts only when its Owner claims it, never here.
             status: 'pending_activation',
             subscribedBranchCount: 1,
             additionalSeats: 0,
@@ -251,10 +281,46 @@ export class RegistrationService {
             companyId,
             subscriptionId,
             kind: 'registered',
-            note: input.note?.slice(0, 255) ?? 'Self-service registration. Awaiting activation.',
+            note:
+              input.note?.slice(0, 255) ??
+              (input.trialEligible
+                ? 'Self-service registration. Nothing is active yet.'
+                : 'Self-service registration. Awaiting activation.'),
             actor: input.actor?.slice(0, 120) ?? 'self-service',
           },
         });
+
+        /*
+         * The free trial's eligibility (0095), in the same transaction as the
+         * business it belongs to: a registration that rolls back leaves no
+         * eligibility behind, and one that commits is eligible from its first
+         * instant. Which contacts were given decides which the Owner must have
+         * verified before claiming — both, if both. A retry recognised above
+         * never reaches here, so nothing is written twice.
+         */
+        if (input.trialEligible) {
+          const now = this.clock.now();
+          await tx.trialEligibility.create({
+            data: {
+              id: newUuidV7Bin(),
+              companyId,
+              ownerUserId: userId,
+              registrationMethod: registrationMethodOf(email, phone),
+              createdAt: now,
+            },
+          });
+          await tx.subscriptionEvent.create({
+            data: {
+              id: newUuidV7Bin(),
+              companyId,
+              subscriptionId,
+              kind: 'trial_eligible',
+              note: TRIAL_ELIGIBLE_NOTE,
+              actor: 'self-service',
+              createdAt: now,
+            },
+          });
+        }
       });
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
@@ -349,6 +415,8 @@ export class RegistrationService {
       select: { id: true },
       orderBy: { createdAt: 'asc' },
     });
+    const eligibility = await this.prisma.trialEligibility.findUnique({ where: { companyId }, select: { closedAt: true } });
+    const claim = await this.prisma.trialClaim.findUnique({ where: { companyId }, select: { claimedAt: true } });
 
     return {
       companyId: binToUuid(company.id),
@@ -358,6 +426,7 @@ export class RegistrationService {
       ownerUserId: binToUuid(owner.id),
       status: 'pending_activation',
       created,
+      trialEligible: eligibility !== null && eligibility.closedAt === null && claim === null,
     };
   }
 }

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { RequestMethod, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { PlatformController } from './platform.controller';
+import { RegistrationFlowService } from './registration-flow.service';
 import { ALLOW_PENDING_MFA, PlatformAdminGuard } from './platform-admin.guard';
 import { IS_PUBLIC_KEY } from '../common/decorators/public.decorator';
 import { ALWAYS_ALLOWED, ALWAYS_READABLE } from '../entitlement/route-classification';
@@ -266,14 +267,15 @@ describe('the controller, from the platform’s side', () => {
   });
 
   describe('registration is refused before anything is created when no code can be delivered (2026-10-05)', () => {
+    /*
+     * The website's route hands its body to the flow it shares with the app's
+     * `auth/register` (0095), so the controller is built on the real flow and
+     * the refusal is proved where it now lives — for both doors at once.
+     */
     const stub = {} as never;
     function controllerWith(registration: unknown, delivery: unknown) {
-      return new PlatformController(
-        stub, stub, stub, stub,
-        registration as never,
-        stub, stub, stub, stub, stub, stub, stub,
-        delivery as never,
-      );
+      const flow = new RegistrationFlowService(registration as never, stub, delivery as never);
+      return new PlatformController(stub, stub, stub, stub, registration as never, stub, stub, stub, stub, stub, stub, flow);
     }
     const attempt = {
       idempotencyKey: 'k-1',
@@ -316,13 +318,13 @@ describe('the controller, from the platform’s side', () => {
         {
           register: async (input: { email?: string }) => {
             seen.push(input.email ?? '');
-            return { companyId: 'c', publicStoreId: 'ABCDEF0123', branchId: 'b', ownerUserId: 'u', status: 'pending_activation', created: true };
+            return { companyId: 'c', publicStoreId: 'ABCDEF0123', branchId: 'b', ownerUserId: 'u', status: 'pending_activation', created: true, trialEligible: true };
           },
           pendingOwnerFor: async () => null,
         },
         { canDeliver: (channel: string) => channel === 'email' },
       );
-      await expect(controller.register(attempt as never)).resolves.toMatchObject({ created: true, next: 'sign_in', continuation: null });
+      await expect(controller.register(attempt as never)).resolves.toMatchObject({ created: true, next: 'sign_in', continuation: null, trialEligible: true });
       expect(seen).toEqual(['aicha@example.test']);
     });
   });
