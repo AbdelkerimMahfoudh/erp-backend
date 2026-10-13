@@ -185,9 +185,22 @@ export function stateOf(sub: SubscriptionRecord, now: Date): EntitlementState {
   }
 
   const end = sub.currentPeriodEnd?.getTime() ?? null;
-  // Never subscribed and not granted anything — after a trial, said as the
-  // trial's end. Reads still work; writes do not.
-  if (end === null) return claim ? 'trial_expired' : 'expired';
+  if (end === null) {
+    // Never subscribed and not granted anything — after a trial, said as the
+    // trial's end. Reads still work; writes do not.
+    if (claim) return 'trial_expired';
+    /*
+     * An open eligibility on an `activated` business that was never paid for
+     * or granted anything: a business suspended before it claimed, then
+     * reinstated — `reinstate` sets `activated` whatever the business was
+     * (0095). Suspension blocks the trial and never closes it, so the business
+     * may still claim, exactly as before it was suspended. Every approval,
+     * grant and period closes the eligibility under the fence, so a business
+     * that was ever given access never reaches this line with one open — and
+     * if it somehow did, its dates above would already have answered.
+     */
+    return sub.trial?.eligible && !sub.isComplimentary ? 'trial_available' : 'expired';
+  }
 
   if (now.getTime() < end) return 'active';
   if (now.getTime() < end + GRACE_MS) return 'grace';

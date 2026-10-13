@@ -420,13 +420,32 @@ describe('the free trial: three computed states (0095)', () => {
 
   it('activated with no period: trial_expired after a trial, expired without one (unchanged)', () => {
     expect(stateOf(sub({ status: 'activated', currentPeriodEnd: null, trial: { eligible: false, claim } }), END)).toBe('trial_expired');
-    expect(stateOf(sub({ status: 'activated', currentPeriodEnd: null, trial: { eligible: true, claim: null } }), END)).toBe('expired');
+    expect(stateOf(sub({ status: 'activated', currentPeriodEnd: null, trial: { eligible: false, claim: null } }), END)).toBe('expired');
     expect(stateOf(sub({ status: 'activated', currentPeriodEnd: null }), END)).toBe('expired');
   });
 
-  it('an eligibility alone opens nothing for a business that is not pending', () => {
-    // Only `pending_activation` reads an open eligibility; a running or lapsed business is told its dates.
+  it('suspended before claiming, then reinstated: trial_available again — suspension blocks and never closes', () => {
+    // `reinstate` sets `activated` whatever the business was (F12). Nothing was ever paid or granted, and the
+    // eligibility is still open: the business may claim, exactly as it could before it was suspended (SPEC §2.1).
+    const reinstated = sub({ status: 'activated', currentPeriodEnd: null, trial: { eligible: true, claim: null } });
+    expect(stateOf(reinstated, START)).toBe('trial_available');
+    expect([canRead(stateOf(reinstated, START)), canWrite(stateOf(reinstated, START))]).toEqual([false, false]);
+    // While it was suspended, the suspension answered.
+    expect(stateOf({ ...reinstated, status: 'suspended' }, START)).toBe('suspended');
+  });
+
+  it('an open eligibility never outranks access that was given: dates and grants answer first', () => {
+    // Every approval, grant and period closes the eligibility under the fence; if one were somehow left open, the
+    // business would still be told its dates — a paying business is never closed by a trial it did not claim.
     expect(stateOf(sub({ status: 'activated', trial: { eligible: true, claim: null } }), AUG_18)).toBe('active');
+    const grantRanOut = sub({
+      status: 'activated',
+      currentPeriodEnd: null,
+      isComplimentary: true,
+      complimentaryUntil: new Date(START.getTime() - DAY),
+      trial: { eligible: true, claim: null },
+    });
+    expect(stateOf(grantRanOut, START)).toBe('expired');
   });
 
   it('a status nobody recognises fails to expired even during a trial — a corrupted row never writes', () => {
