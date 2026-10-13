@@ -27,6 +27,7 @@ import {
   ContactDeliveryProvider,
   outboxAllowed,
   OutboxDeliveryProvider,
+  SelectedContactDelivery,
   UnconfiguredDeliveryProvider,
   WhatsAppContactDeliveryProvider,
   isRealChannel,
@@ -49,6 +50,10 @@ import { EMAIL_CHANNEL, EmailChannel } from '../messaging/email-channel';
  *
  * The development-log channel is deliberately NOT treated as real: it prints
  * codes to a log sink, which is what the outbox already does more safely.
+ *
+ * Asked on every call, never once at boot (F11, `SelectedContactDelivery`):
+ * whether WhatsApp is open in production depends on delivery proofs that load
+ * after the module is built.
  */
 export function selectContactDelivery(
   channel: WhatsAppChannel,
@@ -105,6 +110,11 @@ export function selectContactDelivery(
        * objects — and the code is silently never found. Selecting among the
        * single registered instances is what makes the development flow work
        * at all.
+       *
+       * And the selection runs per call, not here (F11): built now, it would
+       * be made before the WhatsApp delivery proofs are read, and a
+       * WhatsApp-only production deployment would refuse every code until it
+       * was restarted.
        */
       inject: [WHATSAPP_CHANNEL, WhatsAppContactDeliveryProvider, OutboxDeliveryProvider, UnconfiguredDeliveryProvider, EMAIL_CHANNEL],
       useFactory: (
@@ -113,7 +123,7 @@ export function selectContactDelivery(
         outbox: OutboxDeliveryProvider,
         unconfigured: UnconfiguredDeliveryProvider,
         email: EmailChannel,
-      ) => selectContactDelivery(channel, real, outbox, unconfigured, outboxAllowed(), email),
+      ) => new SelectedContactDelivery(() => selectContactDelivery(channel, real, outbox, unconfigured, outboxAllowed(), email)),
     },
     WhatsAppContactDeliveryProvider,
     OutboxDeliveryProvider,

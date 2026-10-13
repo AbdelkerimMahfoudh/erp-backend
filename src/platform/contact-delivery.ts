@@ -163,6 +163,39 @@ export class UnconfiguredDeliveryProvider extends ContactDeliveryProvider {
   }
 }
 
+/**
+ * The provider every caller holds: it asks which provider is right on EVERY call (F11, 2026-10-13).
+ *
+ * The choice used to be made once, when the module was built — before `WhatsAppReadiness` had read a single
+ * delivery proof. In production a configured WhatsApp channel stays closed until its proofs load, so a deployment
+ * whose only channel is WhatsApp looked undeliverable at that moment, was handed the honest refusal, and kept
+ * refusing every code for as long as the process ran: the proofs loading a moment later, or the webhook completing
+ * one, changed nothing until a restart. A registration it refused said "nothing was saved", truthfully, about a
+ * server that could in fact send.
+ *
+ * Choosing per call costs a few property reads, and each answer is the true one at that moment: closed before the
+ * proofs, open from the instant they load, closed again if the channel goes away. `choose` is pure selection over the
+ * registered instances — nothing is built per call, so the outbox a code was stored in is the outbox it is read from.
+ */
+export class SelectedContactDelivery extends ContactDeliveryProvider {
+  constructor(private readonly choose: () => ContactDeliveryProvider) {
+    super();
+  }
+
+  /** The name of the provider a call would reach now — what a code's row records as its provider. */
+  get name(): string {
+    return this.choose().name;
+  }
+
+  canDeliver(channel: ContactChannel): boolean {
+    return this.choose().canDeliver(channel);
+  }
+
+  send(req: DeliveryRequest): Promise<DeliveryResult> {
+    return this.choose().send(req);
+  }
+}
+
 /** A real channel: enabled, and not one that only writes to a development log. */
 export function isRealChannel(channel: { isEnabled: boolean; name: string }): boolean {
   return channel.isEnabled && channel.name !== 'development-log';
