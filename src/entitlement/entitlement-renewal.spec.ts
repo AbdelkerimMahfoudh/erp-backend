@@ -15,7 +15,9 @@ const PAID_TO = new Date('2026-11-30T23:00:00.000Z');
 function makeWorld(now: { t: Date }, opts: { failRead?: boolean } = {}) {
   let reads = 0;
   let rolls = 0;
-  const sub = { id: newUuidV7Bin(), companyId: COMPANY, status: 'activated', currentPeriodEnd: PAID_TO, isComplimentary: false, complimentaryUntil: null, subscribedBranchCount: 1, additionalSeats: 0 };
+  // The company the evaluation reads with the row (0095): its zone and its free trial — none here.
+  const company = { name: 'Shop', timezone: 'UTC', trialEligibility: null, trialClaim: null };
+  const sub = { id: newUuidV7Bin(), companyId: COMPANY, status: 'activated', currentPeriodEnd: PAID_TO, isComplimentary: false, complimentaryUntil: null, subscribedBranchCount: 1, additionalSeats: 0, company };
   let latestEnd = OLD_END;
   const prisma: Record<string, any> = {
     subscription: { findFirst: async () => ({ ...sub }) },

@@ -1,11 +1,14 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { CLOCK, type Clock } from './clock';
 import { seatCensus } from './seat-census';
-import { binToUuid } from '../common/utils/uuid.util';
+import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 import { BillingService } from '../billing/billing.service';
-import { SubscriptionRenewal } from '../billing/renewal';
+import { SubscriptionRenewal, lockSubscription } from '../billing/renewal';
+import { redact } from '../platform/platform-audit.service';
+import { TRIAL_DURATION_DAYS, displayTimeZone, trialFactsOf } from '../platform/trial/trial-rules';
 import {
   buildEntitlement,
   canWrite,
@@ -21,6 +24,7 @@ import {
   ENTITLEMENT_PENDING,
   ENTITLEMENT_REJECTED,
   ENTITLEMENT_SUSPENDED,
+  ENTITLEMENT_TRIAL_AVAILABLE,
   ENTITLEMENT_WRITE_BLOCKED,
   type EntitlementState,
 } from './entitlement-rules';
@@ -40,14 +44,23 @@ import {
 /** How long a company's "is a renewal due?" answer is trusted before it is asked again. */
 const ROLL_CHECK_TTL_MS = 60_000;
 
-/** What a refused write says, per state that cannot write. Only an expired subscription has "ended". */
+/** What a refused write says, per state that cannot write. Only an expired subscription or trial has "ended". */
 const WRITE_REFUSED = {
   expired: 'Your subscription has ended. You can still read and export everything.',
   suspended: 'This business is suspended, so nothing can be changed. Open your account page to see why.',
   cancelled: 'This business is cancelled, so nothing can be changed. Open your account page to see why.',
   pending: 'This business is waiting to be activated, so nothing can be changed yet.',
   rejected: 'This registration was not approved, so nothing can be changed.',
-} satisfies Record<Exclude<EntitlementState, 'active' | 'grace' | 'complimentary'>, string>;
+  trial_available: 'This business has not started yet, so nothing can be changed.',
+  trial_expired: 'The free trial has ended. You can still read and export everything.',
+} satisfies Record<Exclude<EntitlementState, 'active' | 'grace' | 'complimentary' | 'trial_active'>, string>;
+
+/** The claim as the expiry record needs it: which row, when it ends, and whether its end was written down. */
+interface ClaimRow {
+  id: Buffer;
+  endsAt: Date;
+  expiryRecordedAt: Date | null;
+}
 
 @Injectable()
 export class EntitlementService {
@@ -56,6 +69,8 @@ export class EntitlementService {
   private readonly renewal: SubscriptionRenewal;
   /** company → when it was last checked: at most one cheap query a minute per company. */
   private readonly rollCheckedAt = new Map<string, number>();
+  /** Companies whose stored time zone was refused — said once per process, not on every request. */
+  private readonly unknownZones = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -91,16 +106,111 @@ export class EntitlementService {
   }
 
   /**
+   * The free trial's end, written down once (0095): the first evaluation at or
+   * after `endsAt` marks the claim, appends the `trial_expired` event and the
+   * platform audit. The end itself needs none of this — the state is computed
+   * from the stored instants, so access stops at `endsAt` exactly; this is the
+   * record that it did.
+   *
+   * Exactly once, across requests and API instances: the mark is a conditional
+   * update (`expiry_recorded_at IS NULL`), and the event and the audit are
+   * written only when it changed the row, in the same transaction — all three
+   * or none. The subscription is locked first, as every writer here does
+   * (subscription first, audit last).
+   *
+   * The audit row goes through the transaction with `redact()` rather than
+   * `PlatformAuditService`: that service writes outside any transaction, and
+   * the platform module already imports this global one — importing it back
+   * would be a cycle.
+   *
+   * Never blocks the request: a failure is logged, nothing is marked, and the
+   * next evaluation tries again.
+   */
+  private async recordTrialExpiry(companyId: Buffer, subscriptionId: Buffer, label: string, claim: ClaimRow): Promise<void> {
+    const now = this.clock.now();
+    if (claim.expiryRecordedAt !== null || now.getTime() < claim.endsAt.getTime()) return;
+    const endsAt = claim.endsAt.toISOString();
+    try {
+      const recorded = await this.prisma.$transaction(async (tx) => {
+        await lockSubscription(tx, companyId);
+        const marked = await tx.trialClaim.updateMany({
+          where: { id: claim.id, expiryRecordedAt: null },
+          data: { expiryRecordedAt: now },
+        });
+        if (marked.count !== 1) return false;
+        await tx.subscriptionEvent.create({
+          data: {
+            id: newUuidV7Bin(),
+            companyId,
+            subscriptionId,
+            kind: 'trial_expired',
+            note: `The ${TRIAL_DURATION_DAYS}-day free trial ended at ${endsAt}. Nothing was charged.`,
+            actor: 'system',
+            createdAt: now,
+          },
+        });
+        await tx.platformAuditEvent.create({
+          data: {
+            id: newUuidV7Bin(),
+            adminId: null,
+            actor: 'system',
+            action: 'trial.expired',
+            targetType: 'Company',
+            targetId: companyId,
+            targetLabel: label.slice(0, 200),
+            afterJson: redact({ endsAt }) as Prisma.InputJsonValue,
+            createdAt: now,
+          },
+        });
+        return true;
+      });
+      if (recorded) this.logger.log(`Free trial expiry recorded for company ${binToUuid(companyId)} (ended ${endsAt})`);
+    } catch (e) {
+      this.logger.warn(`Free trial expiry record failed for company ${binToUuid(companyId)}: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * The zone the trial's dates are shown in: the company's own, validated. An
+   * unknown name reads as UTC and is reported once — never replaced by a zone
+   * guessed for the country (trial-rules `displayTimeZone`).
+   */
+  private trialZone(companyId: Buffer, stored: string): string {
+    return displayTimeZone(stored, (refused) => {
+      const key = companyId.toString('hex');
+      if (this.unknownZones.has(key)) return;
+      this.unknownZones.add(key);
+      this.logger.warn(`Company ${binToUuid(companyId)} has an unknown time zone "${refused}"; its trial dates are shown in UTC`);
+    });
+  }
+
+  /**
    * The subscription row, or a synthetic never-subscribed one.
    *
    * A company with no row is treated as expired rather than as an error: the
    * backfill covers everybody who existed at deployment, and a company created
    * afterwards by some path that forgot to make one must fail closed rather
    * than crash on every request.
+   *
+   * The free trial's facts are read with it on every evaluation, never cached
+   * (0095): a claim made on the website must be what the very next request
+   * sees, and an ended trial must stop writes at its exact end.
    */
   private async recordFor(companyId: Buffer): Promise<SubscriptionRecord> {
     await this.rollIfDue(companyId);
-    const row = await this.prisma.subscription.findFirst({ where: { companyId } });
+    const row = await this.prisma.subscription.findFirst({
+      where: { companyId },
+      include: {
+        company: {
+          select: {
+            name: true,
+            timezone: true,
+            trialEligibility: { select: { closedAt: true } },
+            trialClaim: { select: { id: true, claimedAt: true, startedAt: true, endsAt: true, expiryRecordedAt: true } },
+          },
+        },
+      },
+    });
     if (!row) {
       return {
         subscribedBranchCount: 0,
@@ -109,10 +219,13 @@ export class EntitlementService {
         isComplimentary: false,
         complimentaryUntil: null,
         // No subscription row at all. `expired` is the honest reading: reads
-        // work, writes do not, and nothing was ever granted.
+        // work, writes do not, and nothing was ever granted — not a trial either.
         status: 'activated',
+        trial: null,
       };
     }
+    const { name, timezone, trialEligibility, trialClaim } = row.company;
+    if (trialClaim) await this.recordTrialExpiry(companyId, row.id, name, trialClaim);
     return {
       subscribedBranchCount: row.subscribedBranchCount,
       additionalSeats: row.additionalSeats,
@@ -123,6 +236,9 @@ export class EntitlementService {
       // pending business then reads as EXPIRED — which is what happened, and
       // which no test caught because the field is optional by design.
       status: row.status,
+      trial: trialFactsOf(trialEligibility, trialClaim),
+      // Only the trial's view shows a date in the business's zone, so only a business with a trial has it checked.
+      timeZone: trialEligibility || trialClaim ? this.trialZone(companyId, timezone) : undefined,
     };
   }
 
@@ -168,9 +284,9 @@ export class EntitlementService {
   /**
    * Whether the operational app is closed to this company entirely.
    *
-   * Returns `null` when it is open — including when the subscription has
-   * EXPIRED, because expiry has never hidden anything and still does not.
-   * Only the two deliberate states close the door, and each says which one it
+   * Returns `null` when it is open — including when the subscription or the
+   * free trial has EXPIRED, because expiry has never hidden anything and still
+   * does not. Only the closed states close the door, and each says which one it
    * is so the client can show the right screen rather than guess.
    */
   async operationalAccessBlocked(
@@ -187,6 +303,10 @@ export class EntitlementService {
     }
     if (state === 'rejected') {
       return { code: ENTITLEMENT_REJECTED, message: 'This registration was not approved.', state };
+    }
+    // Eligible for the free trial and not started: "not started", never "waiting for approval" or "ended" (0095).
+    if (state === 'trial_available') {
+      return { code: ENTITLEMENT_TRIAL_AVAILABLE, message: 'This business has not started yet.', state };
     }
     return {
       code: ENTITLEMENT_SUSPENDED,

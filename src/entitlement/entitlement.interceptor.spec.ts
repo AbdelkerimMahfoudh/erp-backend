@@ -2,7 +2,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { lastValueFrom, of } from 'rxjs';
 import { EntitlementInterceptor } from './entitlement.interceptor';
 import { EntitlementService } from './entitlement.service';
-import { ENTITLEMENT_SUSPENDED, ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
+import { ENTITLEMENT_SUSPENDED, ENTITLEMENT_TRIAL_AVAILABLE, ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
 
 /**
  * The one place a lapsed or stopped subscription refuses a write (Milestone K),
@@ -18,10 +18,17 @@ import { ENTITLEMENT_SUSPENDED, ENTITLEMENT_WRITE_BLOCKED } from './entitlement-
 const COMPANY = Buffer.alloc(16, 7);
 const NOW = new Date('2026-10-10T12:00:00.000Z');
 
-function interceptorFor(subscription: { status: string; currentPeriodEnd: Date | null }) {
+/** The company the evaluation reads with the row (0095): its zone and, when given, its free trial. */
+interface TrialRows {
+  trialEligibility?: { closedAt: Date | null } | null;
+  trialClaim?: { id: Buffer; claimedAt: Date; startedAt: Date; endsAt: Date; expiryRecordedAt: Date | null } | null;
+}
+
+function interceptorFor(subscription: { status: string; currentPeriodEnd: Date | null }, trial: TrialRows = {}) {
+  const company = { name: 'Shop', timezone: 'UTC', trialEligibility: trial.trialEligibility ?? null, trialClaim: trial.trialClaim ?? null };
   const prisma = {
     subscription: {
-      findFirst: async () => ({ ...subscription, isComplimentary: false, complimentaryUntil: null, subscribedBranchCount: 1, additionalSeats: 0 }),
+      findFirst: async () => ({ ...subscription, isComplimentary: false, complimentaryUntil: null, subscribedBranchCount: 1, additionalSeats: 0, company }),
     },
     // No billing period: the renewal check finds nothing due.
     billingPeriod: { findFirst: async () => null },
@@ -87,5 +94,57 @@ describe('a refused write names the subscription state (D161)', () => {
       const closed = interceptorFor({ status, currentPeriodEnd: null });
       await expect(lastValueFrom(await closed.intercept(request('GET', '/api/v1/agent/transactions/client/:clientUuid'), handler))).resolves.toBe('ran');
     }
+  });
+});
+
+describe('the free trial at the gate (0095)', () => {
+  const HOUR = 60 * 60 * 1000;
+  const pending = { status: 'pending_activation', currentPeriodEnd: null };
+  const claimed = (start: Date) => ({
+    id: Buffer.alloc(16, 9),
+    claimedAt: start,
+    startedAt: start,
+    endsAt: new Date(start.getTime() + 168 * HOUR),
+    // An ended trial's expiry already recorded: this spec is about the gate, not the record (trial-expiry.spec).
+    expiryRecordedAt: start.getTime() + 168 * HOUR <= NOW.getTime() ? NOW : null,
+  });
+
+  it('not started: writes and reads are refused as "not started" — never "ended", never "waiting to be activated"', async () => {
+    const open = { trialEligibility: { closedAt: null } };
+    const e = await interceptorFor(pending, open)
+      .intercept(request('POST', '/api/v1/sales'), handler)
+      .catch((err: unknown) => err);
+    expect((e as ForbiddenException).getResponse()).toEqual({
+      code: ENTITLEMENT_WRITE_BLOCKED,
+      state: 'trial_available',
+      message: 'This business has not started yet, so nothing can be changed.',
+    });
+    const r = await interceptorFor(pending, open)
+      .intercept(request('GET', '/api/v1/sales'), handler)
+      .catch((err: unknown) => err);
+    expect((r as ForbiddenException).getResponse()).toEqual({
+      code: ENTITLEMENT_TRIAL_AVAILABLE,
+      state: 'trial_available',
+      message: 'This business has not started yet.',
+    });
+  });
+
+  it('running: the business writes and reads like a paid month', async () => {
+    const running = interceptorFor(pending, { trialEligibility: { closedAt: null }, trialClaim: claimed(new Date(NOW.getTime() - 24 * HOUR)) });
+    await expect(lastValueFrom(await running.intercept(request('POST', '/api/v1/sales'), handler))).resolves.toBe('ran');
+    await expect(lastValueFrom(await running.intercept(request('GET', '/api/v1/sales'), handler))).resolves.toBe('ran');
+  });
+
+  it('ended: read-only from the exact end — every read, no write, and the refusal says the trial ended', async () => {
+    const ended = { trialEligibility: { closedAt: null }, trialClaim: claimed(new Date(NOW.getTime() - 168 * HOUR)) };
+    const e = await interceptorFor(pending, ended)
+      .intercept(request('POST', '/api/v1/sales'), handler)
+      .catch((err: unknown) => err);
+    expect((e as ForbiddenException).getResponse()).toEqual({
+      code: ENTITLEMENT_WRITE_BLOCKED,
+      state: 'trial_expired',
+      message: 'The free trial has ended. You can still read and export everything.',
+    });
+    await expect(lastValueFrom(await interceptorFor(pending, ended).intercept(request('GET', '/api/v1/sales'), handler))).resolves.toBe('ran');
   });
 });

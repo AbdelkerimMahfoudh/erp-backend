@@ -1,0 +1,200 @@
+import { createHash } from 'node:crypto';
+import { isValidTimezone } from '../../common/business-day';
+import type { EntitlementState } from '../../entitlement/entitlement-rules';
+
+/**
+ * The website-only seven-day free trial — its pure rules (0095; docs/76).
+ *
+ * A business that registered itself may use Dukan ERP for exactly 168 hours, once, from the instant its Owner
+ * confirms it on the Dukan ERP website. Everything here is a fact the server computes and every client renders:
+ * no client divides hours into days, adds a duration to a date, or decides which contact is missing — a client that
+ * computes its own trial is a client that can be made to compute a longer one.
+ *
+ * Pure and clock-injected, like the entitlement rules it feeds: the instant before the end and the end itself are
+ * tested without waiting a week.
+ */
+
+/** Exactly seven consecutive 24-hour periods — never calendar days, so no time zone or clock change stretches it. */
+export const TRIAL_DURATION_HOURS = 168;
+export const TRIAL_DURATION_MS = TRIAL_DURATION_HOURS * 60 * 60 * 1000;
+/** Sent beside the hours, so no client ever divides them. */
+export const TRIAL_DURATION_DAYS = 7;
+/** The terms the website shows. A claim made against any other version is refused and shown the current one. */
+export const TRIAL_TERMS_VERSION = '2026-10-13';
+/** How long a setup link works after it is sent. */
+export const TRIAL_SETUP_LINK_TTL_HOURS = 24;
+
+/*
+ * The website resend throttle: at least a minute between sends, three in fifteen minutes, ten a day — counted from
+ * every attempt the company has, whatever triggered it, so the automatic send uses up a place like any other.
+ */
+export const RESEND_MIN_INTERVAL_MS = 60_000;
+export const RESEND_WINDOW_MS = 15 * 60_000;
+export const RESEND_WINDOW_MAX = 3;
+export const RESEND_DAY_MS = 24 * 3600_000;
+export const RESEND_DAY_MAX = 10;
+
+/** A contact the Owner proves: the address, or the WhatsApp number. */
+export type TrialContact = 'email' | 'phone';
+
+/** Which contacts the business gave when it registered itself (`trial_eligibilities.registration_method`). */
+export type TrialRegistrationMethod = 'email' | 'phone' | 'both';
+
+/** A claim as the rules need it. `startedAt` is `claimedAt`; `endsAt` is `startedAt` + 168 hours. */
+export interface TrialClaimFacts {
+  claimedAt: Date;
+  startedAt: Date;
+  endsAt: Date;
+}
+
+/** What the entitlement reads about the trial, on every evaluation. */
+export interface TrialFacts {
+  /** An eligibility row exists and is not closed. */
+  eligible: boolean;
+  /** The claim, when one exists. There is at most one per business, ever. */
+  claim: TrialClaimFacts | null;
+}
+
+/**
+ * The facts, from the two rows as stored. A closed eligibility is no eligibility: the business was approved,
+ * granted, paid for, refused or closed, and can never start a trial — whether or not it already ran one.
+ */
+export function trialFactsOf(
+  eligibility: { closedAt: Date | null } | null | undefined,
+  claim: TrialClaimFacts | null | undefined,
+): TrialFacts {
+  return {
+    eligible: !!eligibility && eligibility.closedAt === null,
+    claim: claim ? { claimedAt: claim.claimedAt, startedAt: claim.startedAt, endsAt: claim.endsAt } : null,
+  };
+}
+
+/** When a trial started at this instant ends: the same instant plus exactly 168 hours, as the CHECK compares it. */
+export function trialEndFor(startedAt: Date): Date {
+  return new Date(startedAt.getTime() + TRIAL_DURATION_MS);
+}
+
+/**
+ * The end of a trial still running at `now`, or null. Paid access the Super Admin gives while it runs starts here,
+ * never sooner (the owner's decision of 2026-10-13): the trial is not shortened, and nothing paid runs beside it.
+ * The end is exclusive — at `endsAt` itself the trial is over.
+ */
+export function runningTrialEnd(claim: { endsAt: Date } | null | undefined, now: Date): Date | null {
+  return claim && now.getTime() < claim.endsAt.getTime() ? claim.endsAt : null;
+}
+
+export type TrialViewStatus = 'available' | 'active' | 'expired';
+
+/** The trial as every client is told it, on the entitlement. Rendered, never recomputed. */
+export interface TrialView {
+  status: TrialViewStatus;
+  durationHours: typeof TRIAL_DURATION_HOURS;
+  durationDays: typeof TRIAL_DURATION_DAYS;
+  /** UTC ISO instants, exactly as stored; all three null while the trial is only available. */
+  claimedAt: string | null;
+  startedAt: string | null;
+  endsAt: string | null;
+  /** The business's configured IANA time zone (`companies.timezone`), for display only. */
+  timeZone: string;
+}
+
+/**
+ * The trial's view: a claim is `active` until its end and `expired` from it, with its instants; an unclaimed trial
+ * is `available` only while the business's state says so; anything else has no trial to show.
+ *
+ * A claim is told whatever the state above it says — a suspended business still has a trial clock running, and an
+ * approved one still shows the trial its paid access waits for. The state says what the business may do; this
+ * says what happened to its trial.
+ */
+export function trialViewOf(
+  trial: TrialFacts | null | undefined,
+  state: EntitlementState,
+  now: Date,
+  timeZone: string,
+): TrialView | null {
+  const claim = trial?.claim ?? null;
+  if (claim) {
+    return {
+      status: now.getTime() < claim.endsAt.getTime() ? 'active' : 'expired',
+      durationHours: TRIAL_DURATION_HOURS,
+      durationDays: TRIAL_DURATION_DAYS,
+      claimedAt: claim.claimedAt.toISOString(),
+      startedAt: claim.startedAt.toISOString(),
+      endsAt: claim.endsAt.toISOString(),
+      timeZone,
+    };
+  }
+  if (state !== 'trial_available') return null;
+  return {
+    status: 'available',
+    durationHours: TRIAL_DURATION_HOURS,
+    durationDays: TRIAL_DURATION_DAYS,
+    claimedAt: null,
+    startedAt: null,
+    endsAt: null,
+    timeZone,
+  };
+}
+
+/**
+ * The zone a business's trial dates are shown in: its own configured IANA zone, as stored — never assumed.
+ *
+ * A name `Intl` does not know falls back to UTC and `onInvalid` is told, so the caller can say so. It never falls
+ * back to a zone guessed from the country: Mauritania keeps GMT today, which is exactly why such a guess would look
+ * right until the day it was not.
+ */
+export function displayTimeZone(stored: string | null | undefined, onInvalid?: (stored: string) => void): string {
+  const zone = stored?.trim() ?? '';
+  if (zone && isValidTimezone(zone)) return zone;
+  onInvalid?.(zone);
+  return 'UTC';
+}
+
+/** The contacts the Owner must have verified before claiming: the ones given at registration — both, if both. */
+export function requiredContacts(method: TrialRegistrationMethod): TrialContact[] {
+  return method === 'both' ? ['email', 'phone'] : [method];
+}
+
+/** The Owner's contacts as the account holds them. A contact counts only while it is set AND verified. */
+export interface OwnerContacts {
+  email: string | null;
+  emailVerifiedAt: Date | null;
+  phone: string | null;
+  phoneVerifiedAt: Date | null;
+}
+
+/** The required contacts not yet verified, in a stable order (email, then phone). Empty means ready. */
+export function missingContacts(method: TrialRegistrationMethod, owner: OwnerContacts): TrialContact[] {
+  return requiredContacts(method).filter((contact) =>
+    contact === 'email' ? !(owner.email && owner.emailVerifiedAt) : !(owner.phone && owner.phoneVerifiedAt),
+  );
+}
+
+/**
+ * A verified contact as its own Owner is shown it: enough to recognise, never the value — `a•••@example.com`,
+ * `+222••••1234`. A number too short to keep a middle hidden shows its last two digits only.
+ */
+export function maskForOwner(contact: TrialContact, value: string): string {
+  if (contact === 'email') {
+    const at = value.lastIndexOf('@');
+    return at > 0 ? `${value.slice(0, 1)}•••@${value.slice(at + 1)}` : '•••';
+  }
+  const digits = value.replace(/\D/g, '');
+  if (value.length <= 8) return digits.length > 2 ? `••••${digits.slice(-2)}` : '••••';
+  return `${value.slice(0, 4)}••••${digits.slice(-4)}`;
+}
+
+/** SHA-256 hex of a setup token: the only form of it ever stored (`trial_setup_links.token_hash`). */
+export function setupTokenHash(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+/**
+ * The claim's canonical request, hashed (`trial_claims.request_hash`): the terms version shown and the link's hash
+ * — never the token — in this order. The same idempotency key with the same request replays the claim; with
+ * another request it is refused.
+ */
+export function claimRequestHash(termsVersion: string, token?: string | null): string {
+  const canonical = JSON.stringify({ termsVersion, linkTokenHash: token ? setupTokenHash(token) : null });
+  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+}

@@ -115,31 +115,42 @@ describe('a decision outranks the calendar', () => {
 });
 
 describe('what each state may do', () => {
+  /*
+   * The three free-trial states (0095) join these pins deliberately: a running
+   * trial writes like a paid month, an ended one reads like an expired one, and
+   * an unstarted one is closed like pending.
+   */
   it('writes are accepted only while the shop is genuinely live', () => {
     expect(canWrite('active')).toBe(true);
     expect(canWrite('grace')).toBe(true);
     expect(canWrite('complimentary')).toBe(true);
+    expect(canWrite('trial_active')).toBe(true);
 
     expect(canWrite('expired')).toBe(false);
     expect(canWrite('pending')).toBe(false);
     expect(canWrite('suspended')).toBe(false);
     expect(canWrite('cancelled')).toBe(false);
     expect(canWrite('rejected')).toBe(false);
+    expect(canWrite('trial_available')).toBe(false);
+    expect(canWrite('trial_expired')).toBe(false);
   });
 
   it('EXPIRY still hides nothing', () => {
-    // The rule that must survive this whole change.
+    // The rule that must survive this whole change — an ended free trial included.
     expect(canRead('expired')).toBe(true);
     expect(canRead('active')).toBe(true);
     expect(canRead('grace')).toBe(true);
     expect(canRead('complimentary')).toBe(true);
+    expect(canRead('trial_active')).toBe(true);
+    expect(canRead('trial_expired')).toBe(true);
   });
 
-  it('but the deliberate states close the operational app', () => {
+  it('but the deliberate states close the operational app, and so does a trial nobody started', () => {
     expect(canRead('pending')).toBe(false);
     expect(canRead('suspended')).toBe(false);
     expect(canRead('cancelled')).toBe(false);
     expect(canRead('rejected')).toBe(false);
+    expect(canRead('trial_available')).toBe(false);
   });
 });
 
@@ -172,7 +183,8 @@ describe('what the client is told', () => {
   });
 
   it('a pending business is never described as complimentary', () => {
-    // It has been given nothing. Saying otherwise would read as a free trial.
+    // It has been given nothing. A grant is a platform decision, and the free
+    // trial (0095) is its own state, claimed by the Owner — never this one.
     const e = buildEntitlement(
       sub({ status: 'pending_activation', currentPeriodEnd: null }),
       { seatsUsed: 0, activeBranchCount: 1 },

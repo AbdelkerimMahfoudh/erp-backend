@@ -18,6 +18,7 @@ import {
   ENTITLEMENT_PENDING,
   ENTITLEMENT_REJECTED,
   ENTITLEMENT_SUSPENDED,
+  ENTITLEMENT_TRIAL_AVAILABLE,
   ENTITLEMENT_WRITE_BLOCKED,
 } from '../entitlement/entitlement-rules';
 
@@ -360,7 +361,7 @@ describe('payment instructions serve no stand-in (2026-10-05)', () => {
 });
 
 describe('a closed business stays closed on the server', () => {
-  function serviceWith(status: string, currentPeriodEnd: Date | null = null) {
+  function serviceWith(status: string, currentPeriodEnd: Date | null = null, trialEligibility: { closedAt: Date | null } | null = null) {
     const prisma = {
       subscription: {
         findFirst: async () => ({
@@ -370,6 +371,8 @@ describe('a closed business stays closed on the server', () => {
           complimentaryUntil: null,
           subscribedBranchCount: 1,
           additionalSeats: 0,
+          // The company read with the row (0095): its zone and its free trial, unclaimed here.
+          company: { name: 'Shop', timezone: 'UTC', trialEligibility, trialClaim: null },
         }),
       },
       branch: { count: async () => 1 },
@@ -397,9 +400,14 @@ describe('a closed business stays closed on the server', () => {
       code: ENTITLEMENT_SUSPENDED,
       state: 'cancelled',
     });
+    // 0095: eligible for the free trial and not started — closed, with its own code, never "pending approval".
+    await expect(serviceWith('pending_activation', null, { closedAt: null }).operationalAccessBlocked(company)).resolves.toMatchObject({
+      code: ENTITLEMENT_TRIAL_AVAILABLE,
+      state: 'trial_available',
+    });
   });
 
-  it('expiry still hides nothing, and none of the five may write — each refusal names its own state (D161)', async () => {
+  it('expiry still hides nothing, and no closed state may write — each refusal names its own state (D161, 0095)', async () => {
     await expect(serviceWith('activated', null).operationalAccessBlocked(company)).resolves.toBeNull();
     for (const [status, state] of [
       ['pending_activation', 'pending'],
@@ -410,6 +418,10 @@ describe('a closed business stays closed on the server', () => {
     ]) {
       await expect(serviceWith(status, null).writeRefusal(company)).resolves.toMatchObject({ code: ENTITLEMENT_WRITE_BLOCKED, state });
     }
+    await expect(serviceWith('pending_activation', null, { closedAt: null }).writeRefusal(company)).resolves.toMatchObject({
+      code: ENTITLEMENT_WRITE_BLOCKED,
+      state: 'trial_available',
+    });
   });
 
   it('is decided by the server clock and the subscription row — nothing the phone sends', () => {

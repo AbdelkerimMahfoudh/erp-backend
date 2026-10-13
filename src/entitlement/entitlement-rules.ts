@@ -1,4 +1,5 @@
 import type { Activity } from './activity';
+import { trialViewOf, type TrialFacts, type TrialView } from '../platform/trial/trial-rules';
 
 /**
  * What a shop is entitled to (Milestone K).
@@ -41,7 +42,13 @@ export type EntitlementState =
   | 'complimentary'
   | 'suspended'
   | 'cancelled'
-  | 'rejected';
+  | 'rejected'
+  /** 0095: eligible for the free trial, which has not started. Closed, like `pending`. */
+  | 'trial_available'
+  /** 0095: the free trial runs — claimed by the Owner on the website, 168 hours. Writes. */
+  | 'trial_active'
+  /** 0095: the free trial ended and nothing paid followed. Read-only, and no grace. */
+  | 'trial_expired';
 
 /** Exactly 72 hours. Derived from the period, never stored beside it. */
 export const GRACE_HOURS = 72;
@@ -66,6 +73,13 @@ export interface SubscriptionRecord {
    * compiling and keep behaving identically — absent reads as `activated`.
    */
   status?: SubscriptionStatus;
+  /**
+   * The free trial's facts (0095): an open eligibility, and the claim. Optional for the same reason as `status`: a
+   * record without them — the console's tallies, every caller written before the trial — has no trial at all.
+   */
+  trial?: TrialFacts | null;
+  /** The business's configured IANA time zone, already validated. Only the trial's view carries it; absent is UTC. */
+  timeZone?: string;
 }
 
 /** One store's seats: who works there, and what the shop holds for it. */
@@ -99,8 +113,9 @@ export interface SeatUsage {
 /**
  * The state, from the server's clock.
  *
- * Order of precedence: an administrator's explicit decision, then a
- * complimentary grant, then the paid period.
+ * Order of precedence: an administrator's explicit decision, then a running
+ * free trial, then the pending readings, then a complimentary grant, then the
+ * paid period.
  *
  * Complimentary is checked before the dates and independently: a platform grant
  * is a decision about this shop that outranks whatever the paid period says,
@@ -111,24 +126,20 @@ export function stateOf(sub: SubscriptionRecord, now: Date): EntitlementState {
   /*
    * A deliberate decision outranks the calendar.
    *
-   * Checked before everything, including a complimentary grant: suspending a
-   * business that also holds a grant must actually suspend it, or suspension
-   * would be unreliable in exactly the case somebody reaches for it.
-   *
-   * `pending_activation` is checked here rather than derived, because the
-   * alternative is telling a shop that registered five minutes ago that its
-   * subscription has **expired** — which is both confusing and untrue.
+   * Checked before everything, including a complimentary grant or a running
+   * trial: suspending a business that also holds one must actually suspend it,
+   * or suspension would be unreliable in exactly the case somebody reaches for
+   * it.
    */
   const status = sub.status ?? 'activated';
   if (status === 'cancelled') return 'cancelled';
   if (status === 'suspended') return 'suspended';
-  if (status === 'pending_activation') return 'pending';
   // Refused. Its own state, so a shop told "no" is not told "your
   // subscription ended" — it never had one.
   if (status === 'rejected') return 'rejected';
 
   /*
-   * A value that is none of the four.
+   * A value that is none of the five.
    *
    * Not hypothetical: this MySQL server runs with an EMPTY `sql_mode`, so a
    * bad ENUM written outside Prisma is silently coerced to `''` rather than
@@ -138,17 +149,45 @@ export function stateOf(sub: SubscriptionRecord, now: Date): EntitlementState {
    *
    * `expired` instead: writes are refused, and the shop can still read
    * everything it owns. Not silently permissive, and nobody is locked out of
-   * their own records while somebody works out what happened.
+   * their own records while somebody works out what happened. Decided before
+   * the trial, too: a running trial does not make a corrupted row write.
    */
-  if (status !== 'activated') return 'expired';
+  if (status !== 'activated' && status !== 'pending_activation') return 'expired';
+
+  /*
+   * The free trial (0095): exactly 168 hours from the instant the Owner
+   * confirmed it on the website, whatever the status underneath. A pending
+   * business with a running trial writes, and so does one approved, granted or
+   * given a paid period during it — paid access given then starts at the
+   * trial's end by construction (the lifecycle's fence), so nothing paid runs
+   * beside it and the dates below take over at that instant. A reinstated
+   * business resumes the same trial: its clock kept running while suspended.
+   */
+  const claim = sub.trial?.claim ?? null;
+  if (claim && now.getTime() < claim.endsAt.getTime()) return 'trial_active';
+
+  /*
+   * `pending_activation` is read here rather than derived, because the
+   * alternative is telling a shop that registered five minutes ago that its
+   * subscription has **expired** — which is both confusing and untrue.
+   *
+   * Three readings: a trial that ran and ended — read-only, never a grace; an
+   * open eligibility nobody has claimed — closed, like pending, until the Owner
+   * starts it on the website; or neither — pending, waiting for a person.
+   */
+  if (status === 'pending_activation') {
+    if (claim) return 'trial_expired';
+    return sub.trial?.eligible ? 'trial_available' : 'pending';
+  }
 
   if (sub.isComplimentary && sub.complimentaryUntil && sub.complimentaryUntil.getTime() > now.getTime()) {
     return 'complimentary';
   }
 
   const end = sub.currentPeriodEnd?.getTime() ?? null;
-  // Never subscribed and not granted anything. Reads still work; writes do not.
-  if (end === null) return 'expired';
+  // Never subscribed and not granted anything — after a trial, said as the
+  // trial's end. Reads still work; writes do not.
+  if (end === null) return claim ? 'trial_expired' : 'expired';
 
   if (now.getTime() < end) return 'active';
   if (now.getTime() < end + GRACE_MS) return 'grace';
@@ -161,9 +200,12 @@ export function stateOf(sub: SubscriptionRecord, now: Date): EntitlementState {
  * Grace deliberately writes: a shop three hours past renewal is still open, and
  * refusing its sales would cost it real money over an administrative boundary.
  * The warning is loud; the till keeps working.
+ *
+ * A running free trial writes like a paid month (0095); an ended one does not,
+ * and gets no grace: its 168 hours are the whole offer.
  */
 export function canWrite(state: EntitlementState): boolean {
-  return state === 'active' || state === 'grace' || state === 'complimentary';
+  return state === 'active' || state === 'grace' || state === 'complimentary' || state === 'trial_active';
 }
 
 /**
@@ -177,10 +219,11 @@ export function canWrite(state: EntitlementState): boolean {
  * The two new states are genuinely different, and the difference is worth
  * stating because it looks like an inconsistency until you say it out loud:
  *
- *  - **`pending`** — a business that has never been activated. There is no
- *    operational history to withhold; the shop has never sold anything. Opening
- *    the till to it would be handing out the product before activation, which
- *    is the whole point of there being no free trial.
+ *  - **`pending`** and **`trial_available`** — a business that has never been
+ *    activated and has not started its free trial. There is no operational
+ *    history to withhold; the shop has never sold anything. Opening the till to
+ *    it would be handing out the product before anything started it: the trial
+ *    starts only when the Owner confirms it on the website (0095).
  *  - **`suspended`** / **`cancelled`** — somebody deliberately did this, with a
  *    recorded reason. Expiry is administrative drift, and treating a decision
  *    the same as drift would make suspension useless in exactly the case
@@ -190,7 +233,13 @@ export function canWrite(state: EntitlementState): boolean {
  * is ever locked out of finding out *why* — see `docs/37`.
  */
 export function canRead(state: EntitlementState = 'active'): boolean {
-  return state !== 'pending' && state !== 'suspended' && state !== 'cancelled' && state !== 'rejected';
+  return (
+    state !== 'pending' &&
+    state !== 'trial_available' &&
+    state !== 'suspended' &&
+    state !== 'cancelled' &&
+    state !== 'rejected'
+  );
 }
 
 export function graceEndsAt(sub: SubscriptionRecord): Date | null {
@@ -352,6 +401,8 @@ export const ENTITLEMENT_PENDING = 'ENTITLEMENT_PENDING';
 export const ENTITLEMENT_SUSPENDED = 'ENTITLEMENT_SUSPENDED';
 /// Refused at registration. Its own code, so the client never calls it "ended".
 export const ENTITLEMENT_REJECTED = 'ENTITLEMENT_REJECTED';
+/// 0095: eligible for the free trial, not started. Its own code, so the client says "not started" — never "ended".
+export const ENTITLEMENT_TRIAL_AVAILABLE = 'ENTITLEMENT_TRIAL_AVAILABLE';
 export const SEAT_LIMIT_REACHED = 'SEAT_LIMIT_REACHED';
 
 /**
@@ -413,6 +464,8 @@ export interface Entitlement {
   isComplimentary: boolean;
   /** The platform's grant with its own dates — what the shop reads instead of a paid period's. */
   complimentary: ComplimentaryView;
+  /** The free trial (0095), with its own instants and the business's time zone; null when there is none to show. */
+  trial: TrialView | null;
   /** The lifecycle position an administrator put this in. */
   status: SubscriptionStatus;
   /** When the server computed this, so a cached copy can be shown as stale. */
@@ -452,6 +505,7 @@ export function buildEntitlement(
     canWrite: canWrite(state),
     isComplimentary: state === 'complimentary',
     complimentary: complimentaryOf(sub, now),
+    trial: trialViewOf(sub.trial, state, now, sub.timeZone ?? 'UTC'),
     status: sub.status ?? 'activated',
     calculatedAt: now.toISOString(),
   };

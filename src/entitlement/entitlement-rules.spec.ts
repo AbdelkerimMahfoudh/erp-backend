@@ -1,8 +1,10 @@
 import {
   buildEntitlement,
+  canRead,
   canWrite,
   complimentaryOf,
   daysRemaining,
+  ENTITLEMENT_TRIAL_AVAILABLE,
   ENTITLEMENT_WRITE_BLOCKED,
   GRACE_MS,
   graceEndsAt,
@@ -13,7 +15,9 @@ import {
   mayConsumeSeatIn,
   stateOf,
   type SubscriptionRecord,
+  type SubscriptionStatus,
 } from './entitlement-rules';
+import { displayTimeZone, type TrialFacts } from '../platform/trial/trial-rules';
 import {
   isAllowedWhenExpired,
   isMutation,
@@ -329,6 +333,191 @@ describe('the whole answer is calculated on the server', () => {
 
   it('counts remaining days without rounding up a part-day', () => {
     expect(daysRemaining(sub(), new Date('2026-08-31T23:00:00.000Z'))).toBe(0);
+  });
+});
+
+/**
+ * The free trial (0095): three states computed from its facts and the server clock, never stored.
+ *
+ * Every precedence row and both boundaries, to the millisecond: the trial writes until one millisecond before its
+ * end and is read-only at the end itself, with no grace; a decision outranks it; paid access approved during it
+ * takes over at its end, never beside it.
+ */
+describe('the free trial: three computed states (0095)', () => {
+  const HOUR = 60 * 60 * 1000;
+  const DAY = 24 * HOUR;
+  const START = new Date('2026-10-13T10:00:00.123Z');
+  const END = new Date(START.getTime() + 168 * HOUR);
+  const claim = { claimedAt: START, startedAt: START, endsAt: END };
+  const pending = (trial: TrialFacts | null, over: Partial<SubscriptionRecord> = {}) =>
+    sub({ status: 'pending_activation', currentPeriodEnd: null, trial, ...over });
+  const usage = { activeBranchCount: 1, seatsUsed: 0 };
+
+  it('an open eligibility nobody has claimed is trial_available; no eligibility, or a closed one, is pending', () => {
+    expect(stateOf(pending({ eligible: true, claim: null }), START)).toBe('trial_available');
+    // Closed by an approval, a grant, a paid period, a refusal or a closure that did not change the status (yet).
+    expect(stateOf(pending({ eligible: false, claim: null }), START)).toBe('pending');
+    // A business the Super Admin created, and every business that existed before the trial: never eligible.
+    expect(stateOf(pending(null), START)).toBe('pending');
+    expect(stateOf(sub({ status: 'pending_activation', currentPeriodEnd: null }), START)).toBe('pending');
+  });
+
+  it('a claim is trial_active to its last millisecond and trial_expired at its exact end', () => {
+    const claimed = pending({ eligible: true, claim });
+    expect(stateOf(claimed, START)).toBe('trial_active');
+    expect(stateOf(claimed, new Date(END.getTime() - 1))).toBe('trial_active');
+    expect(stateOf(claimed, END)).toBe('trial_expired');
+    expect(stateOf(claimed, new Date(END.getTime() + 1))).toBe('trial_expired');
+    // Whatever the eligibility says: there is one trial per business, ever.
+    expect(stateOf(pending({ eligible: false, claim }), END)).toBe('trial_expired');
+  });
+
+  it('an ended trial is read-only with no grace — three days later too', () => {
+    const claimed = pending({ eligible: true, claim });
+    expect(stateOf(claimed, new Date(END.getTime() + GRACE_MS - 1))).toBe('trial_expired');
+    expect(stateOf(claimed, new Date(END.getTime() + 30 * DAY))).toBe('trial_expired');
+    const e = buildEntitlement(claimed, usage, END);
+    expect(e).toMatchObject({ state: 'trial_expired', canRead: true, canWrite: false, graceEnd: null, graceHoursRemaining: 0 });
+  });
+
+  it('a decision outranks a running trial: suspended, refused and cancelled stop it', () => {
+    for (const status of ['suspended', 'rejected', 'cancelled'] as const) {
+      const decided = sub({ status, currentPeriodEnd: null, trial: { eligible: true, claim } });
+      expect([status, stateOf(decided, new Date(START.getTime() + HOUR))]).toEqual([status, status]);
+      expect([status, canWrite(stateOf(decided, new Date(START.getTime() + HOUR)))]).toEqual([status, false]);
+    }
+  });
+
+  it('a reinstated business resumes the same trial — its clock kept running, it is never extended', () => {
+    // `reinstate` sets `activated` with no period: the claim's own instants still decide.
+    const reinstated = sub({ status: 'activated', currentPeriodEnd: null, trial: { eligible: true, claim } });
+    expect(stateOf(reinstated, new Date(END.getTime() - 1))).toBe('trial_active');
+    expect(stateOf(reinstated, END)).toBe('trial_expired');
+  });
+
+  it('paid access approved during a trial: trial_active until its end, then active — never both, never a gap', () => {
+    const paidEnd = new Date('2026-11-20T10:00:00.123Z');
+    const approved = sub({ status: 'activated', currentPeriodEnd: paidEnd, trial: { eligible: false, claim } });
+    expect(stateOf(approved, new Date(END.getTime() - 1))).toBe('trial_active');
+    expect(stateOf(approved, END)).toBe('active');
+    expect(stateOf(approved, paidEnd)).toBe('grace');
+    // A business that was paid for lapses as any paid business does: expired, not "trial ended".
+    expect(stateOf(approved, new Date(paidEnd.getTime() + GRACE_MS))).toBe('expired');
+  });
+
+  it('a grant given during a trial: trial_active, then complimentary, then the trial’s end if nothing was paid', () => {
+    const granted = sub({
+      status: 'activated',
+      currentPeriodEnd: null,
+      isComplimentary: true,
+      complimentaryUntil: new Date(END.getTime() + 30 * DAY),
+      trial: { eligible: false, claim },
+    });
+    expect(stateOf(granted, START)).toBe('trial_active');
+    expect(stateOf(granted, END)).toBe('complimentary');
+    expect(stateOf(granted, new Date(END.getTime() + 31 * DAY))).toBe('trial_expired');
+  });
+
+  it('activated with no period: trial_expired after a trial, expired without one (unchanged)', () => {
+    expect(stateOf(sub({ status: 'activated', currentPeriodEnd: null, trial: { eligible: false, claim } }), END)).toBe('trial_expired');
+    expect(stateOf(sub({ status: 'activated', currentPeriodEnd: null, trial: { eligible: true, claim: null } }), END)).toBe('expired');
+    expect(stateOf(sub({ status: 'activated', currentPeriodEnd: null }), END)).toBe('expired');
+  });
+
+  it('an eligibility alone opens nothing for a business that is not pending', () => {
+    // Only `pending_activation` reads an open eligibility; a running or lapsed business is told its dates.
+    expect(stateOf(sub({ status: 'activated', trial: { eligible: true, claim: null } }), AUG_18)).toBe('active');
+  });
+
+  it('a status nobody recognises fails to expired even during a trial — a corrupted row never writes', () => {
+    const corrupt = sub({ status: '' as unknown as SubscriptionStatus, currentPeriodEnd: null, trial: { eligible: true, claim } });
+    expect(stateOf(corrupt, START)).toBe('expired');
+    expect(canWrite(stateOf(corrupt, START))).toBe(false);
+  });
+
+  it('what each trial state may do', () => {
+    expect([canRead('trial_available'), canWrite('trial_available')]).toEqual([false, false]);
+    expect([canRead('trial_active'), canWrite('trial_active')]).toEqual([true, true]);
+    expect([canRead('trial_expired'), canWrite('trial_expired')]).toEqual([true, false]);
+  });
+
+  it('the code a closed, unstarted business is refused with is its own, and stable', () => {
+    // The client says "not started" from it — never "waiting for approval", never "ended".
+    expect(ENTITLEMENT_TRIAL_AVAILABLE).toBe('ENTITLEMENT_TRIAL_AVAILABLE');
+  });
+});
+
+describe('the trial as the client is told it (0095)', () => {
+  const HOUR = 60 * 60 * 1000;
+  const START = new Date('2026-10-13T10:00:00.123Z');
+  const END = new Date(START.getTime() + 168 * HOUR);
+  const claim = { claimedAt: START, startedAt: START, endsAt: END };
+  const usage = { activeBranchCount: 1, seatsUsed: 0 };
+  const pending = (trial: TrialFacts | null, over: Partial<SubscriptionRecord> = {}) =>
+    sub({ status: 'pending_activation', currentPeriodEnd: null, trial, ...over });
+
+  it('available: no instants, the duration in hours and in days, the business’s zone', () => {
+    const e = buildEntitlement(pending({ eligible: true, claim: null }, { timeZone: 'Africa/Nouakchott' }), usage, START);
+    expect(e).toMatchObject({ state: 'trial_available', canRead: false, canWrite: false });
+    expect(e.trial).toEqual({
+      status: 'available',
+      durationHours: 168,
+      durationDays: 7,
+      claimedAt: null,
+      startedAt: null,
+      endsAt: null,
+      timeZone: 'Africa/Nouakchott',
+    });
+  });
+
+  it('active, then expired: the recorded instants as stored, in UTC, the zone beside them', () => {
+    const claimed = pending({ eligible: true, claim }, { timeZone: 'Europe/Paris' });
+    const running = buildEntitlement(claimed, usage, new Date(END.getTime() - 1));
+    expect(running.state).toBe('trial_active');
+    expect(running.trial).toEqual({
+      status: 'active',
+      durationHours: 168,
+      durationDays: 7,
+      claimedAt: '2026-10-13T10:00:00.123Z',
+      startedAt: '2026-10-13T10:00:00.123Z',
+      endsAt: '2026-10-20T10:00:00.123Z',
+      timeZone: 'Europe/Paris',
+    });
+    expect(buildEntitlement(claimed, usage, END).trial).toMatchObject({ status: 'expired', endsAt: '2026-10-20T10:00:00.123Z' });
+  });
+
+  it('nothing paid, nothing granted, no grace: the paid figures stay empty while a trial runs', () => {
+    const e = buildEntitlement(pending({ eligible: true, claim }), usage, START);
+    expect(e).toMatchObject({
+      state: 'trial_active',
+      canRead: true,
+      canWrite: true,
+      periodEnd: null,
+      graceEnd: null,
+      daysRemaining: null,
+      graceHoursRemaining: 0,
+      isComplimentary: false,
+      complimentary: { status: 'none' },
+      status: 'pending_activation',
+    });
+  });
+
+  it('the zone is the one the record carries; a record without one is shown in UTC', () => {
+    expect(buildEntitlement(pending({ eligible: true, claim: null }), usage, START).trial?.timeZone).toBe('UTC');
+  });
+
+  it('an invalid stored zone reaches the client as UTC — never a zone guessed for the country', () => {
+    const zone = displayTimeZone('Mars/Olympus_Mons');
+    const e = buildEntitlement(pending({ eligible: true, claim: null }, { timeZone: zone }), usage, START);
+    expect(e.trial?.timeZone).toBe('UTC');
+  });
+
+  it('no trial to show: a business that never had one, or whose eligibility closed before a claim', () => {
+    expect(buildEntitlement(sub(), usage, AUG_18).trial).toBeNull();
+    expect(buildEntitlement(pending(null), usage, START).trial).toBeNull();
+    expect(buildEntitlement(pending({ eligible: false, claim: null }), usage, START).trial).toBeNull();
+    // Suspended before anything was claimed: nothing to offer, so nothing shown.
+    expect(buildEntitlement(sub({ status: 'suspended', trial: { eligible: true, claim: null } }), usage, START).trial).toBeNull();
   });
 });
 
