@@ -371,7 +371,7 @@ async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, ad
     const code = await codeFor(prisma, email);
     const done = expectOk(await call('POST', 'platform/register/verify/confirm', { body: { continuation: reg.continuation.token, code } }), `verify ${email}`);
     // Completion signs the Owner in; the fixture is signed into later, so that session is closed at once.
-    if (done?.accessToken) await call('POST', 'auth/logout-all', { token: done.accessToken, body: {} });
+    if (done?.accessToken) await call('POST', 'auth/logout', { token: done.accessToken, body: { refreshToken: done.refreshToken } });
   }
   const found = expectOk(await call('GET', `platform/businesses?q=${encodeURIComponent(email)}`, { cookie: adminCookie }), `find ${email}`);
   const row = (found.rows ?? []).find((r: any) => r.name === `Boutique ${n}`);
@@ -386,17 +386,19 @@ async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, ad
   return { companyId: row.id, created: Boolean(reg.created) };
 }
 
-async function signIn(email: string, pw: string): Promise<{ token: string; branch: string }> {
+async function signIn(email: string, pw: string): Promise<{ token: string; refresh: string; branch: string }> {
   const login = expectOk(await call('POST', 'auth/login', { body: { identifier: email, password: pw } }), `sign in ${email}`);
   const branches = expectOk(await call('GET', 'auth/branches', { token: login.accessToken }), `branches ${email}`);
   if (!Array.isArray(branches) || branches.length !== 1) throw new Error(`${email}: expected one branch, got ${Array.isArray(branches) ? branches.length : '?'}`);
-  return { token: login.accessToken, branch: branches[0].id };
+  return { token: login.accessToken, refresh: login.refreshToken, branch: branches[0].id };
 }
 
 async function stockBoutique(n: number, pw: string): Promise<{ products: number; phones: number; accessories: number; stocked: boolean }> {
   const email = `boutique${n}@test.com`;
-  const { token, branch } = await signIn(email, pw);
+  const { token, refresh, branch } = await signIn(email, pw);
   const as = { token, branch };
+  // The Owner's session opened for this receipt is closed again — that one only, never a phone's.
+  const close = () => call('POST', 'auth/logout', { token, body: { refreshToken: refresh } });
 
   // A registered shop starts with no categories; its Owner creates them (Catalogue → Categories) — the two used here.
   const categories = expectOk(await call('GET', 'categories', as), 'categories');
@@ -451,7 +453,10 @@ async function stockBoutique(n: number, pw: string): Promise<{ products: number;
   const accessories = ACCESSORIES.reduce((s, a) => s + a.quantity, 0);
   // Already received (the fixture's first IMEI is on the shelf or was sold from it): no day is opened, nothing sent.
   const firstImei = (items[0] as { units: { identifier: string }[] }).units[0].identifier;
-  if ((await call('GET', `units/${firstImei}`, as)).status === 200) return { products: products.length, phones, accessories, stocked: true };
+  if ((await call('GET', `units/${firstImei}`, as)).status === 200) {
+    await close();
+    return { products: products.length, phones, accessories, stocked: true };
+  }
 
   // Receipts wait for the day's opening (docs/63): open it — before 06:00 start today early — keeping the amounts.
   const day = expectOk(await call('GET', 'closings/business-day', as), 'business day');
@@ -471,6 +476,7 @@ async function stockBoutique(n: number, pw: string): Promise<{ products: number;
     body: { clientUuid: keyFor(`boutique-${n}-stock-v1`), paymentMethod: 'cash', referenceNo: `QA-B${n}-STOCK`, items },
   });
   expectOk(receipt, `receipt Boutique ${n}`);
+  await close();
   return { products: products.length, phones, accessories, stocked: false };
 }
 
@@ -488,7 +494,7 @@ async function verify(pw: string): Promise<boolean> {
   };
   const rowsOf = (j: any): any[] => (Array.isArray(j) ? j : j?.rows ?? j?.items ?? []);
 
-  const owners: { n: number; token: string; branch: string; productId: string; imei: string }[] = [];
+  const owners: { n: number; token: string; refresh: string; branch: string; productId: string; imei: string }[] = [];
   for (let n = 1; n <= BOUTIQUES; n++) {
     const email = `boutique${n}@test.com`;
     const login = await call('POST', 'auth/login', { body: { identifier: email, password: pw } });
@@ -505,7 +511,7 @@ async function verify(pw: string): Promise<boolean> {
     const list = (await call('GET', 'inventory?status=in_stock&limit=1', { token, branch })).json;
     const firstPhone = summary.find((r: any) => r.trackingType === 'imei');
     const unitList = rowsOf((await call('GET', `inventory?productId=${firstPhone?.productId}&limit=1`, { token, branch })).json);
-    owners.push({ n, token, branch, productId: firstPhone?.productId, imei: unitList[0]?.identifier ?? unitList[0]?.imeiPrimary });
+    owners.push({ n, token, refresh: login.json.refreshToken, branch, productId: firstPhone?.productId, imei: unitList[0]?.identifier ?? unitList[0]?.imeiPrimary });
     check(`${email}: the unit list agrees (${list?.totals?.units} phones in stock)`, list?.totals?.units === phones, JSON.stringify(list?.totals ?? null));
   }
 
@@ -541,8 +547,8 @@ async function verify(pw: string): Promise<boolean> {
   check('the administrator has no shop access: no shop session, no shop account', shop.status === 401 && shopLogin.status === 401, `${shop.status} / ${shopLogin.status}`);
   await call('POST', 'platform/admin/sign-out', { cookie, body: {} });
 
-  // The sessions opened here are closed again.
-  for (const o of owners) await call('POST', 'auth/logout-all', { token: o.token, body: {} });
+  // The sessions opened here are closed again — only those: a phone signed in to a boutique stays signed in.
+  for (const o of owners) await call('POST', 'auth/logout', { token: o.token, body: { refreshToken: o.refresh } });
   console.log(`\n  ${failed === 0 ? 'all checks passed' : `${failed} check(s) FAILED`}\n`);
   return failed === 0;
 }
