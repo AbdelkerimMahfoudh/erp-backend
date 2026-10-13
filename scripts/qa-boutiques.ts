@@ -8,6 +8,9 @@
 //
 //   QA_DB   the QA schema (default `prisma_qa`; anything else starting `prisma_qa`)
 //   QA_API  the QA API serving that schema (default http://127.0.0.1:3020/api/v1)
+//   PLATFORM_MFA_KEY        the QA API's own key: the administrator's second factor is sealed and derived with it
+//   QA_ADMIN_RECOVERY_CODE  only when the administrator was enrolled with an authenticator app, whose codes this script
+//                           cannot compute: one of its recovery codes, spent on one --verify sign-in; never printed
 //
 // Every boutique is its own company with one branch and one Owner
 // (`boutique1@test.com` … `boutique10@test.com`), registered, verified and
@@ -40,7 +43,7 @@
 import { config as loadEnv } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { createHash as sha256, createHmac } from 'node:crypto';
-import { parseMfaKey, seal } from '../src/platform/mfa/secret-box';
+import { open, parseMfaKey, seal } from '../src/platform/mfa/secret-box';
 import { base32Encode, stepAt, totpForStep } from '../src/platform/mfa/totp';
 import { HashingService } from '../src/common/security/hashing.service';
 import { isValidImei, luhnValid } from '../src/inventory/imei.util';
@@ -200,19 +203,31 @@ interface Reply {
   cookie: string | null;
 }
 
+/**
+ * Reading a contact code back blocks this script for seconds (up to a million hashes), longer than the API keeps an
+ * idle connection: the next request can go out on the socket the API just closed, and fails with ECONNRESET before
+ * the server reads it. Such a request is sent once more; any other failure is reported as it is.
+ */
+function closedSocket(e: unknown): boolean {
+  const code = (e as { cause?: { code?: string } })?.cause?.code;
+  return code === 'ECONNRESET' || code === 'UND_ERR_SOCKET' || code === 'EPIPE';
+}
+
 async function call(method: string, path: string, opts: { body?: unknown; token?: string; branch?: string; cookie?: string } = {}): Promise<Reply> {
   for (let attempt = 0; attempt < 12; attempt++) {
-    const res = await fetch(`${QA_API}/${path}`, {
-      method,
-      headers: {
-        ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
-        ...(opts.branch ? { 'X-Branch-Id': opts.branch } : {}),
-        ...(opts.cookie ? { Cookie: opts.cookie } : {}),
-        'User-Agent': 'qa-boutiques',
-      },
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-    });
+    const send = () =>
+      fetch(`${QA_API}/${path}`, {
+        method,
+        headers: {
+          ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+          ...(opts.branch ? { 'X-Branch-Id': opts.branch } : {}),
+          ...(opts.cookie ? { Cookie: opts.cookie } : {}),
+          'User-Agent': 'qa-boutiques',
+        },
+        body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      });
+    const res = await send().catch((e: unknown) => (closedSocket(e) ? send() : Promise.reject(e)));
     if (res.status === 429) {
       const wait = Number(res.headers.get('retry-after')) || 15;
       await new Promise((r) => setTimeout(r, Math.min(60, wait) * 1000));
@@ -257,12 +272,33 @@ async function qaAdminCode(): Promise<string> {
   return totpForStep(qaAdminSecret(), lastTotpStep);
 }
 
-/** Password, then the code: the session reaches nothing until its second factor is verified. */
+/**
+ * Whose second factor the administrator holds: `derived`, the one this script provisions (or none yet), or `app`,
+ * an authenticator app a person enrolled with a server token — its codes cannot be computed here, and this script
+ * never overwrites it.
+ */
+let adminFactor: 'derived' | 'app' = 'derived';
+async function readAdminFactor(prisma: PrismaClient): Promise<void> {
+  const admin = await prisma.platformAdmin.findUnique({ where: { email: ADMIN_EMAIL }, select: { mfaSecretEnc: true, mfaEnabledAt: true } });
+  const enrolled = admin?.mfaEnabledAt != null && admin.mfaSecretEnc != null;
+  adminFactor = enrolled && open(admin.mfaSecretEnc, mfaKey()) !== qaAdminSecret() ? 'app' : 'derived';
+}
+
+function recoveryCode(): string {
+  const value = process.env.QA_ADMIN_RECOVERY_CODE?.trim();
+  if (!value) {
+    throw new Error(`${ADMIN_EMAIL} was enrolled with an authenticator app (or under another PLATFORM_MFA_KEY), whose codes this script cannot compute: set QA_ADMIN_RECOVERY_CODE to one of its recovery codes — it is spent on this sign-in.`);
+  }
+  return value;
+}
+
+/** Password, then the second factor — the derived code, or a recovery code of an app-enrolled administrator. */
 async function adminSignIn(pw: string): Promise<{ status: number; cookie: string | null }> {
   const signIn = await call('POST', 'platform/admin/sign-in', { body: { email: ADMIN_EMAIL, password: pw } });
   const cookie = signIn.cookie ?? (signIn.json?.sessionToken ? `erp_platform_session=${signIn.json.sessionToken}` : null);
   if (signIn.status !== 200 || !cookie) return { status: signIn.status, cookie: null };
-  const verified = await call('POST', 'platform/admin/mfa/verify', { cookie, body: { code: await qaAdminCode() } });
+  const factor = adminFactor === 'derived' ? { code: await qaAdminCode() } : { recoveryCode: recoveryCode() };
+  const verified = await call('POST', 'platform/admin/mfa/verify', { cookie, body: factor });
   return { status: verified.status, cookie: verified.status === 200 ? cookie : null };
 }
 
@@ -276,6 +312,11 @@ async function ensureStepUp(cookie: string, pw: string): Promise<void> {
 }
 
 async function ensureAdmin(prisma: PrismaClient, hashing: HashingService, pw: string): Promise<string> {
+  if (adminFactor === 'app') {
+    // Protected actions need a fresh code from that app: provisioning cannot proceed, and a person's enrolment is theirs.
+    if (!APPLY) return 'enrolled with an authenticator app — left as it is; --apply would refuse';
+    throw new Error(`Refusing: ${ADMIN_EMAIL} was enrolled with an authenticator app, and provisioning needs step-up codes this script cannot compute. Reset that factor on the server first — npx ts-node prisma/platform-admin-mfa.ts enrolment-token ${ADMIN_EMAIL}, the token left unused — and run --apply again: the script then provisions its own.`);
+  }
   const existing = await prisma.platformAdmin.findUnique({ where: { email: ADMIN_EMAIL } });
   const enrolled = existing?.mfaEnabledAt != null && existing.mfaSecretEnc != null;
   if (existing && existing.isActive && !existing.deletedAt && enrolled && (await hashing.verify(existing.passwordHash, pw))) return 'present';
@@ -490,7 +531,7 @@ async function verify(pw: string): Promise<boolean> {
   // The administrator: the platform, and nothing of a shop.
   const signIn = await adminSignIn(pw);
   const cookie = signIn.cookie ?? '';
-  check(`${ADMIN_EMAIL} signs in to the platform, password and code`, signIn.status === 200 && Boolean(cookie), String(signIn.status));
+  check(`${ADMIN_EMAIL} signs in to the platform, password and ${adminFactor === 'derived' ? 'code' : 'recovery code'}`, signIn.status === 200 && Boolean(cookie), String(signIn.status));
   const me = await call('GET', 'platform/admin/me', { cookie });
   const businesses = await call('GET', 'platform/businesses', { cookie });
   const qa = rowsOf(businesses.json).filter((b: any) => /^Boutique \d+$/.test(b.name));
@@ -542,6 +583,7 @@ async function main(): Promise<void> {
   console.log(`  plan: ${BOUTIQUES} boutiques × (80 phones + 20 accessories); ${all.size} distinct identifiers (IMEIs and barcodes)`);
 
   try {
+    await readAdminFactor(prisma);
     if (VERIFY) {
       if (!(await verify(pw))) process.exitCode = 1;
       return;
@@ -571,7 +613,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  console.error(`\n  failed: ${e instanceof Error ? e.message : String(e)}\n`);
+  const cause = (e as { cause?: { code?: string } })?.cause?.code;
+  console.error(`\n  failed: ${e instanceof Error ? e.message : String(e)}${cause ? ` (${cause})` : ''}\n`);
   process.exit(1);
 });
 
