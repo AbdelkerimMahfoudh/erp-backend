@@ -303,6 +303,35 @@ describe('what the filter writes to the log (R3-3, C16)', () => {
     expect(body.message).toBe(parserMessage);
   });
 
+  it('a body the parser refuses is the client’s: its own status and message — and the body it attached is never logged', () => {
+    // As http-errors builds body-parser's refusals: a 4xx marked safe to show, with the whole body it refused attached.
+    const refused = (status: number, message: string, type: string) =>
+      Object.assign(new Error(message), { status, statusCode: status, expose: true, type, body: `identifier=owner&password=${TOKEN}` });
+    for (const [status, message, type] of [
+      [400, 'The input exceeded the depth', 'querystring.parse.rangeError'],
+      [413, 'too many parameters', 'parameters.too.many'],
+      [413, 'request entity too large', 'entity.too.large'],
+      [415, 'unsupported charset "X-UNKNOWN"', 'charset.unsupported'],
+    ] as const) {
+      const { body, lines, calls } = logged(refused(status, message, type), '/api/v1/auth/login');
+      expect(body).toMatchObject({ statusCode: status, message, path: '/api/v1/auth/login' });
+      expect(lines).not.toContain(TOKEN);
+      expect(calls).toEqual([[expect.objectContaining({ statusCode: status, message }), 'Request error']]);
+      expect(calls[0][0]).not.toHaveProperty('err');
+    }
+  });
+
+  it('only a 4xx marked safe to show is the client’s: anything else is still a server error, said as nothing more', () => {
+    for (const exception of [
+      Object.assign(new Error('stream is not readable'), { status: 500, statusCode: 500, expose: false }),
+      Object.assign(new Error('a 400 nobody marked safe to show'), { status: 400 }),
+      Object.assign(new Error('a 503 marked safe to show'), { status: 503, expose: true }),
+      { status: 400, expose: true, message: 'not an error at all' },
+    ]) {
+      expect(runFilter(exception)).toMatchObject({ statusCode: 500, message: 'Internal server error' });
+    }
+  });
+
   it('every other message is logged as it was', () => {
     const { lines } = logged(new BadRequestException(['name must be a string', 'property password should not exist']), '/api/v1/x');
     expect(lines).toContain('name must be a string');

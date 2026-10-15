@@ -167,10 +167,19 @@ function loggedMessage(message: unknown, status: number, url: string): unknown {
   return url && message.includes(url) ? message.split(url).join(scrubUrl(url)) : message;
 }
 
+/** An http-errors error meant for the client — a 4xx whose message may be shown (`expose`): body-parser's refusals. */
+function isClientHttpError(exception: unknown): exception is Error & { status: number } {
+  if (!(exception instanceof Error)) return false;
+  const { status, expose } = exception as Error & { status?: unknown; expose?: unknown };
+  return expose === true && typeof status === 'number' && status >= 400 && status < 500;
+}
+
 /**
  * Single global exception filter. Produces a consistent error body, maps Prisma
  * and tenant-context errors to appropriate HTTP codes, and NEVER leaks stack
- * traces or SQL to clients. Server-side it logs full detail (5xx as error).
+ * traces or SQL to clients. Server-side it logs a 5xx as an error with its
+ * class, message and stack (the request log's `loggedError` keeps nothing
+ * else), and every other refusal as a warning with the answer given.
  */
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -239,6 +248,16 @@ export class AllExceptionsFilter implements ExceptionFilter {
         code: typeof obj.code === 'string' ? obj.code : undefined,
         details,
       };
+    }
+
+    if (isClientHttpError(exception)) {
+      /*
+       * What body-parser refuses before any handler runs — a form nested deeper than it reads, more parameters than
+       * it takes, a body over its limit, a charset it does not know: the client's request, answered with the status
+       * and the message http-errors marks as safe to show (`expose`), never as a server error. Like every refusal it
+       * is logged with the answer only, never with the body the parser attached to it (C16).
+       */
+      return { status: exception.status, message: exception.message, details: {} };
     }
 
     if (exception instanceof MissingTenantContextError) {

@@ -160,6 +160,16 @@ class OutcomesController {
   broken() {
     throw new Error('the handler failed');
   }
+
+  /** A library's error carrying what it was sent — as body-parser attaches the body it refused. */
+  @Post('attached')
+  attached() {
+    throw Object.assign(new Error('a library failed'), {
+      status: 500,
+      body: `identifier=owner%40shop.test&password=${SECRET.password}`,
+      request: { refreshToken: SECRET.refreshToken },
+    });
+  }
 }
 
 describe('the request log never holds a secret, on success or failure (C16)', () => {
@@ -218,6 +228,7 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
 
   const statuses: Record<string, number> = {};
   const bracketed: Record<string, number> = {};
+  const refused: Record<string, number> = {};
   let webhook: { answered: request.Response; refused: request.Response };
 
   beforeAll(async () => {
@@ -245,6 +256,14 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
     for (const path of ['probe/ok', 'probe/signed-in', 'probe/nowhere', 'probe/broken']) {
       bracketed[path] = (await request(app.getHttpServer()).post(`/api/v1/${path}?${BRACKETED_QUERY}`)).status;
     }
+    // Bodies the parser refuses, each with a password on board: body-parser attaches the whole body to its error.
+    const form = (body: string) =>
+      request(app.getHttpServer()).post('/api/v1/probe/ok').set('Content-Type', 'application/x-www-form-urlencoded').send(body);
+    const login = `identifier=owner%40shop.test&password=${SECRET.password}`;
+    refused.deep = (await form(`${login}&x${'[a]'.repeat(33)}=1`)).status;
+    refused.many = (await form(`${login}&${Array.from({ length: 1001 }, (_, i) => `p${i}=1`).join('&')}`)).status;
+    refused.large = (await request(app.getHttpServer()).post('/api/v1/probe/ok').send({ password: SECRET.password, note: 'x'.repeat(110_000) })).status;
+    refused.attached = (await request(app.getHttpServer()).post('/api/v1/probe/attached')).status;
   });
 
   it('2xx, 3xx, 400, 401, 403, 404, 429 and 500 — with every secret on board, no line holds any of them', () => {
@@ -323,7 +342,28 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
     expect(refusals.some((entry) => entry.statusCode === 400 && entry.message === 'The request body is not valid JSON.')).toBe(true);
     // The server error keeps its own error for whoever investigates — and nothing of the request but its scrubbed path.
     const failure = refusals.find((entry) => entry.statusCode === 500 && entry.err)!;
-    expect(failure.err.message).toBe('the handler failed');
+    expect(failure.err).toEqual({ type: 'Error', message: 'the handler failed', stack: expect.stringContaining('the handler failed') });
+  });
+
+  it('a body the parser refuses is the client’s 400 or 413, and what it attached to its error is never written (C16)', () => {
+    // A form nested deeper than the parser reads, more parameters than it takes, a JSON body over its limit: 500 before.
+    expect(refused).toEqual({ deep: 400, many: 413, large: 413, attached: 500 });
+    expect(written.join('\n')).not.toContain(SECRET.password);
+
+    // The filter's line for each: the answer given, and no error object at all.
+    const answers = entries().filter((entry) => entry.path === '/api/v1/probe/ok' && entry.statusCode >= 400);
+    expect(answers.map((entry) => [entry.statusCode, entry.message, entry.err])).toEqual([
+      [400, 'The input exceeded the depth', undefined],
+      [413, 'too many parameters', undefined],
+      [413, 'request entity too large', undefined],
+    ]);
+
+    // A server error whose error carries what the request sent: its class, message, stack and status, nothing else.
+    const failure = entries().find((entry) => entry.statusCode === 500 && entry.path === '/api/v1/probe/attached')!;
+    expect(failure.err).toEqual({ type: 'Error', message: 'a library failed', stack: expect.stringContaining('a library failed'), status: 500 });
+    // pino-http's own line about the same request carries an error too, kept by the same rule.
+    const requestLine = entries().find((entry) => entry.res?.statusCode === 500 && entry.req?.url === '/api/v1/probe/attached')!;
+    expect(Object.keys(requestLine.err).sort()).toEqual(['message', 'stack', 'type']);
   });
 
   it('a credential under a bracketed name its handler still receives — t[], t[0], t%5B1%5D, t[a], [t] — is scrubbed the same', () => {

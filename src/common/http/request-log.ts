@@ -15,7 +15,9 @@ import { scrubHeaders, scrubQuery, scrubUrl } from './log-scrub';
  *    webhook's verify token as `?hub.verify_token=…`: the serializer scrubs the URL and the parsed query, so the path
  *    stays followable and the value goes (`scrubUrl`, `scrubQuery`);
  *  - **the body** — never logged: the request serializer carries no body. The body paths below are belt and braces,
- *    for the day somebody adds one.
+ *    for the day somebody adds one. Nor is it logged through an error: a library may hang what it was sent on the
+ *    error it throws — body-parser attaches the whole body it refused, a password included — so an error is logged
+ *    with its class, message, stack and status, and nothing else (`loggedError`).
  *
  * The exception filter writes its own line for a refused request, and scrubs it by the same rules.
  */
@@ -49,8 +51,22 @@ export function requestLogOptions(cfg: { logLevel: string; isProduction: boolean
       req(req: Record<string, unknown>) {
         return { ...req, url: scrubUrl(req.url), query: scrubQuery(req.query), headers: scrubHeaders(req.headers) };
       },
+      err: loggedError,
     },
     transport: cfg.isProduction ? undefined : { target: 'pino-pretty', options: { singleLine: true } },
     autoLogging: true,
   };
+}
+
+/**
+ * An error as the log keeps it — every `err` written, the exception filter's and pino-http's own (C16). It arrives
+ * already serialized by pino: `type`, `message` and `stack` (with their causes), then every other field the error
+ * carries. Only what a diagnosis needs is kept, and the HTTP status when it has one; anything else is dropped, since
+ * that is where a library puts what the request sent it (body-parser's `body`).
+ */
+function loggedError(err: unknown): unknown {
+  if (!err || typeof err !== 'object') return err;
+  const { type, message, stack, status, statusCode } = err as Record<string, unknown>;
+  const http = status ?? statusCode;
+  return { type, message, stack, ...(typeof http === 'number' ? { status: http } : {}) };
 }
