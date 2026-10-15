@@ -624,6 +624,28 @@ describe('the offer the website shows', () => {
     expect(b).toEqual(a);
     expect(a).toMatchObject({ available: true });
   });
+
+  it('a setup status that cannot be read leaves the card standing: the offer, the trial and the state, setup null (C3)', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const w = makeTrialWorld();
+      const shop = w.business();
+      const before = await w.service.status(shop.owner);
+      w.setup.websiteSetup = async () => {
+        throw new Error('trial_setup_messages could not be read');
+      };
+      const card = await w.service.status(shop.owner);
+      expect(card).toEqual({ ...before, setup: null });
+      expect(card.offer).toMatchObject({ available: true, reason: null });
+      expect(warn.mock.calls.map(([m]) => String(m))).toEqual([
+        `Free trial setup status not read for company ${binToUuid(shop.companyId)}: trial_setup_messages could not be read`,
+      ]);
+      // And the Owner claims from it.
+      await expect(w.service.claim(shop.owner, claimOf('k-1'))).resolves.toMatchObject({ state: 'trial_active' });
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('tenant isolation and the trial’s source', () => {

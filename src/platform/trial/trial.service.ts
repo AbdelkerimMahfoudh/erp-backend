@@ -21,6 +21,7 @@ import {
   type OwnerContacts,
   type TrialFacts,
   type TrialOffer,
+  type TrialRegistrationMethod,
   type TrialView,
 } from './trial-rules';
 import { LINK_REFUSAL, linkBindingOf, linkOutcomeOf, type LinkBinding, type TrialLinkOutcome } from './trial-link';
@@ -62,7 +63,8 @@ export interface TrialStatus {
   offer: TrialOffer | null;
   /**
    * Where the setup instructions stand, with their history and when the Owner may ask again — while the business may
-   * claim (`trial_available`), else null. Never a condition for claiming: the offer does not read it.
+   * claim (`trial_available`), else null; null too when it cannot be read right now. Never a condition for claiming:
+   * the offer does not read it, and is answered whether or not it could be read.
    */
   setup: WebsiteSetup | null;
   calculatedAt: string;
@@ -139,12 +141,23 @@ export class TrialService {
       state: card.state,
       trial: card.trial,
       offer: card.offer,
-      setup:
-        eligibility && mayClaimNow(row, now)
-          ? await this.setup.websiteSetup(who.companyId, owner, eligibility.registrationMethod, now)
-          : null,
+      setup: eligibility && mayClaimNow(row, now) ? await this.setupOf(who, owner, eligibility.registrationMethod, now) : null,
       calculatedAt: card.calculatedAt,
     };
+  }
+
+  /**
+   * Where the setup instructions stand — or null when that cannot be read now, which is logged (C3; review finding
+   * R2-4). The card never fails with it: the state, the trial and the offer are answered either way, and the Owner can
+   * still start the trial from it.
+   */
+  private async setupOf(who: TrialPrincipal, owner: OwnerContacts, method: TrialRegistrationMethod, now: Date): Promise<WebsiteSetup | null> {
+    try {
+      return await this.setup.websiteSetup(who.companyId, owner, method, now);
+    } catch (e) {
+      this.logger.warn(`Free trial setup status not read for company ${binToUuid(who.companyId)}: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   /**
