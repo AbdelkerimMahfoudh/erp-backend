@@ -150,10 +150,15 @@ describe('the console sees each business’s trial by the shop’s own rules', (
           }),
         },
       },
-      entitlement: { trialZone: (_id: Buffer, stored: string) => stored },
+      // Evaluated before the page is read (D176) — and, with no subscription row, shown as no entitlement at all.
+      entitlement: { forCompany: async () => ({ state: 'expired' }), trialZone: (_id: Buffer, stored: string) => stored },
       lifecycle: { timeline: async () => ({ events: [], payments: [] }) },
     });
-    expect(await platform.business(binToUuid(companyId))).toMatchObject({ trial: { eligibility: null, claim: null, timeZone: 'Africa/Nouakchott' } });
+    expect(await platform.business(binToUuid(companyId))).toMatchObject({
+      entitlement: null,
+      pricing: null,
+      trial: { eligibility: null, claim: null, timeZone: 'Africa/Nouakchott' },
+    });
   });
 
   it('the Owner’s account page carries the trial with the entitlement — the same view the app reads', async () => {

@@ -547,6 +547,14 @@ export class PlatformController {
     if (!isUuid(id)) return { error: 'Unknown business' };
     const companyId = uuidToBin(id);
 
+    /*
+     * The evaluation first (D176). At a free trial's end it records the expiry and puts in force what was paid for
+     * during the trial — a store opened, the subscription's version moved — so the page is read after it: the store
+     * is listed, the claim shows its expiry record, and the version the console sends back with its next action is
+     * the current one rather than one the activation already moved past.
+     */
+    const evaluated = await this.entitlement.forCompany(companyId);
+
     const company = await this.prisma.company.findUniqueOrThrow({
       where: { id: companyId },
       select: {
@@ -591,7 +599,7 @@ export class PlatformController {
     const sub = company.subscription;
     // The real census, store by store (docs/21, 2026-10-05) — the same figures
     // the shop's own app and the invoice are built from.
-    const ent = sub ? await this.entitlement.forCompany(companyId) : null;
+    const ent = sub ? evaluated : null;
     const pricing = sub ? await this.billing.pricingFor(companyId) : null;
 
     const timeline = await this.lifecycle.timeline(id);
@@ -985,7 +993,10 @@ export class PlatformController {
   async mySubscription() {
     const companyId = this.tenant.companyId();
 
-    const [company, entitlement, pricing] = await Promise.all([
+    // The evaluation first (D176): at the free trial's end it may open a store paid for during the trial, and the
+    // stores listed and priced below must include it.
+    const entitlement = await this.entitlement.forCompany(companyId);
+    const [company, pricing] = await Promise.all([
       this.prisma.company.findUniqueOrThrow({
         where: { id: companyId },
         select: {
@@ -999,7 +1010,6 @@ export class PlatformController {
           },
         },
       }),
-      this.entitlement.forCompany(companyId),
       this.billing.pricingFor(companyId),
     ]);
 

@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { ConflictException } from '@nestjs/common';
 import { ALWAYS_ALLOWED } from '../entitlement/route-classification';
 import { CTX, DAY, HOUR, makeTrialBillingWorld, type Business, type TrialBillingWorld, type WorldOptions } from './__testing__/trial-billing-world';
+import { PlatformController } from './platform.controller';
 
 /**
  * Additional stores and paid employee seats during the free trial — the owner's correction of 2026-10-15 (D176).
@@ -339,5 +340,51 @@ describe('the scheduled requests as the website and the console read them', () =
     expect(byId.get(theirs)!.business.name).toBe('Other');
     // Every other status carries no start.
     expect((await w.seats.queue('pending_payment')).every((r) => r.activation === null)).toBe(true);
+  });
+
+  /** The console's business page and the Owner's account page, over the world; the timeline is not what is asked. */
+  const pagesOf = (w: TrialBillingWorld, b: Business) => {
+    const unused = {} as never;
+    return new PlatformController(
+      w.db as never,
+      unused,
+      unused,
+      { timeline: async () => ({ events: [], payments: [] }) } as never,
+      unused,
+      w.billing,
+      unused,
+      w.entitlement,
+      { companyId: () => b.companyId } as never,
+      unused,
+      unused,
+      unused,
+    );
+  };
+
+  it('the console’s business page, the first look after the end, is read after the activation it causes — the store, the record, the version', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    await scheduledStoreAndSeat(w, b);
+    const versionBefore = w.subscription(b).version;
+    const at = new Date(T.getTime() + 5 * 60_000);
+    w.clock.set(at);
+    const page = await pagesOf(w, b).business(w.uuid(b.companyId));
+    expect(w.subscription(b).version).toBe(versionBefore + 1);
+    // The version the console sends back with its next action: the one after the activation, never the one before it.
+    expect(page).toMatchObject({
+      version: versionBefore + 1,
+      branches: [expect.objectContaining({ name: 'Main' }), expect.objectContaining({ name: 'B' })],
+      entitlement: { state: 'active', activeBranchCount: 2, subscribedBranchCount: 2 },
+      trial: { claim: { endsAt: T.toISOString(), expiryRecordedAt: at.toISOString() } },
+    });
+  });
+
+  it('the Owner’s account page, the first look after the end, lists, counts and prices the store the evaluation opened', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    await scheduledStoreAndSeat(w, b);
+    w.clock.set(new Date(T.getTime() + 5 * 60_000));
+    const page = await pagesOf(w, b).mySubscription();
+    expect(page.business.branches.map((x) => x.name)).toEqual(['Main', 'B']);
+    expect(page.entitlement).toMatchObject({ state: 'active', activeBranchCount: 2, subscribedBranchCount: 2 });
+    expect(page.pricing.currentPeriod).toMatchObject({ periodStart: T.toISOString(), assessedTotal: 1100, available: true });
   });
 });
