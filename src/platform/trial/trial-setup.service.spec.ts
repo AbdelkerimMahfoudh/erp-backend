@@ -411,6 +411,33 @@ describe('the website’s resend — after the Owner signs in, never from the ap
     await expect(w.setup.resend(shop.owner)).resolves.toMatchObject({ delivery: 'sent' });
   });
 
+  it('two at once with a provider that takes 3 s: the loser’s resendAvailableAt is exactly when the next is allowed (C5)', async () => {
+    const t1 = NOW.getTime() + 2 * MINUTE;
+    w.clock.set(new Date(t1));
+    const email = w.email as TestEmailChannel;
+    const send = email.send.bind(email);
+    let slow = true;
+    email.send = async (message) => {
+      if (slow) {
+        slow = false;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        w.clock.advance(3 * SECOND);
+      }
+      return send(message);
+    };
+    const [first, second] = await Promise.allSettled([w.setup.resend(shop.owner), w.setup.resend(shop.owner)]);
+    expect(first.status).toBe('fulfilled');
+    const promised = (await refusal(Promise.reject((second as PromiseRejectedResult).reason))).body.resendAvailableAt as string;
+    expect(promised).toBe(new Date(t1 + MINUTE).toISOString());
+    // The attempt is recorded at the link's instant, not when the provider answered.
+    expect(w.messages(shop).at(-1)).toMatchObject({ trigger: 'resend', createdAt: new Date(t1) });
+
+    w.clock.set(new Date(new Date(promised).getTime() - 1));
+    expect(await refusal(w.setup.resend(shop.owner))).toMatchObject({ code: 'too_many_requests', body: { resendAvailableAt: promised } });
+    w.clock.set(new Date(promised));
+    await expect(w.setup.resend(shop.owner)).resolves.toMatchObject({ delivery: 'sent' });
+  });
+
   it('two at once send once: the second sees the first in flight', async () => {
     w.clock.advance(MINUTE);
     const before = (w.email as TestEmailChannel).sent.length;
@@ -544,7 +571,7 @@ describe('delivery is never a condition for claiming', () => {
 });
 
 describe('instants and secrets', () => {
-  it('every instant is the server clock’s: the link when it was issued, the attempt when it was recorded', async () => {
+  it('every instant is the server clock’s, taken under the lock: the link’s, and its attempt’s and audit’s with it (C5)', async () => {
     const email = new TestEmailChannel();
     const w = world({ email });
     const send = email.send.bind(email);
@@ -556,7 +583,8 @@ describe('instants and secrets', () => {
     const shop = w.business();
     await verifiedNow(w, shop);
     expect(w.links(shop)[0]).toMatchObject({ createdAt: NOW, expiresAt: new Date(NOW.getTime() + 24 * HOUR) });
-    expect(w.messages(shop)[0].createdAt).toEqual(new Date(NOW.getTime() + 3 * SECOND));
+    expect(w.messages(shop)[0].createdAt).toEqual(NOW);
+    expect(w.audits(shop)[0].createdAt).toEqual(NOW);
   });
 
   it('no audit, row or log line holds a contact, the token, the link or a code', async () => {

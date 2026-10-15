@@ -83,6 +83,8 @@ interface Ready {
 /** A link issued under the lock, and everything the messages need — carried out of the transaction, never stored. */
 interface Issued {
   linkId: Buffer;
+  /** The server's instant under the lock: the link's, and its attempt's when that is recorded. */
+  issuedAt: Date;
   token: string;
   plan: Record<SetupChannel, PlannedOutcome>;
   email: string | null;
@@ -216,7 +218,9 @@ export class TrialSetupService {
    *     (`reissued`) and a new one is issued and committed — 256 random bits, only their hash stored, bound to the
    *     Owner's credentials and contacts as they are, for 24 hours;
    *  2. the providers, outside any transaction, one per verified contact whose channel can carry it;
-   *  3. tx B, under the lock again: the attempt with what each channel did, and the audit — last.
+   *  3. tx B, under the lock again: the attempt with what each channel did, and the audit — last. Both carry the
+   *     instant the link was issued, so the throttle's minute and the `resendAvailableAt` it promises are measured
+   *     from one time, however long the providers took (C5; review finding R3-4).
    */
   private async send(who: TrialPrincipal, trigger: TrialSetupTrigger): Promise<SendOutcome> {
     const issued = await this.prisma.$transaction(async (tx) => {
@@ -271,6 +275,7 @@ export class TrialSetupService {
       });
       return {
         linkId,
+        issuedAt: now,
         token,
         plan,
         email: owner.email,
@@ -295,7 +300,7 @@ export class TrialSetupService {
 
     await this.prisma.$transaction(async (tx) => {
       await lockSubscription(tx, who.companyId);
-      await this.record(tx, who, trigger, issued.business, issued.linkId, outcomes, this.clock.now());
+      await this.record(tx, who, trigger, issued.business, issued.linkId, outcomes, issued.issuedAt);
     });
     return outcomes.email === 'accepted' || outcomes.whatsapp === 'accepted' ? 'sent' : 'failed';
   }
