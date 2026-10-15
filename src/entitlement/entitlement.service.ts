@@ -193,7 +193,9 @@ export class EntitlementService {
           select: {
             name: true,
             timezone: true,
-            trialEligibility: { select: { closedAt: true } },
+            // The closure with its reason: what proves, after the trial, that the access following it was decided
+            // while it ran (C6).
+            trialEligibility: { select: { closedAt: true, closedReason: true } },
             trialClaim: { select: { id: true, claimedAt: true, startedAt: true, endsAt: true, expiryRecordedAt: true } },
           },
         },

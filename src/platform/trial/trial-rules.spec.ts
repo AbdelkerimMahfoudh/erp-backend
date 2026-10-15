@@ -21,7 +21,9 @@ import {
   trialFactsOf,
   trialOfferOf,
   trialViewOf,
+  accessAfterTrialOf,
   type OfferFacts,
+  type TrialAccessFacts,
 } from './trial-rules';
 
 /**
@@ -34,6 +36,15 @@ const HOUR = 60 * 60 * 1000;
 const START = new Date('2026-10-13T10:00:00.123Z');
 const END = new Date('2026-10-20T10:00:00.123Z');
 const claim = { claimedAt: START, startedAt: START, endsAt: END };
+/** The subscription row as the trial view reads what follows it: nothing given yet, a month paid from the end, a grant. */
+const pending: TrialAccessFacts = { status: 'pending_activation', currentPeriodEnd: null, isComplimentary: false, complimentaryUntil: null };
+const paidAccess: TrialAccessFacts = { status: 'activated', currentPeriodEnd: new Date('2026-11-20T10:00:00.123Z'), isComplimentary: false, complimentaryUntil: null };
+const grantedAccess: TrialAccessFacts = {
+  status: 'activated',
+  currentPeriodEnd: null,
+  isComplimentary: true,
+  complimentaryUntil: new Date(END.getTime() + 30 * 24 * HOUR),
+};
 
 describe('the constants are the offer, and clients never compute them', () => {
   it('is exactly seven consecutive 24-hour periods', () => {
@@ -76,15 +87,20 @@ describe('the end is the start plus 168 hours, from the same instant', () => {
 
 describe('the facts, from the rows as stored', () => {
   it('an open eligibility is eligible; a closed one is not, whatever closed it', () => {
-    expect(trialFactsOf({ closedAt: null }, null)).toEqual({ eligible: true, claim: null });
-    expect(trialFactsOf({ closedAt: START }, null)).toEqual({ eligible: false, claim: null });
-    expect(trialFactsOf(null, null)).toEqual({ eligible: false, claim: null });
-    expect(trialFactsOf(undefined, undefined)).toEqual({ eligible: false, claim: null });
+    expect(trialFactsOf({ closedAt: null }, null)).toEqual({ eligible: true, claim: null, closure: null });
+    expect(trialFactsOf({ closedAt: START }, null)).toEqual({ eligible: false, claim: null, closure: null });
+    expect(trialFactsOf(null, null)).toEqual({ eligible: false, claim: null, closure: null });
+    expect(trialFactsOf(undefined, undefined)).toEqual({ eligible: false, claim: null, closure: null });
   });
 
   it('keeps only the claim’s three instants, whatever else the row carries', () => {
     const row = { ...claim, id: Buffer.alloc(16, 1), expiryRecordedAt: null, idempotencyKey: 'k' };
-    expect(trialFactsOf({ closedAt: START }, row)).toEqual({ eligible: false, claim });
+    expect(trialFactsOf({ closedAt: START }, row)).toEqual({ eligible: false, claim, closure: null });
+  });
+
+  it('the closure, when its reason was read: when the eligibility closed and by which decision (C6)', () => {
+    expect(trialFactsOf({ closedAt: START, closedReason: 'approved' }, claim).closure).toEqual({ at: START, reason: 'approved' });
+    expect(trialFactsOf({ closedAt: null, closedReason: null }, claim).closure).toBeNull();
   });
 });
 
@@ -92,7 +108,7 @@ describe('the view every client renders', () => {
   const zone = 'Africa/Nouakchott';
 
   it('a claim is active until its end, with its instants in UTC and the business’s zone beside them', () => {
-    expect(trialViewOf({ eligible: false, claim }, 'trial_active', new Date(END.getTime() - 1), zone)).toEqual({
+    expect(trialViewOf({ eligible: false, claim }, 'trial_active', new Date(END.getTime() - 1), zone, pending)).toEqual({
       status: 'active',
       durationHours: 168,
       durationDays: 7,
@@ -100,20 +116,21 @@ describe('the view every client renders', () => {
       startedAt: '2026-10-13T10:00:00.123Z',
       endsAt: '2026-10-20T10:00:00.123Z',
       timeZone: zone,
+      accessAfterTrial: null,
     });
   });
 
   it('and expired from the end itself', () => {
-    expect(trialViewOf({ eligible: false, claim }, 'trial_expired', END, 'UTC')).toMatchObject({ status: 'expired', endsAt: END.toISOString() });
+    expect(trialViewOf({ eligible: false, claim }, 'trial_expired', END, 'UTC', pending)).toMatchObject({ status: 'expired', endsAt: END.toISOString() });
   });
 
   it('a claim is told whatever the state above it says: the trial clock of a suspended or approved business still runs', () => {
-    expect(trialViewOf({ eligible: false, claim }, 'suspended', START, zone)?.status).toBe('active');
-    expect(trialViewOf({ eligible: false, claim }, 'active', new Date(END.getTime() + HOUR), zone)?.status).toBe('expired');
+    expect(trialViewOf({ eligible: false, claim }, 'suspended', START, zone, pending)?.status).toBe('active');
+    expect(trialViewOf({ eligible: false, claim }, 'active', new Date(END.getTime() + HOUR), zone, paidAccess)?.status).toBe('expired');
   });
 
   it('an unclaimed trial is available, with no instants, only while the state says so', () => {
-    expect(trialViewOf({ eligible: true, claim: null }, 'trial_available', START, zone)).toEqual({
+    expect(trialViewOf({ eligible: true, claim: null }, 'trial_available', START, zone, pending)).toEqual({
       status: 'available',
       durationHours: 168,
       durationDays: 7,
@@ -121,12 +138,66 @@ describe('the view every client renders', () => {
       startedAt: null,
       endsAt: null,
       timeZone: zone,
+      accessAfterTrial: null,
     });
     // Eligible on paper, but the business is suspended: nothing to offer, so nothing to show.
-    expect(trialViewOf({ eligible: true, claim: null }, 'suspended', START, zone)).toBeNull();
-    expect(trialViewOf({ eligible: false, claim: null }, 'pending', START, zone)).toBeNull();
-    expect(trialViewOf(null, 'active', START, zone)).toBeNull();
-    expect(trialViewOf(undefined, 'expired', START, zone)).toBeNull();
+    expect(trialViewOf({ eligible: true, claim: null }, 'suspended', START, zone, pending)).toBeNull();
+    expect(trialViewOf({ eligible: false, claim: null }, 'pending', START, zone, pending)).toBeNull();
+    expect(trialViewOf(null, 'active', START, zone, paidAccess)).toBeNull();
+    expect(trialViewOf(undefined, 'expired', START, zone, null)).toBeNull();
+  });
+});
+
+describe('what follows the trial at its end (C6): the paid period or the grant approved while it ran', () => {
+  const zone = 'Africa/Casablanca';
+  const running = new Date(END.getTime() - HOUR);
+  const after = new Date(END.getTime() + HOUR);
+  const viewAt = (now: Date, access: TrialAccessFacts | null, closure: { at: Date; reason: 'approved' | 'granted' | 'paid_period' | 'refused' | 'cancelled' } | null = null) =>
+    trialViewOf({ eligible: false, claim, closure }, 'trial_active', now, zone, access)?.accessAfterTrial;
+
+  it('paid: a paid period approved during the trial runs past its end — it starts at the end, in UTC', () => {
+    expect(viewAt(running, paidAccess)).toEqual({ kind: 'paid', startsAt: '2026-10-20T10:00:00.123Z' });
+    // An exact end date one millisecond past the trial's end is a period that follows it.
+    expect(viewAt(running, { ...paidAccess, currentPeriodEnd: new Date(END.getTime() + 1) })).toEqual({ kind: 'paid', startsAt: END.toISOString() });
+  });
+
+  it('granted: the platform’s grant, dated from the trial’s end — and it outranks a paid period beside it, as the state does', () => {
+    expect(viewAt(running, grantedAccess)).toEqual({ kind: 'granted', startsAt: END.toISOString() });
+    expect(viewAt(running, { ...grantedAccess, currentPeriodEnd: new Date(END.getTime() + 60 * 24 * HOUR) })).toEqual({ kind: 'granted', startsAt: END.toISOString() });
+  });
+
+  it('none: nothing approved — or a business never given anything after a reinstatement — turns read-only at the end', () => {
+    expect(viewAt(running, pending)).toBeNull();
+    expect(viewAt(running, { status: 'activated', currentPeriodEnd: null, isComplimentary: false, complimentaryUntil: null })).toBeNull();
+    // A grant flag with no end is no grant (the state does not count it either).
+    expect(viewAt(running, { ...pending, status: 'activated', isComplimentary: true })).toBeNull();
+    expect(viewAt(running, null)).toBeNull();
+  });
+
+  it('available: no claim, nothing to follow', () => {
+    expect(trialViewOf({ eligible: true, claim: null }, 'trial_available', START, zone, paidAccess)?.accessAfterTrial).toBeNull();
+    expect(accessAfterTrialOf({ eligible: true, claim: null }, paidAccess, START)).toBeNull();
+  });
+
+  it('a suspension blocks what was arranged without ending it; a cancellation or a refusal ends it', () => {
+    expect(viewAt(running, { ...paidAccess, status: 'suspended' })).toEqual({ kind: 'paid', startsAt: END.toISOString() });
+    expect(viewAt(running, { ...paidAccess, status: 'cancelled' })).toBeNull();
+    expect(viewAt(running, { ...paidAccess, status: 'rejected' })).toBeNull();
+    expect(viewAt(running, { ...paidAccess, status: 'pending_activation' })).toBeNull();
+  });
+
+  it('once the trial has ended, only an access decision fenced while it ran proves the access followed it', () => {
+    const during = new Date(END.getTime() - 2 * HOUR);
+    expect(viewAt(after, paidAccess, { at: during, reason: 'approved' })).toEqual({ kind: 'paid', startsAt: END.toISOString() });
+    expect(viewAt(after, grantedAccess, { at: during, reason: 'granted' })).toEqual({ kind: 'granted', startsAt: END.toISOString() });
+    expect(viewAt(after, paidAccess, { at: during, reason: 'paid_period' })).toEqual({ kind: 'paid', startsAt: END.toISOString() });
+    // Approved after the end: paid access started then, not at the end — the business was read-only between.
+    expect(viewAt(after, paidAccess, { at: new Date(END.getTime() + 30 * 60_000), reason: 'approved' })).toBeNull();
+    expect(viewAt(after, paidAccess, { at: END, reason: 'approved' })).toBeNull();
+    // Refused during the trial, approved after it: the closure proves nothing.
+    expect(viewAt(after, paidAccess, { at: during, reason: 'refused' })).toBeNull();
+    // No closure read: nothing is claimed.
+    expect(viewAt(after, paidAccess, null)).toBeNull();
   });
 });
 

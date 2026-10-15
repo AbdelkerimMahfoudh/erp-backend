@@ -67,6 +67,8 @@ describe('the Owner starts the free trial on the website', () => {
         startedAt: NOW.toISOString(),
         endsAt: new Date(NOW.getTime() + TRIAL_MS).toISOString(),
         timeZone: 'Africa/Nouakchott',
+        // Nothing follows a trial claimed this instant: no access was ever given to a business that could claim (C6).
+        accessAfterTrial: null,
       },
       subscriptionVersion: versionBefore + 1,
     });
@@ -537,6 +539,7 @@ describe('the offer the website shows', () => {
         startedAt: null,
         endsAt: null,
         timeZone: 'Asia/Dubai',
+        accessAfterTrial: null,
       },
       offer: {
         available: true,

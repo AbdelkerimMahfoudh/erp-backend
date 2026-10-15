@@ -518,7 +518,8 @@ export function buildEntitlement(
     canWrite: canWrite(state),
     isComplimentary: state === 'complimentary',
     complimentary: complimentaryOf(sub, now),
-    trial: trialViewOf(sub.trial, state, now, sub.timeZone ?? 'UTC'),
+    // What follows the trial is read from the same row: its grant and its paid period (C6).
+    trial: trialViewOf(sub.trial, state, now, sub.timeZone ?? 'UTC', sub),
     status: sub.status ?? 'activated',
     calculatedAt: now.toISOString(),
   };

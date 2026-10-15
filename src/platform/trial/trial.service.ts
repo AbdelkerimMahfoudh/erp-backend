@@ -113,7 +113,7 @@ export class TrialService {
     const zone = this.entitlement.trialZone(companyId, row.timezone);
     return {
       state,
-      trial: trialViewOf(record.trial, state, now, zone),
+      trial: trialViewOf(record.trial, state, now, zone, record),
       offer: trialOfferOf(
         { eligibility: row.trialEligibility, claimed: row.trialClaim !== null, closed: isClosed(row), state, owner },
         now,
@@ -414,8 +414,10 @@ export class TrialService {
     );
 
     const trial: TrialFacts = { eligible: true, claim: { claimedAt: now, startedAt, endsAt } };
-    const state = stateOf({ ...subscriptionRecordOf(row), trial }, now);
-    const view = trialViewOf(trial, state, now, this.entitlement.trialZone(who.companyId, row.timezone))!;
+    const record = { ...subscriptionRecordOf(row), trial };
+    const state = stateOf(record, now);
+    // Nothing follows a trial claimed this instant: a claim needs an open eligibility, so no access was ever given.
+    const view = trialViewOf(trial, state, now, this.entitlement.trialZone(who.companyId, row.timezone), record)!;
     return { claimed: true, replayed: false, state, trial: view, subscriptionVersion: version };
   }
 

@@ -37,7 +37,7 @@ export function readFacts(db: Prisma.TransactionClient, companyId: Buffer) {
           additionalSeats: true,
         },
       },
-      trialEligibility: { select: { id: true, registrationMethod: true, closedAt: true } },
+      trialEligibility: { select: { id: true, registrationMethod: true, closedAt: true, closedReason: true } },
       trialClaim: {
         select: {
           claimedAt: true,

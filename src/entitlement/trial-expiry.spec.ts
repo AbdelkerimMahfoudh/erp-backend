@@ -339,6 +339,7 @@ describe('the trial as the entitlement tells it', () => {
       startedAt: '2026-10-13T10:00:00.123Z',
       endsAt: '2026-10-20T10:00:00.123Z',
       timeZone: 'Africa/Nouakchott',
+      accessAfterTrial: null,
     });
   });
 

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { BadRequestException, ConflictException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, type TrialEligibilityClosedReason } from '@prisma/client';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { stateOf } from '../entitlement/entitlement-rules';
@@ -52,7 +52,7 @@ interface BranchRow {
 
 /** The free trial's rows (0095), as the fence reads and closes them, and the clock it reads them by. */
 interface TrialWorld {
-  eligibility?: { closedAt: Date | null; closedReason: string | null } | null;
+  eligibility?: { closedAt: Date | null; closedReason: TrialEligibilityClosedReason | null } | null;
   claim?: { claimedAt: Date; startedAt: Date; endsAt: Date } | null;
   now?: Date;
   /** Never billed at all: a pending business suspended during its trial and reinstated is `activated` with no period. */
@@ -528,7 +528,7 @@ describe('the free trial’s fence, and paid access that waits for the trial’s
   const START = new Date('2026-10-13T10:00:00.000Z');
   const END = new Date(START.getTime() + 168 * 60 * 60 * 1000);
   const running = { claimedAt: START, startedAt: START, endsAt: END };
-  const open = () => ({ closedAt: null, closedReason: null });
+  const open = () => ({ closedAt: null, closedReason: null as TrialEligibilityClosedReason | null });
   const months = (from: Date, n: number) => {
     const d = new Date(from);
     d.setMonth(d.getMonth() + n);
@@ -640,7 +640,7 @@ describe('the free trial’s fence, and paid access that waits for the trial’s
 
   it('extended after an approval deferred to the trial’s end: only the end moves — the deferred period is the one running', async () => {
     const paidEnd = months(END, 1);
-    const closed = { closedAt: START, closedReason: 'approved' };
+    const closed = { closedAt: START, closedReason: 'approved' as const };
     const w = makeWorld('activated', { currentPeriodEnd: paidEnd }, [], { eligibility: closed, claim: running, now: NOW });
     await w.service.extend(COMPANY, { months: 1 }, CTX);
     expect(w.sub.currentPeriodEnd).toEqual(months(paidEnd, 1));

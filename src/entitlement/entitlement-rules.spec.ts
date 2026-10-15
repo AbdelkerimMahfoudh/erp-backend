@@ -486,6 +486,7 @@ describe('the trial as the client is told it (0095)', () => {
       startedAt: null,
       endsAt: null,
       timeZone: 'Africa/Nouakchott',
+      accessAfterTrial: null,
     });
   });
 
@@ -501,6 +502,7 @@ describe('the trial as the client is told it (0095)', () => {
       startedAt: '2026-10-13T10:00:00.123Z',
       endsAt: '2026-10-20T10:00:00.123Z',
       timeZone: 'Europe/Paris',
+      accessAfterTrial: null,
     });
     expect(buildEntitlement(claimed, usage, END).trial).toMatchObject({ status: 'expired', endsAt: '2026-10-20T10:00:00.123Z' });
   });
@@ -529,6 +531,15 @@ describe('the trial as the client is told it (0095)', () => {
     const zone = displayTimeZone('Mars/Olympus_Mons');
     const e = buildEntitlement(pending({ eligible: true, claim: null }, { timeZone: zone }), usage, START);
     expect(e.trial?.timeZone).toBe('UTC');
+  });
+
+  it('what follows the trial is read from the same record: its paid period, or its grant, running past the end (C6)', () => {
+    const fenced = { eligible: false, claim, closure: { at: START, reason: 'approved' as const } };
+    const paid = sub({ status: 'activated', currentPeriodEnd: new Date(END.getTime() + 30 * 24 * HOUR), trial: fenced });
+    expect(buildEntitlement(paid, usage, START).trial?.accessAfterTrial).toEqual({ kind: 'paid', startsAt: END.toISOString() });
+    const granted = sub({ status: 'activated', currentPeriodEnd: null, isComplimentary: true, complimentaryUntil: new Date(END.getTime() + 24 * HOUR), trial: fenced });
+    expect(buildEntitlement(granted, usage, START).trial?.accessAfterTrial).toEqual({ kind: 'granted', startsAt: END.toISOString() });
+    expect(buildEntitlement(pending({ eligible: true, claim }), usage, START).trial?.accessAfterTrial).toBeNull();
   });
 
   it('no trial to show: a business that never had one, or whose eligibility closed before a claim', () => {
