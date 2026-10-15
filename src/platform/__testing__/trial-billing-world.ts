@@ -12,6 +12,7 @@ import { TrialService } from '../trial/trial.service';
 import { TrialEndRoll } from '../trial/trial-end-roll';
 import { TrialEndSweeper } from '../trial/trial-end.sweeper';
 import { TRIAL_TERMS_VERSION } from '../trial/trial-rules';
+import { evaluationColumnsOf, isEvaluationRead } from '../../entitlement/__testing__/evaluation-columns';
 
 /**
  * Several businesses, their stores, people, subscriptions, billing periods, payments, seat and store requests and
@@ -546,6 +547,16 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     const strings: readonly string[] = Array.isArray(q) ? (q as readonly string[]) : ((q as { strings: readonly string[] }).strings ?? []);
     const values: unknown[] = Array.isArray(q) ? rest : ((q as { values: unknown[] }).values ?? []);
     const text = strings.join('?').replace(/\s+/g, ' ').trim();
+    if (isEvaluationRead(strings)) {
+      // The entitlement evaluation's one statement (R1-F4): the subscription, its company and its two trial rows.
+      const companyId = values[0] as Buffer;
+      const sub = t.subscription.find((x) => same(x.companyId, companyId));
+      const company = sub ? t.company.find((c) => same(c.id, companyId)) : undefined;
+      if (!sub || !company) return [];
+      const eligibility = t.trialEligibility.find((e) => same(e.companyId, companyId)) ?? null;
+      const claim = t.trialClaim.find((c) => same(c.companyId, companyId)) ?? null;
+      return [evaluationColumnsOf(sub as never, company as never, eligibility as never, claim as never)];
+    }
     if (/^SELECT id FROM subscriptions WHERE company_id = \? FOR UPDATE NOWAIT$/.test(text)) return lock(values[0] as Buffer, true);
     if (/^SELECT id FROM subscriptions WHERE company_id = \? FOR UPDATE$/.test(text)) return lock(values[0] as Buffer, false);
     if (/^SELECT id FROM branches WHERE id = \? AND company_id = \? FOR UPDATE$/.test(text)) return [];

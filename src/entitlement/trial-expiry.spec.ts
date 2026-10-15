@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { EntitlementService } from './entitlement.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
+import { evaluationColumnsOf, isEvaluationRead } from './__testing__/evaluation-columns';
 
 /**
  * The free trial's end, as the entitlement check sees it (0095; R1-F2, D176).
@@ -65,22 +66,10 @@ function makeWorld(now: { t: Date }, opts: WorldOptions = {}): {
 
   const prisma: Record<string, any> = {
     subscription: {
-      // The renewal check reads the row too (a `select`); only the evaluation's read (an `include`) loads the claim.
-      findFirst: async (args: { include?: unknown }) => {
+      // The renewal check's read; the evaluation reads the row, the company and the trial in one statement (R1-F4).
+      findFirst: async () => {
         queries.push('subscription');
-        if (opts.noSubscription) return null;
-        const stale = !!args.include && staleReads > 0;
-        if (stale) staleReads -= 1;
-        const seen = stale ? { ...claim, expiryRecordedAt: null } : { ...claim };
-        return {
-          ...sub,
-          company: {
-            name: 'Shop',
-            timezone: opts.timezone ?? 'Africa/Nouakchott',
-            trialEligibility: withTrial ? { closedAt: null } : null,
-            trialClaim: withTrial ? seen : null,
-          },
-        };
+        return opts.noSubscription ? null : { ...sub };
       },
     },
     // Never billed: no renewal is due, no paid period is in force, and the census finds nobody.
@@ -120,6 +109,22 @@ function makeWorld(now: { t: Date }, opts: WorldOptions = {}): {
       },
     },
     $queryRaw: async (q: { strings?: readonly string[] }) => {
+      // The evaluation's one statement: the subscription, the company, the eligibility and the claim (R1-F4).
+      if (isEvaluationRead(q.strings)) {
+        queries.push('subscription');
+        if (opts.noSubscription) return [];
+        const stale = staleReads > 0;
+        if (stale) staleReads -= 1;
+        const seen = stale ? { ...claim, expiryRecordedAt: null } : { ...claim };
+        return [
+          evaluationColumnsOf(
+            sub,
+            { name: 'Shop', timezone: opts.timezone ?? 'Africa/Nouakchott' },
+            withTrial ? { closedAt: null } : null,
+            withTrial ? seen : null,
+          ),
+        ];
+      }
       const text = (q.strings ?? []).join('?');
       if (/FOR UPDATE NOWAIT/.test(text)) {
         order.push('lock nowait');

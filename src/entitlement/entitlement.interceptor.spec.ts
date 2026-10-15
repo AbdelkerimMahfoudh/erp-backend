@@ -3,6 +3,7 @@ import { lastValueFrom, of } from 'rxjs';
 import { EntitlementInterceptor } from './entitlement.interceptor';
 import { EntitlementService } from './entitlement.service';
 import { ENTITLEMENT_SUSPENDED, ENTITLEMENT_TRIAL_AVAILABLE, ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
+import { evaluationColumnsOf, isEvaluationRead } from './__testing__/evaluation-columns';
 
 /**
  * The one place a lapsed or stopped subscription refuses a write (Milestone K),
@@ -25,17 +26,19 @@ interface TrialRows {
 }
 
 function interceptorFor(subscription: { status: string; currentPeriodEnd: Date | null }, trial: TrialRows = {}) {
-  const company = { name: 'Shop', timezone: 'UTC', trialEligibility: trial.trialEligibility ?? null, trialClaim: trial.trialClaim ?? null };
   const prisma = {
-    subscription: {
-      findFirst: async () => ({ ...subscription, isComplimentary: false, complimentaryUntil: null, subscribedBranchCount: 1, additionalSeats: 0, company }),
-    },
+    // The renewal check's read.
+    subscription: { findFirst: async () => ({ ...subscription }) },
     // No billing period: the renewal check finds nothing due.
     billingPeriod: { findFirst: async () => null },
     // Nothing was paid for during a trial: once one ends, nothing is due to be put in force (D176).
     seatAllocation: { findFirst: async () => null },
     branch: { count: async () => 1 },
-    $queryRaw: async () => [{ n: 0n }],
+    // The evaluation's one statement (R1-F4): the row, the company and its trial; the census finds nobody.
+    $queryRaw: async (q: { strings?: readonly string[] }) =>
+      isEvaluationRead(q.strings)
+        ? [evaluationColumnsOf(subscription, { name: 'Shop', timezone: 'UTC' }, trial.trialEligibility ?? null, trial.trialClaim ?? null)]
+        : [{ n: 0n }],
   };
   const entitlement = new EntitlementService(prisma as never, {} as never, { now: () => NOW });
   const reflector = { getAllAndOverride: () => false };

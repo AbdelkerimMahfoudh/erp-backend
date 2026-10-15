@@ -15,6 +15,7 @@ import {
   paymentInstructions,
 } from './payment-instructions';
 import { EntitlementService } from '../entitlement/entitlement.service';
+import { evaluationColumnsOf, isEvaluationRead } from '../entitlement/__testing__/evaluation-columns';
 import {
   ENTITLEMENT_PENDING,
   ENTITLEMENT_REJECTED,
@@ -366,20 +367,14 @@ describe('payment instructions serve no stand-in (2026-10-05)', () => {
 describe('a closed business stays closed on the server', () => {
   function serviceWith(status: string, currentPeriodEnd: Date | null = null, trialEligibility: { closedAt: Date | null } | null = null) {
     const prisma = {
-      subscription: {
-        findFirst: async () => ({
-          status,
-          currentPeriodEnd,
-          isComplimentary: false,
-          complimentaryUntil: null,
-          subscribedBranchCount: 1,
-          additionalSeats: 0,
-          // The company read with the row (0095): its zone and its free trial, unclaimed here.
-          company: { name: 'Shop', timezone: 'UTC', trialEligibility, trialClaim: null },
-        }),
-      },
+      // The renewal check's read.
+      subscription: { findFirst: async () => ({ status, currentPeriodEnd }) },
       branch: { count: async () => 1 },
-      $queryRaw: async () => [{ n: 0n }],
+      // The evaluation's one statement (R1-F4): the row, the company and its free trial; the census finds nobody.
+      $queryRaw: async (q: { strings?: readonly string[] }) =>
+        isEvaluationRead(q.strings)
+          ? [evaluationColumnsOf({ status, currentPeriodEnd }, { name: 'Shop', timezone: 'UTC' }, trialEligibility, null)]
+          : [{ n: 0n }],
     };
     const clock = { now: () => new Date('2026-06-15T12:00:00.000Z') };
     return new EntitlementService(prisma as never, {} as never, clock as never);

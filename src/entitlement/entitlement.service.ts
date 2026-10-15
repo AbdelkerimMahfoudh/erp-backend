@@ -8,6 +8,7 @@ import { BillingService } from '../billing/billing.service';
 import { SubscriptionRenewal } from '../billing/renewal';
 import { displayTimeZone, trialFactsOf } from '../platform/trial/trial-rules';
 import { TrialEndRoll } from '../platform/trial/trial-end-roll';
+import { evaluationFactsOf, evaluationRead, type EvaluationColumns, type EvaluationFacts } from './evaluation-facts';
 import {
   buildEntitlement,
   canWrite,
@@ -186,23 +187,15 @@ export class EntitlementService {
     return seatCensus(this.prisma, companyId);
   }
 
-  /** The subscription row with what the evaluation reads beside it: the company's name and zone, and its free trial. */
-  private readRecord(companyId: Buffer) {
-    return this.prisma.subscription.findFirst({
-      where: { companyId },
-      include: {
-        company: {
-          select: {
-            name: true,
-            timezone: true,
-            // The closure with its reason: what proves, after the trial, that the access following it was decided
-            // while it ran (C6).
-            trialEligibility: { select: { closedAt: true, closedReason: true } },
-            trialClaim: { select: { id: true, claimedAt: true, startedAt: true, endsAt: true, expiryRecordedAt: true } },
-          },
-        },
-      },
-    });
+  /**
+   * The subscription row with what the evaluation reads beside it: the company's name and zone, and its free trial —
+   * the eligibility's closure (with its reason: what proves, after the trial, that the access following it was decided
+   * while it ran, C6) and the claim. One statement, one round trip, no cache (R1-F4; evaluation-facts.ts): every tenant
+   * request passes here.
+   */
+  private async readRecord(companyId: Buffer): Promise<EvaluationFacts | null> {
+    const [row] = await this.prisma.$queryRaw<EvaluationColumns[]>(evaluationRead(companyId));
+    return row ? evaluationFactsOf(row) : null;
   }
 
   /** The full object the mobile app renders and never recomputes. */
