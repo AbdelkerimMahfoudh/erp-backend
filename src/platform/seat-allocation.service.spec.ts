@@ -214,6 +214,10 @@ function makeWorld(
       },
     },
     company: { findUnique: async () => ({ name: 'Shop' }) },
+    // No free trial here (D176): no claim and no eligibility, so a confirmation takes effect at once, as it always did.
+    // The add-on rules of a trial business are driven through the real services in trial-addons.spec.ts.
+    trialClaim: { findUnique: async () => null },
+    trialEligibility: { findUnique: async () => null },
     // The per-branch lock of a request (SELECT … FOR UPDATE): one request at a time per branch, by the database.
     $queryRaw: async () => [],
   };

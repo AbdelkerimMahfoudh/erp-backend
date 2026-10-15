@@ -3,13 +3,15 @@ import { Prisma, type SeatAllocationKind, type SeatAllocationStatus } from '@pri
 import { PrismaService } from '../prisma/prisma.service';
 import { PlatformAuditService } from './platform-audit.service';
 import { AuditService } from '../common/audit/audit.service';
-import { BillingService, periodRunning, type BillingDb } from '../billing/billing.service';
+import { BillingService, periodInForce, periodRunning, type BillingDb, type PeriodState } from '../billing/billing.service';
 import { SubscriptionRenewal, lockSubscription } from '../billing/renewal';
 import { activityFee, chooseReplacementSlot, replacementDue, type ActivityPrices } from '../billing/pricing-rules';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { decideActivityChange } from './activity-decision';
 import { openStoreTx as openStore, type StoreOpening } from './store-opening';
+import { TrialEndRoll } from './trial/trial-end-roll';
+import { displayTimeZone, runningTrialEnd } from './trial/trial-rules';
 import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
@@ -42,6 +44,11 @@ import type { PlatformAdminIdentity } from './platform-admin.service';
  * only the difference when it costs more. Each replacement is written down once
  * in `branch_replacements`, and every request that can take or price a slot is
  * decided behind the subscription row's lock.
+ *
+ * A seat or a store confirmed while the business's free trial runs (D176, the
+ * owner's correction of 2026-10-15) is `scheduled`: paid, recorded once, and
+ * counted nowhere until the trial ends — then it is put in force and joins the
+ * first paid period (trial/trial-end-roll.ts), so the month is charged once.
  *
  * **No provider is integrated.** Every payment row carries `providerVerified:
  * false`, and every confirmation is a named administrator saying they saw the
@@ -85,9 +92,29 @@ export interface SeatAllocationView {
    * what the period already paid for its location — the credit the request was priced against.
    */
   replaces: { branchId: string; name: string; credit: number } | null;
+  /**
+   * D176: for a scheduled request, when it starts (the free trial's end); once it is in force, when it took effect.
+   * Null for every request that took effect at its confirmation.
+   */
+  effectiveAt: string | null;
+  /** D176: a scheduled request's start, as the website shows it. Null for every other status. */
+  activation: AddOnActivationView | null;
   version: number;
   /** Always false: no payment provider is integrated. Said on every row. */
   providerVerified: false;
+}
+
+/** When a request paid for during a free trial starts (D176), in the business's own zone, and what it waits for. */
+export interface AddOnActivationView {
+  /** UTC ISO: the trial's end. */
+  startsAt: string;
+  /** The business's configured IANA zone, for display only. */
+  timeZone: string;
+  /**
+   * `trial_end` — paid access is arranged from the trial's end, so the request starts then; `paid_access` — none is
+   * yet, so it starts with the first paid period, whenever paid access is approved (PQ1).
+   */
+  waitsFor: 'trial_end' | 'paid_access';
 }
 
 export interface SeatRequestQueueItem extends SeatAllocationView {
@@ -157,6 +184,17 @@ const CREDIT_NO_LONGER_APPLIES = () =>
       'This change was priced against what the running period had already paid for the store this one replaced, and that period has ended. Nothing was charged. Refuse or withdraw this request; asked again, it is priced afresh.',
   });
 
+/**
+ * A seat or a store confirmed for a business that has free trial facts, no paid period ever started and no trial
+ * running (D176 PQ2): the first paid period would charge it again, so nothing is recorded and the request waits.
+ */
+const PAID_PERIOD_NOT_STARTED = () =>
+  new ConflictException({
+    code: 'paid_period_not_started',
+    message:
+      'This business has no paid period running and no free trial running, so a payment confirmed now would be charged again by its first paid period. Nothing was recorded. Confirm it once paid access has started, or while its free trial runs (it then starts when the trial ends).',
+  });
+
 /** The audit writer's client: a tenant transaction, which the base transaction is at run time. */
 type AuditClient = Parameters<AuditService['recordTx']>[0];
 
@@ -166,6 +204,27 @@ interface ReservedSlot {
   /** The period's own prices: the replacement's fee is written down at them. */
   prices: ActivityPrices;
   archived: { id: Buffer; name: string; activity: Activity };
+}
+
+/** A payment as the administrator confirmed it, ready to be written beside the status it moves. */
+interface ConfirmedPayment {
+  amount: string;
+  paidAt: Date;
+  channel: 'manual' | 'bank_transfer' | 'mobile_money';
+  reference: string;
+  note: string | null;
+  by: string;
+}
+
+/** What one confirmation did, for the audit written after it commits. */
+interface Confirmation {
+  payment: { id: Buffer; channel: string };
+  status: 'paid' | 'scheduled';
+  storeName: string | null;
+  replacement: ReplacementRecord | null;
+  /** Scheduled (D176): when it starts, and what it waits for. */
+  startsAt: Date | null;
+  waitsFor: 'trial_end' | 'paid_access' | null;
 }
 
 /** What the platform audit says about a replacement confirmed with its payment (D158 B5). */
@@ -200,6 +259,8 @@ const actionOf = (kind: SeatAllocationKind, verb: 'refuse' | 'release'): string 
 export class SeatAllocationService {
   /** The renewal due at the end of a prepaid period (billing/renewal.ts), applied before a request is priced. */
   private readonly renewal: SubscriptionRenewal;
+  /** What a free trial's end owes the business (D176): put in force before a confirmation decides anything. */
+  private readonly trialEnd: TrialEndRoll;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -210,9 +271,10 @@ export class SeatAllocationService {
     private readonly tenantAudit: AuditService,
   ) {
     this.renewal = new SubscriptionRenewal(prisma, billing, clock);
+    this.trialEnd = new TrialEndRoll(prisma, clock);
   }
 
-  view(row: Row): SeatAllocationView {
+  view(row: Row, activation: AddOnActivationView | null = null): SeatAllocationView {
     return {
       id: binToUuid(row.id),
       kind: row.kind,
@@ -246,9 +308,37 @@ export class SeatAllocationService {
       replaces: row.replaces
         ? { branchId: binToUuid(row.replaces.id), name: row.replaces.name, credit: row.replacementCredit ?? 0 }
         : null,
+      effectiveAt: row.effectiveAt?.toISOString() ?? null,
+      activation: row.status === 'scheduled' ? activation : null,
       version: row.version,
       providerVerified: false,
     };
+  }
+
+  /**
+   * A scheduled request's start, as the website shows it (D176): the trial's end in the business's zone, and whether
+   * paid access is already arranged from then (a period in force at that instant) or still to be approved.
+   */
+  private activationOf(row: Pick<Row, 'status' | 'effectiveAt'>, zone: string, latest: Pick<PeriodState, 'periodStart' | 'periodEnd'> | null): AddOnActivationView | null {
+    if (row.status !== 'scheduled' || !row.effectiveAt) return null;
+    return {
+      startsAt: row.effectiveAt.toISOString(),
+      timeZone: zone,
+      waitsFor: periodInForce(latest, row.effectiveAt) ? 'trial_end' : 'paid_access',
+    };
+  }
+
+  /** The business's zone and latest period, read only when a scheduled request is shown. */
+  private async activationContext(companyId: Buffer) {
+    const company = await this.prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true } });
+    return { zone: displayTimeZone(company?.timezone), latest: await this.billing.latestPeriod(companyId) };
+  }
+
+  /** One request as the website and the console read it, with its start when it is scheduled. */
+  private async present(row: Row): Promise<SeatAllocationView> {
+    if (row.status !== 'scheduled') return this.view(row);
+    const { zone, latest } = await this.activationContext(row.companyId);
+    return this.view(row, this.activationOf(row, zone, latest));
   }
 
   private async subscriptionOf(companyId: Buffer) {
@@ -308,11 +398,12 @@ export class SeatAllocationService {
           kind: 'seat',
           branchId: branch.id,
           userId: input.userId,
-          status: { in: ['pending_payment', 'paid', 'granted'] },
+          // A seat paid for during the free trial is this person's seat too (D176): asking again creates nothing.
+          status: { in: ['pending_payment', 'paid', 'granted', 'scheduled'] },
         },
         include: INCLUDE,
       });
-      if (existing) return { allocation: this.view(existing), created: false };
+      if (existing) return { allocation: await this.present(existing), created: false };
     }
 
     const plan = await this.billing.planAt(this.clock.now());
@@ -400,12 +491,14 @@ export class SeatAllocationService {
           message: 'A store with that name already exists.',
         });
       }
+      // The same name again is the request that exists — awaiting payment, or paid during the free trial and opening
+      // when it ends (D176): no second store is priced for one name.
       const pendingSame = await tx.seatAllocation.findFirst({
         where: {
           companyId,
           kind: 'store',
           label: name,
-          status: 'pending_payment',
+          status: { in: ['pending_payment', 'scheduled'] },
         },
         select: { id: true },
       });
@@ -567,7 +660,7 @@ export class SeatAllocationService {
       return { rowId: id, created: true };
     });
 
-    return { allocation: this.view(await this.load(outcome.rowId)), created: outcome.created };
+    return { allocation: await this.present(await this.load(outcome.rowId)), created: outcome.created };
   }
 
   /**
@@ -784,7 +877,7 @@ export class SeatAllocationService {
       return { rowId: id, created: true };
     });
 
-    return { allocation: this.view(await this.load(outcome.rowId)), created: outcome.created };
+    return { allocation: await this.present(await this.load(outcome.rowId)), created: outcome.created };
   }
 
   /**
@@ -875,21 +968,35 @@ export class SeatAllocationService {
    * statement or a receipt is not evidence. The payment row and the status
    * change commit together; the `version` guard makes a second confirmation —
    * a retry, or a colleague a second later — a refusal, never a second payment.
-   * A request already paid answers `applied: false` with what it has, so a
-   * dropped response can be retried safely.
+   * A request already paid — or scheduled — answers `applied: false` with what
+   * it has, so a dropped response can be retried safely.
    *
-   * For a store request, the store is created here with the activity that was
-   * paid for, the company's subscribed store count rises by one, every Owner
-   * is assigned to it so the shop can use it at once, and the request names the
-   * store it opened. A store priced as the replacement of an archived one
-   * (D158) is confirmed only while its slot still stands — re-read under the
-   * subscription lock — and the replacement is written down with the payment;
-   * a slot that is gone is refused (`replacement_no_longer_applies`) before
+   * Decided behind the subscription lock, with the instant read after it
+   * (D176), in this order:
+   *
+   *  1. **a seat or a store while the free trial runs** — `scheduled`: the
+   *     payment is recorded once, the request starts at the trial's end
+   *     (`effective_at`), and nothing is opened, counted or charged to a period
+   *     now. The trial's end puts it in force and raises the first paid period
+   *     by it, once (trial/trial-end-roll.ts);
+   *  2. **a paid period in force** — at once, as below;
+   *  3. **a seat or a store of a business with free trial facts, no paid period
+   *     ever started and no trial running** — refused, nothing recorded
+   *     (`paid_period_not_started`, PQ2): the first paid period would charge it
+   *     again. The request stays awaiting payment;
+   *  4. **anything else** — at once, as before (PQ12).
+   *
+   * At once: for a store request, the store is created here with the activity
+   * that was paid for, the company's subscribed store count rises by one, every
+   * Owner is assigned to it so the shop can use it at once, and the request
+   * names the store it opened. A store priced as the replacement of an archived
+   * one (D158) is confirmed only while its slot still stands — re-read under the
+   * subscription lock — and the replacement is written down with the payment; a
+   * slot that is gone is refused (`replacement_no_longer_applies`) before
    * anything is written, never charged on a stale figure. For an activity
-   * upgrade, the branch takes its new activity here, and the period is
-   * assessed for the difference. A seat request grants nothing by itself: the
-   * caller then asks the activation service whether the person may now be
-   * activated.
+   * upgrade, the branch takes its new activity here, and the period is assessed
+   * for the difference. A seat request grants nothing by itself: the caller then
+   * asks the activation service whether the person may now be activated.
    */
   async confirmPayment(
     allocationId: Buffer,
@@ -926,9 +1033,9 @@ export class SeatAllocationService {
     // A stale version is a colleague's decision the caller has not seen: told to refresh,
     // whatever the state. Without a version, a retry that finds the work done is a no-op.
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) throw CHANGED();
-    if (before.status === 'paid') {
+    if (before.status === 'paid' || before.status === 'scheduled') {
       return {
-        allocation: this.view(before),
+        allocation: await this.present(before),
         applied: false,
         paymentId: before.payment ? binToUuid(before.payment.id) : null,
       };
@@ -939,152 +1046,40 @@ export class SeatAllocationService {
       );
     }
 
+    // What is due first: a renewal at the end of a prepaid period, and what a free trial's end owes the business —
+    // so the decision below is made against the period really in force. Neither waits for nor throws on a busy row.
+    await this.renewal.rollIfDue(before.companyId);
+    await this.trialEnd.applyIfDue(before.companyId);
+
     const sub = await this.subscriptionOf(before.companyId);
-    const now = this.clock.now();
+    const payment = {
+      amount: input.amount,
+      paidAt: input.paidAt,
+      channel: input.channel ?? 'manual',
+      reference: reference.slice(0, 120),
+      note: input.note?.slice(0, 500) ?? null,
+      by: ctx.admin.email,
+    };
 
     const result = await this.prisma.$transaction(async (tx) => {
       // One confirmation at a time per company, behind the lock the renewal and the requests take: a reserved slot
       // is re-read, and the period assessed, against what the previous one committed.
       await lockSubscription(tx, before.companyId);
+      // Read after the lock, as every writer here reads its instant: whether the trial still runs is decided against
+      // what a claim or an approval committed before it.
+      const now = this.clock.now();
+      const claim = await tx.trialClaim.findUnique({ where: { companyId: before.companyId }, select: { endsAt: true } });
+      const eligibility = await tx.trialEligibility.findUnique({ where: { companyId: before.companyId }, select: { id: true } });
+      const period = await this.billing.latestPeriod(before.companyId, tx);
 
-      const payment = await tx.subscriptionPayment.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId: before.companyId,
-          subscriptionId: sub.id,
-          amount: new Prisma.Decimal(input.amount),
-          currency: 'MRU',
-          paidAt: input.paidAt,
-          channel: input.channel ?? 'manual',
-          reference: reference.slice(0, 120),
-          note: input.note?.slice(0, 500) ?? null,
-          recordedBy: ctx.admin.email,
-          confirmedBy: ctx.admin.email,
-          confirmedAt: now,
-        },
-      });
-
-      // The guard. If the row moved under us, this writes nothing — and the
-      // thrown conflict rolls the payment back with it.
-      const moved = await tx.seatAllocation.updateMany({
-        where: {
-          id: allocationId,
-          status: 'pending_payment',
-          version: before.version,
-        },
-        data: {
-          status: 'paid',
-          paymentId: payment.id,
-          confirmedBy: ctx.admin.email,
-          confirmedAt: now,
-          version: { increment: 1 },
-        },
-      });
-      if (moved.count !== 1) throw CHANGED();
-
-      // Judged only for the confirmation that won the guard. A slot that is gone throws, and the throw rolls the
-      // payment and the status back with it: nothing is charged on a stale figure.
-      const slot = before.kind === 'store' && before.replacesBranchId ? await this.reservedSlotTx(tx, before) : null;
-      if (before.kind === 'activity' && before.replacementPeriodId) await this.creditPeriodTx(tx, before);
-
-      let storeName: string | null = null;
-      let replacement: ReplacementRecord | null = null;
-      if (before.kind === 'store') {
-        storeName = before.label ?? 'New store';
-        // What was paid for. A request made before activities existed has none and opens as electronics.
-        const activity = before.activityTo ?? 'electronics';
-        const branchId = await this.openStoreTx(tx, {
-          companyId: before.companyId,
-          subscriptionId: sub.id,
-          name: storeName,
-          activity,
-          actor: ctx.admin.email,
-          note: `Store "${storeName}" (${activity}) opened after payment ${reference}.`,
-        });
-        if (slot) {
-          replacement = {
-            archivedBranchId: binToUuid(slot.archived.id),
-            archivedStore: slot.archived.name,
-            archivedActivity: slot.archived.activity,
-            slotFee: before.replacementCredit ?? 0,
-            replacementFee: activityFee(activity, slot.prices),
-            chargedDifference: before.monthlyAmount,
-            decision: 'difference_charged',
-          };
-          await this.recordReplacementTx(tx, {
-            id: newUuidV7Bin(),
-            companyId: before.companyId,
-            billingPeriodId: slot.periodId,
-            archivedBranchId: slot.archived.id,
-            replacementBranchId: branchId,
-            seatAllocationId: before.id,
-            archivedActivity: slot.archived.activity,
-            replacementActivity: activity,
-            slotFee: replacement.slotFee,
-            replacementFee: replacement.replacementFee,
-            chargedDifference: replacement.chargedDifference,
-            decision: replacement.decision,
-            paymentId: payment.id,
-            decidedBy: ctx.admin.email.slice(0, 160),
-            decidedAt: now,
-          });
-        }
-        // The request names the store it opened, for good — the link a matching label never was.
-        await tx.seatAllocation.updateMany({ where: { id: before.id }, data: { branchId } });
+      // A seat or a store of its own — not one taking an archived store's place (D158, PQ16).
+      const addOn = (before.kind === 'seat' || before.kind === 'store') && before.replacesBranchId === null;
+      const trialEndsAt = runningTrialEnd(claim, now);
+      if (addOn && trialEndsAt) return this.scheduleTx(tx, before, sub, payment, { now, endsAt: trialEndsAt, period });
+      if (addOn && !periodInForce(period, now) && (claim || eligibility) && (!period || period.periodStart.getTime() > now.getTime())) {
+        throw PAID_PERIOD_NOT_STARTED();
       }
-
-      if (before.kind === 'activity') {
-        if (!before.branchId || !before.activityTo) throw new BadRequestException('This activity request names no store.');
-        // The upgrade takes effect now. A downgrade waiting for the renewal on
-        // the same branch cannot exist beside an upgrade (one open request per
-        // branch), but the column is cleared regardless: what was paid for wins.
-        const changed = await tx.branch.updateMany({
-          where: { id: before.branchId, companyId: before.companyId },
-          data: { activity: before.activityTo, activityNext: null, activityChangedAt: now },
-        });
-        if (changed.count !== 1) throw new NotFoundException('Unknown store');
-        // Whatever else was open for this branch is superseded by what was paid for: no stale "scheduled" row survives.
-        await tx.seatAllocation.updateMany({
-          where: {
-            companyId: before.companyId,
-            kind: 'activity',
-            branchId: before.branchId,
-            id: { not: before.id },
-            status: { in: ['pending_payment', 'granted'] },
-            confirmedAt: null,
-          },
-          data: { status: 'released', closedAt: now, closedBy: ctx.admin.email.slice(0, 160), reason: 'Superseded by the paid upgrade.', version: { increment: 1 } },
-        });
-        await tx.subscriptionEvent.create({
-          data: {
-            id: newUuidV7Bin(),
-            companyId: before.companyId,
-            subscriptionId: sub.id,
-            kind: 'activity_changed',
-            note: `Store "${before.branch?.name ?? ''}": ${before.activityFrom ?? '?'} → ${before.activityTo} after payment ${reference}.`.slice(0, 255),
-            branchesAfter: sub.subscribedBranchCount,
-            actor: ctx.admin.email,
-          },
-        });
-      }
-
-      await tx.subscriptionEvent.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId: before.companyId,
-          subscriptionId: sub.id,
-          kind: 'seat_paid',
-          note: `${before.kind === 'store' ? 'Store' : requestLabel(before)}: payment confirmed, reference ${reference}.`.slice(0, 255),
-          branchesAfter: sub.subscribedBranchCount + (before.kind === 'store' ? 1 : 0),
-          actor: ctx.admin.email,
-        },
-      });
-
-      // A seat, a store or an activity upgrade added mid-period costs the whole month, now — in this transaction, so the
-      // payment, the change and the assessment commit together. A period that already ended is never raised.
-      await this.billing.assessNow(before.companyId, tx);
-
-      return { payment, storeName, replacement };
+      return this.confirmNowTx(tx, before, sub, payment, now);
     });
 
     const action =
@@ -1108,13 +1103,16 @@ export class SeatAllocationService {
       },
       after: {
         requestId: binToUuid(allocationId),
-        status: 'paid',
+        status: result.status,
         paymentId: binToUuid(result.payment.id),
         amount: input.amount,
         currency: 'MRU',
         channel: result.payment.channel,
         reference,
+        // Scheduled (D176): when it starts. Nothing is open or charged before then.
+        ...(result.startsAt ? { startsAt: result.startsAt.toISOString(), waitsFor: result.waitsFor } : {}),
         ...(result.storeName ? { storeOpened: result.storeName, activity: before.activityTo ?? 'electronics' } : {}),
+        ...(before.kind === 'store' && result.status === 'scheduled' ? { storeToOpen: before.label, activity: before.activityTo ?? 'electronics' } : {}),
         // The archived store this one replaced, the slot it took and what the replacement cost (D158 B5).
         ...(result.replacement ? { replacement: result.replacement } : {}),
         ...(before.branch ? { store: before.branch.name } : {}),
@@ -1128,10 +1126,237 @@ export class SeatAllocationService {
 
     const after = await this.load(allocationId);
     return {
-      allocation: this.view(after),
+      allocation: await this.present(after),
       applied: true,
       paymentId: binToUuid(result.payment.id),
     };
+  }
+
+  /** The payment row a confirmation writes, beside the status it moves — in the same transaction, or not at all. */
+  private async paymentTx(tx: BillingDb, before: Row, subscriptionId: Buffer, p: ConfirmedPayment, now: Date) {
+    return tx.subscriptionPayment.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId: before.companyId,
+        subscriptionId,
+        amount: new Prisma.Decimal(p.amount),
+        currency: 'MRU',
+        paidAt: p.paidAt,
+        channel: p.channel,
+        reference: p.reference,
+        note: p.note,
+        recordedBy: p.by,
+        confirmedBy: p.by,
+        confirmedAt: now,
+      },
+    });
+  }
+
+  /**
+   * Rule 1 (D176): paid during a running free trial, the seat or the store is `scheduled` to start at the trial's
+   * end. The payment is recorded once; the status, the payment and the start move together, guarded by the version,
+   * and are read back — a database without 0097 (or a write that did not hold) throws and rolls the payment back,
+   * never leaving a paid request that nothing will put in force. Nothing is opened, linked, counted or assessed now:
+   * the trial's end does that, once.
+   */
+  private async scheduleTx(
+    tx: BillingDb,
+    before: Row,
+    sub: { id: Buffer; subscribedBranchCount: number },
+    p: ConfirmedPayment,
+    at: { now: Date; endsAt: Date; period: PeriodState | null },
+  ): Promise<Confirmation> {
+    if (before.kind === 'store') {
+      const clash = await tx.branch.findFirst({ where: { companyId: before.companyId, name: before.label ?? '' }, select: { id: true } });
+      if (clash) {
+        throw new ConflictException({
+          code: 'store_name_in_use',
+          message: 'A store with that name already exists.',
+        });
+      }
+    }
+    const payment = await this.paymentTx(tx, before, sub.id, p, at.now);
+    const moved = await tx.seatAllocation.updateMany({
+      where: { id: before.id, status: 'pending_payment', version: before.version },
+      data: {
+        status: 'scheduled',
+        paymentId: payment.id,
+        confirmedBy: p.by,
+        confirmedAt: at.now,
+        effectiveAt: at.endsAt,
+        version: { increment: 1 },
+      },
+    });
+    if (moved.count !== 1) throw CHANGED();
+    // The CHECK holds the start (0097); the payment link is held here — MySQL cannot check a column its foreign key
+    // writes. Read back exactly what was written, or nothing stands.
+    const [back] = await tx.$queryRaw<{ status: string; effective_at: Date | null; payment_id: Uint8Array | null }[]>(
+      Prisma.sql`SELECT status, effective_at, payment_id FROM seat_allocations WHERE id = ${before.id}`,
+    );
+    if (
+      !back ||
+      back.status !== 'scheduled' ||
+      !back.effective_at ||
+      back.effective_at.getTime() !== at.endsAt.getTime() ||
+      !back.payment_id ||
+      !Buffer.from(back.payment_id).equals(payment.id)
+    ) {
+      throw new Error('The request was not scheduled as written (is migration 0097 applied?); nothing was recorded.');
+    }
+
+    // Paid access already arranged from the trial's end, or still to be approved (PQ1): the timeline says which.
+    const waitsFor = periodInForce(at.period, at.endsAt) ? 'trial_end' : 'paid_access';
+    const opens = before.kind === 'store' ? 'It opens' : 'It starts';
+    await tx.subscriptionEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId: before.companyId,
+        subscriptionId: sub.id,
+        kind: 'seat_paid',
+        // No instant in the note: the date travels as data (`activation.startsAt`) and is shown in the business's zone.
+        note: `${before.kind === 'store' ? `Store "${before.label ?? ''}"` : requestLabel(before)}: payment confirmed, reference ${p.reference}. ${
+          waitsFor === 'trial_end'
+            ? `${opens} when the free trial ends; its first paid month starts then.`
+            : `${opens} when paid access starts after the free trial; its first paid month starts then.`
+        }`.slice(0, 255),
+        branchesAfter: sub.subscribedBranchCount,
+        actor: p.by,
+      },
+    });
+    return { payment, status: 'scheduled', storeName: null, replacement: null, startsAt: at.endsAt, waitsFor };
+  }
+
+  /** Rules 2 and 4: the request takes effect now — today's confirmation, at the instant read behind the lock. */
+  private async confirmNowTx(
+    tx: BillingDb,
+    before: Row,
+    sub: { id: Buffer; subscribedBranchCount: number },
+    p: ConfirmedPayment,
+    now: Date,
+  ): Promise<Confirmation> {
+    const payment = await this.paymentTx(tx, before, sub.id, p, now);
+
+    // The guard. If the row moved under us, this writes nothing — and the
+    // thrown conflict rolls the payment back with it.
+    const moved = await tx.seatAllocation.updateMany({
+      where: {
+        id: before.id,
+        status: 'pending_payment',
+        version: before.version,
+      },
+      data: {
+        status: 'paid',
+        paymentId: payment.id,
+        confirmedBy: p.by,
+        confirmedAt: now,
+        version: { increment: 1 },
+      },
+    });
+    if (moved.count !== 1) throw CHANGED();
+
+    // Judged only for the confirmation that won the guard. A slot that is gone throws, and the throw rolls the
+    // payment and the status back with it: nothing is charged on a stale figure.
+    const slot = before.kind === 'store' && before.replacesBranchId ? await this.reservedSlotTx(tx, before) : null;
+    if (before.kind === 'activity' && before.replacementPeriodId) await this.creditPeriodTx(tx, before);
+
+    let storeName: string | null = null;
+    let replacement: ReplacementRecord | null = null;
+    if (before.kind === 'store') {
+      storeName = before.label ?? 'New store';
+      // What was paid for. A request made before activities existed has none and opens as electronics.
+      const activity = before.activityTo ?? 'electronics';
+      const branchId = await this.openStoreTx(tx, {
+        companyId: before.companyId,
+        subscriptionId: sub.id,
+        name: storeName,
+        activity,
+        actor: p.by,
+        note: `Store "${storeName}" (${activity}) opened after payment ${p.reference}.`,
+      });
+      if (slot) {
+        replacement = {
+          archivedBranchId: binToUuid(slot.archived.id),
+          archivedStore: slot.archived.name,
+          archivedActivity: slot.archived.activity,
+          slotFee: before.replacementCredit ?? 0,
+          replacementFee: activityFee(activity, slot.prices),
+          chargedDifference: before.monthlyAmount,
+          decision: 'difference_charged',
+        };
+        await this.recordReplacementTx(tx, {
+          id: newUuidV7Bin(),
+          companyId: before.companyId,
+          billingPeriodId: slot.periodId,
+          archivedBranchId: slot.archived.id,
+          replacementBranchId: branchId,
+          seatAllocationId: before.id,
+          archivedActivity: slot.archived.activity,
+          replacementActivity: activity,
+          slotFee: replacement.slotFee,
+          replacementFee: replacement.replacementFee,
+          chargedDifference: replacement.chargedDifference,
+          decision: replacement.decision,
+          paymentId: payment.id,
+          decidedBy: p.by.slice(0, 160),
+          decidedAt: now,
+        });
+      }
+      // The request names the store it opened, for good — the link a matching label never was.
+      await tx.seatAllocation.updateMany({ where: { id: before.id }, data: { branchId } });
+    }
+
+    if (before.kind === 'activity') {
+      if (!before.branchId || !before.activityTo) throw new BadRequestException('This activity request names no store.');
+      // The upgrade takes effect now. A downgrade waiting for the renewal on
+      // the same branch cannot exist beside an upgrade (one open request per
+      // branch), but the column is cleared regardless: what was paid for wins.
+      const changed = await tx.branch.updateMany({
+        where: { id: before.branchId, companyId: before.companyId },
+        data: { activity: before.activityTo, activityNext: null, activityChangedAt: now },
+      });
+      if (changed.count !== 1) throw new NotFoundException('Unknown store');
+      // Whatever else was open for this branch is superseded by what was paid for: no stale "scheduled" row survives.
+      await tx.seatAllocation.updateMany({
+        where: {
+          companyId: before.companyId,
+          kind: 'activity',
+          branchId: before.branchId,
+          id: { not: before.id },
+          status: { in: ['pending_payment', 'granted'] },
+          confirmedAt: null,
+        },
+        data: { status: 'released', closedAt: now, closedBy: p.by.slice(0, 160), reason: 'Superseded by the paid upgrade.', version: { increment: 1 } },
+      });
+      await tx.subscriptionEvent.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: before.companyId,
+          subscriptionId: sub.id,
+          kind: 'activity_changed',
+          note: `Store "${before.branch?.name ?? ''}": ${before.activityFrom ?? '?'} → ${before.activityTo} after payment ${p.reference}.`.slice(0, 255),
+          branchesAfter: sub.subscribedBranchCount,
+          actor: p.by,
+        },
+      });
+    }
+
+    await tx.subscriptionEvent.create({
+      data: {
+        id: newUuidV7Bin(),
+        companyId: before.companyId,
+        subscriptionId: sub.id,
+        kind: 'seat_paid',
+        note: `${before.kind === 'store' ? 'Store' : requestLabel(before)}: payment confirmed, reference ${p.reference}.`.slice(0, 255),
+        branchesAfter: sub.subscribedBranchCount + (before.kind === 'store' ? 1 : 0),
+        actor: p.by,
+      },
+    });
+
+    // A seat, a store or an activity upgrade added mid-period costs the whole month, now — in this transaction, so the
+    // payment, the change and the assessment commit together. A period that already ended is never raised.
+    await this.billing.assessNow(before.companyId, tx, now);
+
+    return { payment, status: 'paid', storeName, replacement, startsAt: null, waitsFor: null };
   }
 
   /** Refuse a request awaiting payment, with a reason. Nothing was ever granted by it — a branch keeps the activity it has. */
@@ -1390,7 +1615,10 @@ export class SeatAllocationService {
       orderBy: { requestedAt: 'desc' },
       take: 200,
     });
-    return rows.map((r) => this.view(r));
+    // The zone and the latest period are read once, and only when a scheduled request is listed (D176).
+    if (!rows.some((r) => r.status === 'scheduled')) return rows.map((r) => this.view(r));
+    const { zone, latest } = await this.activationContext(companyId);
+    return rows.map((r) => this.view(r, this.activationOf(r, zone, latest)));
   }
 
   /** The platform's queue: what is waiting for a decision, oldest first. */
@@ -1399,13 +1627,27 @@ export class SeatAllocationService {
       where: { status },
       include: {
         ...INCLUDE,
-        company: { select: { id: true, name: true, publicStoreId: true } },
+        company: { select: { id: true, name: true, publicStoreId: true, timezone: true } },
       },
       orderBy: { requestedAt: status === 'pending_payment' ? 'asc' : 'desc' },
       take: 200,
     });
+    // Each scheduled row's start in its own business's zone, against that business's latest period — read for the
+    // whole page in one query (D176).
+    const latest = new Map<string, Pick<PeriodState, 'periodStart' | 'periodEnd'>>();
+    if (rows.some((r) => r.status === 'scheduled')) {
+      const periods = await this.prisma.billingPeriod.findMany({
+        where: { companyId: { in: rows.map((r) => r.companyId) } },
+        orderBy: [{ companyId: 'asc' }, { periodStart: 'desc' }, { id: 'desc' }],
+        select: { companyId: true, periodStart: true, periodEnd: true },
+      });
+      for (const p of periods) {
+        const key = binToUuid(p.companyId);
+        if (!latest.has(key)) latest.set(key, p);
+      }
+    }
     return rows.map((r) => ({
-      ...this.view(r),
+      ...this.view(r, this.activationOf(r, displayTimeZone(r.company.timezone), latest.get(binToUuid(r.companyId)) ?? null)),
       business: {
         id: binToUuid(r.company.id),
         name: r.company.name,

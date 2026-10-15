@@ -549,9 +549,9 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
       }
       return [...by.entries()].map(([k, n]) => ({ branch_hex: k.split('|')[0], status: k.split('|')[1], n: BigInt(n) }));
     }
-    if (/^SELECT status, effective_at FROM seat_allocations WHERE id = \?$/.test(text)) {
+    if (/^SELECT status, effective_at, payment_id FROM seat_allocations WHERE id = \?$/.test(text)) {
       const r = t.seatAllocation.find((a) => same(a.id, values[0]));
-      return r ? [{ status: r.status, effective_at: r.effectiveAt }] : [];
+      return r ? [{ status: r.status, effective_at: r.effectiveAt, payment_id: r.paymentId }] : [];
     }
     if (/^SELECT DISTINCT company_id FROM seat_allocations WHERE status = 'scheduled' AND effective_at <= \? LIMIT 200$/.test(text)) {
       const at = values[0] as Date;

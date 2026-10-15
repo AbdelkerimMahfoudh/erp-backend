@@ -229,7 +229,8 @@ export class SeatRequestsController {
   @UseGuards(PlatformAdminGuard)
   @Get('seat-requests')
   seatRequests(@Query('status') status?: string) {
-    const allowed = ['pending_payment', 'paid', 'granted', 'released', 'refused'] as const;
+    // `scheduled` (D176): paid during a free trial, starting when it ends — a queue of its own for the console.
+    const allowed = ['pending_payment', 'scheduled', 'paid', 'granted', 'released', 'refused'] as const;
     const wanted = allowed.find((s) => s === status) ?? 'pending_payment';
     return this.allocations.queue(wanted);
   }

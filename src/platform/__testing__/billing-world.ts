@@ -180,6 +180,9 @@ export async function makeBillingWorld(opts: WorldOptions) {
       update: async ({ where, data }: AnyRow) => ({ ...apply(t.subscriptions.find((x) => x.id.equals(where.id))!, data) }),
     },
     company: { findUnique: async () => ({ name: sub.company.name }) },
+    // Never a free trial in this world (D176): a confirmation takes effect at once, as it always did.
+    trialClaim: { findUnique: async () => null },
+    trialEligibility: { findUnique: async () => null },
     branch: {
       findFirst: async ({ where }: AnyRow) => {
         const b = t.branches.find((x) => matches(x, where));
