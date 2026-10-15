@@ -1,5 +1,7 @@
 import 'reflect-metadata';
+import { Logger } from '@nestjs/common';
 import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
+import { EntitlementService } from '../entitlement/entitlement.service';
 import { PlatformController } from './platform.controller';
 
 /**
@@ -82,6 +84,74 @@ describe('the console sees each business’s trial by the shop’s own rules', (
     expect(all.rows.map((r) => r.state)).toEqual(['trial_available', 'trial_active', 'trial_expired', 'pending', 'active']);
     const active = await platform.businesses(undefined, 'trial_active');
     expect(active.rows.map((r) => r.name)).toEqual(['Shop 1']);
+  });
+
+  describe('the pending queue says what each application became (C8; review finding R4-13)', () => {
+    /** The real zone rule — an unknown zone reads UTC and is reported once — over no database at all. */
+    const zones = new EntitlementService({} as never, {} as never, { now: () => new Date(now) });
+    const attempt = (n: number, companyId: Buffer | null) => ({
+      id: newUuidV7Bin(),
+      companyId,
+      businessName: `Shop ${n}`,
+      ownerName: `Owner ${n}`,
+      city: null,
+      email: `o${n}@shop.test`,
+      phone: null,
+      language: 'fr',
+      createdAt: new Date(now - n * HOUR),
+    });
+    const business = (timezone: string, sub: Record<string, unknown> | null, eligibility: { closedAt: Date | null } | null, claim: typeof running | null) => ({
+      id: newUuidV7Bin(),
+      timezone,
+      subscription: sub,
+      trialEligibility: eligibility,
+      trialClaim: claim,
+    });
+
+    afterEach(() => jest.restoreAllMocks());
+
+    it('a business in its trial reads as one — with its end and its own zone — and every other application as it stands', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const available = business('Asia/Dubai', base, { closedAt: null }, null);
+      const inTrial = business('Africa/Casablanca', base, { closedAt: null }, running);
+      const endedTrial = business('Europe/Paris', base, { closedAt: null }, ended);
+      const approvedDuring = business('Africa/Nouakchott', { ...base, status: 'activated', currentPeriodEnd: new Date(running.endsAt.getTime() + 30 * 24 * HOUR) }, { closedAt: new Date(now - HOUR / 2) }, running);
+      const consoleMade = business('Africa/Nouakchott', base, null, null);
+      const oddZone = business('Mars/Olympus', base, { closedAt: null }, running);
+      const noRow = business('Africa/Nouakchott', null, null, null);
+      const all = [available, inTrial, endedTrial, approvedDuring, consoleMade, oddZone, noRow];
+      const attempts = [...all.map((b, i) => attempt(i + 1, b.id)), attempt(9, null)];
+      const asked: unknown[] = [];
+      const prisma = {
+        registrationAttempt: { findMany: async () => attempts },
+        company: {
+          findMany: async (args: { where: { id: { in: Buffer[] } } }) => {
+            asked.push(args);
+            return all.filter((b) => args.where.id.in.some((id) => id.equals(b.id)));
+          },
+        },
+      };
+      const rows = await platformWith({ prisma, entitlement: zones }).pending();
+
+      expect(rows.map((r) => [r.businessName, r.status, r.state, r.trial])).toEqual([
+        ['Shop 1', 'pending_activation', 'trial_available', { status: 'available', endsAt: null, timeZone: 'Asia/Dubai' }],
+        ['Shop 2', 'pending_activation', 'trial_active', { status: 'active', endsAt: running.endsAt.toISOString(), timeZone: 'Africa/Casablanca' }],
+        ['Shop 3', 'pending_activation', 'trial_expired', { status: 'expired', endsAt: ended.endsAt.toISOString(), timeZone: 'Europe/Paris' }],
+        // Approved while its trial runs: still in its trial, and the console says so — paid access waits for the end.
+        ['Shop 4', 'activated', 'trial_active', { status: 'active', endsAt: running.endsAt.toISOString(), timeZone: 'Africa/Nouakchott' }],
+        // Created from the console: never eligible — pending, no trial.
+        ['Shop 5', 'pending_activation', 'pending', null],
+        // A zone nobody knows reads UTC, as the trial's own view reads it — never a zone guessed for the country.
+        ['Shop 6', 'pending_activation', 'trial_active', { status: 'active', endsAt: running.endsAt.toISOString(), timeZone: 'UTC' }],
+        // A business without a subscription row reads as the entitlement reads it.
+        ['Shop 7', 'unknown', 'expired', null],
+        ['Shop 9', 'incomplete', null, null],
+      ]);
+      // One read for the businesses behind the page, by their ids.
+      expect(asked).toHaveLength(1);
+      // The unknown zone is reported, once — as the trial's own view reports it.
+      expect(warn.mock.calls.filter(([m]) => /unknown time zone "Mars\/Olympus"/.test(String(m)))).toHaveLength(1);
+    });
   });
 
   it('the business page shows the recorded eligibility and claim, in UTC, with the business’s own zone', async () => {

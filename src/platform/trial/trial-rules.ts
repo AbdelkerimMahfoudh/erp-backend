@@ -217,6 +217,18 @@ export function trialViewOf(
   };
 }
 
+/** A free trial as a console row shows it (C8, C18): its status, its end once claimed, and the zone its dates are shown in. */
+export interface TrialSummary {
+  status: TrialViewStatus;
+  endsAt: string | null;
+  timeZone: string;
+}
+
+/** The trial's view cut to a console row — null exactly when the view is: no trial to show. */
+export function trialSummaryOf(view: TrialView | null): TrialSummary | null {
+  return view ? { status: view.status, endsAt: view.endsAt, timeZone: view.timeZone } : null;
+}
+
 /**
  * The zone a business's trial dates are shown in: its own configured IANA zone, as stored — never assumed.
  *

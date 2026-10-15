@@ -30,7 +30,7 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { binToUuid, uuidToBin, isUuid } from '../common/utils/uuid.util';
-import { buildEntitlement } from '../entitlement/entitlement-rules';
+import { buildEntitlement, type EntitlementState, type SubscriptionStatus } from '../entitlement/entitlement-rules';
 import {
   ADMIN_SESSION_COOKIE,
   PlatformAdminGuard,
@@ -54,7 +54,7 @@ import { TenantContext } from '../common/tenant/tenant-context.service';
 import { randomBytes } from 'node:crypto';
 import { RegistrationFlowService } from './registration-flow.service';
 import { ContinueConfirmDto, ContinueStartDto, IsNotEmptyish, RegisterDto } from './registration.dto';
-import { trialFactsOf } from './trial/trial-rules';
+import { trialFactsOf, trialSummaryOf, type TrialClaimFacts } from './trial/trial-rules';
 
 /**
  * The platform-control API.
@@ -108,6 +108,32 @@ const TRIAL_FACTS = {
   trialEligibility: { select: { closedAt: true } },
   trialClaim: { select: { claimedAt: true, startedAt: true, endsAt: true } },
 } as const;
+
+/** The subscription's columns the entitlement rules read: what a console row's state is computed from. */
+const SUBSCRIPTION_FACTS = {
+  status: true,
+  currentPeriodEnd: true,
+  isComplimentary: true,
+  complimentaryUntil: true,
+  subscribedBranchCount: true,
+  additionalSeats: true,
+} as const;
+
+/** A business as a console list reads it: its zone, its subscription and its free trial's rows. */
+interface ListedBusiness {
+  id: Buffer;
+  timezone: string;
+  subscription: {
+    status: SubscriptionStatus;
+    currentPeriodEnd: Date | null;
+    isComplimentary: boolean;
+    complimentaryUntil: Date | null;
+    subscribedBranchCount: number;
+    additionalSeats: number;
+  } | null;
+  trialEligibility: { closedAt: Date | null } | null;
+  trialClaim: TrialClaimFacts | null;
+}
 
 class AdminSignInDto {
   @IsEmail() @MaxLength(160) email: string;
@@ -376,6 +402,24 @@ export class PlatformController {
   me(@Req() req: AdminRequest) {
     const a = req.platformAdmin!;
     return { id: binToUuid(a.id), email: a.email, name: a.name };
+  }
+
+  /**
+   * A business as the console's lists show it (C8, C18): the state it is judged by — by the rules the shop itself is
+   * judged by, its free trial's facts included — and its trial cut to a row: the status, the end once claimed, and the
+   * business's own zone, normalised as the trial's view normalises it (an unknown zone reads UTC and is reported once).
+   * One reading for the pending queue and the businesses list, so the two never disagree about a business. No
+   * subscription row reads as the entitlement reads it: expired, with no trial.
+   */
+  private listed(business: ListedBusiness, now: Date, activeBranchCount = 0) {
+    const sub = business.subscription;
+    if (!sub) return { state: 'expired' as EntitlementState, trial: null, complimentary: null };
+    const trial = trialFactsOf(business.trialEligibility, business.trialClaim);
+    // As the evaluation does: a business with trial rows has its zone checked.
+    const timeZone =
+      business.trialEligibility || business.trialClaim ? this.entitlement.trialZone(business.id, business.timezone) : undefined;
+    const ent = buildEntitlement({ ...sub, trial, timeZone }, { seatsUsed: 0, activeBranchCount }, now);
+    return { state: ent.state, trial: trialSummaryOf(ent.trial), complimentary: ent.complimentary };
   }
 
   // ── Dashboard ────────────────────────────────────────────────────────────
@@ -672,24 +716,37 @@ export class PlatformController {
     });
 
     const ids = rows.map((r) => r.companyId).filter((b): b is Buffer => b !== null);
-    const subs = await this.prisma.subscription.findMany({
-      where: { companyId: { in: ids } },
-      select: { companyId: true, status: true },
+    // The businesses behind the applications, with what their state and their trial are computed from (C8).
+    const businesses = await this.prisma.company.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, timezone: true, subscription: { select: SUBSCRIPTION_FACTS }, ...TRIAL_FACTS },
     });
-    const byCompany = new Map(subs.map((s) => [s.companyId.toString('hex'), s.status]));
+    const byCompany = new Map(businesses.map((c) => [c.id.toString('hex'), c]));
 
-    return rows.map((r) => ({
-      id: binToUuid(r.id),
-      companyId: r.companyId ? binToUuid(r.companyId) : null,
-      businessName: r.businessName,
-      ownerName: r.ownerName,
-      city: r.city,
-      email: r.email,
-      phone: r.phone,
-      language: r.language,
-      registeredAt: r.createdAt.toISOString(),
-      status: r.companyId ? (byCompany.get(r.companyId.toString('hex')) ?? 'unknown') : 'incomplete',
-    }));
+    const now = new Date();
+    return rows.map((r) => {
+      const business = r.companyId ? byCompany.get(r.companyId.toString('hex')) : undefined;
+      /*
+       * The state computed for the business, its free trial's included — a business using its trial is not shown as
+       * a plain pending application (review finding R4-13) — and the trial with its end and its zone. Both null for
+       * an application that left no business.
+       */
+      const listed = business ? this.listed(business, now) : null;
+      return {
+        id: binToUuid(r.id),
+        companyId: r.companyId ? binToUuid(r.companyId) : null,
+        businessName: r.businessName,
+        ownerName: r.ownerName,
+        city: r.city,
+        email: r.email,
+        phone: r.phone,
+        language: r.language,
+        registeredAt: r.createdAt.toISOString(),
+        status: r.companyId ? (business?.subscription?.status ?? 'unknown') : 'incomplete',
+        state: listed?.state ?? null,
+        trial: listed?.trial ?? null,
+      };
+    });
   }
 
   // ── A business the platform creates for a shop ──────────────────────────
