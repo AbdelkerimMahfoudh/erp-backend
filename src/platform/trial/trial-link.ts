@@ -95,6 +95,15 @@ function digestsMatch(a: string, b: string): boolean {
 }
 
 /**
+ * Whether a link is still bound to its Owner as they are now: the digest it was issued with is the digest of their
+ * password, contacts and verifications today. False when anything changed since — or when no key exists to compute
+ * one (`currentDigest` null).
+ */
+export function stillBound(bindingDigest: string, currentDigest: string | null): boolean {
+  return currentDigest !== null && digestsMatch(currentDigest, bindingDigest);
+}
+
+/**
  * The link's outcome for this signed-in Owner, in this order: no row for the token → `invalid` (forged, mistyped,
  * or never sent); another business's or another person's → `other_account`, before anything about it is told;
  * consumed → `used`; revoked → `revoked`; past its end → `expired`; bound to credentials or contacts that have
@@ -114,7 +123,7 @@ export function linkOutcomeOf(
   if (link.consumedAt) return 'used';
   if (link.revokedAt) return 'revoked';
   if (link.expiresAt.getTime() <= now.getTime()) return 'expired';
-  if (!currentDigest || !digestsMatch(currentDigest, link.bindingDigest)) return 'revoked';
+  if (!stillBound(link.bindingDigest, currentDigest)) return 'revoked';
   return 'valid';
 }
 

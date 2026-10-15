@@ -15,7 +15,7 @@ import { TRIAL_SETUP_TEMPLATE, type MessageLanguage } from '../../messaging/temp
 import { outboxAllowed, sendWithOneRetry } from '../contact-delivery';
 import { PlatformAuditService } from '../platform-audit.service';
 import { mayClaimNow, readFacts, readOwner, subscriptionRecordOf, type TrialFactsRow, type TrialPrincipal } from './trial-facts';
-import { bindingKey, linkBindingOf, revokeUsableLinks } from './trial-link';
+import { bindingKey, linkBindingOf, revokeUsableLinks, stillBound } from './trial-link';
 import { TrialRefusal } from './trial-refusal';
 import {
   RESEND_DAY_MS,
@@ -27,6 +27,7 @@ import {
   requiredContacts,
   setupTokenHash,
   type OwnerContacts,
+  type TrialContact,
   type TrialRegistrationMethod,
 } from './trial-rules';
 import {
@@ -43,6 +44,7 @@ import {
   setupLinkUrl,
   verifiedDestinations,
   type AppSetupStatus,
+  type DeliveryFacts,
   type PlannedOutcome,
   type SetupAttempt,
   type SetupChannel,
@@ -138,11 +140,8 @@ export class TrialSetupService implements OnApplicationShutdown {
     if (state !== 'trial_available' || !eligibility || !mayClaimNow(row, now)) return { state, eligible: false };
 
     const missing = missingContacts(eligibility.registrationMethod, owner);
-    const [last, lastAccepted, newestLink] = await Promise.all([
-      this.attempts(who.companyId, 1),
-      this.lastAccepted(who.companyId),
-      this.newestLink(who.companyId),
-    ]);
+    const [last, delivery] = await Promise.all([this.attempts(who.companyId, 1), this.deliveryFacts(who, missing)]);
+    const facts = { ...delivery, last: last[0] ?? null };
     return {
       state,
       eligible: true,
@@ -151,8 +150,8 @@ export class TrialSetupService implements OnApplicationShutdown {
       requiredContacts: requiredContacts(eligibility.registrationMethod),
       missingContacts: missing,
       destinations: verifiedDestinations(owner),
-      delivery: deliveryOf({ missing, last: last[0] ?? null, newestLink }, now),
-      sentTo: sentTo(lastAccepted),
+      delivery: deliveryOf(facts, now),
+      sentTo: sentTo(delivery.lastAccepted, facts.acceptedIsCurrent),
       lastAttemptAt: last[0]?.at.toISOString() ?? null,
       timeZone: this.entitlement.trialZone(who.companyId, row.timezone),
     };
@@ -162,22 +161,22 @@ export class TrialSetupService implements OnApplicationShutdown {
    * The website's `setup` object, for a business that is `trial_available`: the same status, an honest history of the
    * last attempts, and when the Owner may ask again. Read by the website's trial card and answered by the resend.
    */
-  async websiteSetup(companyId: Buffer, owner: OwnerContacts, method: TrialRegistrationMethod, now: Date): Promise<WebsiteSetup> {
+  async websiteSetup(who: TrialPrincipal, owner: OwnerContacts, method: TrialRegistrationMethod, now: Date): Promise<WebsiteSetup> {
     const missing = missingContacts(method, owner);
-    const [history, lastAccepted, newestLink, recent, inFlight] = await Promise.all([
-      this.attempts(companyId, SETUP_HISTORY_SIZE),
-      this.lastAccepted(companyId),
-      this.newestLink(companyId),
-      this.recentAttempts(this.prisma, companyId, now),
-      this.linkInFlight(this.prisma, companyId, now),
+    const [history, delivery, recent, inFlight] = await Promise.all([
+      this.attempts(who.companyId, SETUP_HISTORY_SIZE),
+      this.deliveryFacts(who, missing),
+      this.recentAttempts(this.prisma, who.companyId, now),
+      this.linkInFlight(this.prisma, who.companyId, now),
     ]);
     const last = history[0] ?? null;
+    const facts = { ...delivery, last };
     const availableAt = resendAvailableAt(recent, inFlight, now);
     const operational = this.operational();
     const destinations = verifiedDestinations(owner);
     return {
-      delivery: deliveryOf({ missing, last, newestLink }, now),
-      sentTo: sentTo(lastAccepted),
+      delivery: deliveryOf(facts, now),
+      sentTo: sentTo(delivery.lastAccepted, facts.acceptedIsCurrent),
       destinations,
       lastAttemptAt: last?.at.toISOString() ?? null,
       canResendNow: missing.length === 0 && destinations.some((d) => operational[d.channel]) && availableAt === null,
@@ -203,7 +202,7 @@ export class TrialSetupService implements OnApplicationShutdown {
     const owner = await readOwner(this.prisma, who);
     const row = owner ? await readFacts(this.prisma, who.companyId) : null;
     if (!owner || !row?.trialEligibility) throw new TrialRefusal('owner_only');
-    return this.websiteSetup(who.companyId, owner, row.trialEligibility.registrationMethod, now);
+    return this.websiteSetup(who, owner, row.trialEligibility.registrationMethod, now);
   }
 
   /**
@@ -271,12 +270,8 @@ export class TrialSetupService implements OnApplicationShutdown {
         return 'unavailable' as const;
       }
 
-      const binding = await tx.user.findUnique({
-        where: { id: who.userId },
-        select: { passwordHash: true, email: true, phone: true, emailVerifiedAt: true, phoneVerifiedAt: true },
-      });
       // `operational()` already required a key, so a binding exists for a person read a moment ago.
-      const digest = binding ? linkBindingOf(this.config.otpPepper, binding) : null;
+      const digest = await this.currentBinding(tx, who.userId);
       if (!digest) throw new Error('the setup link could not be bound to its Owner');
 
       await tx.trialSetupLink.updateMany(revokeUsableLinks({ companyId: who.companyId }, 'reissued', now));
@@ -519,14 +514,46 @@ export class TrialSetupService implements OnApplicationShutdown {
     return rows.map((r) => ({ at: r.createdAt, trigger: r.trigger, email: r.emailOutcome, whatsapp: r.whatsappOutcome }));
   }
 
-  /** The newest attempt a provider accepted on some channel — what `sentTo` names — or null. */
-  private async lastAccepted(companyId: Buffer): Promise<SetupAttempt | null> {
-    const row = await this.prisma.trialSetupMessage.findFirst({
-      where: { companyId, OR: [{ emailOutcome: 'accepted' }, { whatsappOutcome: 'accepted' }] },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      select: { createdAt: true, trigger: true, emailOutcome: true, whatsappOutcome: true },
+  /**
+   * Where the status stands for this Owner, but for the last attempt, which each reader takes from its own list (C1, C2):
+   * the automatic attempt, the newest link and whether its attempt is in, and the newest accepted attempt — what
+   * `sentTo` names — with whether its link still binds to the Owner as they are now.
+   */
+  private async deliveryFacts(
+    who: TrialPrincipal,
+    missing: TrialContact[],
+  ): Promise<Omit<DeliveryFacts, 'last'> & { lastAccepted: SetupAttempt | null }> {
+    const [automatic, newestLink, accepted, binding] = await Promise.all([
+      this.prisma.trialSetupMessage.findFirst({ where: { companyId: who.companyId, trigger: 'verified' }, select: { id: true } }),
+      this.newestLink(who.companyId),
+      this.prisma.trialSetupMessage.findFirst({
+        where: { companyId: who.companyId, OR: [{ emailOutcome: 'accepted' }, { whatsappOutcome: 'accepted' }] },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { createdAt: true, trigger: true, emailOutcome: true, whatsappOutcome: true, link: { select: { bindingDigest: true } } },
+      }),
+      this.currentBinding(this.prisma, who.userId),
+    ]);
+    return {
+      missing,
+      automaticSent: automatic !== null,
+      newestLink,
+      acceptedIsCurrent: accepted?.link ? stillBound(accepted.link.bindingDigest, binding) : false,
+      lastAccepted: accepted
+        ? { at: accepted.createdAt, trigger: accepted.trigger, email: accepted.emailOutcome, whatsapp: accepted.whatsappOutcome }
+        : null,
+    };
+  }
+
+  /**
+   * The digest a link issued to this person now would carry — their password, contacts and verifications as they are
+   * — or null when there is no key to compute one. Issuing binds with it; the status compares a sent link with it.
+   */
+  private async currentBinding(db: Prisma.TransactionClient, userId: Buffer): Promise<string | null> {
+    const binding = await db.user.findUnique({
+      where: { id: userId },
+      select: { passwordHash: true, email: true, phone: true, emailVerifiedAt: true, phoneVerifiedAt: true },
     });
-    return row ? { at: row.createdAt, trigger: row.trigger, email: row.emailOutcome, whatsapp: row.whatsappOutcome } : null;
+    return binding ? linkBindingOf(this.config.otpPepper, binding) : null;
   }
 
   /** Every attempt of the last 24 hours, whatever triggered it: what the throttle counts. */

@@ -153,7 +153,7 @@ export class TrialService {
    */
   private async setupOf(who: TrialPrincipal, owner: OwnerContacts, method: TrialRegistrationMethod, now: Date): Promise<WebsiteSetup | null> {
     try {
-      return await this.setup.websiteSetup(who.companyId, owner, method, now);
+      return await this.setup.websiteSetup(who, owner, method, now);
     } catch (e) {
       this.logger.warn(`Free trial setup status not read for company ${binToUuid(who.companyId)}: ${(e as Error).message}`);
       return null;

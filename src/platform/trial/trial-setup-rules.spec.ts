@@ -12,6 +12,7 @@ import {
   setupLinkUrl,
   verifiedDestinations,
   type DeliveryContext,
+  type DeliveryFacts,
   type SetupAttempt,
 } from './trial-setup-rules';
 import type { OwnerContacts } from './trial-rules';
@@ -49,33 +50,53 @@ describe('where the instructions stand', () => {
     email,
     whatsapp,
   });
+  /** Contacts complete, the automatic send recorded, nothing in flight, what was sent still the Owner's — unless said. */
+  const facts = (over: Partial<DeliveryFacts> = {}): DeliveryFacts => ({
+    missing: [],
+    automaticSent: true,
+    last: null,
+    newestLink: null,
+    acceptedIsCurrent: true,
+    ...over,
+  });
+  const recorded = { issuedAt: T, recorded: true };
 
-  it('a missing contact outranks everything: nothing is sent by design until it is verified', () => {
-    expect(deliveryOf({ missing: ['phone'], last: attemptAt(0, 'accepted'), newestLink: { issuedAt: T, recorded: true } }, T)).toBe(
-      'waiting_for_contact',
+  it('a missing contact before anything went automatically: waiting — nothing is sent by design until it is verified', () => {
+    expect(deliveryOf(facts({ missing: ['phone'], automaticSent: false }), T)).toBe('waiting_for_contact');
+    expect(deliveryOf(facts({ missing: ['email', 'phone'], automaticSent: false }), T)).toBe('waiting_for_contact');
+  });
+
+  it('a missing contact after the automatic send is not waiting for anything: nothing more goes on its own (C2)', () => {
+    expect(deliveryOf(facts({ missing: ['phone'], last: attemptAt(0, 'accepted'), newestLink: recorded, acceptedIsCurrent: false }), at(HOUR))).toBe(
+      'not_sent',
     );
-    expect(deliveryOf({ missing: ['email', 'phone'], last: null, newestLink: null }, T)).toBe('waiting_for_contact');
+    expect(deliveryOf(facts({ missing: ['phone'], last: attemptAt(0, 'failed'), newestLink: recorded }), at(HOUR))).toBe('failed');
   });
 
   it('contacts complete: no attempt recorded is not_sent; otherwise the last attempt says', () => {
-    expect(deliveryOf({ missing: [], last: null, newestLink: null }, T)).toBe('not_sent');
-    const recorded = { issuedAt: T, recorded: true };
-    expect(deliveryOf({ missing: [], last: attemptAt(0, 'accepted', 'failed'), newestLink: recorded }, at(HOUR))).toBe('sent');
-    expect(deliveryOf({ missing: [], last: attemptAt(0, 'failed'), newestLink: recorded }, at(HOUR))).toBe('failed');
-    expect(deliveryOf({ missing: [], last: attemptAt(0, 'unavailable', 'unavailable'), newestLink: null }, at(HOUR))).toBe('unavailable');
+    expect(deliveryOf(facts({ automaticSent: false }), T)).toBe('not_sent');
+    expect(deliveryOf(facts({ last: attemptAt(0, 'accepted', 'failed'), newestLink: recorded }), at(HOUR))).toBe('sent');
+    expect(deliveryOf(facts({ last: attemptAt(0, 'failed'), newestLink: recorded }), at(HOUR))).toBe('failed');
+    expect(deliveryOf(facts({ last: attemptAt(0, 'unavailable', 'unavailable') }), at(HOUR))).toBe('unavailable');
+  });
+
+  it('sent only while what went out still binds to the Owner as they are now — otherwise not_sent (C2)', () => {
+    expect(deliveryOf(facts({ last: attemptAt(0, 'accepted'), newestLink: recorded, acceptedIsCurrent: false }), at(HOUR))).toBe('not_sent');
+    // A failure or an unavailable channel is told as it was, whoever it concerned.
+    expect(deliveryOf(facts({ last: attemptAt(0, 'failed'), newestLink: recorded, acceptedIsCurrent: false }), at(HOUR))).toBe('failed');
   });
 
   it('a link newer than every attempt, without one of its own, is sending for a minute — then not_sent (C1)', () => {
     const inFlight = { issuedAt: at(10 * SECOND), recorded: false };
     // The first send: no attempt at all yet.
-    expect(deliveryOf({ missing: [], last: null, newestLink: inFlight }, at(10 * SECOND))).toBe('sending');
-    expect(deliveryOf({ missing: [], last: null, newestLink: inFlight }, at(10 * SECOND + SETUP_SENDING_WINDOW_MS - 1))).toBe('sending');
-    expect(deliveryOf({ missing: [], last: null, newestLink: inFlight }, at(10 * SECOND + SETUP_SENDING_WINDOW_MS))).toBe('not_sent');
+    expect(deliveryOf(facts({ automaticSent: false, newestLink: inFlight }), at(10 * SECOND))).toBe('sending');
+    expect(deliveryOf(facts({ automaticSent: false, newestLink: inFlight }), at(10 * SECOND + SETUP_SENDING_WINDOW_MS - 1))).toBe('sending');
+    expect(deliveryOf(facts({ automaticSent: false, newestLink: inFlight }), at(10 * SECOND + SETUP_SENDING_WINDOW_MS))).toBe('not_sent');
     // A resend after an earlier attempt: the earlier outcome is not what is happening now.
-    expect(deliveryOf({ missing: [], last: attemptAt(0, 'accepted'), newestLink: inFlight }, at(20 * SECOND))).toBe('sending');
-    expect(deliveryOf({ missing: [], last: attemptAt(0, 'accepted'), newestLink: inFlight }, at(2 * MINUTE))).toBe('not_sent');
+    expect(deliveryOf(facts({ last: attemptAt(0, 'accepted'), newestLink: inFlight }), at(20 * SECOND))).toBe('sending');
+    expect(deliveryOf(facts({ last: attemptAt(0, 'accepted'), newestLink: inFlight }), at(2 * MINUTE))).toBe('not_sent');
     // An attempt newer than the unrecorded link (nothing could carry the next one) says what happened since.
-    expect(deliveryOf({ missing: [], last: attemptAt(2 * MINUTE, 'unavailable'), newestLink: inFlight }, at(3 * MINUTE))).toBe('unavailable');
+    expect(deliveryOf(facts({ last: attemptAt(2 * MINUTE, 'unavailable'), newestLink: inFlight }), at(3 * MINUTE))).toBe('unavailable');
   });
 
   it('waits a bounded time for the providers, and shows sending no longer than the throttle’s minute', () => {
@@ -83,10 +104,11 @@ describe('where the instructions stand', () => {
     expect(SETUP_SENDING_WINDOW_MS).toBe(60_000);
   });
 
-  it('sentTo names the channels a provider accepted, email first', () => {
-    expect(sentTo({ email: 'accepted', whatsapp: 'accepted' })).toEqual(['email', 'whatsapp']);
-    expect(sentTo({ email: 'failed', whatsapp: 'accepted' })).toEqual(['whatsapp']);
-    expect(sentTo(null)).toEqual([]);
+  it('sentTo names the channels a provider accepted, email first — none once that message is no longer the Owner’s (C2)', () => {
+    expect(sentTo({ email: 'accepted', whatsapp: 'accepted' }, true)).toEqual(['email', 'whatsapp']);
+    expect(sentTo({ email: 'failed', whatsapp: 'accepted' }, true)).toEqual(['whatsapp']);
+    expect(sentTo(null, true)).toEqual([]);
+    expect(sentTo({ email: 'accepted', whatsapp: 'accepted' }, false)).toEqual([]);
   });
 
   it('the website lists the send after verification as automatic, a resend as a resend, outcomes as stored', () => {

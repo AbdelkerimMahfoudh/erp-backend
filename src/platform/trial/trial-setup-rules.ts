@@ -57,10 +57,13 @@ export interface SetupAttempt {
 
 /**
  * Where the instructions stand, as the Owner is told it:
- *  - `waiting_for_contact` — a required contact is not verified yet, so nothing is sent, by design;
+ *  - `waiting_for_contact` — a required contact is not verified yet and nothing was sent automatically, so the
+ *    instructions go once it is — by design;
  *  - `sending` — a link was issued less than a minute ago and its providers have not all answered yet;
- *  - `not_sent` — the contacts are complete but no attempt is recorded (a send lost on the way, say);
- *  - `sent` — the last attempt was accepted by a provider on at least one channel;
+ *  - `not_sent` — the contacts are complete but no attempt is recorded (a send lost on the way, say), or the message
+ *    that went out went to contacts the Owner no longer has, with a link that no longer works;
+ *  - `sent` — the last attempt was accepted by a provider on at least one channel, to the Owner's contacts as they
+ *    are now;
  *  - `failed` — the last attempt reached providers and none accepted it;
  *  - `unavailable` — the last attempt found no channel that could carry it.
  */
@@ -78,30 +81,46 @@ export function attemptOutcome(attempt: Pick<SetupAttempt, 'email' | 'whatsapp'>
 export interface DeliveryFacts {
   /** The required contacts not verified yet. */
   missing: readonly TrialContact[];
+  /** The automatic attempt (`verified`) is recorded: the instructions will not go again on their own. */
+  automaticSent: boolean;
   /** The newest attempt recorded, or null. */
   last: Pick<SetupAttempt, 'at' | 'email' | 'whatsapp'> | null;
   /** The newest link issued and whether its attempt is recorded yet; null when none was ever issued. */
   newestLink: { issuedAt: Date; recorded: boolean } | null;
+  /**
+   * The last accepted attempt's link is still bound to the Owner as they are now (`trial-link.stillBound`): the
+   * contacts it went to are the Owner's contacts today, and the link it carried still works for them.
+   */
+  acceptedIsCurrent: boolean;
 }
 
 /**
- * The status, at `now`. A link newer than every attempt and without one of its own is a send still in flight — its
- * attempt is written once the providers have answered — for a minute; after that, the send was lost (C1). Otherwise
- * the last attempt says.
+ * The status, at `now`.
+ *
+ *  - A required contact unverified is `waiting_for_contact` only while nothing was sent automatically — the promise
+ *    that the instructions follow its verification holds only then (C2).
+ *  - A link newer than every attempt and without one of its own is a send still in flight — its attempt is written
+ *    once the providers have answered — for a minute; after that, the send was lost (C1).
+ *  - Otherwise the last attempt says; and `sent` only while what it sent still binds to the Owner's contacts as they
+ *    are now — a message to a number since replaced, with a link that no longer works, was not sent to this Owner (C2).
  */
 export function deliveryOf(facts: DeliveryFacts, now: Date): SetupDelivery {
-  if (facts.missing.length > 0) return 'waiting_for_contact';
+  if (facts.missing.length > 0 && !facts.automaticSent) return 'waiting_for_contact';
   const link = facts.newestLink;
   if (link && !link.recorded && (!facts.last || link.issuedAt.getTime() >= facts.last.at.getTime())) {
     return now.getTime() - link.issuedAt.getTime() < SETUP_SENDING_WINDOW_MS ? 'sending' : 'not_sent';
   }
   if (!facts.last) return 'not_sent';
-  return attemptOutcome(facts.last);
+  const outcome = attemptOutcome(facts.last);
+  return outcome === 'sent' && !facts.acceptedIsCurrent ? 'not_sent' : outcome;
 }
 
-/** The channels a provider accepted in this attempt — the last attempt that had one — email first. */
-export function sentTo(attempt: Pick<SetupAttempt, 'email' | 'whatsapp'> | null): SetupChannel[] {
-  if (!attempt) return [];
+/**
+ * The channels a provider accepted in this attempt — the last attempt that had one — email first; none when that
+ * attempt's message no longer went to the Owner's contacts as they are now (`current` false: see `DeliveryFacts`).
+ */
+export function sentTo(attempt: Pick<SetupAttempt, 'email' | 'whatsapp'> | null, current: boolean): SetupChannel[] {
+  if (!attempt || !current) return [];
   return (['email', 'whatsapp'] as const).filter((channel) => attempt[channel] === 'accepted');
 }
 

@@ -305,8 +305,13 @@ export function makeTrialWorld(options: WorldOptions = {}) {
     trialSetupMessage: {
       // Append-only, as its triggers keep it: no update, no delete.
       create: async ({ data }: Row) => (t.messages.push({ ...data }), data),
-      findFirst: async ({ where, orderBy, select }: Row) =>
-        pick(newestFirst(t.messages.filter((x) => matches(x, where)), orderBy ?? { createdAt: 'desc' })[0], select),
+      findFirst: async ({ where, orderBy, select }: Row) => {
+        const row = newestFirst(t.messages.filter((x) => matches(x, where)), orderBy ?? { createdAt: 'desc' })[0];
+        const out = pick(row, select);
+        // The one relation the status reads: the link an attempt carried, as the select names it.
+        if (out && select?.link) out.link = pick(t.links.find((l) => same(l.id, row.linkId)), select.link.select);
+        return out;
+      },
       findMany: async ({ where, orderBy, take, select }: Row) =>
         newestFirst(t.messages.filter((x) => matches(x, where)), orderBy ?? { createdAt: 'desc' })
           .slice(0, take ?? undefined)

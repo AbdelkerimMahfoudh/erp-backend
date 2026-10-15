@@ -616,6 +616,72 @@ describe('the website’s resend — after the Owner signs in, never from the ap
   });
 });
 
+describe('`sent` says where the message went — the Owner’s contacts as they are now (C2; review finding R3-2)', () => {
+  const HOUR_LATER = new Date(NOW.getTime() + HOUR);
+
+  it('a phone-only Owner sent the instructions, who then verifies another number: not_sent, sent to nobody', async () => {
+    const w = world();
+    const shop = w.business({ contacts: 'phone' });
+    await verifiedNow(w, shop);
+    const wa = w.whatsapp as TestWhatsAppChannel;
+    const token = wa.last!.variables.token;
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sent', sentTo: ['whatsapp'] });
+
+    // What AccountService.confirmPhoneVerification writes for a new number — and its hand-off, which sends nothing again.
+    w.clock.set(HOUR_LATER);
+    Object.assign(w.owner(shop), { phone: '+22249998877', phoneVerifiedAt: HOUR_LATER });
+    await verifiedNow(w, shop);
+    expect(wa.messages).toHaveLength(1);
+    expect((await w.service.checkLink(shop.owner, token)).link).toBe('revoked');
+
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({
+      delivery: 'not_sent',
+      sentTo: [],
+      destinations: [{ channel: 'whatsapp', masked: '+222••••8877' }],
+    });
+    expect((await w.service.status(shop.owner)).setup).toMatchObject({ delivery: 'not_sent', sentTo: [] });
+  });
+
+  it('an email-only Owner who then verifies a WhatsApp number: the emailed link no longer works — not_sent', async () => {
+    const w = world();
+    const shop = w.business({ contacts: 'email' });
+    await verifiedNow(w, shop);
+    w.clock.set(HOUR_LATER);
+    Object.assign(w.owner(shop), { phone: '+22249998877', phoneVerifiedAt: HOUR_LATER });
+    await verifiedNow(w, shop);
+    expect((w.email as TestEmailChannel).sent).toHaveLength(1);
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'not_sent', sentTo: [] });
+    expect((await w.service.status(shop.owner)).setup).toMatchObject({ delivery: 'not_sent', sentTo: [] });
+  });
+
+  it('a password changed since: the link sent is bound to the old one — not_sent; nothing changed: still sent', async () => {
+    const w = world();
+    const changed = w.business();
+    const untouched = w.business();
+    await verifiedNow(w, changed);
+    await verifiedNow(w, untouched);
+    w.owner(changed).passwordHash = '$argon2id$v=19$m=65536,t=3,p=4$owner$another-hash';
+    w.clock.set(HOUR_LATER);
+    expect(await w.setup.appStatus(changed.owner)).toMatchObject({ delivery: 'not_sent', sentTo: [] });
+    expect(await w.setup.appStatus(untouched.owner)).toMatchObject({ delivery: 'sent', sentTo: ['email'] });
+  });
+
+  it('waiting_for_contact only while nothing went automatically: once it did, a contact unverified since waits for nothing', async () => {
+    const w = world();
+    const shop = w.business({ contacts: 'both', verified: ['email'] });
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'waiting_for_contact', missingContacts: ['phone'] });
+
+    w.owner(shop).phoneVerifiedAt = NOW;
+    await verifiedNow(w, shop);
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sent', sentTo: ['email', 'whatsapp'] });
+
+    // The number's verification is cleared (a Team contact change): no automatic send will follow its verification.
+    w.clock.set(HOUR_LATER);
+    w.owner(shop).phoneVerifiedAt = null;
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'not_sent', sentTo: [], missingContacts: ['phone'] });
+  });
+});
+
 describe('the app is told where things stand, and nothing it could act on', () => {
   it('eligible: exactly the display fields — duration, contacts, masked destinations, delivery, the business’s zone', async () => {
     const w = world();
