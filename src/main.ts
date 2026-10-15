@@ -8,6 +8,7 @@ import helmet from 'helmet';
 
 import { AppModule } from './app.module';
 import { AppConfigService } from './common/config/app-config.service';
+import { apiHttpAdapter } from './common/http/http-adapter';
 import { assertProductionConfig } from './common/config/production-guard';
 import { assertPaymentInstructionsSafeForProduction } from './platform/payment-instructions';
 import { isIngressMode, trustProxySetting } from './common/config/ingress';
@@ -29,8 +30,10 @@ async function bootstrap(): Promise<void> {
    * `rawBody`: the provider's delivery webhook is authenticated by an HMAC over
    * the exact bytes received, so the parsed body is not enough. Kept only for
    * the request's lifetime, on the request object, like the parsed body.
+   *
+   * The adapter matches routes in their own letter case only (`http-adapter.ts`).
    */
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true, rawBody: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, apiHttpAdapter(), { bufferLogs: true, rawBody: true });
   const config = app.get(AppConfigService);
 
   /**
