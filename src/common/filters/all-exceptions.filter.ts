@@ -52,6 +52,7 @@ interface ErrorBody {
   missingContacts?: unknown;
   termsVersion?: unknown;
   trial?: unknown;
+  unavailableContacts?: unknown;
   requestId?: string;
   path: string;
   timestamp: string;
@@ -147,6 +148,11 @@ const DETAIL_KEYS = [
   'missingContacts',
   'termsVersion',
   'trial',
+  /*
+   * `registration_unavailable` (C10): which of the contacts given cannot receive a verification code right now
+   * (`email`, `phone` — the kinds, never a value), so the form can offer to continue without that one.
+   */
+  'unavailableContacts',
 ] as const;
 
 /**

@@ -229,6 +229,13 @@ describe('per-item detail survives the filter', () => {
     expect(runFilter(new ConflictException({ code: 'trial_already_claimed', message: 'm', trial: view }))).toMatchObject({ trial: view });
   });
 
+  it('a registration refused before anything was saved names the contacts that cannot receive a code (C10)', () => {
+    const body = runFilter(
+      new HttpException({ code: 'registration_unavailable', message: 'm', unavailableContacts: ['phone'] }, HttpStatus.SERVICE_UNAVAILABLE),
+    );
+    expect(body).toMatchObject({ statusCode: 503, code: 'registration_unavailable', unavailableContacts: ['phone'] });
+  });
+
   it('still reveals nothing about an unexpected error', () => {
     const body = runFilter(new Error('connect ECONNREFUSED 127.0.0.1:3306'));
     expect(body.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);

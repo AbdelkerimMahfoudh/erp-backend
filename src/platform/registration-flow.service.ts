@@ -30,15 +30,21 @@ export class RegistrationFlowService {
      * refuse here — not create a pending business whose Owner then waits for a
      * code that is never coming, and can sign in to *Waiting for activation*
      * meanwhile (`docs/67` RC-02). The same rule the deletion flow follows
-     * (`56bddbe`): refused up front, and nothing was saved. The channel is the
-     * one the Owner record will carry: the email when one is given, else the
-     * number.
+     * (`56bddbe`): refused up front, and nothing was saved.
+     *
+     * Every contact given, not only the first (C10; review finding R2-3): each
+     * one given must be verified (the owner's rule of 2026-10-15), and the free
+     * trial waits for all of them — so a number whose code cannot leave this
+     * server would leave a business that can never claim. The refusal names
+     * which ones, so the person can drop that contact and continue.
      */
-    const channel: ContactChannel = dto.email?.trim() ? 'email' : 'phone';
-    if (!this.delivery.canDeliver(channel)) {
+    const given = (['email', 'phone'] as const).filter((channel) => (channel === 'email' ? dto.email : dto.phone)?.trim());
+    const unavailable: ContactChannel[] = given.filter((channel) => !this.delivery.canDeliver(channel));
+    if (unavailable.length > 0) {
       throw new ServiceUnavailableException({
         code: 'registration_unavailable',
-        message: 'Registration cannot be completed right now: no verification code can be sent. Nothing was saved.',
+        message: 'Registration cannot be completed right now: a verification code cannot be sent to every contact given. Nothing was saved.',
+        unavailableContacts: unavailable,
       });
     }
 

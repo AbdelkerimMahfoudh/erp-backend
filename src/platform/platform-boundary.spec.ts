@@ -301,7 +301,7 @@ describe('the controller, from the platform’s side', () => {
       expect(reached).toEqual([]);
     });
 
-    it('asks about the channel the Owner record will carry: the email when one is given, else the number', async () => {
+    it('asks about every contact given — each must be verified, so each must be able to receive its code (C10)', async () => {
       const asked: string[] = [];
       const controller = controllerWith({ register: async () => { throw new Error('must not be reached'); } }, {
         canDeliver: (channel: string) => { asked.push(channel); return false; },
@@ -309,23 +309,24 @@ describe('the controller, from the platform’s side', () => {
       await controller.register(attempt as never).catch(() => undefined);
       await controller.register({ ...attempt, email: undefined } as never).catch(() => undefined);
       await controller.register({ ...attempt, email: '   ' } as never).catch(() => undefined);
-      expect(asked).toEqual(['email', 'phone', 'phone']);
+      await controller.register({ ...attempt, phone: undefined } as never).catch(() => undefined);
+      expect(asked).toEqual(['email', 'phone', 'phone', 'phone', 'email']);
     });
 
-    it('and proceeds exactly as before once a code can go out', async () => {
+    it('and proceeds exactly as before once a code can go to every contact given', async () => {
       const seen: string[] = [];
-      const controller = controllerWith(
-        {
-          register: async (input: { email?: string }) => {
-            seen.push(input.email ?? '');
-            return { companyId: 'c', publicStoreId: 'ABCDEF0123', branchId: 'b', ownerUserId: 'u', status: 'pending_activation', created: true, trialEligible: true };
-          },
-          pendingOwnerFor: async () => null,
+      const registration = {
+        register: async (input: { email?: string; phone?: string }) => {
+          seen.push(`${input.email ?? ''}|${input.phone ?? ''}`);
+          return { companyId: 'c', publicStoreId: 'ABCDEF0123', branchId: 'b', ownerUserId: 'u', status: 'pending_activation', created: true, trialEligible: true };
         },
-        { canDeliver: (channel: string) => channel === 'email' },
-      );
-      await expect(controller.register(attempt as never)).resolves.toMatchObject({ created: true, next: 'sign_in', continuation: null, trialEligible: true });
-      expect(seen).toEqual(['aicha@example.test']);
+        pendingOwnerFor: async () => null,
+      };
+      const both = controllerWith(registration, { canDeliver: () => true });
+      await expect(both.register(attempt as never)).resolves.toMatchObject({ created: true, next: 'sign_in', continuation: null, trialEligible: true });
+      const emailOnly = controllerWith(registration, { canDeliver: (channel: string) => channel === 'email' });
+      await expect(emailOnly.register({ ...attempt, phone: undefined } as never)).resolves.toMatchObject({ created: true });
+      expect(seen).toEqual(['aicha@example.test|+22243210987', 'aicha@example.test|']);
     });
   });
 });

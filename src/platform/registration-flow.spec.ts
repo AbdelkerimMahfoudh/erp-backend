@@ -7,6 +7,7 @@ import { AppRegistrationController } from './app-registration.controller';
 import { PlatformAdminGuard } from './platform-admin.guard';
 import { PlatformController, PUBLIC_THROTTLE } from './platform.controller';
 import { RegistrationFlowService } from './registration-flow.service';
+import { RegistrationService } from './registration.service';
 
 /**
  * A business registering itself through either door (0095, the owner's decision Q1 of 2026-10-13): the website's
@@ -226,5 +227,74 @@ describe('the shared flow', () => {
     expect(seen).toHaveLength(1);
     expect(seen[0].trialEligible).toBeUndefined();
     expect(answer).toMatchObject({ trialEligible: false });
+  });
+});
+
+describe('every contact given must be able to receive its code, or nothing is saved (C10; review finding R2-3)', () => {
+  /**
+   * The real registration, on a database that records every table it is asked for and refuses them all: a refusal
+   * made before anything is saved touches none — no attempt, no company, no Owner, no eligibility, no event.
+   */
+  function realFlow(canDeliver: (channel: string) => boolean) {
+    const touched: string[] = [];
+    const prisma = new Proxy(
+      {},
+      {
+        get: (_db, table: string) => {
+          touched.push(table);
+          return new Proxy({}, { get: () => async () => { throw new Error(`the database was reached (${table})`); } });
+        },
+      },
+    );
+    const registration = new RegistrationService(prisma as never, {} as never, { now: () => new Date() });
+    const flow = new RegistrationFlowService(registration, {} as never, { canDeliver } as never);
+    return { flow, touched };
+  }
+
+  async function refusalOf(flow: RegistrationFlowService, attempt: object): Promise<Record<string, unknown>> {
+    const refusal = await flow.register(attempt as never).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(ServiceUnavailableException);
+    return (refusal as ServiceUnavailableException).getResponse() as Record<string, unknown>;
+  }
+
+  const BOTH = { ...ATTEMPT, phone: '+22243210987' };
+
+  it('an email and a WhatsApp number while WhatsApp codes cannot be sent: refused, naming the number — nothing saved', async () => {
+    const { flow, touched } = realFlow((channel) => channel === 'email');
+    expect(await refusalOf(flow, BOTH)).toEqual({
+      code: 'registration_unavailable',
+      message: 'Registration cannot be completed right now: a verification code cannot be sent to every contact given. Nothing was saved.',
+      unavailableContacts: ['phone'],
+    });
+    expect(touched).toEqual([]);
+  });
+
+  it('the email cannot receive one: refused, naming the email', async () => {
+    const { flow, touched } = realFlow((channel) => channel === 'phone');
+    expect(await refusalOf(flow, BOTH)).toMatchObject({ code: 'registration_unavailable', unavailableContacts: ['email'] });
+    expect(await refusalOf(flow, ATTEMPT)).toMatchObject({ unavailableContacts: ['email'] });
+    expect(touched).toEqual([]);
+  });
+
+  it('neither can: refused, naming both, email first', async () => {
+    const { flow, touched } = realFlow(() => false);
+    expect(await refusalOf(flow, BOTH)).toMatchObject({ code: 'registration_unavailable', unavailableContacts: ['email', 'phone'] });
+    expect(await refusalOf(flow, { ...BOTH, email: undefined })).toMatchObject({ unavailableContacts: ['phone'] });
+    expect(touched).toEqual([]);
+  });
+
+  it('on either door alike', async () => {
+    const { flow } = realFlow((channel) => channel === 'email');
+    for (const door of [platformWith({ flow }), new AppRegistrationController(flow)]) {
+      const refusal = await door.register(BOTH as never).catch((e: unknown) => e);
+      expect((refusal as ServiceUnavailableException).getResponse()).toMatchObject({ unavailableContacts: ['phone'] });
+    }
+  });
+
+  it('a contact left blank is not a contact given: the email alone goes through to the registration', async () => {
+    const { flow, touched } = realFlow((channel) => channel === 'email');
+    // The real registration starts at the database — which this one refuses — so reaching it is the proof.
+    await expect(flow.register({ ...ATTEMPT, phone: '   ' } as never)).rejects.toThrow('the database was reached (registrationAttempt)');
+    expect(touched).toEqual(['registrationAttempt']);
   });
 });
