@@ -12,10 +12,17 @@ import { TrialEndRoll, type TrialEndOutcome } from './trial-end-roll';
  * the seat it paid for whenever somebody next happened to look — a month late, if nobody did.
  *
  * The rollup outbox's pattern (rollup-outbox.service.ts): a pass at start-up, then one a minute on an unref'd timer,
- * one pass at a time per process. Each pass finds the companies with a scheduled request whose start has come, and
- * the claims whose end is not recorded yet — at most 200 — and runs `applyIfDue` for each, one at a time. Every
- * activation is NOWAIT and guarded row by row, so a pass beside the lazy path, an administrator's action or another
- * instance does each thing once; a company still waiting for paid access (PQ1) is simply asked again a minute later.
+ * one pass at a time per process. Each pass finds the companies with a scheduled request whose start has come and
+ * that can be put in force now, and the claims whose end is not recorded yet — at most 200 — and runs `applyIfDue`
+ * for each, one at a time. Every activation is NOWAIT and guarded row by row, so a pass beside the lazy path, an
+ * administrator's action or another instance does each thing once.
+ *
+ * "Can be put in force now" is the activation's own gate, read in the same query: the company is open and a paid
+ * period is in force. A business still waiting for paid access (PQ1), or closed, keeps its requests scheduled — and
+ * is not visited for them every minute: unordered and limited to 200, such businesses would otherwise fill every
+ * pass once there were 200 of them, and a business that is due, and that nobody looks at, would never be reached.
+ * Its approval puts its requests in force (the lifecycle's trigger), and so does the first pass after a period
+ * starts. Its trial's end is still written down once, through the claims query.
  */
 
 const SWEEP_INTERVAL_MS = 60_000;
@@ -73,8 +80,21 @@ export class TrialEndSweeper implements OnApplicationBootstrap, OnModuleDestroy 
   async sweep(): Promise<TrialEndSweep> {
     const now = this.clock.now();
     const [scheduled, unrecorded] = await Promise.all([
+      // The activation's gate (trial-end-roll.ts `activateDueAddOnsTx`): an open company with a paid period in force.
       this.prisma.$queryRaw<{ company_id: Buffer }[]>`
-        SELECT DISTINCT company_id FROM seat_allocations WHERE status = 'scheduled' AND effective_at <= ${now} LIMIT 200
+        SELECT DISTINCT sa.company_id
+          FROM seat_allocations sa
+          JOIN companies c ON c.id = sa.company_id
+         WHERE sa.status = 'scheduled'
+           AND sa.effective_at <= ${now}
+           AND c.closed_at IS NULL
+           AND EXISTS (
+                 SELECT 1 FROM billing_periods bp
+                  WHERE bp.company_id = sa.company_id
+                    AND bp.period_start <= ${now}
+                    AND (bp.period_end IS NULL OR bp.period_end > ${now})
+               )
+         LIMIT 200
       `,
       this.prisma.$queryRaw<{ company_id: Buffer }[]>`
         SELECT company_id FROM trial_claims WHERE expiry_recorded_at IS NULL AND ends_at <= ${now} LIMIT 200

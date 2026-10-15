@@ -578,11 +578,21 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
       const r = t.seatAllocation.find((a) => same(a.id, values[0]));
       return r ? [{ status: r.status, effective_at: r.effectiveAt, payment_id: r.paymentId }] : [];
     }
-    if (/^SELECT DISTINCT company_id FROM seat_allocations WHERE status = 'scheduled' AND effective_at <= \? LIMIT 200$/.test(text)) {
-      const at = values[0] as Date;
+    if (
+      text ===
+      "SELECT DISTINCT sa.company_id FROM seat_allocations sa JOIN companies c ON c.id = sa.company_id WHERE sa.status = 'scheduled' AND sa.effective_at <= ? AND c.closed_at IS NULL AND EXISTS ( SELECT 1 FROM billing_periods bp WHERE bp.company_id = sa.company_id AND bp.period_start <= ? AND (bp.period_end IS NULL OR bp.period_end > ?) ) LIMIT 200"
+    ) {
+      // The sweeper's: scheduled and due, in an open company with a paid period in force.
+      const [due, start, end] = values as Date[];
+      const inForce = (companyId: Buffer) =>
+        t.billingPeriod.some(
+          (p) => same(p.companyId, companyId) && p.periodStart.getTime() <= start.getTime() && (p.periodEnd === null || p.periodEnd.getTime() > end.getTime()),
+        );
       const seen = new Map<string, Buffer>();
       for (const a of t.seatAllocation) {
-        if (a.status === 'scheduled' && a.effectiveAt && a.effectiveAt.getTime() <= at.getTime()) seen.set(a.companyId.toString('hex'), a.companyId);
+        if (a.status !== 'scheduled' || !a.effectiveAt || a.effectiveAt.getTime() > due.getTime()) continue;
+        const company = t.company.find((c) => same(c.id, a.companyId));
+        if (company && company.closedAt === null && inForce(a.companyId)) seen.set(a.companyId.toString('hex'), a.companyId);
       }
       return [...seen.values()].slice(0, 200).map((company_id) => ({ company_id }));
     }

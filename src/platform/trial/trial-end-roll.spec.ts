@@ -309,15 +309,53 @@ describe('the sweeper: a business nobody looks at gets what it paid for, on time
     await expect(w.sweeper.sweep()).resolves.toEqual({ companies: 0, outcomes: { busy: 0, nothing_due: 0, done: 0, failed: 0 } });
   });
 
-  it('a business still waiting for paid access is visited each pass and changes nothing until it has a period', async () => {
+  it('a business still waiting for paid access: its end is written down once, then it is not visited until it has a period', async () => {
     const { w, b, store } = await scheduledWorld({ approve: false });
     w.clock.set(new Date(T.getTime() + 30_000));
     await w.sweeper.sweep();
     expect(w.events(b, 'trial_expired')).toHaveLength(1);
     const waiting = snapshot(w);
-    await expect(w.sweeper.sweep()).resolves.toMatchObject({ companies: 1, outcomes: { nothing_due: 1 } });
+    // Nothing it holds can be put in force without a paid period: the sweeper does not come back for it.
+    await expect(w.sweeper.sweep()).resolves.toEqual({ companies: 0, outcomes: { busy: 0, nothing_due: 0, done: 0, failed: 0 } });
     expect(snapshot(w)).toBe(waiting);
     expect(w.request(store).status).toBe('scheduled');
+  });
+
+  it('two hundred businesses still waiting never crowd out one that is due: it is put in force by the first pass', async () => {
+    const w = makeTrialBillingWorld({ now: CLAIMED });
+    const waiting: Business[] = [];
+    for (let i = 0; i < 201; i += 1) {
+      const x = w.business({ name: `Waiting ${i}` });
+      await w.claim(x);
+      schedule(w, x, { kind: 'store', label: 'B', amount: 500, reference: `BK-W${i}` });
+      waiting.push(x);
+    }
+    // One more, approved during its trial: the one a pass must not miss. Its Owner does not look; its people cannot.
+    const due = w.business({ name: 'Due' });
+    await w.claim(due);
+    w.clock.set(new Date(CLAIMED.getTime() + HOUR));
+    await w.lifecycle.approve(w.uuid(due.companyId), { months: 1, reason: 'paid' }, CTX);
+    const store = schedule(w, due, { kind: 'store', label: 'B', amount: 500, reference: 'BK-D' });
+
+    w.clock.set(new Date(T.getTime() + 30_000));
+    await w.sweeper.sweep();
+    expect(w.request(store)).toMatchObject({ status: 'paid', effectiveAt: T });
+    expect(w.periods(due)[0].assessedTotal).toBe(1000);
+    // The waiting ones keep what they paid for, scheduled, and are not visited again while they wait.
+    expect(waiting.every((x) => w.requests(x)[0].status === 'scheduled')).toBe(true);
+    await w.sweeper.sweep();
+    expect(waiting.every((x) => w.events(x, 'trial_expired').length === 1)).toBe(true);
+    await expect(w.sweeper.sweep()).resolves.toMatchObject({ companies: 0 });
+  });
+
+  it('a closed business is never visited for what it paid for: its end is written down once, and that is all', async () => {
+    const { w, b, store } = await scheduledWorld();
+    await w.closeCompany(b);
+    w.clock.set(new Date(T.getTime() + 30_000));
+    await expect(w.sweeper.sweep()).resolves.toMatchObject({ companies: 1 });
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    expect(w.request(store).status).toBe('scheduled');
+    await expect(w.sweeper.sweep()).resolves.toMatchObject({ companies: 0 });
   });
 
   it('only companies with something due are visited, and only their rows change', async () => {
