@@ -4600,6 +4600,8 @@ enum SeatAllocationStatus {
   released
   /// Refused by an administrator, with a reason. Counts for nothing.
   refused
+  /// Payment confirmed during a running free trial; not in force and counted nowhere until effective_at (D176).
+  scheduled
 }
 
 /// A seat beyond a store's included one, or an additional store (0086).
@@ -4651,6 +4653,11 @@ model SeatAllocation {
   paymentId   Bytes?    @map("payment_id") @db.Binary(16)
   confirmedBy String?   @map("confirmed_by") @db.VarChar(160)
   confirmedAt DateTime? @map("confirmed_at") @db.DateTime(6)
+  /// 0097 (D176): a scheduled request's start — the free trial's end, copied at its confirmation — and, once it is in
+  /// force, the instant it took effect. Null for every request that took effect at its confirmation.
+  /// `ck_seat_alloc_scheduled` (SQL only): a scheduled row has this, and is a seat or a store. Its payment is held by
+  /// the confirmation, the status's one writer (MySQL refuses `payment_id` in a CHECK: its foreign key writes it).
+  effectiveAt DateTime? @map("effective_at") @db.DateTime(6)
   closedAt    DateTime? @map("closed_at") @db.DateTime(6)
   closedBy    String?   @map("closed_by") @db.VarChar(160)
   reason      String?   @db.VarChar(500)
