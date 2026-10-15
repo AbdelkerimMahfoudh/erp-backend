@@ -306,6 +306,13 @@ export type AppSetupStatus =
       delivery: SetupDelivery;
       sentTo: SetupChannel[];
       lastAttemptAt: string | null;
+      /**
+       * When the instructions last went out (C17): the newest attempt in which a provider accepted at least one channel,
+       * whatever happened since — whether or not its link still binds to the Owner as they are now. UTC ISO; null when
+       * no attempt was ever accepted. Beside `delivery` 'not_sent' it tells "never sent" from "sent, and no longer
+       * working" (`sentTo` empty) and from "sent, but the latest were not" (`sentTo` not empty).
+       */
+      lastSentAt: string | null;
       /** The business's configured IANA time zone, for display only; instants are UTC. */
       timeZone: string;
     };

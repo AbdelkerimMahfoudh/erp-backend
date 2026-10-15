@@ -103,7 +103,20 @@ describe('through the real Nest pipeline', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ state: 'trial_available', eligible: true, durationDays: 7, delivery: 'sent', sentTo: ['email'] });
     expect(Object.keys(res.body).sort()).toEqual(
-      ['delivery', 'destinations', 'durationDays', 'durationHours', 'eligible', 'lastAttemptAt', 'missingContacts', 'requiredContacts', 'sentTo', 'state', 'timeZone'].sort(),
+      [
+        'delivery',
+        'destinations',
+        'durationDays',
+        'durationHours',
+        'eligible',
+        'lastAttemptAt',
+        'lastSentAt',
+        'missingContacts',
+        'requiredContacts',
+        'sentTo',
+        'state',
+        'timeZone',
+      ].sort(),
     );
 
     caller = w.staff(shop, 'store_manager');

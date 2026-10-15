@@ -60,7 +60,6 @@ function emailedToken(w: TrialWorld): string {
 const verifiedNow = (w: TrialWorld, b: Business) => w.setup.onContactsVerified(b.companyId, b.ownerId);
 const actorOf = (b: Business) => `user:${binToUuid(b.ownerId)}`;
 
-
 describe('sent automatically once the contacts given at registration are verified', () => {
   it('email only: one email in the business’s language with the website link, one link, one attempt, one audit', async () => {
     const w = world();
@@ -765,6 +764,122 @@ describe('`sent` says where the message went — the Owner’s contacts as they 
   });
 });
 
+describe('`lastSentAt`: when the instructions last went out, whatever happened since (C17)', () => {
+  const HOUR_LATER = new Date(NOW.getTime() + HOUR);
+  const TWO_HOURS_LATER = new Date(NOW.getTime() + 2 * HOUR);
+
+  it('never accepted: null — nothing sent yet, waiting for a contact, or every attempt refused or unavailable', async () => {
+    const quiet = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const w = world();
+      expect(await w.setup.appStatus(w.business().owner)).toMatchObject({ delivery: 'not_sent', lastSentAt: null });
+      expect(await w.setup.appStatus(w.business({ contacts: 'both', verified: ['email'] }).owner)).toMatchObject({
+        delivery: 'waiting_for_contact',
+        lastSentAt: null,
+      });
+      const refused = world({ email: Object.assign(new TestEmailChannel(), { next: { status: 'failed', reason: 'rejected', detail: '422', provider: 'resend' } }) });
+      const a = refused.business();
+      await verifiedNow(refused, a);
+      expect(await refused.setup.appStatus(a.owner)).toMatchObject({ delivery: 'failed', lastAttemptAt: NOW.toISOString(), lastSentAt: null });
+      const off = world({ email: new DisabledEmailChannel(), whatsapp: new DisabledWhatsAppChannel() });
+      const b = off.business();
+      await verifiedNow(off, b);
+      expect(await off.setup.appStatus(b.owner)).toMatchObject({ delivery: 'unavailable', lastAttemptAt: NOW.toISOString(), lastSentAt: null });
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it('sent, and still working: the instant it was accepted', async () => {
+    const w = world();
+    const shop = w.business();
+    await verifiedNow(w, shop);
+    w.clock.set(HOUR_LATER);
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sent', sentTo: ['email'], lastSentAt: NOW.toISOString() });
+  });
+
+  it('sent, then the account changed: not_sent and sent to nobody now — but they were sent, and when', async () => {
+    const w = world();
+    const shop = w.business({ contacts: 'phone' });
+    await verifiedNow(w, shop);
+    w.clock.set(HOUR_LATER);
+    Object.assign(w.owner(shop), { phone: '+22249998877', phoneVerifiedAt: HOUR_LATER });
+    await verifiedNow(w, shop);
+    // The app's line: "were sent on {date}, but they no longer work because your account details have changed since".
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({
+      delivery: 'not_sent',
+      sentTo: [],
+      lastAttemptAt: NOW.toISOString(),
+      lastSentAt: NOW.toISOString(),
+    });
+  });
+
+  it('sent, then a later send failed: the earlier one is when they last went out', async () => {
+    const email = new TestEmailChannel();
+    const w = world({ email });
+    const shop = w.business();
+    await verifiedNow(w, shop);
+    w.clock.set(HOUR_LATER);
+    email.next = { status: 'failed', reason: 'rejected', detail: '422', provider: 'resend' };
+    const quiet = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      await w.setup.resend(shop.owner);
+    } finally {
+      quiet.mockRestore();
+    }
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({
+      delivery: 'failed',
+      lastAttemptAt: HOUR_LATER.toISOString(),
+      lastSentAt: NOW.toISOString(),
+    });
+  });
+
+  it('sent, then the latest send lost on the way: not_sent, still sent to the verified contact — and when', async () => {
+    jest.useFakeTimers(TIMERS_ONLY);
+    const quiet = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const email = new HangingEmailChannel();
+      const w = world({ email });
+      const shop = w.business();
+      const verified = verifiedNow(w, shop);
+      await email.called;
+      email.answer();
+      await verified;
+      await w.setup.idle();
+      expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sent', lastSentAt: NOW.toISOString() });
+
+      // The website asks again an hour later; the providers answer, but the attempt is never recorded.
+      w.clock.set(HOUR_LATER);
+      const resent = w.setup.resend(shop.owner);
+      await jest.advanceTimersByTimeAsync(SETUP_DELIVERY_WAIT_MS);
+      await resent;
+      w.db.$transaction = () => Promise.reject(new Error('connection lost'));
+      email.answer();
+      await w.setup.idle();
+      w.clock.set(TWO_HOURS_LATER);
+      // The app's line: "were sent to your verified contact on {date}, but the latest ones have not been sent".
+      expect(await w.setup.appStatus(shop.owner)).toMatchObject({
+        delivery: 'not_sent',
+        sentTo: ['email'],
+        lastAttemptAt: NOW.toISOString(),
+        lastSentAt: NOW.toISOString(),
+      });
+    } finally {
+      quiet.mockRestore();
+      jest.useRealTimers();
+    }
+  });
+
+  it('only the app’s status carries it — display data, no action — and the website’s setup is unchanged', async () => {
+    const w = world();
+    const shop = w.business();
+    await verifiedNow(w, shop);
+    const website = (await w.service.status(shop.owner)).setup!;
+    expect(Object.keys(website)).not.toContain('lastSentAt');
+    expect(website).toMatchObject({ delivery: 'sent', lastAttemptAt: NOW.toISOString() });
+  });
+});
+
 describe('the app is told where things stand, and nothing it could act on', () => {
   it('eligible: exactly the display fields — duration, contacts, masked destinations, delivery, the business’s zone', async () => {
     const w = world();
@@ -785,6 +900,7 @@ describe('the app is told where things stand, and nothing it could act on', () =
       delivery: 'sent',
       sentTo: ['email', 'whatsapp'],
       lastAttemptAt: NOW.toISOString(),
+      lastSentAt: NOW.toISOString(),
       timeZone: 'Asia/Dubai',
     });
     // No action data: nothing to resend, no time to ask again, no link, no token, no route, no website.
@@ -800,7 +916,7 @@ describe('the app is told where things stand, and nothing it could act on', () =
   ])('%s → %s', async (_name, delivery) => {
     const w = world();
     const shop = delivery === 'waiting_for_contact' ? w.business({ contacts: 'both', verified: ['email'] }) : w.business();
-    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery, lastAttemptAt: null, sentTo: [] });
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery, lastAttemptAt: null, lastSentAt: null, sentTo: [] });
   });
 
   it('a business that may not claim is told only its state — no card', async () => {

@@ -154,6 +154,7 @@ export class TrialSetupService implements OnApplicationShutdown {
       delivery: deliveryOf(facts, now),
       sentTo: sentTo(delivery.lastAccepted, facts.acceptedIsCurrent),
       lastAttemptAt: last[0]?.at.toISOString() ?? null,
+      lastSentAt: delivery.lastAccepted?.at.toISOString() ?? null,
       timeZone: this.entitlement.trialZone(who.companyId, row.timezone),
     };
   }
