@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { BillingService } from '../../billing/billing.service';
 import { EntitlementService } from '../../entitlement/entitlement.service';
+import { StaffInvitationService } from '../../staff/staff-invitation.service';
 import { binToUuid, newUuidV7Bin } from '../../common/utils/uuid.util';
 import type { Activity } from '../../entitlement/activity';
 import { PlatformAuditService } from '../platform-audit.service';
@@ -15,8 +16,8 @@ import { TRIAL_TERMS_VERSION } from '../trial/trial-rules';
 /**
  * Several businesses, their stores, people, subscriptions, billing periods, payments, seat and store requests and
  * free trial rows, held in memory — with the REAL `BillingService`, `SubscriptionRenewal`, `SeatAllocationService`,
- * `SubscriptionLifecycleService`, `StaffActivationService`, `TrialService`, `TrialEndRoll`, `TrialEndSweeper` and
- * `EntitlementService` running on top (D176, the add-ons of a free trial).
+ * `SubscriptionLifecycleService`, `StaffActivationService`, `StaffInvitationService`, `TrialService`, `TrialEndRoll`,
+ * `TrialEndSweeper` and `EntitlementService` running on top (D176, the add-ons of a free trial).
  *
  * The narrower worlds (billing-world, trial-world) each see one side: billing without trials, trials without money.
  * The add-on rules live where the two meet — a store paid for during a trial, put in force when it ends, raising the
@@ -34,7 +35,9 @@ import { TRIAL_TERMS_VERSION } from '../trial/trial-rules';
  *  - **the subscription row's lock** — `FOR UPDATE` waits while a test holds a company's row, `FOR UPDATE NOWAIT`
  *    fails at once with the P2010 / 3572 Prisma gives on MySQL;
  *  - **one transaction at a time, all or nothing** — `$transaction` runs its callbacks in turn (what the subscription
- *    lock gives every path that takes it) and a callback that throws leaves every table as it found it;
+ *    lock gives every path that takes it), each on its own client; a callback that throws undoes exactly what it
+ *    wrote through that client, newest first, while a write made outside it in the meantime (an autocommitted
+ *    statement on another connection: a refusal, an Owner's seat request) stands — as InnoDB would leave it;
  *  - **the clock** — one mutable instant for every service.
  */
 
@@ -96,6 +99,12 @@ const MODELS = [
 ] as const;
 type Model = (typeof MODELS)[number];
 type Tables = Record<Model, Row[]>;
+/** One write a transaction made: the row it replaced (null for an insert) and the row it wrote. */
+interface Undo {
+  model: Model;
+  before: Row | null;
+  after: Row;
+}
 
 /** What a created row holds before its data, per model: the columns' defaults. */
 function defaultsOf(model: Model, now: Date): Row {
@@ -310,7 +319,6 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     /** Throws from inside the next `openStoreTx`-style branch creation: a failure injected into an activation. */
     failBranchCreate: 0,
   };
-  let depth = 0;
 
   // ── the generic delegate ──────────────────────────────────────────────────
   function related(model: string, row: Row, key: string): Row | Row[] | null {
@@ -438,7 +446,11 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     }
   }
 
-  function delegate(model: Model): Row {
+  /**
+   * One model's delegate. `undo`, for a transaction's client: every row it inserts or replaces is noted, so a
+   * rollback takes back this transaction's writes and nobody else's.
+   */
+  function delegate(model: Model, undo: Undo[] | null = null): Row {
     return {
       findFirst: async (args: Row = {}) => {
         const r = query(model, t[model], args)[0];
@@ -469,7 +481,8 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
         checkRow(model, row);
         assertUnique(model, row, null);
         t[model].push(row);
-        if (model === 'subscriptionEvent' && hooks.onEvent) await hooks.onEvent(row, depth > 0);
+        undo?.push({ model, before: null, after: row });
+        if (model === 'subscriptionEvent' && hooks.onEvent) await hooks.onEvent(row, undo !== null);
         return project(model, row, args);
       },
       update: async (args: Row) => {
@@ -479,6 +492,7 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
         if ('updatedAt' in next) next.updatedAt = now;
         checkRow(model, next);
         assertUnique(model, next, t[model][index]);
+        undo?.push({ model, before: t[model][index], after: next });
         t[model][index] = next;
         return project(model, next, args);
       },
@@ -490,12 +504,23 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
           checkRow(model, next);
           return next;
         });
-        hits.forEach(({ i }, k) => {
+        hits.forEach(({ r, i }, k) => {
+          undo?.push({ model, before: r, after: nexts[k] });
           t[model][i] = nexts[k];
         });
         return { count: hits.length };
       },
     };
+  }
+
+  /** Take back one transaction's writes, newest first: each inserted row removed, each replaced row put back. */
+  function rollBack(undo: Undo[]): void {
+    for (const { model, before, after } of [...undo].reverse()) {
+      const index = t[model].indexOf(after);
+      if (index < 0) continue;
+      if (before === null) t[model].splice(index, 1);
+      else t[model][index] = before;
+    }
   }
 
   // ── raw SQL: the locks, the census, the read-back ────────────────────────
@@ -578,18 +603,15 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
   db.$transaction = async (fn: (tx: Row) => Promise<unknown>, options?: unknown) => {
     txOptions.push(options ?? null);
     const run = queue.then(async () => {
-      const saved = Object.fromEntries(MODELS.map((m) => [m, t[m].map((r) => ({ ...r }))])) as Tables;
-      depth += 1;
+      // Its own client, as Prisma's interactive transaction is: what it writes is noted, to be taken back on a throw.
+      const undo: Undo[] = [];
+      const tx: Row = Object.fromEntries(MODELS.map((m) => [m, delegate(m, undo)]));
+      tx.$queryRaw = queryRaw;
       try {
-        return await fn(db);
+        return await fn(tx);
       } catch (e) {
-        for (const m of MODELS) {
-          t[m].length = 0;
-          t[m].push(...saved[m]);
-        }
+        rollBack(undo);
         throw e;
-      } finally {
-        depth -= 1;
       }
     });
     queue = run.catch(() => undefined);
@@ -674,6 +696,25 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     return id;
   }
 
+  /**
+   * The Owner's Team screen at a business: adding and withdrawing accounts. No message channel is configured, so no
+   * code goes out (the person's proof is set on the row by the spec that needs it).
+   */
+  function staff(b: Business): StaffInvitationService {
+    return new StaffInvitationService(
+      db as never,
+      { companyId: () => b.companyId, requireUserId: () => b.ownerId } as never,
+      { recordTx: async () => undefined } as never,
+      { hash: async () => 'x' } as never,
+      { start: async () => ({ delivery: 'outbox' }) } as never,
+      { canDeliver: () => false } as never,
+      { peek: () => null } as never,
+      entitlement,
+      activation,
+      seats,
+    );
+  }
+
   const of = <M extends Model>(model: M, b: Business) => t[model].filter((r) => same(r.companyId, b.companyId));
   const uuid = (id: Buffer) => binToUuid(id);
 
@@ -714,6 +755,7 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     trial,
     business,
     person,
+    staff,
     /** The Owner claims the trial on the website, now. */
     claim: (b: Business, key = `claim-${binToUuid(b.companyId)}`) =>
       trial.claim({ companyId: b.companyId, userId: b.ownerId }, { idempotencyKey: key, termsVersion: TRIAL_TERMS_VERSION }),

@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
+import { SubscriptionRenewal } from '../billing/renewal';
 import { ALWAYS_ALLOWED } from '../entitlement/route-classification';
 import { CTX, DAY, HOUR, makeTrialBillingWorld, type Business, type TrialBillingWorld, type WorldOptions } from './__testing__/trial-billing-world';
 import { PlatformController } from './platform.controller';
@@ -88,6 +89,98 @@ describe('1. store requested during trial', () => {
     const scheduled = await askStore(w, b);
     expect(scheduled).toMatchObject({ created: false, allocation: { id: first.allocation.id, status: 'scheduled' } });
     expect(w.requests(b)).toHaveLength(1);
+  });
+});
+
+/** The person proves their contact (the code itself is the verification service's, not what is asked here). */
+const proves = (w: TrialBillingWorld, id: Buffer | string) => {
+  const row = w.t.user.find((u) => w.uuid(u.id) === (typeof id === 'string' ? id : w.uuid(id)))!;
+  row.emailVerifiedAt = w.clock.now();
+};
+/** Real instants apart: an invitation is stamped by the wall clock, and coverage follows the invitation order. */
+const aMomentLater = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+describe('2. paid seat requested during trial', () => {
+  it('a seat the website asks for, naming nobody: priced at 100, counted nowhere until the end — then held, and charged once', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    w.person(b, { name: 'Ali', stores: ['Main'], active: true });
+    const mayBefore = await w.entitlement.maySeat(b.companyId, [b.stores.Main]);
+    const r = await askSeat(w, b);
+    expect(r.created).toBe(true);
+    expect(r.allocation).toMatchObject({ kind: 'seat', status: 'pending_payment', monthlyAmount: 100, person: null });
+
+    await w.confirm(r.allocation.id, 100, { reference: 'BK-S' });
+    expect(w.request(r.allocation.id)).toMatchObject({ status: 'scheduled', effectiveAt: T });
+    const census = await w.entitlement.forCompany(b.companyId);
+    const may = await w.entitlement.maySeat(b.companyId, [b.stores.Main]);
+    expect(census.seatsByStore).toEqual([expect.objectContaining({ name: 'Main', paidSeats: 0 })]);
+    expect(may).toEqual(mayBefore);
+    expect(may.allowed).toBe(false);
+    expect(w.periods(b)[0]).toMatchObject({ assessedStaffFee: 0, assessedTotal: 500 });
+
+    w.clock.set(T);
+    const after = await w.entitlement.maySeat(b.companyId, [b.stores.Main]);
+    expect(after).toMatchObject({ allowed: true, stores: [expect.objectContaining({ name: 'Main', paidSeats: 1 })] });
+    expect(w.periods(b)[0]).toMatchObject({ assessedStaffFee: 100, assessedTotal: 600 });
+    expect(w.payments(b)).toHaveLength(1);
+  });
+
+  it('a person added at a full store: one request, priced; added again — before payment and once paid — the same one', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    w.person(b, { name: 'Ali', stores: ['Main'], active: true });
+    const team = w.staff(b);
+    const sara = { name: 'Sara', email: 'sara@shop.test', branchIds: [w.uuid(b.stores.Main)], role: 'store_employee' as const };
+    const first = await team.invite(sara);
+    expect(first).toMatchObject({ created: true, seats: [{ store: 'Main', state: 'awaiting_payment' }] });
+    expect(w.requests(b)).toEqual([expect.objectContaining({ kind: 'seat', status: 'pending_payment', monthlyAmount: 100 })]);
+
+    const again = await team.invite(sara);
+    expect(again).toMatchObject({ created: false, user: { id: first.user.id } });
+    expect(w.requests(b)).toHaveLength(1);
+
+    await w.confirm(w.uuid(w.requests(b)[0].id), 100, { reference: 'BK-S' });
+    const held = await team.invite(sara);
+    // Paid during the trial: hers, shown as held, in force when the trial ends — never asked for again.
+    expect(held).toMatchObject({ created: false, seats: [{ store: 'Main', state: 'held' }], activation: { pending: ['email_verification', 'seat_scheduled'] } });
+    proves(w, first.user.id);
+    await expect(w.activation.tryActivate(Buffer.from(first.user.id.replace(/-/g, ''), 'hex'), 'person')).resolves.toMatchObject({ activated: false, pending: ['seat_scheduled'] });
+    expect(w.requests(b)).toHaveLength(1);
+    expect(w.payments(b)).toHaveLength(1);
+  });
+
+  it('a seat bought naming nobody seats the first person added after it — no second request — and the next one is priced', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    w.person(b, { name: 'Ali', stores: ['Main'], active: true });
+    const seat = (await askSeat(w, b)).allocation.id;
+    await w.confirm(seat, 100, { reference: 'BK-S' });
+
+    const team = w.staff(b);
+    const main = [w.uuid(b.stores.Main)];
+    const tom = await team.invite({ name: 'Tom', email: 'tom@shop.test', branchIds: main, role: 'store_employee' });
+    await aMomentLater();
+    const uma = await team.invite({ name: 'Uma', email: 'uma@shop.test', branchIds: main, role: 'store_employee' });
+    const asked = (id: string) => w.requests(b).filter((r) => r.userId && w.uuid(r.userId) === id);
+    // Tom is covered by the seat already bought; Uma, invited after him, is priced one of her own.
+    expect(asked(tom.user.id)).toEqual([]);
+    expect(tom.activation.pending).toEqual(['email_verification', 'seat_scheduled']);
+    expect(asked(uma.user.id)).toEqual([expect.objectContaining({ status: 'pending_payment', monthlyAmount: 100 })]);
+
+    proves(w, tom.user.id);
+    proves(w, uma.user.id);
+    const tomId = Buffer.from(tom.user.id.replace(/-/g, ''), 'hex');
+    const umaId = Buffer.from(uma.user.id.replace(/-/g, ''), 'hex');
+    await expect(w.activation.tryActivate(tomId, 'person')).resolves.toEqual({ activated: false, alreadyActive: false, pending: ['seat_scheduled'] });
+    await expect(w.activation.tryActivate(umaId, 'person')).resolves.toEqual({ activated: false, alreadyActive: false, pending: ['seat_payment'] });
+    expect(w.requests(b)).toHaveLength(2);
+
+    w.clock.set(T);
+    await w.sweeper.sweep();
+    expect(w.user(tomId)).toMatchObject({ isActive: true, activatedAt: T });
+    expect(w.events(b, 'staff_activated').map((e) => e.note)).toEqual([expect.stringMatching(/^Tom activated at Main/)]);
+    expect(w.user(umaId).isActive).toBe(false);
+    expect(asked(uma.user.id)[0].status).toBe('pending_payment');
+    expect(w.periods(b)[0]).toMatchObject({ assessedStaffFee: 100, assessedTotal: 600 });
+    expect(w.requests(b)).toHaveLength(2);
   });
 });
 
@@ -222,17 +315,192 @@ describe('6. exact activation at trial expiry', () => {
 
   it('the store cannot be created: the record stands, nothing is half-done, and the next attempt succeeds', async () => {
     const { w, b } = await trialWorld({ approve: true });
-    const { store } = await scheduledStoreAndSeat(w, b);
+    const { person, store, seat } = await scheduledStoreAndSeat(w, b);
+    const versionBefore = w.subscription(b).version;
     w.clock.set(T);
     w.hooks.failBranchCreate = 1;
     await w.entitlement.forCompany(b.companyId);
+    // Tx A committed; Tx B rolled back whole — the seat beside the store included.
     expect(w.claimOf(b)!.expiryRecordedAt).toEqual(T);
-    expect(w.request(store).status).toBe('scheduled');
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['scheduled', 'scheduled']);
     expect(w.periods(b)[0].assessedTotal).toBe(500);
     expect(w.branch(b, 'B')).toBeNull();
+    expect(w.subscription(b).version).toBe(versionBefore);
+    expect(w.user(person).isActive).toBe(false);
+    expect(w.audits(b).filter((a) => /\.activate$/.test(a.action))).toEqual([]);
+
     await w.trialEnd.applyIfDue(b.companyId);
-    expect(w.request(store).status).toBe('paid');
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['paid', 'paid']);
     expect(w.periods(b)[0].assessedTotal).toBe(1100);
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+  });
+});
+
+describe('7. one charge only', () => {
+  const grant = (w: TrialBillingWorld, b: Business) => w.lifecycle.activateByGrant(w.uuid(b.companyId), { days: 30, reason: 'pilot shop' }, CTX);
+
+  /** Everything the shop could be charged by, as it stands. */
+  const ledger = (w: TrialBillingWorld, b: Business) =>
+    JSON.stringify({
+      periods: w.periods(b).map((p) => [p.periodStart.toISOString(), p.periodEnd?.toISOString() ?? null, p.assessedTotal, p.assessedBranchFee, p.assessedStaffFee]),
+      payments: w.payments(b).map((p) => p.amount.toString()),
+      stores: w.branches(b).map((x) => x.name),
+      requests: w.requests(b).map((r) => [r.status, r.version]),
+      activations: w.audits(b).filter((a) => /\.activate$/.test(a.action)).length,
+    });
+
+  /** Store B (500) and Sara's seat at Main (100) paid for during the trial — in the order each case says — then the end. */
+  const cases: { order: string; run: (w: TrialBillingWorld, b: Business) => Promise<void>; earlier: number[] }[] = [
+    {
+      order: 'approved, then both confirmed during the trial',
+      run: async (w, b) => {
+        await approve(w, b);
+        await scheduledStoreAndSeat(w, b);
+      },
+      earlier: [],
+    },
+    {
+      order: 'both confirmed, then approved during the trial',
+      run: async (w, b) => {
+        await scheduledStoreAndSeat(w, b);
+        await approve(w, b);
+      },
+      earlier: [],
+    },
+    {
+      order: 'both confirmed between the approval’s decision and the opening of its first period',
+      run: async (w, b) => {
+        let between = false;
+        w.hooks.onEvent = async (event) => {
+          if (event.kind !== 'approved' || between) return;
+          between = true;
+          expect(w.periods(b)).toEqual([]);
+          await scheduledStoreAndSeat(w, b);
+        };
+        await approve(w, b);
+        w.hooks.onEvent = null;
+        expect(between).toBe(true);
+      },
+      earlier: [],
+    },
+    {
+      order: 'both confirmed during the trial, approved only a day after it ended',
+      run: async (w, b) => {
+        await scheduledStoreAndSeat(w, b);
+        w.clock.set(new Date(T.getTime() + HOUR));
+        await w.entitlement.forCompany(b.companyId);
+        // Ended, recorded — and nothing in force without a paid period.
+        expect(w.claimOf(b)!.expiryRecordedAt).not.toBeNull();
+        expect(w.branch(b, 'B')).toBeNull();
+        w.clock.set(new Date(T.getTime() + DAY));
+        await approve(w, b);
+        expect(w.periods(b)[0].periodStart).toEqual(new Date(T.getTime() + DAY));
+      },
+      earlier: [],
+    },
+    {
+      order: 'granted during the trial, then both confirmed',
+      run: async (w, b) => {
+        await grant(w, b);
+        await scheduledStoreAndSeat(w, b);
+      },
+      earlier: [],
+    },
+    {
+      order: 'approved, both confirmed, then granted during the trial — the grant’s period is the one they join',
+      run: async (w, b) => {
+        await approve(w, b);
+        await scheduledStoreAndSeat(w, b);
+        await grant(w, b);
+      },
+      // The approval's first period, closed at the trial's end by the grant before it began (pre-existing, not an add-on's).
+      earlier: [500],
+    },
+  ];
+
+  for (const { order, run, earlier } of cases) {
+    it(`${order}: each add-on raises the period it joins once — 500 and 100 — paid once, and nothing again on any re-run`, async () => {
+      const { w, b } = await trialWorld();
+      await run(w, b);
+      w.clock.set(new Date(Math.max(w.clock.now().getTime(), T.getTime()) + 5 * 60_000));
+      await w.entitlement.forCompany(b.companyId);
+      await w.sweeper.sweep();
+
+      const joined = w.periods(b).at(-1)!;
+      expect(joined).toMatchObject({ assessedTotal: 1100, assessedBranchFee: 1000, assessedStaffFee: 100, activeBranchCount: 2 });
+      expect(w.periods(b).slice(0, -1).map((p) => p.assessedTotal)).toEqual(earlier);
+      expect(w.payments(b).map((p) => p.amount.toString()).sort()).toEqual(['100', '500']);
+      expect(w.branches(b).map((x) => x.name)).toEqual(['Main', 'B']);
+      // Requests asked at the same instant are put in force in id order; which goes first changes no figure.
+      const raised = w.audits(b)
+        .filter((a) => /\.activate$/.test(a.action))
+        .map((a) => [a.action, a.afterJson.raisedBy, a.afterJson.periodId])
+        .sort((x, y) => String(x[0]).localeCompare(String(y[0])));
+      expect(raised).toEqual([
+        ['seat.activate', 100, w.uuid(joined.id)],
+        ['store.activate', 500, w.uuid(joined.id)],
+      ]);
+      expect(w.requests(b).map((r) => r.status)).toEqual(['paid', 'paid']);
+      // Each in force from the start of the period it joined: the trial's end — or, approved only after it, the
+      // approval (the period opened there at the base, and each add-on raised it by its own fee).
+      expect(w.requests(b).map((r) => r.effectiveAt)).toEqual([joined.periodStart, joined.periodStart]);
+      const opened = w.uuid(w.branch(b, 'B')!.id);
+      expect(Object.keys(joined.assessedActivityFeeByBranch).sort()).toEqual([w.uuid(b.stores.Main), opened].sort());
+      for (const p of w.periods(b).slice(0, -1)) expect(Object.keys(p.assessedActivityFeeByBranch ?? {})).not.toContain(opened);
+
+      // Whoever looks again — the lazy path, the sweeper, a renewal check, a re-assessment, an administrator's
+      // trigger — finds nothing more to charge.
+      const settled = ledger(w, b);
+      await w.trialEnd.applyIfDue(b.companyId);
+      await w.trialEnd.applyIfDue(b.companyId, 'ops@example.test');
+      await new SubscriptionRenewal(w.db as never, w.billing, w.clock).rollIfDue(b.companyId);
+      await w.billing.assessNow(b.companyId);
+      await w.billing.assessNow(b.companyId);
+      await w.sweeper.sweep();
+      await w.entitlement.forCompany(b.companyId);
+      w.clock.advance(2 * 60_000);
+      await w.entitlement.maySeat(b.companyId);
+      expect(ledger(w, b)).toBe(settled);
+    });
+  }
+
+  it('R1, a store paid for before the approval: the first period opens at 500, not 1000; at the end it is 1000 — never 1500', async () => {
+    const { w, b } = await trialWorld();
+    const store = (await askStore(w, b)).allocation.id;
+    await w.confirm(store, 500, { reference: 'BK-1' });
+    await approve(w, b);
+    expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([500]);
+    w.clock.set(T);
+    await w.entitlement.forCompany(b.companyId);
+    expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([1000]);
+    expect(w.payments(b).map((p) => p.amount.toString())).toEqual(['500']);
+  });
+
+  it('R1, approved first: the confirmation raises nothing and opens nothing during the trial; at the end 1000', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const store = (await askStore(w, b)).allocation.id;
+    await w.confirm(store, 500, { reference: 'BK-1' });
+    expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([500]);
+    expect(w.branches(b)).toHaveLength(1);
+    w.clock.set(T);
+    await w.entitlement.forCompany(b.companyId);
+    expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([1000]);
+  });
+
+  it('R1, the seat: the first period’s staff fee is 0 while the trial runs and 100 from its end — in either order', async () => {
+    for (const approvedFirst of [true, false]) {
+      const { w, b } = await trialWorld({ approve: approvedFirst });
+      const sara = w.person(b, { name: 'Sara', stores: ['Main'], verified: true });
+      w.person(b, { name: 'Ali', stores: ['Main'], active: true });
+      const seat = (await askSeat(w, b, sara)).allocation.id;
+      await w.confirm(seat, 100, { reference: 'BK-2' });
+      if (!approvedFirst) await approve(w, b);
+      expect(w.periods(b).map((p) => [p.assessedStaffFee, p.assessedTotal])).toEqual([[0, 500]]);
+      w.clock.set(T);
+      await w.entitlement.forCompany(b.companyId);
+      expect(w.periods(b).map((p) => [p.assessedStaffFee, p.assessedTotal])).toEqual([[100, 600]]);
+    }
   });
 });
 
@@ -277,6 +545,83 @@ describe('8. duplicate payment confirmation', () => {
   });
 });
 
+describe('9. concurrent expiry and payment confirmation', () => {
+  it('the row held by another writer at the end: every evaluation answers at once, nothing waits; released, it is done once', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    await scheduledStoreAndSeat(w, b);
+    w.clock.set(T);
+    const release = w.hold(b);
+    const from = w.locks.length;
+    // Twelve requests evaluating the business while the row is held: none waits for it (a wait would never end here).
+    const answers = await Promise.all(Array.from({ length: 12 }, () => w.entitlement.forCompany(b.companyId)));
+    expect(answers.every((e) => e.state === 'active')).toBe(true);
+    const asked = w.locks.slice(from);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((l) => l.nowait && l.outcome === 'busy')).toBe(true);
+    expect(w.claimOf(b)!.expiryRecordedAt).toBeNull();
+    expect(w.requests(b).map((r) => r.status)).toEqual(['scheduled', 'scheduled']);
+    // The administrator's trigger and the sweeper do not wait either.
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('busy');
+    await expect(w.sweeper.sweep()).resolves.toMatchObject({ outcomes: { busy: 1 } });
+
+    release();
+    w.clock.advance(1_000);
+    await w.entitlement.forCompany(b.companyId);
+    expect(w.claimOf(b)!.expiryRecordedAt).toEqual(new Date(T.getTime() + 1_000));
+    expect(w.requests(b).map((r) => r.status)).toEqual(['paid', 'paid']);
+    expect(w.periods(b)[0].assessedTotal).toBe(1100);
+    await w.sweeper.sweep();
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    expect(w.audits(b).filter((a) => /\.activate$/.test(a.action))).toHaveLength(2);
+  });
+
+  it('confirmed a millisecond before the end, evaluated at the end and beside it: scheduled, then put in force once', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const store = (await askStore(w, b)).allocation.id;
+    w.clock.set(new Date(T.getTime() - 1));
+    const [confirmed] = await Promise.all([w.confirm(store, 500, { reference: 'BK-1' }), w.entitlement.forCompany(b.companyId)]);
+    expect(confirmed.allocation).toMatchObject({ status: 'scheduled', effectiveAt: T.toISOString() });
+    w.clock.set(T);
+    await Promise.all([w.entitlement.forCompany(b.companyId), w.sweeper.sweep(), w.trialEnd.applyIfDue(b.companyId)]);
+    expect(w.request(store)).toMatchObject({ status: 'paid', effectiveAt: T });
+    expect(w.branches(b).filter((x) => x.name === 'B')).toHaveLength(1);
+    expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([1000]);
+    expect(w.audits(b, 'store.activate')).toHaveLength(1);
+  });
+
+  for (const [label, at] of [
+    ['exactly at the end', T],
+    ['a millisecond after it', new Date(T.getTime() + 1)],
+  ] as const) {
+    it(`confirmed ${label} with the first paid period in force: in force at once, the period raised once — never scheduled`, async () => {
+      const { w, b } = await trialWorld({ approve: true });
+      const store = (await askStore(w, b)).allocation.id;
+      w.clock.set(at);
+      const [r] = await Promise.all([w.confirm(store, 500, { reference: 'BK-1' }), w.entitlement.forCompany(b.companyId)]);
+      expect(r.allocation).toMatchObject({ status: 'paid', effectiveAt: null, activation: null, confirmedAt: at.toISOString() });
+      expect(w.branches(b).filter((x) => x.name === 'B')).toHaveLength(1);
+      expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([1000]);
+      await w.entitlement.forCompany(b.companyId);
+      await w.sweeper.sweep();
+      expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([1000]);
+      // The expiry was written down once, by whichever looked first.
+      expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    });
+  }
+
+  it('confirmed a millisecond after the end with no paid period: refused with paid_period_not_started — no payment, nothing changed', async () => {
+    const { w, b } = await trialWorld();
+    const store = (await askStore(w, b)).allocation.id;
+    w.clock.set(new Date(T.getTime() + 1));
+    const refused = await w.confirm(store, 500, { reference: 'BK-1' }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ConflictException);
+    expect((refused as ConflictException).getResponse()).toMatchObject({ code: 'paid_period_not_started' });
+    expect(w.payments(b)).toEqual([]);
+    expect(w.request(store)).toMatchObject({ status: 'pending_payment', version: 0, effectiveAt: null });
+    expect(w.branches(b)).toHaveLength(1);
+  });
+});
+
 describe('10. unpaid request at expiry', () => {
   it('approved business: at the end the unpaid request stays waiting; paid afterwards it takes effect at once, charged once', async () => {
     const { w, b } = await trialWorld({ approve: true });
@@ -312,6 +657,125 @@ describe('10. unpaid request at expiry', () => {
     const r = await w.confirm(allocation.id, 500, { reference: 'BK-late' });
     expect(r.allocation).toMatchObject({ status: 'paid', effectiveAt: null });
     expect(w.periods(b)).toHaveLength(1);
+    expect(w.periods(b)[0].assessedTotal).toBe(1000);
+  });
+});
+
+describe('11. cancelled or refused request', () => {
+  const reason = { reason: 'not wanted after all' };
+  const refuseOf = (w: TrialBillingWorld, id: string, expectedVersion?: number) =>
+    w.seats.refuse(Buffer.from(id.replace(/-/g, ''), 'hex'), { ...reason, expectedVersion }, CTX);
+  const releaseOf = (w: TrialBillingWorld, id: string) => w.seats.release(Buffer.from(id.replace(/-/g, ''), 'hex'), reason, CTX);
+  const withdrawOf = (w: TrialBillingWorld, b: Business, id: string) =>
+    w.seats.withdraw(b.companyId, Buffer.from(id.replace(/-/g, ''), 'hex'), OWNER);
+
+  it('before payment, during the trial: withdrawn, refused, or the person’s account withdrawn — nothing paid, opened, counted or charged', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    w.person(b, { name: 'Ali', stores: ['Main'], active: true });
+    const store = (await askStore(w, b)).allocation.id;
+    const seat = (await askSeat(w, b)).allocation.id;
+    const sara = await w.staff(b).invite({ name: 'Sara', email: 'sara@shop.test', branchIds: [w.uuid(b.stores.Main)], role: 'store_employee' });
+    const saras = w.uuid(w.requests(b).find((r) => r.userId && w.uuid(r.userId) === sara.user.id)!.id);
+
+    await expect(withdrawOf(w, b, store)).resolves.toMatchObject({ applied: true, allocation: { status: 'released' } });
+    await expect(refuseOf(w, seat)).resolves.toMatchObject({ applied: true, allocation: { status: 'refused' } });
+    await expect(w.staff(b).cancel(sara.user.id)).resolves.toEqual({ cancelled: true });
+    expect([w.request(store).status, w.request(seat).status, w.request(saras).status]).toEqual(['released', 'refused', 'released']);
+
+    // A refused request is not paid for afterwards.
+    const late = await w.confirm(seat, 100, { reference: 'BK-9' }).catch((e: unknown) => e);
+    expect(late).toBeInstanceOf(BadRequestException);
+    w.clock.set(T);
+    await w.entitlement.forCompany(b.companyId);
+    await w.sweeper.sweep();
+    expect(w.payments(b)).toEqual([]);
+    expect(w.branches(b).map((x) => x.name)).toEqual(['Main']);
+    expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([500]);
+    expect(w.audits(b).filter((a) => /\.activate$/.test(a.action))).toEqual([]);
+  });
+
+  it('once scheduled: it cannot be withdrawn, refused or released — paid is paid — and it is put in force at the end', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const { store, seat } = await scheduledStoreAndSeat(w, b);
+    const snapshot = () => JSON.stringify([w.request(store), w.request(seat), w.subscription(b).version]);
+    const before = snapshot();
+
+    for (const id of [store, seat]) {
+      await expect(withdrawOf(w, b, id)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(refuseOf(w, id)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(releaseOf(w, id)).rejects.toBeInstanceOf(BadRequestException);
+    }
+    expect(snapshot()).toBe(before);
+
+    w.clock.set(T);
+    await w.entitlement.forCompany(b.companyId);
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['paid', 'paid']);
+    expect(w.periods(b)[0].assessedTotal).toBe(1100);
+  });
+
+  it('the account of a person whose seat was paid during the trial is withdrawn: the seat stays paid, and is the store’s at the end', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    w.person(b, { name: 'Ali', stores: ['Main'], active: true });
+    const team = w.staff(b);
+    const main = [w.uuid(b.stores.Main)];
+    const sara = await team.invite({ name: 'Sara', email: 'sara@shop.test', branchIds: main, role: 'store_employee' });
+    const seat = w.uuid(w.requests(b)[0].id);
+    await w.confirm(seat, 100, { reference: 'BK-S' });
+    await team.cancel(sara.user.id);
+    expect(w.request(seat).status).toBe('scheduled');
+
+    // Nobody holds it now: the next person added there is seated by it, not priced again.
+    await aMomentLater();
+    const tom = await team.invite({ name: 'Tom', email: 'tom@shop.test', branchIds: main, role: 'store_employee' });
+    expect(w.requests(b)).toHaveLength(1);
+    proves(w, tom.user.id);
+    w.clock.set(T);
+    await w.sweeper.sweep();
+    expect(w.request(seat).status).toBe('paid');
+    expect(w.user(Buffer.from(tom.user.id.replace(/-/g, ''), 'hex'))).toMatchObject({ isActive: true, activatedAt: T });
+    expect(w.periods(b)[0]).toMatchObject({ assessedStaffFee: 100, assessedTotal: 600 });
+  });
+
+  for (const [who, closes, closed] of [
+    ['refused by the Super Admin', (w: TrialBillingWorld, _b: Business, id: string) => refuseOf(w, id, 0), 'refused'],
+    ['withdrawn by the Owner', (w: TrialBillingWorld, b: Business, id: string) => withdrawOf(w, b, id), 'released'],
+  ] as const) {
+    it(`${who} while the confirmation holds the lock: the closing stands, the confirmation is refused and its payment taken back`, async () => {
+      const { w, b } = await trialWorld({ approve: true });
+      const store = (await askStore(w, b)).allocation.id;
+      let closing: Promise<unknown> | null = null;
+      // Neither takes the subscription lock to close a request: it lands while the confirmation is deciding.
+      w.hooks.onLock = async (_company, nowait) => {
+        if (nowait || closing) return;
+        closing = closes(w, b, store);
+        await closing;
+      };
+      const confirmed = await w.confirm(store, 500, { reference: 'BK-1', expectedVersion: 0 }).catch((e: unknown) => e);
+      w.hooks.onLock = null;
+      await expect(closing).resolves.toMatchObject({ applied: true, allocation: { status: closed } });
+      expect(confirmed).toBeInstanceOf(ConflictException);
+      expect((confirmed as ConflictException).getResponse()).toMatchObject({ code: 'seat_request_changed' });
+      expect(w.request(store)).toMatchObject({ status: closed, version: 1, paymentId: null, effectiveAt: null });
+      expect(w.payments(b)).toEqual([]);
+      w.clock.set(T);
+      await w.sweeper.sweep();
+      expect(w.branches(b).map((x) => x.name)).toEqual(['Main']);
+      expect(w.periods(b)[0].assessedTotal).toBe(500);
+    });
+  }
+
+  it('confirmed first, then refused or withdrawn: the closing is refused — paid is paid — and the request opens at the end', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const store = (await askStore(w, b)).allocation.id;
+    await w.confirm(store, 500, { reference: 'BK-1', expectedVersion: 0 });
+    const stale = await refuseOf(w, store, 0).catch((e: unknown) => e);
+    expect((stale as ConflictException).getResponse()).toMatchObject({ code: 'seat_request_changed' });
+    await expect(withdrawOf(w, b, store)).rejects.toBeInstanceOf(BadRequestException);
+    expect(w.request(store)).toMatchObject({ status: 'scheduled', version: 1 });
+    expect(w.payments(b)).toHaveLength(1);
+    w.clock.set(T);
+    await w.sweeper.sweep();
+    expect(w.request(store).status).toBe('paid');
     expect(w.periods(b)[0].assessedTotal).toBe(1000);
   });
 });
