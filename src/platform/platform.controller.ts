@@ -85,6 +85,24 @@ import { trialFactsOf } from './trial/trial-rules';
  */
 export const PUBLIC_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
+/** A step of a business registering itself, as both doors expose it. */
+export type RegistrationStep = 'register' | 'verify-start' | 'verify-confirm';
+
+/**
+ * The registration's limit, per step and per address, whichever door a request comes through (C15; review finding
+ * R2-2). The throttler keys a limit by controller and handler, so `platform/register*` and `auth/register*` each kept
+ * their own — one address got twice PUBLIC_THROTTLE, for every code it could have sent. Keyed by the step instead,
+ * the two doors spend one budget.
+ */
+export function registrationThrottle(step: RegistrationStep) {
+  return {
+    default: {
+      ...PUBLIC_THROTTLE.default,
+      generateKey: (_context: unknown, tracker: string, throttler: string) => `registration-${step}-${throttler}-${tracker}`,
+    },
+  };
+}
+
 /** The free trial's facts as a company row carries them (0095) — what the console's states are computed with. */
 const TRIAL_FACTS = {
   trialEligibility: { select: { closedAt: true } },
@@ -233,7 +251,7 @@ export class PlatformController {
    */
 
   @Public()
-  @Throttle(PUBLIC_THROTTLE)
+  @Throttle(registrationThrottle('register'))
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   async register(@Body() dto: RegisterDto) {
@@ -244,7 +262,7 @@ export class PlatformController {
 
   /** Send the code for THIS registration, and bind the challenge to it. */
   @Public()
-  @Throttle(PUBLIC_THROTTLE)
+  @Throttle(registrationThrottle('verify-start'))
   @Post('register/verify/start')
   @HttpCode(HttpStatus.OK)
   async continueStart(@Body() dto: ContinueStartDto) {
@@ -253,7 +271,7 @@ export class PlatformController {
 
   /** Prove the code and finish, receiving one ordinary Owner session. */
   @Public()
-  @Throttle(PUBLIC_THROTTLE)
+  @Throttle(registrationThrottle('verify-confirm'))
   @Post('register/verify/confirm')
   @HttpCode(HttpStatus.OK)
   async continueConfirm(@Body() dto: ContinueConfirmDto, @Req() req: Request) {
