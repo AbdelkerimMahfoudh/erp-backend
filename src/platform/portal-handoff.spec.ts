@@ -1,4 +1,9 @@
+import 'reflect-metadata';
+import { VersioningType } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import { OtpPurpose } from '@prisma/client';
+import request from 'supertest';
+import { PlatformController } from './platform.controller';
 import { PortalHandoffService, HANDOFF_TTL_SECONDS } from './portal-handoff.service';
 import { PORTAL_SESSION_COOKIE, readCookie } from '../common/http/cookies';
 import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
@@ -279,6 +284,43 @@ describe('exchanging a portal handoff', () => {
     expect(w.prisma.subscription).toBeUndefined();
     expect(w.prisma.subscriptionPayment).toBeUndefined();
     expect(w.prisma.subscriptionEvent).toBeUndefined();
+  });
+});
+
+describe('the exchange route, whatever the query parser makes of `t`', () => {
+  it('a ticket that is not one string — ?t[]=, ?t[0]=, ?t[a]= — fails like any other: never a server error, nothing spent', async () => {
+    const w = makeWorld();
+    const { companyId, userId } = addOwner(w);
+    const { token } = await w.service.issue(companyId, userId);
+    const moduleRef = await Test.createTestingModule({ controllers: [PlatformController] })
+      .useMocker((dependency) => (dependency === PortalHandoffService ? w.service : {}))
+      .compile();
+    const app = moduleRef.createNestApplication({ logger: false });
+    app.setGlobalPrefix('api');
+    app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+    await app.init();
+    const exchange = (query: string) => request(app.getHttpServer()).get(`/api/v1/platform/portal-session?${query}`);
+
+    try {
+      // An array or an object reached the ticket's hash and answered 500 (review finding R3-3, C16).
+      for (const query of [`t[]=${token}`, `t[0]=${token}`, `t%5B0%5D=${token}`, `t[a]=${token}`, `t=${token}&t=${token}`]) {
+        const res = await exchange(query);
+        expect({ query, status: res.status, location: res.headers.location, cookie: res.headers['set-cookie'] }).toEqual({
+          query,
+          status: 302,
+          location: '/account?handoff=failed',
+          cookie: undefined,
+        });
+        expect(res.headers['referrer-policy']).toBe('no-referrer');
+      }
+      // Nothing was spent: the ticket, sent as itself, still opens the portal — once.
+      expect(w.sessions).toHaveLength(0);
+      const res = await exchange(`t=${token}`);
+      expect([res.status, res.headers.location]).toEqual([302, '/account?welcome=1']);
+      expect(w.sessions).toHaveLength(1);
+    } finally {
+      await app.close();
+    }
   });
 });
 

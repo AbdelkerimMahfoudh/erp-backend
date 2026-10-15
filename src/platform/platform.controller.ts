@@ -1096,7 +1096,7 @@ export class PlatformController {
   @Public()
   @Get('portal-session')
   async exchangePortalHandoff(
-    @Query('t') token: string | undefined,
+    @Query('t') token: unknown,
     @Req() req: Request,
     @Res() res: Response,
   ) {
@@ -1107,7 +1107,12 @@ export class PlatformController {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Cache-Control', 'no-store');
 
-    const result = await this.handoff.exchange(token ?? '', {
+    /*
+     * A ticket is one string. The query parser makes `?t[]=…` an array and
+     * `?t[a]=…` an object: either is a ticket that does not work, answered like
+     * every other — never a server error (C16).
+     */
+    const result = await this.handoff.exchange(typeof token === 'string' ? token : '', {
       ip: req.ip,
       userAgent: req.headers['user-agent'],
     });
