@@ -88,8 +88,9 @@ export interface DeliveryFacts {
   /** The newest link issued and whether its attempt is recorded yet; null when none was ever issued. */
   newestLink: { issuedAt: Date; recorded: boolean } | null;
   /**
-   * The last accepted attempt's link is still bound to the Owner as they are now (`trial-link.stillBound`): the
-   * contacts it went to are the Owner's contacts today, and the link it carried still works for them.
+   * The last accepted attempt's link is still bound to the Owner it was sent to, as that person is now
+   * (`trial-link.stillBound`): the contacts it went to are that Owner's contacts today, and the link it carried still
+   * works for them — whichever Owner of the business reads the status.
    */
   acceptedIsCurrent: boolean;
 }

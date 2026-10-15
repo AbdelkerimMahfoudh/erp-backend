@@ -141,7 +141,7 @@ export class TrialSetupService implements OnApplicationShutdown {
     if (state !== 'trial_available' || !eligibility || !mayClaimNow(row, now)) return { state, eligible: false };
 
     const missing = missingContacts(eligibility.registrationMethod, owner);
-    const [last, delivery] = await Promise.all([this.attempts(who.companyId, 1), this.deliveryFacts(who, missing)]);
+    const [last, delivery] = await Promise.all([this.attempts(who.companyId, 1), this.deliveryFacts(who.companyId, missing)]);
     const facts = { ...delivery, last: last[0] ?? null };
     return {
       state,
@@ -166,7 +166,7 @@ export class TrialSetupService implements OnApplicationShutdown {
     const missing = missingContacts(method, owner);
     const [history, delivery, recent, inFlight] = await Promise.all([
       this.attempts(who.companyId, SETUP_HISTORY_SIZE),
-      this.deliveryFacts(who, missing),
+      this.deliveryFacts(who.companyId, missing),
       this.recentAttempts(this.prisma, who.companyId, now),
       this.linkInFlight(this.prisma, who.companyId, now),
     ]);
@@ -519,27 +519,35 @@ export class TrialSetupService implements OnApplicationShutdown {
   /**
    * What the status is decided from besides the last attempt, which each reader takes from the list it reads anyway
    * (C1, C2): whether the automatic attempt is recorded; the newest link, and whether its attempt is in yet; and the
-   * newest accepted attempt — what `sentTo` names — with whether its link still binds to this Owner as they are now.
+   * newest accepted attempt — what `sentTo` names — with whether its link still binds to the Owner it was sent to, as
+   * that person is now. The link's Owner, not the reader: a second Owner of the business reads the same status
+   * (review finding R3-2).
    */
   private async deliveryFacts(
-    who: TrialPrincipal,
+    companyId: Buffer,
     missing: TrialContact[],
   ): Promise<Omit<DeliveryFacts, 'last'> & { lastAccepted: SetupAttempt | null }> {
-    const [automatic, newestLink, accepted, binding] = await Promise.all([
-      this.prisma.trialSetupMessage.findFirst({ where: { companyId: who.companyId, trigger: 'verified' }, select: { id: true } }),
-      this.newestLink(who.companyId),
+    const [automatic, newestLink, accepted] = await Promise.all([
+      this.prisma.trialSetupMessage.findFirst({ where: { companyId, trigger: 'verified' }, select: { id: true } }),
+      this.newestLink(companyId),
       this.prisma.trialSetupMessage.findFirst({
-        where: { companyId: who.companyId, OR: [{ emailOutcome: 'accepted' }, { whatsappOutcome: 'accepted' }] },
+        where: { companyId, OR: [{ emailOutcome: 'accepted' }, { whatsappOutcome: 'accepted' }] },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        select: { createdAt: true, trigger: true, emailOutcome: true, whatsappOutcome: true, link: { select: { bindingDigest: true } } },
+        select: {
+          createdAt: true,
+          trigger: true,
+          emailOutcome: true,
+          whatsappOutcome: true,
+          link: { select: { bindingDigest: true, userId: true } },
+        },
       }),
-      this.currentBinding(this.prisma, who.userId),
     ]);
+    const link = accepted?.link;
     return {
       missing,
       automaticSent: automatic !== null,
       newestLink,
-      acceptedIsCurrent: accepted?.link ? stillBound(accepted.link.bindingDigest, binding) : false,
+      acceptedIsCurrent: link ? stillBound(link.bindingDigest, await this.currentBinding(this.prisma, link.userId)) : false,
       lastAccepted: accepted
         ? { at: accepted.createdAt, trigger: accepted.trigger, email: accepted.emailOutcome, whatsapp: accepted.whatsappOutcome }
         : null,

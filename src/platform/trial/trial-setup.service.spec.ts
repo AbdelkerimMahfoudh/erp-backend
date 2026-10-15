@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { Logger } from '@nestjs/common';
-import { binToUuid } from '../../common/utils/uuid.util';
+import { binToUuid, newUuidV7Bin } from '../../common/utils/uuid.util';
 import { DisabledWhatsAppChannel, TestWhatsAppChannel } from '../../messaging/channels';
 import { ProvenWhatsAppChannel } from '../../messaging/delivery-readiness';
 import { DevelopmentLogEmailChannel, DisabledEmailChannel } from '../../messaging/email-channel';
@@ -15,6 +15,7 @@ import {
   type TrialWorld,
   type WorldOptions,
 } from '../__testing__/trial-world';
+import type { TrialPrincipal } from './trial-facts';
 import { TrialRefusal } from './trial-refusal';
 import { TRIAL_TERMS_VERSION, setupTokenHash } from './trial-rules';
 import { SETUP_DELIVERY_WAIT_MS, SETUP_SENDING_WINDOW_MS, SETUP_SHUTDOWN_WAIT_MS } from './trial-setup-rules';
@@ -711,6 +712,56 @@ describe('`sent` says where the message went — the Owner’s contacts as they 
     w.clock.set(HOUR_LATER);
     w.owner(shop).phoneVerifiedAt = null;
     expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'not_sent', sentTo: [], missingContacts: ['phone'] });
+  });
+
+  /** A second person holding the Owner role at the business, with a verified email of their own: an Owner to the trial. */
+  function secondOwner(w: TrialWorld, b: Business): TrialPrincipal {
+    const id = newUuidV7Bin();
+    w.t.users.push({
+      id,
+      companyId: b.companyId,
+      roleKey: 'owner',
+      email: 'second.owner@shop.test',
+      phone: null,
+      emailVerifiedAt: NOW,
+      phoneVerifiedAt: null,
+      passwordHash: '$argon2id$v=19$m=65536,t=3,p=4$second$hash',
+      isActive: true,
+      deletedAt: null,
+    });
+    return { companyId: b.companyId, userId: id };
+  }
+
+  it('every Owner of the business reads the same status: the link’s Owner as that person is now — not the reader (R3-2)', async () => {
+    const w = world();
+    const shop = w.business({ contacts: 'email' });
+    await verifiedNow(w, shop);
+    const second = secondOwner(w, shop);
+    w.clock.set(HOUR_LATER);
+    const readBy = async (reader: TrialPrincipal) => ({
+      app: await w.setup.appStatus(reader),
+      website: (await w.service.status(reader)).setup,
+    });
+
+    // The instructions went to the first Owner, who has not changed since: sent, whoever reads it.
+    for (const reader of [shop.owner, second]) {
+      const { app, website } = await readBy(reader);
+      expect(app).toMatchObject({ delivery: 'sent', sentTo: ['email'] });
+      expect(website).toMatchObject({ delivery: 'sent', sentTo: ['email'] });
+    }
+    // The reader's own credentials are not what the message went to: the second Owner's password changes, nothing moves.
+    w.t.users.find((u) => u.id.equals(second.userId))!.passwordHash = '$argon2id$v=19$m=65536,t=3,p=4$second$changed';
+    expect((await readBy(second)).app).toMatchObject({ delivery: 'sent', sentTo: ['email'] });
+
+    // The link's Owner verifies a WhatsApp number: the emailed link no longer works for them — not_sent, for both.
+    Object.assign(w.owner(shop), { phone: '+22249998877', phoneVerifiedAt: HOUR_LATER });
+    await verifiedNow(w, shop);
+    expect((w.email as TestEmailChannel).sent).toHaveLength(1);
+    for (const reader of [shop.owner, second]) {
+      const { app, website } = await readBy(reader);
+      expect(app).toMatchObject({ delivery: 'not_sent', sentTo: [] });
+      expect(website).toMatchObject({ delivery: 'not_sent', sentTo: [] });
+    }
   });
 });
 
