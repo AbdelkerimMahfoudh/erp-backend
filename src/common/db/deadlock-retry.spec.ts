@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { ConflictException } from '@nestjs/common';
-import { isRetryableLockConflict, withLockRetry } from './deadlock-retry';
+import { isLockBusy, isRetryableLockConflict, withLockRetry } from './deadlock-retry';
 
 /**
  * Retrying a rolled-back transaction (H1.4.1).
@@ -111,5 +111,31 @@ describe('the retry itself', () => {
       }),
     ).rejects.toThrow(ConflictException);
     expect(calls).toBe(1);
+  });
+});
+
+describe('a row another transaction holds, asked for with NOWAIT (D176)', () => {
+  // The exact shape Prisma 5.22 gave on MySQL 8.0.46 for `SELECT … FOR UPDATE NOWAIT` against a held row.
+  const nowait = raw(
+    'Raw query failed. Code: `3572`. Message: `Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.`',
+    { code: '3572', message: 'Statement aborted because lock(s) could not be acquired immediately and NOWAIT is set.' },
+  );
+
+  it('is busy — somebody else holds the row; the next attempt finishes the work', () => {
+    expect(isLockBusy(nowait)).toBe(true);
+    expect(isLockBusy(raw('Raw query failed. Code: `3572`.'))).toBe(true);
+  });
+
+  it('is not a conflict worth retrying in a loop: the caller returns at once and lets a later evaluation try', () => {
+    expect(isRetryableLockConflict(nowait)).toBe(false);
+  });
+
+  it('nothing else is busy: a deadlock, a lock timeout, a duplicate, a domain refusal, an ordinary error', () => {
+    expect(isLockBusy(raw('Raw query failed. Code: `1213`.', { code: '1213' }))).toBe(false);
+    expect(isLockBusy(raw('Raw query failed. Code: `1205`.', { code: '1205' }))).toBe(false);
+    expect(isLockBusy(new Prisma.PrismaClientKnownRequestError('3572 in a value', { code: 'P2002', clientVersion: 'test' }))).toBe(false);
+    expect(isLockBusy(new ConflictException('3572'))).toBe(false);
+    expect(isLockBusy(new Error('3572'))).toBe(false);
+    expect(isLockBusy(null)).toBe(false);
   });
 });

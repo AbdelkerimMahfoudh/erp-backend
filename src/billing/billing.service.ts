@@ -125,6 +125,15 @@ export function periodRunning(period: Pick<PeriodState, 'periodEnd'> | null, now
 }
 
 /**
+ * Is this period the paid month in force at `now` — started, and not yet ended? Stricter than {@link periodRunning}:
+ * a period opened for the end of a free trial runs (it is the one paid for) but is not in force before it starts
+ * (D176). An add-on is put in force only onto a period in force.
+ */
+export function periodInForce(period: Pick<PeriodState, 'periodStart' | 'periodEnd'> | null, now: Date): boolean {
+  return period !== null && period.periodStart.getTime() <= now.getTime() && periodRunning(period, now);
+}
+
+/**
  * The newest period first — for every reader of a company's periods.
  *
  * Two periods can share a `periodStart` (0095): a grant or a correction made while a deferred period waits for a
@@ -448,8 +457,11 @@ export class BillingService {
    * (D158), so taking an archived store's place adds only the difference, if
    * any. Never lowers anything: there is no prorating, so a release reduces
    * the next renewal and nothing else.
+   *
+   * `now` is the caller's instant when it has one — read after the subscription lock it holds — so the period judged
+   * running is the one the caller decided against.
    */
-  async assessNow(companyId: Buffer, db: BillingDb = this.prisma): Promise<void> {
+  async assessNow(companyId: Buffer, db: BillingDb = this.prisma, now: Date = this.clock.now()): Promise<void> {
     const period = await db.billingPeriod.findFirst({
       where: { companyId },
       orderBy: NEWEST_PERIOD_FIRST,
@@ -457,7 +469,7 @@ export class BillingService {
     if (!period) return;
     // A period that already ended is history: nothing is ever added to it. A change confirmed after it ended is
     // priced in full by the next period instead (D154, reviewed 2026-10-09).
-    if (!periodRunning(period, this.clock.now())) return;
+    if (!periodRunning(period, now)) return;
 
     const size = await this.sizeOf(companyId, db);
     const stored = feesFrom(period.assessedActivityFeeByBranch);

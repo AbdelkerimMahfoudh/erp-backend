@@ -77,3 +77,16 @@ export async function withLockRetry<T>(
 
 /** Exposed for tests: is this the kind of failure worth retrying? */
 export const isRetryableLockConflict = isLockConflict;
+
+/** `FOR UPDATE NOWAIT` found the row locked by another transaction (MySQL 3572). */
+const LOCK_NOWAIT = '3572';
+
+/**
+ * Did a `FOR UPDATE NOWAIT` find its row held by another transaction? Not a failure: the work is somebody else's to
+ * finish, or the next attempt's. MySQL answers at once with error 3572, which a raw statement surfaces as Prisma's
+ * P2010 carrying the number in its meta and its message (measured on MySQL 8.0.46 with Prisma 5.22).
+ */
+export function isLockBusy(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== 'P2010') return false;
+  return `${JSON.stringify(e.meta ?? {})} ${e.message}`.includes(LOCK_NOWAIT);
+}

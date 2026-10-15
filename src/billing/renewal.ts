@@ -73,9 +73,11 @@ export class SubscriptionRenewal {
     actor: string,
     at: Date = this.clock.now(),
   ): Promise<RenewalOutcome> {
-    const deferred = at.getTime() > this.clock.now().getTime();
     return this.prisma.$transaction(async (tx) => {
       await lockSubscription(tx, companyId);
+      // Read behind the lock, as every writer here reads its instant: whether the period opens later than now is
+      // decided against what the previous holder committed.
+      const deferred = at.getTime() > this.clock.now().getTime();
       const activityChanges = await applyScheduledActivityChanges(tx, companyId, subscriptionId, at, actor);
       const closedPeriod = await this.billing.closeCurrentPeriod(companyId, at, tx);
       await this.billing.openPeriod(companyId, subscriptionId, periodEnd, { db: tx, startsAt: at });
@@ -146,6 +148,16 @@ export class SubscriptionRenewal {
  */
 export async function lockSubscription(tx: BillingDb, companyId: Buffer): Promise<void> {
   await tx.$queryRaw(Prisma.sql`SELECT id FROM subscriptions WHERE company_id = ${companyId} FOR UPDATE`);
+}
+
+/**
+ * The same lock, never waited for (D176): when another writer holds the row, MySQL refuses the statement at once
+ * (error 3572, which Prisma surfaces as P2010 — `isLockBusy`) instead of queueing the caller behind it. For work that
+ * any later evaluation can redo — the free trial's expiry record and the activation of what was paid for during it —
+ * so a request never waits on it.
+ */
+export async function lockSubscriptionNowait(tx: BillingDb, companyId: Buffer): Promise<void> {
+  await tx.$queryRaw(Prisma.sql`SELECT id FROM subscriptions WHERE company_id = ${companyId} FOR UPDATE NOWAIT`);
 }
 
 /**
