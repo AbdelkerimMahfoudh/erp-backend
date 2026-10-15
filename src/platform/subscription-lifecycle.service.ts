@@ -7,6 +7,7 @@ import { BillingService, periodRunning } from '../billing/billing.service';
 import { SubscriptionRenewal, lockSubscription, type RenewalOutcome } from '../billing/renewal';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { runningTrialEnd } from './trial/trial-rules';
+import { TrialEndRoll } from './trial/trial-end-roll';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
 /**
@@ -95,6 +96,11 @@ interface TrialFence {
 export class SubscriptionLifecycleService {
   /** The one renewal routine, shared with the lazy roll the entitlement check applies (billing/renewal.ts). */
   private readonly renewal: SubscriptionRenewal;
+  /**
+   * What a free trial's end owes the business (D176): run after every decision that gives it a period or lets it
+   * act again, so what was paid for during the trial is put in force as soon as a paid period is (never waiting).
+   */
+  private readonly trialEnd: TrialEndRoll;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -103,6 +109,7 @@ export class SubscriptionLifecycleService {
     @Inject(CLOCK) private readonly clock: Clock,
   ) {
     this.renewal = new SubscriptionRenewal(prisma, billing, clock);
+    this.trialEnd = new TrialEndRoll(prisma, clock);
   }
 
   /**
@@ -262,13 +269,18 @@ export class SubscriptionLifecycleService {
        * If this business is already granted, already activated, and the grant
        * runs to about the same moment, the call has already happened — almost
        * certainly a retry after a dropped response. Return the winning state
-       * rather than stacking a second grant on top.
+       * rather than stacking a second grant on top. Judged on the row read
+       * under the lock (D176 §9): two grants at once see each other.
        */
+      const locked = await tx.subscription.findFirst({
+        where: { companyId: id },
+        select: { status: true, isComplimentary: true, complimentaryUntil: true },
+      });
       const alreadyDone =
-        before.status === 'activated' &&
-        before.isComplimentary &&
-        before.complimentaryUntil !== null &&
-        Math.abs(before.complimentaryUntil.getTime() - until.getTime()) < 60_000;
+        locked?.status === 'activated' &&
+        locked.isComplimentary &&
+        locked.complimentaryUntil !== null &&
+        Math.abs(locked.complimentaryUntil.getTime() - until.getTime()) < 60_000;
       if (alreadyDone) return null;
 
       const after = await this.transition(
@@ -334,6 +346,8 @@ export class SubscriptionLifecycleService {
      * the trial's end (0095).
      */
     await this.renewal.rollNow(id, before.id, after.complimentaryUntil, ctx.admin.email, from);
+    // What was paid for during an ended trial joins the grant's period now (D176); during the trial, nothing is due.
+    await this.trialEnd.applyIfDue(id);
 
     return { subscription: after, applied: true };
   }
@@ -384,7 +398,16 @@ export class SubscriptionLifecycleService {
       );
     }
 
-    const { after, now, paidFrom, trialEndsAt, end } = await this.fenced(id, 'approved', async (tx, { now, trialEndsAt }) => {
+    const approved = await this.fenced(id, 'approved', async (tx, { now, trialEndsAt }) => {
+      // Decided again under the lock (D176 §9): two approvals at once — neither naming a version — make one
+      // transition, one first period and one assessment; the second answers as the retry it is.
+      const locked = await tx.subscription.findFirst({ where: { companyId: id }, select: { status: true } });
+      if (locked?.status === 'activated') return null;
+      if (locked?.status !== 'pending_activation' && locked?.status !== 'rejected') {
+        throw new BadRequestException(
+          'Only a pending or refused registration can be approved. Reinstate a suspended business instead.',
+        );
+      }
       if (hasEnd && trialEndsAt && input.periodEnd!.getTime() <= trialEndsAt.getTime()) throw endsBeforeTrial(trialEndsAt);
       const paidFrom = trialEndsAt ?? now;
       const end = hasEnd ? new Date(input.periodEnd!) : monthsFrom(paidFrom, input.months!);
@@ -396,6 +419,8 @@ export class SubscriptionLifecycleService {
       );
       return { after, now, paidFrom, trialEndsAt, end };
     });
+    if (!approved) return { subscription: before, applied: false };
+    const { after, now, paidFrom, trialEndsAt, end } = approved;
 
     await this.prisma.subscriptionEvent.create({
       data: {
@@ -439,6 +464,8 @@ export class SubscriptionLifecycleService {
       },
       ip: ctx.ip ?? null,
     });
+    // What was paid for during an ended trial joins the first period now (D176); during the trial, nothing is due.
+    await this.trialEnd.applyIfDue(id);
 
     return { subscription: after, applied: true };
   }
@@ -593,6 +620,8 @@ export class SubscriptionLifecycleService {
       after: { ...this.snapshot(after), direction: shortened ? 'shortened' : 'lengthened', redated: running, renewal },
       ip: ctx.ip ?? null,
     });
+    // A new period may now be in force for what was paid for during an ended trial (D176).
+    await this.trialEnd.applyIfDue(id);
 
     return { subscription: after, applied: true };
   }
@@ -673,6 +702,8 @@ export class SubscriptionLifecycleService {
       },
       ip: ctx.ip ?? null,
     });
+    // A new period may now be in force for what was paid for during an ended trial (D176).
+    await this.trialEnd.applyIfDue(id);
 
     return { subscription: after, applied: true };
   }
@@ -772,6 +803,8 @@ export class SubscriptionLifecycleService {
       after: this.snapshot(after),
       ip: ctx.ip ?? null,
     });
+    // Anything still due from an ended trial is brought up to date (D176); what was due while suspended already ran.
+    await this.trialEnd.applyIfDue(id);
 
     return { subscription: after, applied: true };
   }

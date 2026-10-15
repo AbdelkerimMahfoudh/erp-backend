@@ -64,7 +64,12 @@ export class SubscriptionRenewal {
    *
    * `at` moves the beginning: paid access approved while a free trial runs starts when the trial ends (0095), so the
    * period opens there — sized as the shop is today, priced by the plan in force then — and the timeline says when.
-   * The changes scheduled for this renewal are applied as the roll runs, dated `at`.
+   *
+   * The changes scheduled for this renewal are applied as the roll runs, and dated when they took effect (R1-F3,
+   * reviewed 2026-10-15): `at` for a roll that begins now or began earlier, but the roll's own instant — read after
+   * the lock — when the period starts later. A change in force mid-trial is never recorded as made a week ahead.
+   * Moving the change itself to the trial's end is an open question for the owner (PQ7); until then it applies at
+   * the approval, as it always did, and says so.
    */
   async rollNow(
     companyId: Buffer,
@@ -77,8 +82,9 @@ export class SubscriptionRenewal {
       await lockSubscription(tx, companyId);
       // Read behind the lock, as every writer here reads its instant: whether the period opens later than now is
       // decided against what the previous holder committed.
-      const deferred = at.getTime() > this.clock.now().getTime();
-      const activityChanges = await applyScheduledActivityChanges(tx, companyId, subscriptionId, at, actor);
+      const now = this.clock.now();
+      const deferred = at.getTime() > now.getTime();
+      const activityChanges = await applyScheduledActivityChanges(tx, companyId, subscriptionId, deferred ? now : at, actor, deferred);
       const closedPeriod = await this.billing.closeCurrentPeriod(companyId, at, tx);
       await this.billing.openPeriod(companyId, subscriptionId, periodEnd, { db: tx, startsAt: at });
       const opens = `on ${at.toISOString()}, at today's size and the prices in force then.`;
@@ -164,7 +170,12 @@ export async function lockSubscriptionNowait(tx: BillingDb, companyId: Buffer): 
  * Every downgrade waiting for this renewal, applied branch by branch: the
  * branch takes `activity_next`; the request that scheduled it is marked
  * applied (it stays `granted` — it cost nothing and it happened — with the
- * renewal's actor and instant on it); one `activity_changed` event per branch.
+ * renewal's actor and the instant it took effect on it); one
+ * `activity_changed` event per branch.
+ *
+ * `aheadOfPeriod`: applied at an approval made during a free trial, before
+ * the period it was scheduled for starts (R1-F3). The records say so, in
+ * words — the period's start is data elsewhere, never a note (C7).
  */
 async function applyScheduledActivityChanges(
   tx: BillingDb,
@@ -172,6 +183,7 @@ async function applyScheduledActivityChanges(
   subscriptionId: Buffer,
   at: Date,
   actor: string,
+  aheadOfPeriod = false,
 ): Promise<AppliedActivityChange[]> {
   const due = await tx.branch.findMany({
     where: { companyId, activityNext: { not: null } },
@@ -187,7 +199,12 @@ async function applyScheduledActivityChanges(
     });
     await tx.seatAllocation.updateMany({
       where: { companyId, kind: 'activity', branchId: b.id, status: 'granted', activityTo: b.activityNext, confirmedAt: null },
-      data: { confirmedBy: actor.slice(0, 160), confirmedAt: at, reason: 'Applied at the renewal.', version: { increment: 1 } },
+      data: {
+        confirmedBy: actor.slice(0, 160),
+        confirmedAt: at,
+        reason: aheadOfPeriod ? 'Applied at the approval, ahead of the paid period.' : 'Applied at the renewal.',
+        version: { increment: 1 },
+      },
     });
     await tx.subscriptionEvent.create({
       data: {
@@ -195,7 +212,10 @@ async function applyScheduledActivityChanges(
         companyId,
         subscriptionId,
         kind: 'activity_changed',
-        note: `Store "${b.name}": ${b.activity} → ${b.activityNext} at the renewal.`.slice(0, 255),
+        note: (aheadOfPeriod
+          ? `Store "${b.name}": ${b.activity} → ${b.activityNext} at the approval, ahead of the paid period that starts when the free trial ends.`
+          : `Store "${b.name}": ${b.activity} → ${b.activityNext} at the renewal.`
+        ).slice(0, 255),
         actor: actor.slice(0, 120),
       },
     });

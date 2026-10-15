@@ -5,6 +5,8 @@ import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { stateOf } from '../entitlement/entitlement-rules';
 import { trialFactsOf } from './trial/trial-rules';
+import { TrialEndRoll } from './trial/trial-end-roll';
+import { CTX as TB_CTX, makeTrialBillingWorld } from './__testing__/trial-billing-world';
 
 /**
  * Approval, refusal and a corrected period (0075), against a subscription
@@ -715,5 +717,58 @@ describe('what the lifecycle never does', () => {
 
   it('stores no grace: it is derived from the period end, so a corrected period carries its grace', () => {
     expect(SERVICE).not.toMatch(/grace(End|Until|Hours)?\s*:/i);
+  });
+});
+
+describe('decided under the lock, and what a trial’s end owes the business put in force after (D176 §9)', () => {
+  // Through the serialised trial-billing world: two decisions at once take the subscription lock one after the other.
+  const CLAIMED_AT = new Date('2026-10-14T09:30:00.123Z');
+
+  it('two approvals at once, neither naming a version: one transition, one first period — the second is the retry it is', async () => {
+    const w = makeTrialBillingWorld({ now: CLAIMED_AT });
+    const b = w.business();
+    await w.claim(b);
+    const [a1, a2] = await Promise.all([
+      w.lifecycle.approve(w.uuid(b.companyId), { months: 1, reason: 'paid' }, TB_CTX),
+      w.lifecycle.approve(w.uuid(b.companyId), { months: 1, reason: 'paid' }, TB_CTX),
+    ]);
+    expect([a1.applied, a2.applied].sort()).toEqual([false, true]);
+    expect(w.periods(b)).toHaveLength(1);
+    expect(w.events(b, 'approved')).toHaveLength(1);
+    expect(w.events(b, 'renewed')).toHaveLength(1);
+    expect(w.audits(b, 'subscription.approve')).toHaveLength(1);
+    expect(w.subscription(b).version).toBe(3); // claim + one transition
+  });
+
+  it('two grants at once: the second sees the first under the lock and stacks nothing', async () => {
+    const w = makeTrialBillingWorld({ now: CLAIMED_AT });
+    const b = w.business();
+    const [g1, g2] = await Promise.all([
+      w.lifecycle.activateByGrant(w.uuid(b.companyId), { days: 30, reason: 'pilot' }, TB_CTX),
+      w.lifecycle.activateByGrant(w.uuid(b.companyId), { days: 30, reason: 'pilot' }, TB_CTX),
+    ]);
+    expect([g1.applied, g2.applied].sort()).toEqual([false, true]);
+    expect(w.periods(b)).toHaveLength(1);
+    expect(w.events(b, 'administrative_grant')).toHaveLength(1);
+  });
+
+  it('approve, grant, extend, set the period and reinstate each run what a trial’s end owes the business, after they commit', async () => {
+    const spy = jest.spyOn(TrialEndRoll.prototype, 'applyIfDue').mockResolvedValue('nothing_due');
+    const company = uuidToBin(COMPANY);
+    const called = () => spy.mock.calls.map(([id]) => (id as Buffer).equals(company));
+
+    await makeWorld('pending_activation').service.approve(COMPANY, { months: 1 }, CTX);
+    expect(called()).toEqual([true]);
+    await makeWorld('pending_activation').service.activateByGrant(COMPANY, { days: 10, reason: 'pilot' }, CTX);
+    await makeWorld('activated', { currentPeriodEnd: new Date(Date.now() - DAY) }).service.extend(COMPANY, { months: 1 }, CTX);
+    await makeWorld('activated', { currentPeriodEnd: new Date(Date.now() + DAY) }).service.setPeriodEnd(COMPANY, { periodEnd: new Date(Date.now() + 40 * DAY) }, CTX);
+    await makeWorld('suspended').service.reinstate(COMPANY, {}, CTX);
+    expect(called()).toEqual([true, true, true, true, true]);
+
+    // A refusal decided under the lock writes nothing, and runs nothing after it.
+    spy.mockClear();
+    const refused = makeWorld('activated', { currentPeriodEnd: new Date(Date.now() + 30 * DAY) });
+    await expect(refused.service.approve(COMPANY, { months: 1 }, CTX)).resolves.toMatchObject({ applied: false });
+    expect(spy).not.toHaveBeenCalled();
   });
 });

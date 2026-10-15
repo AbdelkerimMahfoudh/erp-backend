@@ -79,7 +79,7 @@ function makeWorld(opts: { now: Date; activityNext?: 'money_agent' | null; curre
     },
   } as unknown as BillingService;
   const renewal = new SubscriptionRenewal(db as never, billing, clock);
-  return { renewal, branch, events, allocations, locks, opened, closed, periods };
+  return { renewal, branch, events, allocations, locks, opened, closed, periods, db, billing };
 }
 
 describe('the roll due at the end of a prepaid period', () => {
@@ -126,18 +126,45 @@ describe('a roll now, at the instant paid access starts (0095)', () => {
     expect(w.events.map((e) => e.note)).toContain("First billing period opened at today's size and prices.");
   });
 
-  it('at a free trial’s end it begins there — the period, the downgrade it applies, and the timeline says so', async () => {
+  it('at a free trial’s end it begins there — the period at the end, the downgrade applied now and dated now (R1-F3)', async () => {
     const w = makeWorld({ now: NOW, unbilled: true });
     const rolled = await w.renewal.rollNow(COMPANY, SUB, NEW_END, 'ops@example.test', TRIAL_END);
     expect(rolled).toMatchObject({ at: TRIAL_END.toISOString(), closedPeriod: false });
     expect(w.closed).toEqual([TRIAL_END]);
     expect(w.opened).toEqual([{ startsAt: TRIAL_END, end: NEW_END }]);
-    // A downgrade scheduled for this renewal is stamped with the renewal's instant, as a roll when due stamps its own.
-    expect(w.branch.activityChangedAt).toEqual(TRIAL_END);
-    expect(w.allocations[0]).toMatchObject({ confirmedAt: TRIAL_END, reason: 'Applied at the renewal.' });
+    // Applied as the roll runs, as before (moving it to the trial's end is the owner's open question, PQ7) — so dated
+    // when it took effect, the roll's own instant read after the lock: never a week ahead of the change in force.
+    expect(w.branch).toMatchObject({ activity: 'money_agent', activityNext: null });
+    expect(w.branch.activityChangedAt).toEqual(NOW);
+    expect(w.allocations[0]).toMatchObject({ confirmedAt: NOW, reason: 'Applied at the approval, ahead of the paid period.' });
     expect(w.events.map((e) => e.kind)).toEqual(['activity_changed', 'renewed']);
+    expect(w.events[0].note).toBe('Store "Main": both → money_agent at the approval, ahead of the paid period that starts when the free trial ends.');
+    expect(w.events[0].note).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
     expect(w.events[1].note).toBe(`First billing period opens on ${TRIAL_END.toISOString()}, at today's size and the prices in force then.`);
     expect(w.locks).toHaveLength(1);
+  });
+
+  it('a roll that begins now stamps the change with its own instant and says "at the renewal", as before', async () => {
+    const w = makeWorld({ now: NOW, unbilled: true });
+    await w.renewal.rollNow(COMPANY, SUB, NEW_END, 'ops@example.test', NOW);
+    expect(w.branch.activityChangedAt).toEqual(NOW);
+    expect(w.allocations[0]).toMatchObject({ confirmedAt: NOW, reason: 'Applied at the renewal.' });
+    expect(w.events[0].note).toBe('Store "Main": both → money_agent at the renewal.');
+  });
+
+  it('whether the period is deferred is decided by the clock read after the lock', async () => {
+    let now = new Date(TRIAL_END.getTime() - 1_000);
+    const w = makeWorld({ now, unbilled: true });
+    // The clock the renewal reads moves past the trial's end while it waits for the lock.
+    const clock = { now: () => now };
+    const renewal = new SubscriptionRenewal(
+      { ...w.db, $queryRaw: async () => void (now = new Date(TRIAL_END.getTime() + 1_000)), $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn({ ...w.db, $queryRaw: async () => void (now = new Date(TRIAL_END.getTime() + 1_000)) }) } as never,
+      w.billing,
+      clock,
+    );
+    await renewal.rollNow(COMPANY, SUB, NEW_END, 'ops@example.test', TRIAL_END);
+    expect(w.allocations[0]).toMatchObject({ confirmedAt: TRIAL_END, reason: 'Applied at the renewal.' });
+    expect(w.events.find((e) => e.kind === 'renewed')!.note).toBe("First billing period opened at today's size and prices.");
   });
 
   it('a deferred roll over an earlier period closes it at that instant and says the next one opens then', async () => {
