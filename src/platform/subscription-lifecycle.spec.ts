@@ -7,6 +7,7 @@ import { stateOf } from '../entitlement/entitlement-rules';
 import { trialFactsOf } from './trial/trial-rules';
 import { TrialEndRoll } from './trial/trial-end-roll';
 import { CTX as TB_CTX, makeTrialBillingWorld } from './__testing__/trial-billing-world';
+import { AllExceptionsFilter } from '../common/filters/all-exceptions.filter';
 
 /**
  * Approval, refusal and a corrected period (0075), against a subscription
@@ -30,6 +31,16 @@ const DAY = 24 * 60 * 60 * 1000;
 const SERVICE = readFileSync('src/platform/subscription-lifecycle.service.ts', 'utf8');
 
 type Status = 'pending_activation' | 'activated' | 'suspended' | 'cancelled' | 'rejected';
+
+/** The body a client receives for this exception: the global filter, run as the application runs it. */
+function answered(exception: unknown): Record<string, unknown> {
+  let body: Record<string, unknown> = {};
+  const response = { status: () => response, json: (b: Record<string, unknown>) => ((body = b), response) };
+  const host = { switchToHttp: () => ({ getResponse: () => response, getRequest: () => ({ url: '/api/v1/platform/businesses/x/approve' }) }) };
+  const quiet = { error: () => undefined, warn: () => undefined };
+  new AllExceptionsFilter(quiet as never, { getId: () => 'req-1', get: () => 'req-1' } as never).catch(exception, host as never);
+  return body;
+}
 
 interface BranchRow {
   id: Buffer;
@@ -567,13 +578,27 @@ describe('the free trial’s fence, and paid access that waits for the trial’s
     const w = makeWorld('pending_activation', {}, [], { eligibility: open(), claim: running, now: NOW });
     const refused = await w.service.approve(COMPANY, { periodEnd: new Date(END) }, CTX).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(BadRequestException);
+    // The end it must pass is data, UTC ISO, for the console to say in the business's zone; the sentence holds no
+    // instant (review finding R4-05).
     expect((refused as BadRequestException).getResponse()).toEqual({
       code: 'period_ends_before_trial_end',
-      message: `The end date must be after the free trial ends on ${END.toISOString()}.`,
+      message: 'The end date must be after the free trial ends.',
+      trialEndsAt: END.toISOString(),
     });
     expect(w.eligibility).toEqual(open());
     expect(w.sub.status).toBe('pending_activation');
     expect(w.events).toEqual([]);
+    // What the console receives, through the real filter: the end survives as data, and nothing else is added.
+    expect(answered(refused)).toEqual({
+      statusCode: 400,
+      error: 'BAD_REQUEST',
+      code: 'period_ends_before_trial_end',
+      message: 'The end date must be after the free trial ends.',
+      trialEndsAt: END.toISOString(),
+      requestId: 'req-1',
+      path: '/api/v1/platform/businesses/x/approve',
+      timestamp: expect.any(String),
+    });
 
     // One millisecond past the trial's end is a period: it opens at the end and runs that millisecond.
     await w.service.approve(COMPANY, { periodEnd: new Date(END.getTime() + 1) }, CTX);
@@ -628,7 +653,7 @@ describe('the free trial’s fence, and paid access that waits for the trial’s
     // Suspended mid-trial and reinstated: `activated` with no period, the trial clock still running.
     const w = makeWorld('activated', { currentPeriodEnd: null }, [], { eligibility: open(), claim: running, now: NOW, unbilled: true });
     await expect(w.service.setPeriodEnd(COMPANY, { periodEnd: new Date(END) }, CTX)).rejects.toMatchObject({
-      response: { code: 'period_ends_before_trial_end' },
+      response: { code: 'period_ends_before_trial_end', message: 'The end date must be after the free trial ends.', trialEndsAt: END.toISOString() },
     });
     expect(w.eligibility).toEqual(open());
 

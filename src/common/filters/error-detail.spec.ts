@@ -229,6 +229,22 @@ describe('per-item detail survives the filter', () => {
     expect(runFilter(new ConflictException({ code: 'trial_already_claimed', message: 'm', trial: view }))).toMatchObject({ trial: view });
   });
 
+  it('a period refused for ending inside the free trial carries the trial’s end as data, never in its sentence (R4-05)', () => {
+    const body = runFilter(
+      new BadRequestException({
+        code: 'period_ends_before_trial_end',
+        message: 'The end date must be after the free trial ends.',
+        trialEndsAt: '2026-10-21T09:30:00.123Z',
+      }),
+    );
+    expect(body).toMatchObject({
+      statusCode: 400,
+      code: 'period_ends_before_trial_end',
+      message: 'The end date must be after the free trial ends.',
+      trialEndsAt: '2026-10-21T09:30:00.123Z',
+    });
+  });
+
   it('a registration refused before anything was saved names the contacts that cannot receive a code (C10)', () => {
     const body = runFilter(
       new HttpException({ code: 'registration_unavailable', message: 'm', unavailableContacts: ['phone'] }, HttpStatus.SERVICE_UNAVAILABLE),

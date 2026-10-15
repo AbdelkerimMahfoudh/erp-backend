@@ -73,11 +73,16 @@ function noteWith(reason: string | undefined, fact: string | null): string | nul
   return lead ? `${lead} ${fact}` : fact;
 }
 
-/** A period that would end inside the free trial it waits for: refused, with the end it must pass. */
+/**
+ * A period that would end inside the free trial it waits for: refused, with the end it must pass as data
+ * (`trialEndsAt`, UTC ISO) — the console says it in the business's zone with the zone's name. The sentence itself
+ * holds no instant (review finding R4-05): a raw UTC string beside a zoned date reads as a second, different time.
+ */
 function endsBeforeTrial(trialEndsAt: Date): BadRequestException {
   return new BadRequestException({
     code: 'period_ends_before_trial_end',
-    message: `The end date must be after the free trial ends on ${trialEndsAt.toISOString()}.`,
+    message: 'The end date must be after the free trial ends.',
+    trialEndsAt: trialEndsAt.toISOString(),
   });
 }
 

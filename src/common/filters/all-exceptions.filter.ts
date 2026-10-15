@@ -149,6 +149,11 @@ const DETAIL_KEYS = [
   'termsVersion',
   'trial',
   /*
+   * `period_ends_before_trial_end` (review finding R4-05): the end of the free trial a period must pass, a UTC ISO
+   * instant — so the console says it in the business's zone with the zone's name, and the sentence holds no instant.
+   */
+  'trialEndsAt',
+  /*
    * `registration_unavailable` (C10): which of the contacts given cannot receive a verification code right now
    * (`email`, `phone` — the kinds, never a value), so the form can offer to continue without that one.
    */
