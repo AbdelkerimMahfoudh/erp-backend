@@ -213,6 +213,19 @@ describe('Origin and Referer change nothing — through the real Nest pipeline',
     expect(w.claims(shop)).toHaveLength(0);
   });
 
+  it('a key MySQL would cut is refused before the claim — so every key accepted replays its own retry (C11)', async () => {
+    const shop = w.business();
+    caller = shop.owner;
+    // 80 characters to a length check, 160 to the column: stored cut, it could never match the retry that sends it.
+    const res = await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/claim').send(claimBody('a\uFE0F'.repeat(80)));
+    expect(res.status).toBe(400);
+    expect(w.claims(shop)).toHaveLength(0);
+    const key = 'b5a4f0e2-7c1d-4a8e-9f3b-2d6c8e1a0b4f';
+    const first = await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/claim').send(claimBody(key));
+    const retry = await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/claim').send(claimBody(key));
+    expect([first.status, retry.status, retry.body.replayed]).toEqual([201, 200, true]);
+  });
+
   it('a link preview opening the trial’s GET with the token in the URL consumes and starts nothing', async () => {
     const shop = w.business();
     caller = shop.owner;

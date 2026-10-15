@@ -1,4 +1,5 @@
 import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsIdempotencyKey } from '../common/decorators/idempotency-key.decorator';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
 
 /**
@@ -15,7 +16,7 @@ export function IsNotEmptyish() {
 
 export class RegisterDto {
   /** The client's own key, so a retry cannot create a second business. */
-  @IsString() @IsNotEmptyish() @MaxLength(80) idempotencyKey: string;
+  @IsString() @IsIdempotencyKey() idempotencyKey: string;
 
   @IsString() @MinLength(1) @MaxLength(160) ownerName: string;
   @IsString() @MinLength(1) @MaxLength(160) businessName: string;

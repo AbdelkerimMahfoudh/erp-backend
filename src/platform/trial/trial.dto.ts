@@ -1,4 +1,5 @@
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsIdempotencyKey } from '../../common/decorators/idempotency-key.decorator';
 
 /**
  * The free trial's request bodies (0095; docs/76). Strict like every DTO here (the global pipe refuses unknown fields),
@@ -11,7 +12,7 @@ const TOKEN_MAX = 200;
 
 export class ClaimTrialDto {
   /** The website's key for one attempt, kept for that attempt's retries: the same key and request replay the claim. */
-  @IsString() @MinLength(1) @MaxLength(80) idempotencyKey: string;
+  @IsString() @IsIdempotencyKey() idempotencyKey: string;
 
   /** The terms version the website showed. Anything but the current one is refused with the current one. */
   @IsString() @MinLength(1) @MaxLength(40) termsVersion: string;
