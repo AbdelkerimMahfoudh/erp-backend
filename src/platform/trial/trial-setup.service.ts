@@ -517,9 +517,9 @@ export class TrialSetupService implements OnApplicationShutdown {
   }
 
   /**
-   * Where the status stands for this Owner, but for the last attempt, which each reader takes from its own list (C1, C2):
-   * the automatic attempt, the newest link and whether its attempt is in, and the newest accepted attempt — what
-   * `sentTo` names — with whether its link still binds to the Owner as they are now.
+   * What the status is decided from besides the last attempt, which each reader takes from the list it reads anyway
+   * (C1, C2): whether the automatic attempt is recorded; the newest link, and whether its attempt is in yet; and the
+   * newest accepted attempt — what `sentTo` names — with whether its link still binds to this Owner as they are now.
    */
   private async deliveryFacts(
     who: TrialPrincipal,
