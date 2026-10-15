@@ -42,6 +42,11 @@ describe('the audit log never keeps a secret', () => {
         verificationCode: 'p',
         secret: 'p',
         deviceSecret: 'p',
+        recoveryCode: 'p',
+        recoveryCodes: ['p'],
+        enrolmentToken: 'p',
+        continuation: 'p',
+        pin: 'p',
       }),
     );
     expect(out).not.toContain('"p"');

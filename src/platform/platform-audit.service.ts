@@ -29,6 +29,9 @@ const NEVER_LOG = [
   'verificationCode',
   'secret',
   'deviceSecret',
+  // A registration's continuation and a staff PIN are credentials too (C16): what a request carries, the audit never keeps.
+  'continuation',
+  'pin',
   // Administrator MFA (0094): never a factor, a sealed factor, a recovery code or an enrolment token.
   'recoveryCode',
   'recoveryCodes',

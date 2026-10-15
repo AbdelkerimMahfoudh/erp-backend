@@ -1,4 +1,4 @@
-import { scrubQuery, scrubUrl, REDACTED } from './log-scrub';
+import { scrubHeaders, scrubQuery, scrubUrl, REDACTED } from './log-scrub';
 
 /**
  * The portal-handoff ticket must not reach a log file.
@@ -66,5 +66,28 @@ describe('log scrubbing of what a person searched for (privacy correction, 2026-
     expect(scrubUrl('/api/v1/connections?q=36123456')).toBe(`/api/v1/connections?q=${REDACTED}`);
     expect(scrubQuery({ search: 'Aminetou', page: '2' })).toEqual({ search: REDACTED, page: '2' });
     expect(scrubUrl('/api/v1/sales?page=2')).toBe('/api/v1/sales?page=2');
+  });
+});
+
+describe('log scrubbing of every other credential a request may carry (C16)', () => {
+  it('the WhatsApp webhook’s verify token, on its own subscription check', () => {
+    expect(scrubUrl('/api/v1/messaging/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=s3cr3t-verify&hub.challenge=42')).toBe(
+      `/api/v1/messaging/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=${REDACTED}&hub.challenge=42`,
+    );
+    expect(scrubQuery({ 'hub.mode': 'subscribe', 'hub.verify_token': 's3cr3t-verify' })).toEqual({ 'hub.mode': 'subscribe', 'hub.verify_token': REDACTED });
+  });
+
+  it('a credential this API takes in a body, sent in a URL by mistake', () => {
+    for (const key of ['password', 'confirmPassword', 'currentPassword', 'refreshToken', 'access_token', 'recoveryCode', 'enrolmentToken', 'deviceSecret', 'pin']) {
+      expect(scrubUrl(`/x?${key}=abcdef123456&page=2`)).toBe(`/x?${key}=${REDACTED}&page=2`);
+    }
+  });
+
+  it('a Referer is a URL like any other: the page’s query is scrubbed, every other header left as it is', () => {
+    const headers = { referer: 'https://dukan.example.test/account/trial?t=abc_DEF-123', 'user-agent': 'Mozilla/5.0', 'x-request-id': 'r-1' };
+    expect(scrubHeaders(headers)).toEqual({ ...headers, referer: `https://dukan.example.test/account/trial?t=${REDACTED}` });
+    const innocent = { 'user-agent': 'Dukan/1.0' };
+    expect(scrubHeaders(innocent)).toBe(innocent);
+    expect(scrubHeaders(undefined)).toBeUndefined();
   });
 });

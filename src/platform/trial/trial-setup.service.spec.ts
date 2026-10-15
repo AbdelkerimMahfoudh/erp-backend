@@ -586,6 +586,7 @@ describe('instants and secrets', () => {
   it('on a development machine the link is also printed to the console, under the banner — and never otherwise', async () => {
     const print = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     const saved = process.env.NODE_ENV;
+    const savedAppEnv = process.env.APP_ENV;
     try {
       const w = world();
       const quiet = w.business();
@@ -599,8 +600,17 @@ describe('instants and secrets', () => {
       const banner = String(print.mock.calls[0][0]);
       expect(banner).toContain('=== LOCAL DEV ONLY — NOT A REAL MESSAGE ===');
       expect(banner).toContain(`${SITE_ORIGIN}/account/trial#t=${emailedToken(w)}`);
+
+      // Staging and production never print it, whatever NODE_ENV says (C16): a deployed console is a log.
+      for (const appEnv of ['staging', 'production']) {
+        process.env.APP_ENV = appEnv;
+        await verifiedNow(w, w.business());
+      }
+      expect(print).toHaveBeenCalledTimes(1);
     } finally {
       process.env.NODE_ENV = saved;
+      if (savedAppEnv === undefined) delete process.env.APP_ENV;
+      else process.env.APP_ENV = savedAppEnv;
       print.mockRestore();
     }
   });

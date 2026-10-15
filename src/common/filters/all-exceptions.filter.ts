@@ -10,6 +10,7 @@ import { ClsService } from 'nestjs-cls';
 import { Logger } from 'nestjs-pino';
 import { Request, Response } from 'express';
 import { AppClsStore } from '../context/request-context';
+import { scrubUrl } from '../http/log-scrub';
 import { MissingTenantContextError } from '../../prisma/tenant.extension';
 
 interface ErrorBody {
@@ -149,6 +150,18 @@ const DETAIL_KEYS = [
 ] as const;
 
 /**
+ * A message as the log may keep it. Nest's own 404 names the URL ("Cannot GET /path?query"), so its query is scrubbed
+ * as the path's is. A body that is not JSON is described, never quoted: Nest answers it with the parser's message,
+ * which carries the first characters of whatever was sent — a password as readily as anything else.
+ */
+function loggedMessage(message: unknown, status: number, url: string): unknown {
+  if (Array.isArray(message)) return message.map((line) => loggedMessage(line, status, url));
+  if (typeof message !== 'string') return message;
+  if (status === HttpStatus.BAD_REQUEST && /\bJSON\b/.test(message)) return 'The request body is not valid JSON.';
+  return url && message.includes(url) ? message.split(url).join(scrubUrl(url)) : message;
+}
+
+/**
  * Single global exception filter. Produces a consistent error body, maps Prisma
  * and tenant-context errors to appropriate HTTP codes, and NEVER leaks stack
  * traces or SQL to clients. Server-side it logs full detail (5xx as error).
@@ -178,10 +191,21 @@ export class AllExceptionsFilter implements ExceptionFilter {
       timestamp: new Date().toISOString(),
     };
 
+    /*
+     * The log keeps the same body minus what a request can smuggle into it (R3-3, C16): a credential in the query —
+     * the portal ticket, a setup token, the webhook's verify token — would otherwise be written on every refused
+     * request, and Nest's 404 repeats the whole URL in its message. The client is still answered with the path it
+     * asked for.
+     */
+    const logged = {
+      ...body,
+      path: scrubUrl(request.url),
+      message: loggedMessage(message, status, request.originalUrl ?? request.url),
+    };
     if (status >= 500) {
-      this.logger.error({ err: exception, ...body }, 'Unhandled server error');
+      this.logger.error({ err: exception, ...logged }, 'Unhandled server error');
     } else {
-      this.logger.warn({ ...body }, 'Request error');
+      this.logger.warn(logged, 'Request error');
     }
 
     response.status(status).json(body);

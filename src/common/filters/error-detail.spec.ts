@@ -4,6 +4,8 @@ import {
   ForbiddenException,
   HttpException,
   HttpStatus,
+  NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { AllExceptionsFilter } from './all-exceptions.filter';
 
@@ -231,5 +233,70 @@ describe('per-item detail survives the filter', () => {
     expect(body.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);
     expect(body.message).toBe('Internal server error');
     expect(JSON.stringify(body)).not.toMatch(/ECONNREFUSED|3306/);
+  });
+});
+
+describe('what the filter writes to the log (R3-3, C16)', () => {
+  /** The filter on one request: what the client is answered, and every line it logged. */
+  function logged(exception: unknown, url: string): { body: Record<string, unknown>; lines: string; calls: unknown[][] } {
+    let body: Record<string, unknown> = {};
+    const lines: unknown[][] = [];
+    const response = {
+      status: () => response,
+      json: (b: Record<string, unknown>) => {
+        body = b;
+        return response;
+      },
+    };
+    const host = { switchToHttp: () => ({ getResponse: () => response, getRequest: () => ({ url, originalUrl: url }) }) };
+    const logger = { error: (...args: unknown[]) => lines.push(args), warn: (...args: unknown[]) => lines.push(args) };
+    new AllExceptionsFilter(logger as never, { getId: () => 'req-1', get: () => 'req-1' } as never).catch(exception, host as never);
+    return { body, lines: JSON.stringify(lines), calls: lines };
+  }
+
+  const TOKEN = 'Zk3pQ9vT2mX8rN4bW7yL1cH6dF5gJ0aS-e_uV9iO2qR';
+
+  it.each([
+    ['a setup token in ?t=', `/api/v1/platform/my-subscription/trial/link?t=${TOKEN}`],
+    ['a token in ?token=', `/api/v1/platform/owner-invitation/accept?token=${TOKEN}&lang=fr`],
+    ['the webhook verify token', `/api/v1/messaging/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=${TOKEN}`],
+  ])('%s: the logged path keeps the route and drops the value; the client gets the path it asked for', (_name, url) => {
+    for (const exception of [new UnauthorizedException(), new ForbiddenException(), new HttpException('slow down', 429)]) {
+      const { body, lines } = logged(exception, url);
+      expect(lines).not.toContain(TOKEN);
+      expect(lines).toContain(url.slice(0, url.indexOf('?')));
+      expect(lines).toContain('[redacted]');
+      expect(body.path).toBe(url);
+    }
+  });
+
+  it('Nest’s own 404 names the URL in its message: the query in it is scrubbed too', () => {
+    const url = `/api/v1/platform/my-subscription/trial/link?t=${TOKEN}`;
+    const { lines, body } = logged(new NotFoundException(`Cannot GET ${url}`), url);
+    expect(lines).not.toContain(TOKEN);
+    expect(lines).toContain('Cannot GET /api/v1/platform/my-subscription/trial/link?t=[redacted]');
+    expect(body.message).toBe(`Cannot GET ${url}`);
+  });
+
+  it('a server error is logged with its own error and the scrubbed path', () => {
+    const failure = new Error('the database went away');
+    const { lines, calls } = logged(failure, `/api/v1/platform/portal-session?t=${TOKEN}`);
+    expect(lines).not.toContain(TOKEN);
+    expect(calls).toEqual([[expect.objectContaining({ err: failure, path: '/api/v1/platform/portal-session?t=[redacted]' }), 'Unhandled server error']]);
+  });
+
+  it('a body that is not JSON is described in the log, never quoted — the parser’s message carries what was sent', () => {
+    // How Nest answers body-parser's SyntaxError: a 400 with the parser's message.
+    const parserMessage = `Unexpected token 'h', "hunter2-password" is not valid JSON`;
+    const { lines, body } = logged(new BadRequestException(parserMessage), '/api/v1/auth/login');
+    expect(lines).not.toContain('hunter2');
+    expect(lines).toContain('The request body is not valid JSON.');
+    expect(body.message).toBe(parserMessage);
+  });
+
+  it('every other message is logged as it was', () => {
+    const { lines } = logged(new BadRequestException(['name must be a string', 'property password should not exist']), '/api/v1/x');
+    expect(lines).toContain('name must be a string');
+    expect(lines).toContain('property password should not exist');
   });
 });

@@ -12,7 +12,7 @@ import { BinaryUuidInterceptor } from './common/interceptors/binary-uuid.interce
 import { CostGatingInterceptor } from './common/interceptors/cost-gating.interceptor';
 import { isUuid, newUuidV7, uuidToBin } from './common/utils/uuid.util';
 import { HashingModule } from './common/security/hashing.module';
-import { scrubQuery, scrubUrl } from './common/http/log-scrub';
+import { requestLogOptions } from './common/http/request-log';
 import { TenantModule } from './common/tenant/tenant.module';
 import { EntitlementModule } from './entitlement/entitlement.module';
 import { PlatformModule } from './platform/platform.module';
@@ -91,50 +91,10 @@ import { AgentModule } from './agent/agent.module';
       },
     }),
 
-    // Structured JSON logging with per-request correlation and secret redaction.
+    // Structured JSON logging with per-request correlation and secret redaction (`request-log.ts`).
     LoggerModule.forRootAsync({
       inject: [AppConfigService],
-      useFactory: (cfg: AppConfigService) => ({
-        pinoHttp: {
-          level: cfg.logLevel,
-          genReqId: (req: IncomingMessage) =>
-            (req.headers['x-request-id'] as string | undefined) ?? newUuidV7(),
-          redact: {
-            paths: [
-              'req.headers.authorization',
-              'req.headers.cookie',
-              'req.body.password',
-              'req.body.pin',
-              'req.body.refreshToken',
-              // Device identity (F1 Stage 3): the enrollment secret the client
-              // presents at login. Redacted for parity with the password, so a
-              // future body log cannot leak it while the password stays safe.
-              'req.body.deviceCredential.deviceSecret',
-              // Administrator MFA (0094): the code, a recovery code, the enrolment token, the step-up's password.
-              'req.body.code',
-              'req.body.recoveryCode',
-              'req.body.enrolmentToken',
-              'req.body.confirmPassword',
-              'res.headers["set-cookie"]',
-            ],
-            remove: true,
-          },
-          /*
-           * `redact.paths` cannot reach inside a URL, and the portal-handoff
-           * ticket arrives as `?t=…`. Without this the request line writes a
-           * live credential to the log file twice per request.
-           */
-          serializers: {
-            req(req: Record<string, unknown>) {
-              return { ...req, url: scrubUrl(req.url), query: scrubQuery(req.query) };
-            },
-          },
-          transport: cfg.isProduction
-            ? undefined
-            : { target: 'pino-pretty', options: { singleLine: true } },
-          autoLogging: true,
-        },
-      }),
+      useFactory: (cfg: AppConfigService) => ({ pinoHttp: requestLogOptions(cfg) }),
     }),
 
     // Global rate limiting (tighter limits on auth endpoints come in Phase 2).
