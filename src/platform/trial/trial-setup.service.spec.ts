@@ -502,6 +502,7 @@ describe('the website’s resend — after the Owner signs in, never from the ap
       destinations: [{ channel: 'email', masked: 'o•••@shop.test' }],
       lastAttemptAt: resent,
       canResendNow: false,
+      resendBlockedBy: 'throttle',
       resendAvailableAt: new Date(NOW.getTime() + 2 * MINUTE).toISOString(),
       history: [
         { at: resent, trigger: 'resend', email: 'accepted', whatsapp: 'not_applicable' },
@@ -600,6 +601,37 @@ describe('the website’s resend — after the Owner signs in, never from the ap
       body: { missingContacts: ['phone'] },
     });
     expect(w.messages(both)).toHaveLength(0);
+  });
+
+  it('says why it may not ask again: the throttle alone counts down; a closed channel or a missing contact does not (C4)', async () => {
+    // Only the throttle: the button counts down to resendAvailableAt.
+    w.clock.advance(30 * SECOND);
+    expect((await w.service.status(shop.owner)).setup).toMatchObject({
+      canResendNow: false,
+      resendBlockedBy: 'throttle',
+      resendAvailableAt: new Date(NOW.getTime() + MINUTE).toISOString(),
+    });
+    w.clock.advance(30 * SECOND);
+    expect((await w.service.status(shop.owner)).setup).toMatchObject({ canResendNow: true, resendBlockedBy: null, resendAvailableAt: null });
+
+    // Nothing can carry it — right after the automatic send found nothing (review finding R4-06): no countdown, though
+    // the throttle's instant is still told as it is.
+    const off = world({ email: new DisabledEmailChannel(), whatsapp: new DisabledWhatsAppChannel() });
+    const closed = off.business({ contacts: 'phone' });
+    await verifiedNow(off, closed);
+    off.clock.advance(30 * SECOND);
+    expect((await off.service.status(closed.owner)).setup).toMatchObject({
+      delivery: 'unavailable',
+      canResendNow: false,
+      resendBlockedBy: 'unavailable',
+      resendAvailableAt: new Date(NOW.getTime() + MINUTE).toISOString(),
+    });
+    off.clock.advance(MINUTE);
+    expect((await off.service.status(closed.owner)).setup).toMatchObject({ resendBlockedBy: 'unavailable', resendAvailableAt: null });
+
+    // A required contact unverified comes first, whatever else also applies.
+    const waiting = off.business({ contacts: 'both', verified: ['email'] });
+    expect((await off.service.status(waiting.owner)).setup).toMatchObject({ canResendNow: false, resendBlockedBy: 'contact_unverified' });
   });
 
   it('nothing can carry it: 503 setup_delivery_unavailable — the attempt recorded, and counted', async () => {

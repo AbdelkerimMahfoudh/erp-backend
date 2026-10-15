@@ -8,6 +8,7 @@ import {
   plannedOutcomes,
   printsDevelopmentLinks,
   resendAvailableAt,
+  resendBlockOf,
   sentTo,
   setupLinkUrl,
   verifiedDestinations,
@@ -182,6 +183,29 @@ describe('when the website may ask again: 60 s, 3 per 15 min, 10 per 24 h — ev
   it('the strictest rule wins, whatever order the attempts arrive in', () => {
     const shuffled = [at(2 * MINUTE), T, at(MINUTE)];
     expect(resendAvailableAt(shuffled, at(2 * MINUTE + 30 * SECOND), at(3 * MINUTE))).toEqual(at(15 * MINUTE));
+  });
+});
+
+describe('why the website may not ask again now (C4)', () => {
+  const destinations = verifiedDestinations(owner());
+  const open = { email: true, whatsapp: true };
+  const closed = { email: false, whatsapp: false };
+
+  it('a required contact unverified comes first, whatever else also stands in the way', () => {
+    expect(resendBlockOf(['phone'], destinations, open, null)).toBe('contact_unverified');
+    expect(resendBlockOf(['phone'], destinations, closed, at(MINUTE))).toBe('contact_unverified');
+  });
+
+  it('then no verified contact whose channel can carry it now — there is nothing to count down to', () => {
+    expect(resendBlockOf([], destinations, closed, null)).toBe('unavailable');
+    expect(resendBlockOf([], destinations, closed, at(MINUTE))).toBe('unavailable');
+    // A channel that is open but leads to no verified contact carries nothing either.
+    expect(resendBlockOf([], verifiedDestinations(owner({ phoneVerifiedAt: null })), { email: false, whatsapp: true }, null)).toBe('unavailable');
+  });
+
+  it('the throttle only when it is the only thing; null exactly when the website may ask now', () => {
+    expect(resendBlockOf([], destinations, open, at(MINUTE))).toBe('throttle');
+    expect(resendBlockOf([], destinations, { email: false, whatsapp: true }, null)).toBeNull();
   });
 });
 

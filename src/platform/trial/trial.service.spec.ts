@@ -558,6 +558,7 @@ describe('the offer the website shows', () => {
         ],
         lastAttemptAt: null,
         canResendNow: true,
+        resendBlockedBy: null,
         resendAvailableAt: null,
         history: [],
       },

@@ -40,6 +40,7 @@ import {
   plannedOutcomes,
   printsDevelopmentLinks,
   resendAvailableAt,
+  resendBlockOf,
   sentTo,
   setupLinkUrl,
   verifiedDestinations,
@@ -172,14 +173,15 @@ export class TrialSetupService implements OnApplicationShutdown {
     const last = history[0] ?? null;
     const facts = { ...delivery, last };
     const availableAt = resendAvailableAt(recent, inFlight, now);
-    const operational = this.operational();
     const destinations = verifiedDestinations(owner);
+    const blockedBy = resendBlockOf(missing, destinations, this.operational(), availableAt);
     return {
       delivery: deliveryOf(facts, now),
       sentTo: sentTo(delivery.lastAccepted, facts.acceptedIsCurrent),
       destinations,
       lastAttemptAt: last?.at.toISOString() ?? null,
-      canResendNow: missing.length === 0 && destinations.some((d) => operational[d.channel]) && availableAt === null,
+      canResendNow: blockedBy === null,
+      resendBlockedBy: blockedBy,
       resendAvailableAt: availableAt?.toISOString() ?? null,
       history: history.map(historyEntry),
     };

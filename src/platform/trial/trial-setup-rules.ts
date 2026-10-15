@@ -250,6 +250,26 @@ export function historyEntry(attempt: SetupAttempt): SetupHistoryEntry {
 }
 
 /**
+ * Why the website may not ask again now (C4; review finding R4-06), the first that applies:
+ *  - `contact_unverified` — a required contact is not verified;
+ *  - `unavailable` — no verified contact's channel can carry the instructions now: there is nothing to count down to,
+ *    and the button says they cannot be sent right now;
+ *  - `throttle` — only the throttle stands in the way, until `resendAvailableAt`.
+ */
+export type ResendBlock = 'contact_unverified' | 'unavailable' | 'throttle';
+
+export function resendBlockOf(
+  missing: readonly TrialContact[],
+  destinations: readonly SetupDestination[],
+  operational: Record<SetupChannel, boolean>,
+  throttledUntil: Date | null,
+): ResendBlock | null {
+  if (missing.length > 0) return 'contact_unverified';
+  if (!destinations.some((d) => operational[d.channel])) return 'unavailable';
+  return throttledUntil ? 'throttle' : null;
+}
+
+/**
  * The website's `setup` object on the Owner's trial card, and the resend's answer: where the instructions stand, an
  * honest history, and when the Owner may ask again. Never a condition for claiming.
  */
@@ -260,7 +280,9 @@ export interface WebsiteSetup {
   lastAttemptAt: string | null;
   /** No missing contact, a verified contact whose channel can carry it now, and the throttle allows it. */
   canResendNow: boolean;
-  /** The earliest instant the throttle allows, or null when it allows now. */
+  /** Why not, when `canResendNow` is false; null exactly when it is true. */
+  resendBlockedBy: ResendBlock | null;
+  /** The earliest instant the throttle allows, or null when it allows now — whatever else may also stand in the way. */
   resendAvailableAt: string | null;
   history: SetupHistoryEntry[];
 }
