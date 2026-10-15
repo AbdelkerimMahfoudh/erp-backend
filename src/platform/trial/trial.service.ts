@@ -384,9 +384,9 @@ export class TrialService {
         companyId: who.companyId,
         subscriptionId: refs.subscriptionId,
         kind: 'trial_claimed',
-        note:
-          `Free trial claimed on the website by the Owner: ${TRIAL_DURATION_DAYS} days from ${startedAt.toISOString()} ` +
-          `to ${endsAt.toISOString()}. Nothing was charged.`,
+        // No instant in the note (C7): the start and the end travel as data — the claim's own columns, the trial's
+        // view — and every client shows them in the business's zone. A note is English text printed as it is.
+        note: `Free trial claimed on the website by the Owner: ${TRIAL_DURATION_DAYS} days from the claim. Nothing was charged.`,
         actor,
         createdAt: now,
       },

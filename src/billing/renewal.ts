@@ -63,7 +63,8 @@ export class SubscriptionRenewal {
    * renewal.
    *
    * `at` moves the beginning: paid access approved while a free trial runs starts when the trial ends (0095), so the
-   * period opens there — sized as the shop is today, priced by the plan in force then — and the timeline says when.
+   * period opens there — sized as the shop is today, priced by the plan in force then — and the timeline says so, in
+   * words: the instant is the period's own start (C7).
    *
    * The changes scheduled for this renewal are applied as the roll runs, and dated when they took effect (R1-F3,
    * reviewed 2026-10-15): `at` for a roll that begins now or began earlier, but the roll's own instant — read after
@@ -87,7 +88,9 @@ export class SubscriptionRenewal {
       const activityChanges = await applyScheduledActivityChanges(tx, companyId, subscriptionId, deferred ? now : at, actor, deferred);
       const closedPeriod = await this.billing.closeCurrentPeriod(companyId, at, tx);
       await this.billing.openPeriod(companyId, subscriptionId, periodEnd, { db: tx, startsAt: at });
-      const opens = `on ${at.toISOString()}, at today's size and the prices in force then.`;
+      // A later start is a free trial's end (the lifecycle's `accessFrom`), said in words: the instant is the period's
+      // own start, data the clients show in the business's zone — never an ISO string in a note (C7).
+      const opens = "when the free trial ends, at today's size and the prices in force then.";
       await tx.subscriptionEvent.create({
         data: {
           id: newUuidV7Bin(),

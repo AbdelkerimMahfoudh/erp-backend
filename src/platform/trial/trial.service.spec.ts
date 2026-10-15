@@ -136,7 +136,8 @@ describe('the Owner starts the free trial on the website', () => {
     expect(w.events(shop)).toEqual([
       expect.objectContaining({
         kind: 'trial_claimed',
-        note: `Free trial claimed on the website by the Owner: 7 days from ${NOW.toISOString()} to ${end}. Nothing was charged.`,
+        // No instant in the note (C7): the start and the end are the claim's data, shown in the business's zone.
+        note: 'Free trial claimed on the website by the Owner: 7 days from the claim. Nothing was charged.',
         actor: actorOf(shop.owner),
         createdAt: NOW,
       }),

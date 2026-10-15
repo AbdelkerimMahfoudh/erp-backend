@@ -292,7 +292,8 @@ describe('6. exact activation at trial expiry', () => {
       const e = await w.entitlement.forCompany(b.companyId);
 
       expect(w.claimOf(b)!.expiryRecordedAt).toEqual(at);
-      expect(w.events(b, 'trial_expired').map((x) => x.note)).toEqual([`The 7-day free trial ended at ${T.toISOString()}. Nothing was charged.`]);
+      // No instant in the note (C7): the end is the claim's own, kept as data in the audit.
+      expect(w.events(b, 'trial_expired').map((x) => x.note)).toEqual(['The 7-day free trial ended. Nothing was charged.']);
       expect(w.audits(b, 'trial.expired')).toHaveLength(1);
 
       const opened = w.branch(b, 'B')!;

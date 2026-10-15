@@ -428,10 +428,8 @@ export class SubscriptionLifecycleService {
         companyId: id,
         subscriptionId: before.id,
         kind: 'approved',
-        note: noteWith(
-          input.reason,
-          trialEndsAt ? `Paid access starts when the free trial ends at ${trialEndsAt.toISOString()}.` : null,
-        ),
+        // When it starts is data — the period's start, the trial's end — never an instant in the note (C7).
+        note: noteWith(input.reason, trialEndsAt ? 'Paid access starts when the free trial ends.' : null),
         periodEndAfter: end,
         branchesAfter: after.subscribedBranchCount,
         seatsAfter: after.additionalSeats,

@@ -140,7 +140,8 @@ describe('a roll now, at the instant paid access starts (0095)', () => {
     expect(w.events.map((e) => e.kind)).toEqual(['activity_changed', 'renewed']);
     expect(w.events[0].note).toBe('Store "Main": both → money_agent at the approval, ahead of the paid period that starts when the free trial ends.');
     expect(w.events[0].note).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
-    expect(w.events[1].note).toBe(`First billing period opens on ${TRIAL_END.toISOString()}, at today's size and the prices in force then.`);
+    expect(w.events[1].note).toBe("First billing period opens when the free trial ends, at today's size and the prices in force then.");
+    expect(w.events[1].note).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
     expect(w.locks).toHaveLength(1);
   });
 
@@ -172,7 +173,7 @@ describe('a roll now, at the instant paid access starts (0095)', () => {
     await w.renewal.rollNow(COMPANY, SUB, NEW_END, 'ops@example.test', TRIAL_END);
     expect(w.closed).toEqual([TRIAL_END]);
     expect(w.events.map((e) => e.note)).toEqual([
-      `Renewed: the billing period closes and a new one opens on ${TRIAL_END.toISOString()}, at today's size and the prices in force then.`,
+      "Renewed: the billing period closes and a new one opens when the free trial ends, at today's size and the prices in force then.",
     ]);
   });
 });

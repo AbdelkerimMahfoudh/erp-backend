@@ -181,7 +181,8 @@ describe('the end of a free trial, written down once', () => {
         companyId: COMPANY,
         subscriptionId: w.sub.id,
         kind: 'trial_expired',
-        note: 'The 7-day free trial ended at 2026-10-20T10:00:00.123Z. Nothing was charged.',
+        // No instant in the note (C7): the end is the claim's, kept as data in the audit below.
+        note: 'The 7-day free trial ended. Nothing was charged.',
         actor: 'system',
         createdAt: END,
       }),

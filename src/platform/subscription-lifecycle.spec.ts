@@ -547,8 +547,10 @@ describe('the free trial’s fence, and paid access that waits for the trial’s
     expect(w.starts).toEqual([END]);
     expect(w.periods).toEqual([months(END, 1)]);
     expect(w.events.map((e) => e.kind)).toEqual(['approved', 'renewed']);
-    expect(w.events[0].note).toBe(`Paid by transfer Paid access starts when the free trial ends at ${END.toISOString()}.`);
-    expect(w.events[1].note).toBe(`First billing period opens on ${END.toISOString()}, at today's size and the prices in force then.`);
+    // No instant in either note (C7): when paid access starts is the period's start and the trial's end — data.
+    expect(w.events[0].note).toBe('Paid by transfer Paid access starts when the free trial ends.');
+    expect(w.events[1].note).toBe("First billing period opens when the free trial ends, at today's size and the prices in force then.");
+    for (const e of w.events) expect(e.note).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
     expect(w.audits[0]).toMatchObject({
       action: 'subscription.approve',
       after: { paidFrom: END.toISOString(), trialEndsAt: END.toISOString(), paymentRecorded: false },

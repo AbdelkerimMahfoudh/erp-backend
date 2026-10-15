@@ -92,7 +92,9 @@ export async function recordTrialExpiryTx(
       companyId,
       subscriptionId,
       kind: 'trial_expired',
-      note: `The ${TRIAL_DURATION_DAYS}-day free trial ended at ${endsAt}. Nothing was charged.`,
+      // No instant in the note (C7): the end is the claim's own `ends_at`, shown in the business's zone; the audit
+      // below keeps it as data. "Nothing was charged." is still true of the trial itself (PQ15).
+      note: `The ${TRIAL_DURATION_DAYS}-day free trial ended. Nothing was charged.`,
       actor: 'system',
       createdAt: now,
     },
