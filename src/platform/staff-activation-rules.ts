@@ -213,3 +213,46 @@ export async function activateIfReadyTx(tx: ActivationDb, userId: Buffer, now: D
   }
   return { activated: true, alreadyActive: false, pending: [] };
 }
+
+/** What a store's scheduled seats can cover, and for whom: {@link scheduledCoverage}. */
+export interface ScheduledCoverage {
+  /** Seats at the store paid for during a free trial, not yet in force, that no pending person holds. */
+  seats: number;
+  /** The pending people a seat there would go to, first invited first. */
+  candidates: Buffer[];
+}
+
+/**
+ * An unreserved scheduled seat is capacity already bought (D176 §8).
+ *
+ * A seat paid for during a free trial is `scheduled` until the trial ends: counted nowhere, so the store still reads
+ * full. Without this rule the next person invited there would be priced a second seat. `seats` (K) counts the
+ * scheduled seats at the store that no pending person holds — requested for nobody, or for somebody since activated
+ * or deleted, as a held seat is read for {@link evaluateActivation}'s reservations. `candidates` are the company's
+ * pending invitees assigned to the store with a non-Owner role and no seat request of their own there, in the order
+ * they were invited (then by id). When the store is full, the candidate at index i is covered exactly when
+ * i < room + K.
+ *
+ * Counts are unchanged: a scheduled seat still seats nobody now. Coverage only stops a second request being made.
+ */
+export async function scheduledCoverage(db: ActivationDb, companyId: Buffer, branchId: Buffer): Promise<ScheduledCoverage> {
+  const scheduled = await db.seatAllocation.findMany({
+    where: { companyId, kind: 'seat', status: 'scheduled', branchId },
+    select: { userId: true, user: { select: { activatedAt: true, deletedAt: true } } },
+  });
+  const seats = scheduled.filter((s) => s.userId === null || !s.user || s.user.activatedAt !== null || s.user.deletedAt !== null).length;
+  if (seats === 0) return { seats: 0, candidates: [] };
+  const people = await db.user.findMany({
+    where: {
+      companyId,
+      invitedAt: { not: null },
+      activatedAt: null,
+      deletedAt: null,
+      userBranches: { some: { branchId, role: { key: { not: 'owner' } } } },
+      seatAllocations: { none: { kind: 'seat', branchId, status: { in: ['pending_payment', 'paid', 'granted', 'scheduled'] } } },
+    },
+    select: { id: true },
+    orderBy: [{ invitedAt: 'asc' }, { id: 'asc' }],
+  });
+  return { seats, candidates: people.map((p) => p.id) };
+}

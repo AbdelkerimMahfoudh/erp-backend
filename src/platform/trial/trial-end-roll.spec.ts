@@ -1,0 +1,274 @@
+import { Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { newUuidV7Bin } from '../../common/utils/uuid.util';
+import { CTX, DAY, HOUR, makeTrialBillingWorld, type Business, type TrialBillingWorld } from '../__testing__/trial-billing-world';
+
+/**
+ * When a free trial ends (0095; D176): the record that it did (Tx A), and what was paid for during it put in force
+ * (Tx B) — each in its own transaction, each taking the subscription row with NOWAIT, neither ever waiting for it.
+ *
+ * The rows a confirmation schedules are written here directly, as the confirmation would leave them (its own spec,
+ * trial-addons.spec, drives the whole journey): `scheduled`, paid, starting at the claim's end.
+ */
+
+const CLAIMED = new Date('2026-10-14T09:30:00.123Z');
+const T = new Date(CLAIMED.getTime() + 168 * HOUR);
+
+let warn: jest.SpyInstance;
+beforeEach(() => {
+  warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+});
+afterEach(() => jest.restoreAllMocks());
+
+/** A business that claimed its trial at CLAIMED, approved for a month during it, with a store and a seat scheduled. */
+async function scheduledWorld(opts: { approve?: boolean; person?: 'own' | 'none' } = {}) {
+  const w = makeTrialBillingWorld({ now: CLAIMED });
+  const b = w.business({ name: 'Boutique' });
+  await w.claim(b);
+  w.clock.set(new Date(CLAIMED.getTime() + HOUR));
+  if (opts.approve ?? true) await w.lifecycle.approve(w.uuid(b.companyId), { months: 1, reason: 'paid' }, CTX);
+  const person = opts.person === 'own' ? w.person(b, { name: 'Sara', stores: ['Main'], verified: true }) : null;
+  const store = schedule(w, b, { kind: 'store', label: 'B', amount: 500, reference: 'BK-1' });
+  const seat = schedule(w, b, { kind: 'seat', branch: 'Main', userId: person, amount: 100, reference: 'BK-2' });
+  return { w, b, store, seat, person };
+}
+
+/** A request as a confirmation during the trial leaves it: paid, scheduled to start at the trial's end. */
+function schedule(
+  w: TrialBillingWorld,
+  b: Business,
+  o: { kind: 'store' | 'seat'; label?: string; branch?: string; userId?: Buffer | null; amount: number; reference: string },
+): string {
+  const paymentId = newUuidV7Bin();
+  const at = w.clock.now();
+  w.t.subscriptionPayment.push({
+    id: paymentId,
+    companyId: b.companyId,
+    subscriptionId: b.subscriptionId,
+    amount: new Prisma.Decimal(o.amount),
+    currency: 'MRU',
+    paidAt: at,
+    channel: 'manual',
+    reference: o.reference,
+    note: null,
+    recordedBy: 'ops@example.test',
+    confirmedBy: 'ops@example.test',
+    confirmedAt: at,
+    reversesId: null,
+    createdAt: at,
+  });
+  const id = newUuidV7Bin();
+  w.t.seatAllocation.push({
+    id,
+    companyId: b.companyId,
+    subscriptionId: b.subscriptionId,
+    branchId: o.branch ? b.stores[o.branch] : null,
+    userId: o.userId ?? null,
+    kind: o.kind,
+    status: 'scheduled',
+    label: o.label ?? null,
+    activityFrom: null,
+    activityTo: o.kind === 'store' ? 'electronics' : null,
+    activityEffective: null,
+    replacesBranchId: null,
+    replacementCredit: null,
+    replacementPeriodId: null,
+    monthlyAmount: o.amount,
+    currency: 'MRU',
+    requestedBy: 'owner',
+    requestedAt: at,
+    paymentId,
+    confirmedBy: 'ops@example.test',
+    confirmedAt: at,
+    effectiveAt: T,
+    closedAt: null,
+    closedBy: null,
+    reason: null,
+    version: 1,
+    createdAt: at,
+    updatedAt: at,
+  });
+  return w.uuid(id);
+}
+
+/** Everything a pass could write, to compare before and after. */
+const snapshot = (w: TrialBillingWorld) => JSON.stringify(w.t, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+
+describe('before the trial ends: nothing is due, and nothing is even locked', () => {
+  it('the last millisecond of the trial', async () => {
+    const { w, b } = await scheduledWorld();
+    w.clock.set(new Date(T.getTime() - 1));
+    const locksBefore = w.locks.length;
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('nothing_due');
+    expect(w.locks.length).toBe(locksBefore);
+    expect(w.requests(b).filter((r) => r.status === 'scheduled')).toHaveLength(2);
+    expect(w.claimOf(b)!.expiryRecordedAt).toBeNull();
+  });
+
+  it('a business with no claim has nothing due, ever', async () => {
+    const w = makeTrialBillingWorld({ now: CLAIMED });
+    const b = w.business({ eligible: false, status: 'activated' });
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('nothing_due');
+    expect(w.locks).toEqual([]);
+  });
+});
+
+describe('at the trial’s end: the record, then the activation — each once', () => {
+  it('records the expiry and puts the store and the seat in force, stamped at the end, the first period raised by each', async () => {
+    const { w, b, store, seat } = await scheduledWorld();
+    w.clock.set(T);
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('done');
+
+    // Tx A, as before: once, with its event and its audit.
+    expect(w.claimOf(b)!.expiryRecordedAt).toEqual(T);
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    expect(w.audits(b, 'trial.expired')).toHaveLength(1);
+
+    // Tx B: the store opened and named, the seat counted, both at the trial's end.
+    const opened = w.branch(b, 'B')!;
+    expect(opened).toMatchObject({ activity: 'electronics', isActive: true });
+    expect(w.request(store)).toMatchObject({ status: 'paid', effectiveAt: T, branchId: opened.id });
+    expect(w.request(seat)).toMatchObject({ status: 'paid', effectiveAt: T });
+    expect(w.t.userBranch.filter((ub) => ub.branchId.equals(opened.id)).map((ub) => ub.userId)).toEqual([b.ownerId]);
+    expect(w.subscription(b)).toMatchObject({ subscribedBranchCount: 2 });
+
+    const [p1] = w.periods(b);
+    expect(p1.periodStart).toEqual(T);
+    expect(p1).toMatchObject({ assessedBranchFee: 1000, assessedStaffFee: 100, assessedTotal: 1100, activeBranchCount: 2 });
+    expect(w.audits(b, 'store.activate').map((a) => a.afterJson)).toEqual([
+      expect.objectContaining({ requestId: store, periodId: w.uuid(p1.id), effectiveAt: T.toISOString(), monthlyAmount: 500, paid: '500', raisedBy: 500 }),
+    ]);
+    expect(w.audits(b, 'seat.activate').map((a) => a.afterJson)).toEqual([expect.objectContaining({ requestId: seat, raisedBy: 100, paid: '100' })]);
+    expect(w.events(b, 'branches_changed').map((e) => e.note)).toEqual([
+      'Store "B" (electronics) opened with its first paid period: paid for during the free trial, payment BK-1.',
+    ]);
+    expect(w.events(b, 'seats_changed').map((e) => e.note)).toEqual([
+      'Seat at Main in force with its first paid period: paid for during the free trial, payment BK-2.',
+    ]);
+    // The notes the server writes here carry no instant (C7): the dates travel as data.
+    for (const e of [...w.events(b, 'branches_changed'), ...w.events(b, 'seats_changed')]) expect(e.note).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+
+    // Both transactions took the row with NOWAIT, bounded.
+    expect(w.locks.slice(-2)).toEqual([
+      { company: w.uuid(b.companyId), nowait: true, outcome: 'taken' },
+      { company: w.uuid(b.companyId), nowait: true, outcome: 'taken' },
+    ]);
+    expect(w.txOptions.slice(-2)).toEqual([
+      { maxWait: 2000, timeout: 10000 },
+      { maxWait: 2000, timeout: 10000 },
+    ]);
+  });
+
+  it('a later first look stamps the same instant, and a re-run changes nothing at all', async () => {
+    const { w, b, store } = await scheduledWorld();
+    w.clock.set(new Date(T.getTime() + 5 * 60_000));
+    await w.trialEnd.applyIfDue(b.companyId);
+    expect(w.request(store).effectiveAt).toEqual(T);
+    const settled = snapshot(w);
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('nothing_due');
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('nothing_due');
+    expect(snapshot(w)).toBe(settled);
+  });
+
+  it('the person a scheduled seat was paid for is activated with it', async () => {
+    const { w, b, person } = await scheduledWorld({ person: 'own' });
+    expect(w.user(person!)).toMatchObject({ isActive: false, activatedAt: null });
+    w.clock.set(T);
+    await w.trialEnd.applyIfDue(b.companyId);
+    expect(w.user(person!)).toMatchObject({ isActive: true, activatedAt: T });
+    expect(w.events(b, 'staff_activated')).toHaveLength(1);
+  });
+});
+
+describe('never waiting on the subscription row (R1-F2)', () => {
+  it('a row another writer holds is busy: nothing written, nothing waited for — and the next attempt finishes', async () => {
+    const { w, b, store } = await scheduledWorld();
+    w.clock.set(T);
+    const release = w.hold(b);
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('busy');
+    expect(w.locks.slice(-2).map((l) => l.outcome)).toEqual(['busy', 'busy']);
+    expect(w.claimOf(b)!.expiryRecordedAt).toBeNull();
+    expect(w.request(store).status).toBe('scheduled');
+    expect(warn).not.toHaveBeenCalled();
+    release();
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('done');
+    expect(w.request(store).status).toBe('paid');
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+  });
+});
+
+describe('the activation’s gate: a paid period in force, in an open company', () => {
+  it('no paid access by the end: the expiry is recorded, the requests wait — paid, counted nowhere', async () => {
+    const { w, b, store, seat } = await scheduledWorld({ approve: false });
+    w.clock.set(T);
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('done');
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['scheduled', 'scheduled']);
+    expect(w.branch(b, 'B')).toBeNull();
+    expect(w.periods(b)).toEqual([]);
+    // Approved a day later: the period opens then, and the requests join it, stamped at its start.
+    w.clock.set(new Date(T.getTime() + DAY));
+    await w.lifecycle.approve(w.uuid(b.companyId), { months: 1, reason: 'paid late' }, CTX);
+    await w.trialEnd.applyIfDue(b.companyId);
+    const [p] = w.periods(b);
+    expect(p.periodStart).toEqual(new Date(T.getTime() + DAY));
+    expect(p.assessedTotal).toBe(1100);
+    expect(w.request(store)).toMatchObject({ status: 'paid', effectiveAt: p.periodStart });
+  });
+
+  it('a closed company activates nothing, whatever its period', async () => {
+    const { w, b, store } = await scheduledWorld();
+    w.company(b).closedAt = new Date(T.getTime() - HOUR);
+    w.clock.set(T);
+    await w.trialEnd.applyIfDue(b.companyId);
+    expect(w.request(store).status).toBe('scheduled');
+    expect(w.branch(b, 'B')).toBeNull();
+    expect(w.periods(b)[0].assessedTotal).toBe(500);
+  });
+
+  it('a suspended business with its period in force activates on schedule (PQ3)', async () => {
+    const { w, b, store } = await scheduledWorld();
+    await w.lifecycle.suspend(w.uuid(b.companyId), { reason: 'check' }, CTX);
+    w.clock.set(T);
+    await w.trialEnd.applyIfDue(b.companyId);
+    expect(w.request(store).status).toBe('paid');
+    expect(w.subscription(b).status).toBe('suspended');
+  });
+});
+
+describe('a store that cannot open under its name', () => {
+  it('waits, flagged once — never thrown, never charged', async () => {
+    const { w, b, store, seat } = await scheduledWorld();
+    // An archived store still holds its name (the unique key counts every branch): the paid one cannot take it.
+    w.t.branch.push({ ...w.branch(b, 'Main')!, id: newUuidV7Bin(), name: 'B', isActive: false });
+    w.clock.set(T);
+    await w.trialEnd.applyIfDue(b.companyId);
+    await w.trialEnd.applyIfDue(b.companyId);
+    expect(w.request(store)).toMatchObject({ status: 'scheduled', reason: expect.stringContaining('A store named "B" already exists') });
+    expect(w.audits(b, 'store.activation_blocked')).toHaveLength(1);
+    // The seat beside it was not held up.
+    expect(w.request(seat).status).toBe('paid');
+    expect(w.periods(b)[0].assessedTotal).toBe(600);
+  });
+});
+
+describe('a failed activation never undoes the expiry record', () => {
+  it('the store cannot be created: the record stands, the activation is rolled back whole, and the next attempt succeeds', async () => {
+    const { w, b, store, seat } = await scheduledWorld();
+    w.clock.set(T);
+    w.hooks.failBranchCreate = 1;
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('failed');
+    expect(w.claimOf(b)!.expiryRecordedAt).toEqual(T);
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['scheduled', 'scheduled']);
+    expect(w.branch(b, 'B')).toBeNull();
+    expect(w.periods(b)[0].assessedTotal).toBe(500);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^Activation of what was paid for during the free trial failed for company .*: injected/));
+
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('done');
+    expect(w.request(store).status).toBe('paid');
+    expect(w.periods(b)[0].assessedTotal).toBe(1100);
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+  });
+});
