@@ -53,7 +53,8 @@ import { EntitlementService } from '../entitlement/entitlement.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { randomBytes } from 'node:crypto';
 import { RegistrationFlowService } from './registration-flow.service';
-import { ContinueConfirmDto, ContinueStartDto, IsNotEmptyish, RegisterDto } from './registration.dto';
+import { ContinueConfirmDto, ContinueStartDto, RegisterDto } from './registration.dto';
+import { IsIdempotencyKey } from '../common/decorators/idempotency-key.decorator';
 import { trialFactsOf, trialSummaryOf, type TrialClaimFacts } from './trial/trial-rules';
 
 /**
@@ -180,12 +181,21 @@ class PeriodDto {
 }
 
 /**
+ * What the console's keys are stored under, apart from the public registrations' — so an administrator's key can
+ * never replay somebody's own registration, nor the other way round.
+ */
+export const ADMIN_KEY_PREFIX = 'admin:';
+
+/**
  * A business created by an administrator for a shop — the same record public
  * registration leaves behind, minus the password, which nobody chooses here.
  */
 export class CreateBusinessDto {
-  /** The administrator's own key, so a retry cannot create a second business. */
-  @IsString() @IsNotEmptyish() @MaxLength(80) idempotencyKey: string;
+  /**
+   * The administrator's own key, so a retry cannot create a second business: the registration's rule (C11), short
+   * enough that the key stored with its prefix still fits its column, whole.
+   */
+  @IsString() @IsIdempotencyKey(ADMIN_KEY_PREFIX) idempotencyKey: string;
   @IsString() @MinLength(1) @MaxLength(160) ownerName: string;
   @IsString() @MinLength(1) @MaxLength(160) businessName: string;
   @IsOptional() @IsString() @MaxLength(160) branchName?: string;
@@ -773,7 +783,7 @@ export class PlatformController {
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
 
     const result = await this.registration.register({
-      idempotencyKey: `admin:${dto.idempotencyKey}`,
+      idempotencyKey: `${ADMIN_KEY_PREFIX}${dto.idempotencyKey}`,
       ownerName: dto.ownerName,
       businessName: dto.businessName,
       branchName: dto.branchName ?? '',

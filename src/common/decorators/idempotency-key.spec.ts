@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { RegisterDto } from '../../platform/registration.dto';
+import { ADMIN_KEY_PREFIX, CreateBusinessDto } from '../../platform/platform.controller';
 import { ClaimTrialDto } from '../../platform/trial/trial.dto';
 import { TRIAL_TERMS_VERSION } from '../../platform/trial/trial-rules';
+import { IDEMPOTENCY_KEY_COLUMN } from './idempotency-key.decorator';
 
 /**
  * The claim's and the registration's idempotency keys (C11; review finding R2-5): 1 to 80 ASCII letters, digits and
@@ -64,5 +66,41 @@ describe('an idempotency key is stored exactly as it was sent (C11)', () => {
   ])('refuses %s, on the claim and on the registration', async (_name, key) => {
     expect(await keyProblems(claim(key))).not.toEqual([]);
     expect(await keyProblems(registration(key))).not.toEqual([]);
+  });
+});
+
+describe('the console’s key follows the same rule, and fits its column with the prefix it is stored under (C11)', () => {
+  const console_ = (idempotencyKey: unknown) =>
+    plainToInstance(CreateBusinessDto, { idempotencyKey, ownerName: 'Aicha', businessName: 'Boutique', language: 'fr', reason: 'Signed up by phone' });
+  /** As many characters as the column leaves after `admin:`. */
+  const room = IDEMPOTENCY_KEY_COLUMN - ADMIN_KEY_PREFIX.length;
+
+  it('the prefix and the longest key it accepts fill the column exactly', () => {
+    expect(room).toBe(74);
+    expect((ADMIN_KEY_PREFIX + 'k'.repeat(room)).length).toBe(IDEMPOTENCY_KEY_COLUMN);
+  });
+
+  it.each([
+    ['the website’s crypto.randomUUID()', randomUUID()],
+    ['the release check’s', 'trial-http-console-r1'],
+    ['a key with every allowed character', 'Az09._:-'],
+    ['one character', 'k'],
+    ['as long as the column leaves', 'k'.repeat(74)],
+  ])('accepts %s', async (_name, key) => {
+    expect(await keyProblems(console_(key))).toEqual([]);
+  });
+
+  it.each([
+    ['empty', ''],
+    // Stored as `admin:` + 75 characters, it would be cut to the column's 80 and never match its own retry.
+    ['one character more than the column leaves', 'k'.repeat(75)],
+    ['eighty characters', 'k'.repeat(80)],
+    ['letters each followed by a variation selector', 'a️'.repeat(40)],
+    ['an emoji', 'key-\u{1F600}'],
+    ['a space', 'my key'],
+    ['an address', 'ops@example.test'],
+    ['not a string', 42],
+  ])('refuses %s', async (_name, key) => {
+    expect(await keyProblems(console_(key))).not.toEqual([]);
   });
 });

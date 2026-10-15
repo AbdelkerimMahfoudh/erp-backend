@@ -226,6 +226,8 @@ describe('the shared flow', () => {
     );
     expect(seen).toHaveLength(1);
     expect(seen[0].trialEligible).toBeUndefined();
+    // Stored under the console's prefix, whole: the DTO leaves room for it (C11).
+    expect(seen[0].idempotencyKey).toBe('admin:a-1');
     expect(answer).toMatchObject({ trialEligible: false });
   });
 });

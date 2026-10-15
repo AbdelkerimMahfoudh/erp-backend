@@ -9,11 +9,6 @@ import { ACTIVITIES, type Activity } from '../entitlement/activity';
  * `auth/register*` — so the two can never accept different things.
  */
 
-/** `@IsNotEmpty` under a name that reads in these files. */
-export function IsNotEmptyish() {
-  return MinLength(1);
-}
-
 export class RegisterDto {
   /** The client's own key, so a retry cannot create a second business. */
   @IsString() @IsIdempotencyKey() idempotencyKey: string;
