@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
@@ -37,6 +38,11 @@ interface UserRow {
   lastLoginAt: Date | null;
   deletedAt: Date | null;
   userBranches: UserBranchRow[];
+  /** Created from Team (0086): pending until the server activates it. */
+  invitedAt?: Date | null;
+  activatedAt?: Date | null;
+  /** The person's own seat requests, as the Team query selects them. */
+  seatAllocations?: { branchId: Buffer; status: string }[];
 }
 
 /** One assignment. `permissions` are the per-branch delegated grants (Stage 2). */
@@ -137,6 +143,9 @@ function makeService(
     emailVerifiedAt: u.emailVerifiedAt,
     isActive: u.isActive,
     lastLoginAt: u.lastLoginAt,
+    invitedAt: u.invitedAt ?? null,
+    activatedAt: u.activatedAt ?? null,
+    seatAllocations: u.seatAllocations ?? [],
     userBranches: u.userBranches.map((b) => ({
       id: b.id,
       branch: { ...b.branch },
@@ -409,6 +418,37 @@ describe('listing the team', () => {
 
     expect(u.phoneVerifiedAt).toBeNull();
     expect(u.emailVerifiedAt).toBeNull();
+  });
+});
+
+describe('a pending account’s seats, as the Team screen shows them', () => {
+  it('a seat paid for during the free trial and starting when it ends reads as held — the app knows that state (D176)', async () => {
+    const main = assignment();
+    const market = assignment({ branch: { id: newUuidV7Bin(), name: 'Market' } });
+    const { service } = makeService({
+      users: [
+        user({
+          name: 'Sara',
+          email: 'sara@shop.test',
+          isActive: false,
+          invitedAt: new Date('2026-10-14T10:00:00Z'),
+          activatedAt: null,
+          userBranches: [main, market],
+          seatAllocations: [{ branchId: main.branch.id, status: 'scheduled' }],
+        }),
+      ],
+    });
+    const [u] = await service.list();
+    expect(u.status).toBe('pending');
+    expect(u.pending!.seats).toEqual([
+      { branchId: binToUuid(main.branch.id), branchName: 'Main Store', state: 'held' },
+      { branchId: binToUuid(market.branch.id), branchName: 'Market', state: 'included' },
+    ]);
+  });
+
+  it('the Team query reads scheduled seats beside the others, so a scheduled seat is never mistaken for none', () => {
+    const source = readFileSync('src/users/user-management.service.ts', 'utf8');
+    expect(source).toMatch(/status: \{ in: \['pending_payment', 'paid', 'granted', 'scheduled'\] as const \}/);
   });
 });
 

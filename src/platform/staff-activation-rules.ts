@@ -10,7 +10,12 @@ import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
  * without ever creating a request.
  */
 
-export type PendingReason = 'email_verification' | 'phone_verification' | 'seat_payment' | 'seat_unavailable';
+/**
+ * What still stands between a staff account and activation. `seat_scheduled` (D176): a seat for this person — their
+ * own, or one bought for the store that nobody holds — was paid for during the free trial and starts when it ends.
+ * Nothing is asked of anyone: the account is activated then.
+ */
+export type PendingReason = 'email_verification' | 'phone_verification' | 'seat_payment' | 'seat_unavailable' | 'seat_scheduled';
 
 export interface ActivationOutcome {
   activated: boolean;
@@ -43,7 +48,8 @@ const SELECT = {
   seatAllocations: {
     where: {
       kind: 'seat' as const,
-      status: { in: ['pending_payment', 'paid', 'granted'] as const },
+      // `scheduled` (D176) is the person's own seat as surely as a paid one: unseen, a second request would be made.
+      status: { in: ['pending_payment', 'paid', 'granted', 'scheduled'] as const },
     },
     select: { branchId: true, status: true },
   },
@@ -57,6 +63,8 @@ export interface Evaluation extends ActivationOutcome {
   eligible: boolean;
   /** Stores where the person has no seat held for them and none is free. */
   storesWithoutSeat: Buffer[];
+  /** Stores where a seat paid for during the free trial will seat them when it ends (D176): no request is made there. */
+  coveredStores: Buffer[];
 }
 
 export function unique<T>(xs: T[]): T[] {
@@ -78,6 +86,7 @@ export async function evaluateActivation(db: ActivationDb, userId: Buffer): Prom
       pending: [],
       row,
       storesWithoutSeat: [],
+      coveredStores: [],
       eligible: true,
     };
   // Not an invited account: a legacy deactivated one. Not ours to switch on.
@@ -88,6 +97,7 @@ export async function evaluateActivation(db: ActivationDb, userId: Buffer): Prom
       pending: [],
       row,
       storesWithoutSeat: [],
+      coveredStores: [],
       eligible: false,
     };
 
@@ -96,6 +106,7 @@ export async function evaluateActivation(db: ActivationDb, userId: Buffer): Prom
   if (row.phone && !row.phoneVerifiedAt) pending.push('phone_verification');
 
   const storesWithoutSeat: Buffer[] = [];
+  const coveredStores: Buffer[] = [];
   const seatStores = row.userBranches.filter(
     (ub) => ub.role.key !== 'owner' && ub.branch.isActive && ub.branch.deletedAt === null,
   );
@@ -140,12 +151,26 @@ export async function evaluateActivation(db: ActivationDb, userId: Buffer): Prom
         pending.push('seat_payment');
         continue;
       }
+      // Paid for during the free trial: theirs, and in force when it ends (D176).
+      if (own?.status === 'scheduled') {
+        pending.push('seat_scheduled');
+        continue;
+      }
       if (own) continue; // paid or granted, held for this very person
       const id = binToUuid(ub.branchId);
       const line = math.branches.find((b) => b.branchId === id);
       const room = line ? line.seatLimit - (reservedBy.get(id) ?? 0) - line.seatsUsed : 0;
       const pooledRoom = math.pooledSeats - overflow;
       if (room <= 0 && pooledRoom <= 0) {
+        // The store is full now; a seat bought for it during the free trial and held by nobody is capacity already
+        // paid for — the first people waiting there, in invitation order, are covered by it (D176 §8).
+        const coverage = await scheduledCoverage(db, row.companyId, ub.branchId);
+        const index = coverage.candidates.findIndex((c) => c.equals(userId));
+        if (index >= 0 && index < room + coverage.seats) {
+          pending.push('seat_scheduled');
+          coveredStores.push(ub.branchId);
+          continue;
+        }
         pending.push('seat_unavailable');
         storesWithoutSeat.push(ub.branchId);
       }
@@ -158,13 +183,15 @@ export async function evaluateActivation(db: ActivationDb, userId: Buffer): Prom
     pending: unique(pending),
     row,
     storesWithoutSeat,
+    coveredStores,
     eligible: true,
   };
 }
 
 /**
  * Activate the account if every condition holds — re-evaluated here, inside the caller's transaction — and say what
- * is missing otherwise. It activates only: it never prices a seat or creates a request.
+ * is missing otherwise. It activates only: it never prices a seat or creates a request. A missing seat reads as
+ * `seat_payment`; a seat that starts when the free trial ends stays `seat_scheduled`.
  *
  * The caller holds the subscription row's lock, so two people verifying their codes at the same instant cannot both
  * take the last seat: the census is read behind it.

@@ -53,7 +53,10 @@ export type DeliveryState = 'sent' | 'unavailable';
 export interface StaffSeatState {
   storeId: string;
   store: string;
-  /** `included`: a free seat; `held`: a seat paid or granted for this person; `awaiting_payment`: a request the server priced. */
+  /**
+   * `included`: a free seat; `held`: a seat paid or granted for this person — or paid during the free trial and starting
+   * when it ends (D176); `awaiting_payment`: a request the server priced.
+   */
   state: 'included' | 'held' | 'awaiting_payment';
 }
 
@@ -240,13 +243,14 @@ export class StaffInvitationService {
       throw e;
     }
 
-    // A store with no free seat: the server prices one now, and the account waits for payment.
+    // A store with no free seat: the server prices one now, and the account waits for payment — unless a seat bought
+    // for that store during the free trial, held by nobody, will seat this person when the trial ends (D176 §8).
     const seats = await this.entitlement.maySeat(
       companyId,
       branches.map((b) => b.id),
     );
     for (const branch of branches) {
-      if (seats.full.includes(binToUuid(branch.id))) {
+      if (seats.full.includes(binToUuid(branch.id)) && !(await this.activation.coveredByScheduledSeat(userId, branch.id))) {
         await this.allocations.requestSeat(companyId, {
           branchId: branch.id,
           userId,
@@ -525,7 +529,8 @@ export class StaffInvitationService {
         seatAllocations: {
           where: {
             kind: 'seat',
-            status: { in: ['pending_payment', 'paid', 'granted'] },
+            // A seat paid for during the free trial is this person's too (D176): shown as held.
+            status: { in: ['pending_payment', 'paid', 'granted', 'scheduled'] },
           },
           select: { branchId: true, status: true },
         },

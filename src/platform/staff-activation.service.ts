@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { SeatAllocationService } from './seat-allocation.service';
+import { TrialEndRoll } from './trial/trial-end-roll';
 import {
   activateIfReadyTx,
   evaluateActivation,
@@ -37,11 +38,16 @@ export type { ActivationOutcome, PendingReason } from './staff-activation-rules'
 
 @Injectable()
 export class StaffActivationService {
+  /** A seat paid for during a free trial that has ended is put in force before anybody is judged on it (D176). */
+  private readonly trialEnd: TrialEndRoll;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly allocations: SeatAllocationService,
     @Inject(CLOCK) private readonly clock: Clock,
-  ) {}
+  ) {
+    this.trialEnd = new TrialEndRoll(prisma, clock);
+  }
 
   /** What still stands between this account and activation. Reads only. */
   async pendingFor(userId: Buffer): Promise<ActivationOutcome> {
@@ -62,6 +68,10 @@ export class StaffActivationService {
    * at the same instant cannot both take the last seat.
    */
   async tryActivate(userId: Buffer, actor: string): Promise<ActivationOutcome> {
+    // What the free trial's end owes the business comes first (never waiting on the lock): the person is then judged on
+    // the seats really in force.
+    const person = await this.prisma.user.findFirst({ where: { id: userId, deletedAt: null }, select: { companyId: true } });
+    if (person) await this.trialEnd.applyIfDue(person.companyId);
     const first = await evaluateActivation(this.prisma, userId);
     if (first.alreadyActive) return { activated: true, alreadyActive: true, pending: [] };
     if (!first.eligible) return { activated: false, alreadyActive: false, pending: [] };
@@ -95,5 +105,14 @@ export class StaffActivationService {
       await tx.$queryRaw`SELECT id FROM subscriptions WHERE company_id = ${companyId} FOR UPDATE`;
       return activateIfReadyTx(tx as unknown as ActivationDb, userId, now, actor);
     });
+  }
+
+  /**
+   * Whether a seat paid for during the free trial will seat this person at this store when it ends (D176 §8) — so
+   * inviting them into a full store prices no second seat. Reads only.
+   */
+  async coveredByScheduledSeat(userId: Buffer, branchId: Buffer): Promise<boolean> {
+    const e = await evaluateActivation(this.prisma, userId);
+    return e.coveredStores.some((b) => b.equals(branchId));
   }
 }

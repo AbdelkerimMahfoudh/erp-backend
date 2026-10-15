@@ -18,7 +18,12 @@ const ROLE = uuidToBin('018f0000-0000-7000-8000-00000000d001');
 const NOW = new Date('2026-10-05T10:00:00.000Z');
 
 function makeWorld(
-  opts: { canDeliver?: (channel: string) => boolean; activation?: { activated: boolean; pending: string[] } } = {},
+  opts: {
+    canDeliver?: (channel: string) => boolean;
+    activation?: { activated: boolean; pending: string[] };
+    /** A seat paid for during the free trial covers the new person at a full store (D176 §8). */
+    covered?: boolean;
+  } = {},
 ) {
   const users: any[] = [
     {
@@ -135,6 +140,7 @@ function makeWorld(
       activations.push(userId);
       return opts.activation ?? { activated: true, alreadyActive: false, pending: [] };
     },
+    coveredByScheduledSeat: async () => opts.covered ?? false,
   };
   const allocations = {
     requestSeat: async (_c: Buffer, input: any) => {
@@ -245,6 +251,14 @@ describe('creating an account', () => {
     expect(w.seatRequests).toHaveLength(1);
     expect(w.seatRequests[0].branchId.equals(MAIN)).toBe(true);
     expect(r.seats).toEqual([{ storeId: binToUuid(MAIN), store: 'Main', state: 'awaiting_payment' }]);
+  });
+
+  it('into a full store that a seat paid for during the free trial covers, nothing is priced: that seat is theirs when it ends (D176)', async () => {
+    const w = makeWorld({ covered: true });
+    w.setSeatsFull([binToUuid(MAIN)]);
+    const r = await w.service.invite(INVITE);
+    expect(w.seatRequests).toEqual([]);
+    expect(r.seats).toEqual([{ storeId: binToUuid(MAIN), store: 'Main', state: 'included' }]);
   });
 });
 

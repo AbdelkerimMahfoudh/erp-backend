@@ -107,7 +107,8 @@ const USER_SELECT = {
   activatedAt: true,
   lastLoginAt: true,
   seatAllocations: {
-    where: { kind: 'seat' as const, status: { in: ['pending_payment', 'paid', 'granted'] as const } },
+    // `scheduled` (D176): a seat paid for during the free trial, starting when it ends — the person's, shown as held.
+    where: { kind: 'seat' as const, status: { in: ['pending_payment', 'paid', 'granted', 'scheduled'] as const } },
     select: { branchId: true, status: true },
   },
   userBranches: {

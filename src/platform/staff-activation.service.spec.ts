@@ -62,7 +62,7 @@ function makeWorld(opts: { additionalSeats?: number } = {}) {
       role: { key: b.role },
     })),
     seatAllocations: allocations.filter(
-      (a) => a.userId?.equals(u.id) && a.kind === 'seat' && ['pending_payment', 'paid', 'granted'].includes(a.status),
+      (a) => a.userId?.equals(u.id) && a.kind === 'seat' && ['pending_payment', 'paid', 'granted', 'scheduled'].includes(a.status),
     ),
   });
 
@@ -71,6 +71,17 @@ function makeWorld(opts: { additionalSeats?: number } = {}) {
       findFirst: async ({ where }: any) => {
         const u = users.find((x) => x.id.equals(where.id) && x.deletedAt === null);
         return u ? hydrate(u) : null;
+      },
+      // The coverage's candidates: pending invitees at the store, with no seat request of their own there, first invited first.
+      findMany: async ({ where }: any) => {
+        const branchId: Buffer = where.userBranches.some.branchId;
+        const own = new Set(where.seatAllocations.none.status.in as string[]);
+        return users
+          .filter((u) => u.invitedAt !== null && u.activatedAt === null && u.deletedAt === null)
+          .filter((u) => u.branches.some((b) => b.branchId.equals(branchId) && b.role !== 'owner'))
+          .filter((u) => !allocations.some((a) => a.userId?.equals(u.id) && a.kind === 'seat' && a.branchId?.equals(branchId) && own.has(a.status)))
+          .sort((a, b) => a.invitedAt!.getTime() - b.invitedAt!.getTime() || Buffer.compare(a.id, b.id))
+          .map((u) => ({ id: u.id }));
       },
       updateMany: async ({ where, data }: any) => {
         const hits = users.filter((x) => x.id.equals(where.id) && x.activatedAt === null && x.deletedAt === null);
@@ -81,15 +92,25 @@ function makeWorld(opts: { additionalSeats?: number } = {}) {
     subscription: { findFirst: async () => ({ ...sub }) },
     branch: { findMany: async () => branches.map((b) => ({ id: b.id, name: b.name })) },
     seatAllocation: {
-      findMany: async ({ where }: any) =>
-        allocations
+      findMany: async ({ where }: any) => {
+        // The coverage read (D176 §8): the store's seats paid for during the free trial, with whose they are.
+        if (where.status === 'scheduled') {
+          return allocations
+            .filter((a) => a.kind === 'seat' && a.status === 'scheduled' && a.branchId?.equals(where.branchId))
+            .map((a) => {
+              const u = a.userId ? users.find((x) => x.id.equals(a.userId!)) : null;
+              return { userId: a.userId, user: u ? { activatedAt: u.activatedAt, deletedAt: u.deletedAt } : null };
+            });
+        }
+        return allocations
           .filter((a) => a.kind === 'seat' && ['paid', 'granted'].includes(a.status) && a.userId !== null)
           .filter((a) => !where.userId.notIn.some((id: Buffer) => id.equals(a.userId!)))
           .filter((a) => {
             const owner = users.find((u) => u.id.equals(a.userId!));
             return owner && owner.activatedAt === null && owner.deletedAt === null;
           })
-          .map((a) => ({ branchId: a.branchId })),
+          .map((a) => ({ branchId: a.branchId }));
+      },
     },
     subscriptionEvent: { create: async ({ data }: any) => (events.push(data), data) },
     $queryRaw: async (strings: TemplateStringsArray) => {
@@ -168,7 +189,7 @@ function makeWorld(opts: { additionalSeats?: number } = {}) {
       invitedAt: null,
       branches: branchIds.map((branchId) => ({ branchId, role })),
     });
-  const hold = (branchId: Buffer, userId: Buffer | null, status: 'paid' | 'granted' | 'pending_payment') =>
+  const hold = (branchId: Buffer, userId: Buffer | null, status: 'paid' | 'granted' | 'pending_payment' | 'scheduled') =>
     allocations.push({ id: newUuidV7Bin(), companyId: COMPANY, branchId, userId, kind: 'seat', status });
 
   return { service, addUser, active, hold, users, allocations, requested, events };
@@ -287,5 +308,64 @@ describe('activating', () => {
     expect(second.activated).toBe(false);
     expect(second.pending).toEqual(['seat_payment']);
     expect(w.users.filter((u) => u.isActive && u.branches.some((x) => x.role !== 'owner'))).toHaveLength(1);
+  });
+});
+
+describe('a seat paid for during the free trial (D176): theirs when it ends, never a second request', () => {
+  it('a person’s own scheduled seat keeps them waiting for the trial’s end, and prices nothing', async () => {
+    const w = makeWorld();
+    w.active([MAIN]);
+    const sara = w.addUser({ name: 'Sara', phone: '+22233445566', phoneVerifiedAt: NOW });
+    w.hold(MAIN, sara.id, 'scheduled');
+    expect((await w.service.pendingFor(sara.id)).pending).toEqual(['seat_scheduled']);
+    const r = await w.service.tryActivate(sara.id, 'admin');
+    expect(r).toEqual({ activated: false, alreadyActive: false, pending: ['seat_scheduled'] });
+    expect(w.requested).toEqual([]);
+    expect(sara.isActive).toBe(false);
+  });
+
+  it('a seat bought for the store and held by nobody covers the first person invited there — the second is priced their own', async () => {
+    const w = makeWorld();
+    w.active([MAIN]);
+    w.hold(MAIN, null, 'scheduled');
+    const tom = w.addUser({ name: 'Tom', phone: '+22233445566', phoneVerifiedAt: NOW, invitedAt: new Date(NOW.getTime() - 2_000) });
+    const uma = w.addUser({ name: 'Uma', phone: '+22233445577', phoneVerifiedAt: NOW, invitedAt: new Date(NOW.getTime() - 1_000) });
+    expect((await w.service.pendingFor(tom.id)).pending).toEqual(['seat_scheduled']);
+    expect(await w.service.coveredByScheduledSeat(tom.id, MAIN)).toBe(true);
+    expect(await w.service.coveredByScheduledSeat(uma.id, MAIN)).toBe(false);
+    expect((await w.service.tryActivate(tom.id, 'tom')).pending).toEqual(['seat_scheduled']);
+    expect(w.requested).toEqual([]);
+    const r = await w.service.tryActivate(uma.id, 'uma');
+    expect(r.pending).toEqual(['seat_payment']);
+    expect(w.requested).toHaveLength(1);
+    expect(w.requested[0].userId?.equals(uma.id)).toBe(true);
+    // Uma has her own request now: she is no longer a candidate, and Tom stays covered.
+    expect((await w.service.pendingFor(tom.id)).pending).toEqual(['seat_scheduled']);
+  });
+
+  it('a scheduled seat held for another pending person covers nobody else', async () => {
+    const w = makeWorld();
+    w.active([MAIN]);
+    const sara = w.addUser({ name: 'Sara', phone: '+22233445566', phoneVerifiedAt: NOW });
+    w.hold(MAIN, sara.id, 'scheduled');
+    const tom = w.addUser({ name: 'Tom', phone: '+22233445577', phoneVerifiedAt: NOW });
+    expect((await w.service.pendingFor(tom.id)).pending).toEqual(['seat_unavailable']);
+  });
+
+  it('a scheduled seat requested for somebody since deleted is held by nobody: it covers the next person', async () => {
+    const w = makeWorld();
+    w.active([MAIN]);
+    const gone = w.addUser({ name: 'Gone', phone: '+22233445500', deletedAt: NOW });
+    w.hold(MAIN, gone.id, 'scheduled');
+    const tom = w.addUser({ name: 'Tom', phone: '+22233445577', phoneVerifiedAt: NOW });
+    expect((await w.service.pendingFor(tom.id)).pending).toEqual(['seat_scheduled']);
+  });
+
+  it('a store with room seats the person now: coverage is asked only of a full store', async () => {
+    const w = makeWorld();
+    w.hold(MAIN, null, 'scheduled');
+    const tom = w.addUser({ name: 'Tom', phone: '+22233445577', phoneVerifiedAt: NOW });
+    const r = await w.service.tryActivate(tom.id, 'tom');
+    expect(r.activated).toBe(true);
   });
 });
