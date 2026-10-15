@@ -108,8 +108,10 @@ export class EntitlementService {
    * unknown name reads as UTC and is reported once — never replaced by a zone
    * guessed for the country (trial-rules `displayTimeZone`).
    *
-   * Shared with the website's trial routes and the console (0095), so a
-   * business's zone is checked by one rule and reported once per process,
+   * Shared with the website's trial routes and the console (0095), and with
+   * every other date of a business that has trial facts (C18): the console's
+   * lists and the Owner's account page say the business's zone by this same
+   * rule. So a business's zone is checked once and reported once per process,
    * wherever it is read.
    */
   trialZone(companyId: Buffer, stored: string): string {
@@ -117,7 +119,7 @@ export class EntitlementService {
       const key = companyId.toString('hex');
       if (this.unknownZones.has(key)) return;
       this.unknownZones.add(key);
-      this.logger.warn(`Company ${binToUuid(companyId)} has an unknown time zone "${refused}"; its trial dates are shown in UTC`);
+      this.logger.warn(`Company ${binToUuid(companyId)} has an unknown time zone "${refused}"; its dates are shown in UTC`);
     });
   }
 

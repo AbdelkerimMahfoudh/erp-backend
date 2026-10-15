@@ -353,7 +353,7 @@ describe('the trial as the entitlement tells it', () => {
     expect((await w.service.current()).trial?.timeZone).toBe('UTC');
     expect((await w.service.current()).trial?.timeZone).toBe('UTC');
     const zoneWarnings = warn.mock.calls.filter(([m]) => /unknown time zone/.test(String(m)));
-    expect(zoneWarnings).toEqual([[expect.stringContaining('unknown time zone "Mars/Olympus_Mons"; its trial dates are shown in UTC')]]);
+    expect(zoneWarnings).toEqual([[expect.stringContaining('unknown time zone "Mars/Olympus_Mons"; its dates are shown in UTC')]]);
   });
 
   it('a business with no trial shows none, and its zone is not even checked', async () => {

@@ -537,6 +537,7 @@ export class PlatformController {
           publicStoreId: true,
           city: true,
           createdAt: true,
+          timezone: true,
           subscription: true,
           ...TRIAL_FACTS,
           _count: { select: { branches: true, users: true } },
@@ -548,14 +549,9 @@ export class PlatformController {
     const now = new Date();
     const mapped = rows.map((c) => {
       const sub = c.subscription;
-      // The free trial's facts with the row (0095): the state the shop itself is judged by, never a second reading.
-      const ent = sub
-        ? buildEntitlement(
-            { ...sub, status: sub.status, trial: trialFactsOf(c.trialEligibility, c.trialClaim) },
-            { seatsUsed: 0, activeBranchCount: c._count.branches },
-            now,
-          )
-        : null;
+      // The free trial's facts with the row (0095): the state the shop itself is judged by, never a second reading —
+      // read as the pending queue reads it (C18).
+      const listed = this.listed(c, now, c._count.branches);
       return {
         id: binToUuid(c.id),
         name: c.name,
@@ -564,11 +560,13 @@ export class PlatformController {
         createdAt: c.createdAt.toISOString(),
         branches: c._count.branches,
         users: c._count.users,
-        state: ent?.state ?? 'expired',
+        state: listed.state,
         status: sub?.status ?? 'activated',
         periodEnd: sub?.currentPeriodEnd?.toISOString() ?? null,
         // The grant with its own dates (docs/73 §11.5): the list says when a complimentary business's access ends.
-        complimentary: ent?.complimentary ?? null,
+        complimentary: listed.complimentary,
+        // The trial with its end and the business's zone (C18): a row with a trial shows its dates in that zone.
+        trial: listed.trial,
         version: sub?.version ?? 0,
       };
     });
@@ -1060,6 +1058,7 @@ export class PlatformController {
           name: true,
           city: true,
           createdAt: true,
+          timezone: true,
           branches: {
             where: { isActive: true },
             select: { id: true, name: true, type: true, activity: true, activityNext: true, activityChangedAt: true },
@@ -1079,6 +1078,11 @@ export class PlatformController {
     });
 
     return {
+      /*
+       * The business's configured zone, normalised as the trial's view normalises it — an unknown one reads UTC (C18):
+       * the zone the account page shows this business's dates in when no trial view carries one.
+       */
+      timeZone: this.entitlement.trialZone(companyId, company.timezone),
       business: {
         name: company.name,
         city: company.city,

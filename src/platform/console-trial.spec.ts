@@ -46,6 +46,9 @@ describe('the console sees each business’s trial by the shop’s own rules', (
     additionalSeats: 0,
   };
   const facts = (eligibility: { closedAt: Date | null } | null, claim: typeof running | null) => ({ trialEligibility: eligibility, trialClaim: claim });
+  /** The real zone rule — an unknown zone reads UTC and is reported once — over no database at all. */
+  const zones = new EntitlementService({} as never, {} as never, { now: () => new Date(now) });
+  afterEach(() => jest.restoreAllMocks());
   const SUBS = [
     { ...base, company: facts({ closedAt: null }, null) },
     { ...base, company: facts({ closedAt: null }, running) },
@@ -74,21 +77,49 @@ describe('the console sees each business’s trial by the shop’s own rules', (
       publicStoreId: `P${i}`,
       city: null,
       createdAt: new Date(now - i * HOUR),
+      timezone: 'Africa/Casablanca',
       subscription: { ...sub, version: 1 },
       ...company,
       _count: { branches: 1, users: 1 },
     }));
     const prisma = { company: { findMany: async () => rows, count: async () => rows.length } };
-    const platform = platformWith({ prisma });
+    const platform = platformWith({ prisma, entitlement: zones });
     const all = await platform.businesses();
     expect(all.rows.map((r) => r.state)).toEqual(['trial_available', 'trial_active', 'trial_expired', 'pending', 'active']);
     const active = await platform.businesses(undefined, 'trial_active');
     expect(active.rows.map((r) => r.name)).toEqual(['Shop 1']);
   });
 
+  it('each row with a trial carries it as the pending queue does — its end and the business’s zone (C18)', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const zonesOf = ['Asia/Dubai', 'Africa/Casablanca', 'Europe/Paris', 'Africa/Nouakchott', 'Mars/Olympus'];
+    const rows = SUBS.map(({ company, ...sub }, i) => ({
+      id: newUuidV7Bin(),
+      name: `Shop ${i}`,
+      publicStoreId: `P${i}`,
+      city: null,
+      createdAt: new Date(now - i * HOUR),
+      timezone: zonesOf[i],
+      subscription: { ...sub, version: 1 },
+      ...company,
+      _count: { branches: 1, users: 1 },
+    }));
+    // The last row's trial is in its zone nobody knows: shown in UTC, as its own trial view shows it.
+    rows[4] = { ...rows[4], trialEligibility: { closedAt: null }, trialClaim: running };
+    const prisma = { company: { findMany: async () => rows, count: async () => rows.length } };
+    const list = await platformWith({ prisma, entitlement: zones }).businesses();
+    expect(list.rows.map((r) => r.trial)).toEqual([
+      { status: 'available', endsAt: null, timeZone: 'Asia/Dubai' },
+      { status: 'active', endsAt: running.endsAt.toISOString(), timeZone: 'Africa/Casablanca' },
+      { status: 'expired', endsAt: ended.endsAt.toISOString(), timeZone: 'Europe/Paris' },
+      // Never eligible: no trial, whatever the zone.
+      null,
+      { status: 'active', endsAt: running.endsAt.toISOString(), timeZone: 'UTC' },
+    ]);
+    expect(warn.mock.calls.filter(([m]) => /unknown time zone "Mars\/Olympus"/.test(String(m)))).toHaveLength(1);
+  });
+
   describe('the pending queue says what each application became (C8; review finding R4-13)', () => {
-    /** The real zone rule — an unknown zone reads UTC and is reported once — over no database at all. */
-    const zones = new EntitlementService({} as never, {} as never, { now: () => new Date(now) });
     const attempt = (n: number, companyId: Buffer | null) => ({
       id: newUuidV7Bin(),
       companyId,
@@ -107,8 +138,6 @@ describe('the console sees each business’s trial by the shop’s own rules', (
       trialEligibility: eligibility,
       trialClaim: claim,
     });
-
-    afterEach(() => jest.restoreAllMocks());
 
     it('a business in its trial reads as one — with its end and its own zone — and every other application as it stands', async () => {
       const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -237,13 +266,37 @@ describe('the console sees each business’s trial by the shop’s own rules', (
     const platform = platformWith({
       tenant: { companyId: () => companyId },
       prisma: {
-        company: { findUniqueOrThrow: async () => ({ name: 'Shop', city: null, createdAt: new Date(), branches: [] }) },
+        company: { findUniqueOrThrow: async () => ({ name: 'Shop', city: null, createdAt: new Date(), timezone: 'Africa/Nouakchott', branches: [] }) },
         user: { findFirst: async () => null },
       },
-      entitlement: { forCompany: async () => ({ state: 'trial_active', trial }) },
+      entitlement: { forCompany: async () => ({ state: 'trial_active', trial }), trialZone: zones.trialZone.bind(zones) },
       billing: { pricingFor: async () => null },
       lifecycle: { timeline: async () => ({ events: [], payments: [] }) },
     });
     expect((await platform.mySubscription()).entitlement).toMatchObject({ state: 'trial_active', trial });
+  });
+
+  it('the Owner’s account page names the business’s zone at the top, normalised as the trial’s view is (C18)', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const pageIn = async (timezone: string) => {
+      const companyId = newUuidV7Bin();
+      const platform = platformWith({
+        tenant: { companyId: () => companyId },
+        prisma: {
+          company: { findUniqueOrThrow: async () => ({ name: 'Shop', city: null, createdAt: new Date(), timezone, branches: [] }) },
+          user: { findFirst: async () => null },
+        },
+        // No trial at all: the zone is said for every business, not only one with a trial view.
+        entitlement: { forCompany: async () => ({ state: 'active', trial: null }), trialZone: zones.trialZone.bind(zones) },
+        billing: { pricingFor: async () => null },
+        lifecycle: { timeline: async () => ({ events: [], payments: [] }) },
+      });
+      return platform.mySubscription();
+    };
+    expect((await pageIn('Europe/Paris')).timeZone).toBe('Europe/Paris');
+    expect((await pageIn('America/New_York')).timeZone).toBe('America/New_York');
+    // An unknown zone reads UTC — never a zone guessed for the country — and is reported.
+    expect((await pageIn('Mars/Olympus_Mons')).timeZone).toBe('UTC');
+    expect(warn.mock.calls.filter(([m]) => /unknown time zone "Mars\/Olympus_Mons"; its dates are shown in UTC/.test(String(m)))).toHaveLength(1);
   });
 });
