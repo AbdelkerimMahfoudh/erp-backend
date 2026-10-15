@@ -9,13 +9,14 @@ import { StaffActivationService } from '../staff-activation.service';
 import { SubscriptionLifecycleService } from '../subscription-lifecycle.service';
 import { TrialService } from '../trial/trial.service';
 import { TrialEndRoll } from '../trial/trial-end-roll';
+import { TrialEndSweeper } from '../trial/trial-end.sweeper';
 import { TRIAL_TERMS_VERSION } from '../trial/trial-rules';
 
 /**
  * Several businesses, their stores, people, subscriptions, billing periods, payments, seat and store requests and
  * free trial rows, held in memory — with the REAL `BillingService`, `SubscriptionRenewal`, `SeatAllocationService`,
- * `SubscriptionLifecycleService`, `StaffActivationService`, `TrialService`, `TrialEndRoll` and `EntitlementService`
- * running on top (D176, the add-ons of a free trial).
+ * `SubscriptionLifecycleService`, `StaffActivationService`, `TrialService`, `TrialEndRoll`, `TrialEndSweeper` and
+ * `EntitlementService` running on top (D176, the add-ons of a free trial).
  *
  * The narrower worlds (billing-world, trial-world) each see one side: billing without trials, trials without money.
  * The add-on rules live where the two meet — a store paid for during a trial, put in force when it ends, raising the
@@ -604,6 +605,7 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
   const activation = new StaffActivationService(db as never, seats, clock);
   const entitlement = new EntitlementService(db as never, {} as never, clock);
   const trialEnd = new TrialEndRoll(db as never, clock);
+  const sweeper = new TrialEndSweeper(db as never, clock);
   const trial = new TrialService(db as never, entitlement, audit, { otpPepper: 'test-pepper-at-least-32-characters-long!!' } as never, {} as never, clock);
 
   // ── the fixtures ──────────────────────────────────────────────────────────
@@ -708,6 +710,7 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     activation,
     entitlement,
     trialEnd,
+    sweeper,
     trial,
     business,
     person,

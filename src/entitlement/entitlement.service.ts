@@ -1,14 +1,13 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { CLOCK, type Clock } from './clock';
 import { seatCensus } from './seat-census';
-import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
+import { binToUuid } from '../common/utils/uuid.util';
 import { BillingService } from '../billing/billing.service';
-import { SubscriptionRenewal, lockSubscription } from '../billing/renewal';
-import { redact } from '../platform/platform-audit.service';
-import { TRIAL_DURATION_DAYS, displayTimeZone, trialFactsOf } from '../platform/trial/trial-rules';
+import { SubscriptionRenewal } from '../billing/renewal';
+import { displayTimeZone, trialFactsOf } from '../platform/trial/trial-rules';
+import { TrialEndRoll } from '../platform/trial/trial-end-roll';
 import {
   buildEntitlement,
   canWrite,
@@ -55,18 +54,16 @@ const WRITE_REFUSED = {
   trial_expired: 'The free trial has ended. You can still read and export everything.',
 } satisfies Record<Exclude<EntitlementState, 'active' | 'grace' | 'complimentary' | 'trial_active'>, string>;
 
-/** The claim as the expiry record needs it: which row, when it ends, and whether its end was written down. */
-interface ClaimRow {
-  id: Buffer;
-  endsAt: Date;
-  expiryRecordedAt: Date | null;
-}
-
 @Injectable()
 export class EntitlementService {
   private readonly logger = new Logger(EntitlementService.name);
   /** The renewal a prepaid period is owed at its end (D154, billing/renewal.ts): applied by the first evaluation after it. */
   private readonly renewal: SubscriptionRenewal;
+  /**
+   * The free trial's end (0095; D176): its record, and what was paid for during it put in force — applied by the first
+   * evaluation after it, never waiting on the subscription row (trial-end-roll.ts).
+   */
+  private readonly trialEnd: TrialEndRoll;
   /** company → when it was last checked: at most one cheap query a minute per company. */
   private readonly rollCheckedAt = new Map<string, number>();
   /** Companies whose stored time zone was refused — said once per process, not on every request. */
@@ -78,6 +75,7 @@ export class EntitlementService {
     @Inject(CLOCK) private readonly clock: Clock,
   ) {
     this.renewal = new SubscriptionRenewal(prisma, new BillingService(prisma, clock), clock);
+    this.trialEnd = new TrialEndRoll(prisma, clock);
   }
 
   /**
@@ -102,71 +100,6 @@ export class EntitlementService {
     } catch (e) {
       this.rollCheckedAt.delete(key);
       this.logger.warn(`Renewal check failed for company ${binToUuid(companyId)}: ${(e as Error).message}`);
-    }
-  }
-
-  /**
-   * The free trial's end, written down once (0095): the first evaluation at or
-   * after `endsAt` marks the claim, appends the `trial_expired` event and the
-   * platform audit. The end itself needs none of this — the state is computed
-   * from the stored instants, so access stops at `endsAt` exactly; this is the
-   * record that it did.
-   *
-   * Exactly once, across requests and API instances: the mark is a conditional
-   * update (`expiry_recorded_at IS NULL`), and the event and the audit are
-   * written only when it changed the row, in the same transaction — all three
-   * or none. The subscription is locked first, as every writer here does
-   * (subscription first, audit last).
-   *
-   * The audit row goes through the transaction with `redact()` rather than
-   * `PlatformAuditService`: that service writes outside any transaction, and
-   * the platform module already imports this global one — importing it back
-   * would be a cycle.
-   *
-   * Never blocks the request: a failure is logged, nothing is marked, and the
-   * next evaluation tries again.
-   */
-  private async recordTrialExpiry(companyId: Buffer, subscriptionId: Buffer, label: string, claim: ClaimRow): Promise<void> {
-    const now = this.clock.now();
-    if (claim.expiryRecordedAt !== null || now.getTime() < claim.endsAt.getTime()) return;
-    const endsAt = claim.endsAt.toISOString();
-    try {
-      const recorded = await this.prisma.$transaction(async (tx) => {
-        await lockSubscription(tx, companyId);
-        const marked = await tx.trialClaim.updateMany({
-          where: { id: claim.id, expiryRecordedAt: null },
-          data: { expiryRecordedAt: now },
-        });
-        if (marked.count !== 1) return false;
-        await tx.subscriptionEvent.create({
-          data: {
-            id: newUuidV7Bin(),
-            companyId,
-            subscriptionId,
-            kind: 'trial_expired',
-            note: `The ${TRIAL_DURATION_DAYS}-day free trial ended at ${endsAt}. Nothing was charged.`,
-            actor: 'system',
-            createdAt: now,
-          },
-        });
-        await tx.platformAuditEvent.create({
-          data: {
-            id: newUuidV7Bin(),
-            adminId: null,
-            actor: 'system',
-            action: 'trial.expired',
-            targetType: 'Company',
-            targetId: companyId,
-            targetLabel: label.slice(0, 200),
-            afterJson: redact({ endsAt }) as Prisma.InputJsonValue,
-            createdAt: now,
-          },
-        });
-        return true;
-      });
-      if (recorded) this.logger.log(`Free trial expiry recorded for company ${binToUuid(companyId)} (ended ${endsAt})`);
-    } catch (e) {
-      this.logger.warn(`Free trial expiry record failed for company ${binToUuid(companyId)}: ${(e as Error).message}`);
     }
   }
 
@@ -202,19 +135,12 @@ export class EntitlementService {
    */
   private async recordFor(companyId: Buffer): Promise<SubscriptionRecord> {
     await this.rollIfDue(companyId);
-    const row = await this.prisma.subscription.findFirst({
-      where: { companyId },
-      include: {
-        company: {
-          select: {
-            name: true,
-            timezone: true,
-            trialEligibility: { select: { closedAt: true } },
-            trialClaim: { select: { id: true, claimedAt: true, startedAt: true, endsAt: true, expiryRecordedAt: true } },
-          },
-        },
-      },
-    });
+    let row = await this.readRecord(companyId);
+    // After the trial's end: its record, and what was paid for during it put in force (D176) — before anything is
+    // counted, so the census read after this sees the store opened and the seat held. Never blocks the request.
+    if (row?.company.trialClaim && (await this.trialEnd.onEvaluation(companyId, row.id, row.company.name, row.company.trialClaim))) {
+      row = (await this.readRecord(companyId)) ?? row;
+    }
     if (!row) {
       return {
         subscribedBranchCount: 0,
@@ -228,8 +154,7 @@ export class EntitlementService {
         trial: null,
       };
     }
-    const { name, timezone, trialEligibility, trialClaim } = row.company;
-    if (trialClaim) await this.recordTrialExpiry(companyId, row.id, name, trialClaim);
+    const { timezone, trialEligibility, trialClaim } = row.company;
     return {
       subscribedBranchCount: row.subscribedBranchCount,
       additionalSeats: row.additionalSeats,
@@ -259,9 +184,29 @@ export class EntitlementService {
     return seatCensus(this.prisma, companyId);
   }
 
+  /** The subscription row with what the evaluation reads beside it: the company's name and zone, and its free trial. */
+  private readRecord(companyId: Buffer) {
+    return this.prisma.subscription.findFirst({
+      where: { companyId },
+      include: {
+        company: {
+          select: {
+            name: true,
+            timezone: true,
+            trialEligibility: { select: { closedAt: true } },
+            trialClaim: { select: { id: true, claimedAt: true, startedAt: true, endsAt: true, expiryRecordedAt: true } },
+          },
+        },
+      },
+    });
+  }
+
   /** The full object the mobile app renders and never recomputes. */
   async forCompany(companyId: Buffer): Promise<Entitlement> {
-    const [record, usage] = await Promise.all([this.recordFor(companyId), this.seatUsage(companyId)]);
+    // One after the other (D176): the record may put in force what was paid for during the free trial, and the census
+    // must count it.
+    const record = await this.recordFor(companyId);
+    const usage = await this.seatUsage(companyId);
     return buildEntitlement(record, usage, this.clock.now());
   }
 
@@ -334,7 +279,9 @@ export class EntitlementService {
     companyId: Buffer,
     branchIds?: readonly Buffer[],
   ): Promise<{ allowed: boolean; seatsUsed: number; seatLimit: number; stores: BranchSeatMath[]; full: string[] }> {
-    const [record, usage] = await Promise.all([this.recordFor(companyId), this.seatUsage(companyId)]);
+    // The census after the record, as in `forCompany`: a seat put in force by this evaluation counts.
+    const record = await this.recordFor(companyId);
+    const usage = await this.seatUsage(companyId);
     const math = seatMath(record, usage);
     if (!branchIds) {
       return { allowed: mayConsumeSeat(math), seatsUsed: math.seatsUsed, seatLimit: math.seatLimit, stores: math.branches, full: [] };

@@ -272,3 +272,69 @@ describe('a failed activation never undoes the expiry record', () => {
     expect(w.events(b, 'trial_expired')).toHaveLength(1);
   });
 });
+
+describe('the lazy path: the entitlement check every request passes', () => {
+  it('one evaluation at the end puts what was paid for in force, and counts it in the same answer', async () => {
+    const { w, b, store } = await scheduledWorld();
+    w.clock.set(T);
+    const e = await w.entitlement.forCompany(b.companyId);
+    expect(w.request(store).status).toBe('paid');
+    // The census was read after the record and the activation, so this very answer has both stores and the seat.
+    expect(e).toMatchObject({ state: 'active', subscribedBranchCount: 2, activeBranchCount: 2 });
+    expect(e.seatsByStore.find((s) => s.name === 'Main')).toMatchObject({ paidSeats: 1, seatLimit: 2 });
+    expect(e.seatsByStore.find((s) => s.name === 'B')).toMatchObject({ seatLimit: 1 });
+  });
+
+  it('before the end, an evaluation counts nothing scheduled and changes nothing', async () => {
+    const { w, b } = await scheduledWorld();
+    w.clock.set(new Date(T.getTime() - 1));
+    const before = snapshot(w);
+    const e = await w.entitlement.forCompany(b.companyId);
+    const may = await w.entitlement.maySeat(b.companyId, [b.stores.Main]);
+    expect(e).toMatchObject({ state: 'trial_active', activeBranchCount: 1, subscribedBranchCount: 1 });
+    expect(e.seatsByStore).toEqual([expect.objectContaining({ name: 'Main', paidSeats: 0, seatLimit: 1 })]);
+    expect(may.stores).toEqual([expect.objectContaining({ name: 'Main', paidSeats: 0 })]);
+    expect(snapshot(w)).toBe(before);
+  });
+});
+
+describe('the sweeper: a business nobody looks at gets what it paid for, on time', () => {
+  it('one pass records the expiry and activates; the next finds nothing to do', async () => {
+    const { w, b, store, seat } = await scheduledWorld();
+    w.clock.set(new Date(T.getTime() + 30_000));
+    await expect(w.sweeper.sweep()).resolves.toEqual({ companies: 1, outcomes: { busy: 0, nothing_due: 0, done: 1, failed: 0 } });
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['paid', 'paid']);
+    expect(w.request(store).effectiveAt).toEqual(T);
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    await expect(w.sweeper.sweep()).resolves.toEqual({ companies: 0, outcomes: { busy: 0, nothing_due: 0, done: 0, failed: 0 } });
+  });
+
+  it('a business still waiting for paid access is visited each pass and changes nothing until it has a period', async () => {
+    const { w, b, store } = await scheduledWorld({ approve: false });
+    w.clock.set(new Date(T.getTime() + 30_000));
+    await w.sweeper.sweep();
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    const waiting = snapshot(w);
+    await expect(w.sweeper.sweep()).resolves.toMatchObject({ companies: 1, outcomes: { nothing_due: 1 } });
+    expect(snapshot(w)).toBe(waiting);
+    expect(w.request(store).status).toBe('scheduled');
+  });
+
+  it('only companies with something due are visited, and only their rows change', async () => {
+    const first = await scheduledWorld();
+    const { w } = first;
+    const other = w.business({ name: 'Other' });
+    w.clock.set(T);
+    await w.sweeper.sweep();
+    expect(w.requests(other)).toEqual([]);
+    expect(w.events(other)).toEqual([]);
+  });
+
+  it('one pass at a time in a process: a call during a pass joins it', async () => {
+    const { w } = await scheduledWorld();
+    w.clock.set(T);
+    const [a, b] = [w.sweeper.sweepNow(), w.sweeper.sweepNow()];
+    expect(a).toBe(b);
+    await expect(a).resolves.toMatchObject({ companies: 1 });
+  });
+});

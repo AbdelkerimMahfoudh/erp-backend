@@ -297,8 +297,10 @@ interface RunResult {
   expiryRecorded: boolean;
   /** Requests put in force by this run. */
   activated: number;
-  /** "Is anything due?" was asked, so "nothing remains" can be known. */
+  /** "Is anything due?" was asked. */
   dueChecked: boolean;
+  /** …and something was: a request whose start has come, put in force by this run or still waiting. */
+  dueFound: boolean;
 }
 
 /** The facts a run needs: the subscription, the business's name and its claim. */
@@ -372,13 +374,13 @@ export class TrialEndRoll {
     const attempt = this.run(companyId, { subscriptionId, label, claim }, { expiry, due }, 'system').catch(
       (e: unknown): RunResult => {
         this.logger.warn(`Free trial end check failed for company ${binToUuid(companyId)}: ${(e as Error).message}`);
-        return { outcome: 'failed', expiryRecorded: !expiry, activated: 0, dueChecked: false };
+        return { outcome: 'failed', expiryRecorded: !expiry, activated: 0, dueChecked: false, dueFound: false };
       },
     );
     this.inFlight.set(key, attempt);
     try {
       const result = await attempt;
-      await this.afterLazyRun(companyId, key, result);
+      this.afterLazyRun(key, result);
       return result.activated > 0;
     } finally {
       this.inFlight.delete(key);
@@ -386,7 +388,7 @@ export class TrialEndRoll {
   }
 
   /** Back-off after busy or an error; once the expiry is recorded and nothing scheduled remains, the company is settled. */
-  private async afterLazyRun(companyId: Buffer, key: string, result: RunResult): Promise<void> {
+  private afterLazyRun(key: string, result: RunResult): void {
     const now = this.clock.now().getTime();
     if (result.outcome === 'busy' || result.outcome === 'failed') {
       this.dueCheckedAt.delete(key);
@@ -401,15 +403,10 @@ export class TrialEndRoll {
     }
     this.failures.delete(key);
     this.retryAt.delete(key);
-    if (!result.expiryRecorded || !result.dueChecked) return;
-    try {
-      // No scheduled request can be made once the trial has ended (a confirmation schedules only while it runs); the
-      // sweeper covers an instance whose clock lagged.
-      const left = await this.prisma.seatAllocation.findFirst({ where: { companyId, status: 'scheduled' }, select: { id: true } });
-      if (!left) this.settled.add(key);
-    } catch (e) {
-      this.logger.warn(`Free trial end check failed for company ${binToUuid(companyId)}: ${(e as Error).message}`);
-    }
+    // Every scheduled request starts at the end of the trial it was paid for during, so once that end has passed,
+    // "nothing due" is "nothing scheduled" — and no request can be scheduled after it (a confirmation schedules only
+    // while the trial runs; the sweeper covers an instance whose clock lagged).
+    if (result.expiryRecorded && result.dueChecked && !result.dueFound) this.settled.add(key);
   }
 
   /** The subscription, the name and the claim, read together. Null when there is no claim: then nothing is ever due. */
@@ -437,7 +434,13 @@ export class TrialEndRoll {
     checks: { expiry: boolean; due: boolean },
     actor: string,
   ): Promise<RunResult> {
-    const result: RunResult = { outcome: 'nothing_due', expiryRecorded: facts.claim.expiryRecordedAt !== null, activated: 0, dueChecked: false };
+    const result: RunResult = {
+      outcome: 'nothing_due',
+      expiryRecorded: facts.claim.expiryRecordedAt !== null,
+      activated: 0,
+      dueChecked: false,
+      dueFound: false,
+    };
     const asked = this.clock.now();
     if (asked.getTime() < facts.claim.endsAt.getTime()) return result;
     const outcomes: TrialEndOutcome[] = [];
@@ -469,6 +472,7 @@ export class TrialEndRoll {
         select: { id: true },
       });
       result.dueChecked = true;
+      result.dueFound = due !== null;
       if (due) {
         const b = await this.attempt(() =>
           this.prisma.$transaction(async (tx) => {

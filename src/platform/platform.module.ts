@@ -25,6 +25,7 @@ import { TrialService } from './trial/trial.service';
 import { TrialController } from './trial/trial.controller';
 import { TrialSetupService } from './trial/trial-setup.service';
 import { TrialSetupController } from './trial/trial-setup.controller';
+import { TrialEndSweeper } from './trial/trial-end.sweeper';
 import {
   ContactDeliveryProvider,
   outboxAllowed,
@@ -108,6 +109,8 @@ export function selectContactDelivery(
     OwnerInvitationService,
     TrialService,
     TrialSetupService,
+    // Mandatory (D176): what was paid for during a free trial is put in force when it ends, looked at or not.
+    TrialEndSweeper,
     SeatAllocationService,
     StaffActivationService,
     {

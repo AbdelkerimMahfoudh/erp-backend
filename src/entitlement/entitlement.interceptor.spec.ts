@@ -32,6 +32,8 @@ function interceptorFor(subscription: { status: string; currentPeriodEnd: Date |
     },
     // No billing period: the renewal check finds nothing due.
     billingPeriod: { findFirst: async () => null },
+    // Nothing was paid for during a trial: once one ends, nothing is due to be put in force (D176).
+    seatAllocation: { findFirst: async () => null },
     branch: { count: async () => 1 },
     $queryRaw: async () => [{ n: 0n }],
   };
