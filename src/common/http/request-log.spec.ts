@@ -27,6 +27,7 @@ import { newUuidV7 } from '../utils/uuid.util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WhatsAppReadiness } from '../../messaging/delivery-readiness';
 import { WhatsAppWebhookController } from '../../messaging/whatsapp-webhook.controller';
+import { ADMIN_SESSION_COOKIE, PORTAL_SESSION_COOKIE } from './cookies';
 import { requestLogOptions } from './request-log';
 
 /**
@@ -39,7 +40,10 @@ import { requestLogOptions } from './request-log';
  * the setup link's token, the portal ticket, a bearer token, the session cookies, a refresh token, an OTP / deletion /
  * MFA code, a recovery code, the registration continuation, a password, an invitation token, the MFA enrolment token,
  * a device secret, the provisioning key and the WhatsApp webhook's verify token — and each status is produced: 200,
- * 302, 400 (a refused body and a body that is not JSON), 401, 403, 404, 429 and 500.
+ * 302, 400 (a refused body and a body that is not JSON), 401, 403, 404, 429 and 500. Then the ways in the first proof
+ * missed (review finding R3-3): credentials under the bracketed names the query parser still hands a handler, bodies
+ * the parser refuses with a password on board, an error carrying what the request sent, and a response that sets
+ * both session cookies.
  *
  * Then nothing of any of them may appear anywhere in what was written, while every request is still followable: its
  * method, its path with the secret replaced, and its status.
@@ -131,6 +135,14 @@ class OutcomesController {
   /** As the portal exchange answers a ticket: straight to a clean address. */
   @Post('handoff')
   handoff(@Res() res: Response) {
+    res.redirect(302, '/account?welcome=1');
+  }
+
+  /** As the portal exchange and the administrator's sign-in answer: a session cookie, then a clean address. */
+  @Post('session')
+  session(@Res() res: Response) {
+    res.cookie(PORTAL_SESSION_COOKIE, SECRET.portalSession, { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
+    res.cookie(ADMIN_SESSION_COOKIE, SECRET.adminSession, { httpOnly: true, secure: true, sameSite: 'strict', path: '/' });
     res.redirect(302, '/account?welcome=1');
   }
 
@@ -230,6 +242,7 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
   const bracketed: Record<string, number> = {};
   const refused: Record<string, number> = {};
   let webhook: { answered: request.Response; refused: request.Response };
+  let session: request.Response;
 
   beforeAll(async () => {
     for (const path of ['probe/ok', 'probe/handoff', 'probe/validated', 'probe/signed-in', 'probe/owner-only', 'probe/nowhere', 'probe/broken']) {
@@ -264,6 +277,8 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
     refused.many = (await form(`${login}&${Array.from({ length: 1001 }, (_, i) => `p${i}=1`).join('&')}`)).status;
     refused.large = (await request(app.getHttpServer()).post('/api/v1/probe/ok').send({ password: SECRET.password, note: 'x'.repeat(110_000) })).status;
     refused.attached = (await request(app.getHttpServer()).post('/api/v1/probe/attached')).status;
+    // A response that sets both session cookies.
+    session = await request(app.getHttpServer()).post('/api/v1/probe/session');
   });
 
   it('2xx, 3xx, 400, 401, 403, 404, 429 and 500 — with every secret on board, no line holds any of them', () => {
@@ -364,6 +379,22 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
     // pino-http's own line about the same request carries an error too, kept by the same rule.
     const requestLine = entries().find((entry) => entry.res?.statusCode === 500 && entry.req?.url === '/api/v1/probe/attached')!;
     expect(Object.keys(requestLine.err).sort()).toEqual(['message', 'stack', 'type']);
+  });
+
+  it('a response that sets the session cookies is logged with its status and address, never with the cookies (C16)', () => {
+    // The browser receives both…
+    expect(session.status).toBe(302);
+    expect(session.headers['set-cookie']).toEqual([
+      expect.stringMatching(new RegExp(`^${PORTAL_SESSION_COOKIE}=${SECRET.portalSession};`)),
+      expect.stringMatching(new RegExp(`^${ADMIN_SESSION_COOKIE}=${SECRET.adminSession};`)),
+    ]);
+    // …and the request log's line about it keeps everything but them.
+    const line = entries().find((entry) => entry.req?.url === '/api/v1/probe/session' && entry.res)!;
+    expect(line.res.statusCode).toBe(302);
+    expect(line.res.headers.location).toBe('/account?welcome=1');
+    expect(line.res.headers).not.toHaveProperty('set-cookie');
+    const log = written.join('\n');
+    expect({ portal: log.includes(SECRET.portalSession), admin: log.includes(SECRET.adminSession) }).toEqual({ portal: false, admin: false });
   });
 
   it('a credential under a bracketed name its handler still receives — t[], t[0], t%5B1%5D, t[a], [t] — is scrubbed the same', () => {
