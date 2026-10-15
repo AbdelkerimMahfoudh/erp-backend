@@ -56,6 +56,18 @@ const SECRET_QUERY_KEYS = new Set([
 
 export const REDACTED = '[redacted]';
 
+/**
+ * Whether a query parameter carries a credential, by the name its handler receives it under. Express's query parser
+ * (qs) reads the name up to its first `[…]` — or that bracket's content when the name starts with one — so `t[]`,
+ * `t[0]`, `t[a]` and `[t]`, and their `%5B…%5D` spellings, all reach a handler as `t` (C16). Matched by the full name
+ * only, a portal ticket sent as `?t[]=` was written to the log in full (review finding R3-3).
+ */
+function isSecretParameter(name: string): boolean {
+  const bracket = /\[([^[\]]*)\]/.exec(name);
+  const parsed = !bracket ? name : bracket.index > 0 ? name.slice(0, bracket.index) : bracket[1];
+  return SECRET_QUERY_KEYS.has(parsed.toLowerCase());
+}
+
 /** `/x?t=abc&page=2` → `/x?t=[redacted]&page=2`. Untouched when there is nothing to hide. */
 export function scrubUrl(url: string): string;
 export function scrubUrl(url: unknown): unknown;
@@ -67,7 +79,7 @@ export function scrubUrl(url: unknown): unknown {
   const params = new URLSearchParams(url.slice(q + 1));
   let touched = false;
   for (const key of [...params.keys()]) {
-    if (SECRET_QUERY_KEYS.has(key.toLowerCase())) {
+    if (isSecretParameter(key)) {
       params.set(key, REDACTED);
       touched = true;
     }
@@ -80,11 +92,9 @@ export function scrubQuery(query: unknown): unknown {
   if (!query || typeof query !== 'object' || Array.isArray(query)) return query;
 
   const entries = Object.entries(query as Record<string, unknown>);
-  if (!entries.some(([k]) => SECRET_QUERY_KEYS.has(k.toLowerCase()))) return query;
+  if (!entries.some(([k]) => isSecretParameter(k))) return query;
 
-  return Object.fromEntries(
-    entries.map(([k, v]) => [k, SECRET_QUERY_KEYS.has(k.toLowerCase()) ? REDACTED : v]),
-  );
+  return Object.fromEntries(entries.map(([k, v]) => [k, isSecretParameter(k) ? REDACTED : v]));
 }
 
 /**

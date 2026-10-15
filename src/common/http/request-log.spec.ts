@@ -85,6 +85,15 @@ const SECRET_QUERY = new URLSearchParams({
   'hub.verify_token': SECRET.verifyToken,
 }).toString();
 
+/**
+ * Credentials under the bracketed names Express's query parser still hands a handler as `t`, `token` or
+ * `hub.verify_token` — the portal exchange was sent `?t[]=<ticket>` and logged the ticket in full (review finding R3-3).
+ */
+const BRACKETED = { listed: fresh(), indexed: fresh(), encoded: fresh(), keyed: fresh(), leading: fresh(), token: fresh(32), verifyToken: fresh() };
+const BRACKETED_QUERY =
+  `t[]=${BRACKETED.listed}&t[0]=${BRACKETED.indexed}&t%5B1%5D=${BRACKETED.encoded}&t[a]=${BRACKETED.keyed}&[t]=${BRACKETED.leading}` +
+  `&token[]=${BRACKETED.token}&hub.verify_token[]=${BRACKETED.verifyToken}&page=2`;
+
 /** Every secret in a body, under the names the DTOs give them. */
 const SECRET_BODY = {
   token: SECRET.invitationToken,
@@ -203,11 +212,12 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
   /** The lines written, parsed: one JSON object per line. */
   const entries = () => written.map((line) => JSON.parse(line) as Record<string, any>);
 
-  /** The request log's own line about one request to `path`, by the status it ended with. */
-  const completed = (path: string, status: number) =>
-    entries().filter((entry) => entry.res?.statusCode === status && String(entry.req?.url).startsWith(`/api/v1/${path}?`));
+  /** The request log's own line about one request to `path`, by the status it ended with and how its query begins. */
+  const completed = (path: string, status: number, query = 'page=2&') =>
+    entries().filter((entry) => entry.res?.statusCode === status && String(entry.req?.url).startsWith(`/api/v1/${path}?${query}`));
 
   const statuses: Record<string, number> = {};
+  const bracketed: Record<string, number> = {};
   let webhook: { answered: request.Response; refused: request.Response };
 
   beforeAll(async () => {
@@ -231,6 +241,10 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
         .query({ 'hub.mode': 'subscribe', 'hub.verify_token': token, 'hub.challenge': '1158201444' })
         .set(SECRET_HEADERS);
     webhook = { answered: await verify(SECRET.verifyToken), refused: await verify(`${SECRET.verifyToken}x`) };
+    // The bracketed names: a request line on its own (200), the filter's path (401, 500) and Nest's 404 message.
+    for (const path of ['probe/ok', 'probe/signed-in', 'probe/nowhere', 'probe/broken']) {
+      bracketed[path] = (await request(app.getHttpServer()).post(`/api/v1/${path}?${BRACKETED_QUERY}`)).status;
+    }
   });
 
   it('2xx, 3xx, 400, 401, 403, 404, 429 and 500 — with every secret on board, no line holds any of them', () => {
@@ -294,7 +308,7 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
       ['probe/limited', 429],
       ['probe/broken', 500],
     ] as const) {
-      const line = refusals.find((entry) => entry.statusCode === status && String(entry.path).startsWith(`/api/v1/${path}?`));
+      const line = refusals.find((entry) => entry.statusCode === status && String(entry.path).startsWith(`/api/v1/${path}?page=2&`));
       expect({ path, logged: line !== undefined }).toEqual({ path, logged: true });
       expect(line!.path.slice(`/api/v1/${path}`.length)).toMatch(scrubbedQuery);
     }
@@ -310,5 +324,32 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
     // The server error keeps its own error for whoever investigates — and nothing of the request but its scrubbed path.
     const failure = refusals.find((entry) => entry.statusCode === 500 && entry.err)!;
     expect(failure.err.message).toBe('the handler failed');
+  });
+
+  it('a credential under a bracketed name its handler still receives — t[], t[0], t%5B1%5D, t[a], [t] — is scrubbed the same', () => {
+    expect(bracketed).toEqual({ 'probe/ok': 200, 'probe/signed-in': 401, 'probe/nowhere': 404, 'probe/broken': 500 });
+    const log = written.join('\n');
+    for (const [name, value] of Object.entries(BRACKETED)) {
+      expect({ name, logged: log.includes(value) }).toEqual({ name, logged: false });
+    }
+
+    const scrubbed =
+      '?t[]=[redacted]&t[0]=[redacted]&t[1]=[redacted]&t[a]=[redacted]&[t]=[redacted]&token[]=[redacted]' +
+      '&hub.verify_token[]=[redacted]&page=2';
+    // The request line: the URL with every value replaced, and the parsed query under the names the handler reads.
+    for (const [path, status] of Object.entries(bracketed)) {
+      const lines = completed(path, status, 't[]=');
+      expect({ path, lines: lines.length }).toEqual({ path, lines: 1 });
+      expect(lines[0].req.url).toBe(`/api/v1/${path}${scrubbed}`);
+      expect(lines[0].req.query).toEqual({ t: '[redacted]', token: '[redacted]', 'hub.verify_token': '[redacted]', page: '2' });
+    }
+    // The filter's line: the path as asked, scrubbed — and Nest's 404, which repeats the whole URL in its message.
+    const refusals = entries().filter((entry) => entry.statusCode >= 400 && String(entry.path).includes('?t[]='));
+    expect(refusals.map((entry) => [entry.statusCode, entry.path])).toEqual([
+      [401, `/api/v1/probe/signed-in${scrubbed}`],
+      [404, `/api/v1/probe/nowhere${scrubbed}`],
+      [500, `/api/v1/probe/broken${scrubbed}`],
+    ]);
+    expect(refusals.find((entry) => entry.statusCode === 404)!.message).toBe(`Cannot POST /api/v1/probe/nowhere${scrubbed}`);
   });
 });

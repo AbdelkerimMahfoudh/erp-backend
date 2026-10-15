@@ -83,6 +83,37 @@ describe('log scrubbing of every other credential a request may carry (C16)', ()
     }
   });
 
+  it('a credential under any name its handler receives it by: t[], t[0], t[a], [t] and their %5B…%5D spellings are t', () => {
+    // What Express's query parser (qs) hands a handler as `t`, `token` or `hub.verify_token` (review finding R3-3).
+    for (const [sent, logged] of [
+      ['t[]', 't[]'],
+      ['t[0]', 't[0]'],
+      ['t%5B0%5D', 't[0]'],
+      ['t[a]', 't[a]'],
+      ['t[a][b]', 't[a][b]'],
+      ['[t]', '[t]'],
+      ['%5Bt%5D', '[t]'],
+      ['T[]', 'T[]'],
+      ['token[]', 'token[]'],
+      ['hub.verify_token[]', 'hub.verify_token[]'],
+    ]) {
+      expect({ sent, url: scrubUrl(`/api/v1/platform/portal-session?${sent}=abcdef123456&page=2`) }).toEqual({
+        sent,
+        url: `/api/v1/platform/portal-session?${logged}=${REDACTED}&page=2`,
+      });
+    }
+    // A parsed query keeps the parser's names; a parser that keeps the brackets is read by the same rule.
+    expect(scrubQuery({ t: ['abcdef123456'], page: '2' })).toEqual({ t: REDACTED, page: '2' });
+    expect(scrubQuery({ 't[]': 'abcdef123456', '[token]': 'abcdef123456', page: '2' })).toEqual({ 't[]': REDACTED, '[token]': REDACTED, page: '2' });
+  });
+
+  it('a name its handler does not receive as a credential is left as it is', () => {
+    // qs reads `a[t]` as `a`, and `t[` and `tx` as themselves.
+    for (const url of ['/x?a[t]=abcdef123456', '/x?t[=abcdef123456', '/x?tx=abcdef123456', '/x?page[t]=2']) {
+      expect(scrubUrl(url)).toBe(url);
+    }
+  });
+
   it('a Referer is a URL like any other: the page’s query is scrubbed, every other header left as it is', () => {
     const headers = { referer: 'https://dukan.example.test/account/trial?t=abc_DEF-123', 'user-agent': 'Mozilla/5.0', 'x-request-id': 'r-1' };
     expect(scrubHeaders(headers)).toEqual({ ...headers, referer: `https://dukan.example.test/account/trial?t=${REDACTED}` });
