@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -254,7 +255,8 @@ describe('what the filter writes to the log (R3-3, C16)', () => {
     return { body, lines: JSON.stringify(lines), calls: lines };
   }
 
-  const TOKEN = 'Zk3pQ9vT2mX8rN4bW7yL1cH6dF5gJ0aS-e_uV9iO2qR';
+  // Made at run time, as a setup link's token is: a literal here would be a secret-looking string in the repository.
+  const TOKEN = randomBytes(32).toString('base64url');
 
   it.each([
     ['a setup token in ?t=', `/api/v1/platform/my-subscription/trial/link?t=${TOKEN}`],
