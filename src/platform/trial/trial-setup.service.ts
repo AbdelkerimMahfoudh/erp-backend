@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, type OnApplicationShutdown } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import type { Prisma, TrialSetupOutcome, TrialSetupTrigger } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -30,7 +30,9 @@ import {
   type TrialRegistrationMethod,
 } from './trial-rules';
 import {
+  SETUP_DELIVERY_WAIT_MS,
   SETUP_HISTORY_SIZE,
+  SETUP_SHUTDOWN_WAIT_MS,
   deliveryOf,
   historyEntry,
   operationalChannels,
@@ -69,10 +71,17 @@ import {
  * with what each channel did (tx B). Which channels can carry it is decided at that moment — never from a snapshot
  * taken at boot. The token exists in the messages and nowhere else: the database keeps its hash, and no log, audit
  * or answer ever holds it, or a contact, or a code.
+ *
+ * **Never holding a verification.** The providers and tx B are waited for at most `SETUP_DELIVERY_WAIT_MS` (C14;
+ * review findings R2-1, R3-1): past it the caller is answered — the verification with its session, the resend with
+ * `sending` — and the delivery finishes in the background, tracked, its attempt recorded once it is done.
  */
 
-/** What one send did. `skipped`: nothing to do (automatic only) — not eligible, not the Owner, or already done. */
-type SendOutcome = 'skipped' | 'unavailable' | 'sent' | 'failed';
+/**
+ * What one send did. `skipped`: nothing to do (automatic only) — not eligible, not the Owner, or already done.
+ * `sending`: the providers had not all answered within `SETUP_DELIVERY_WAIT_MS`; the delivery goes on in the background.
+ */
+type SendOutcome = 'skipped' | 'unavailable' | 'sent' | 'failed' | 'sending';
 
 /** The business and its Owner when the instructions may go to them now. */
 interface Ready {
@@ -96,8 +105,10 @@ interface Issued {
 const LANGUAGES: readonly MessageLanguage[] = ['en', 'fr', 'ar'];
 
 @Injectable()
-export class TrialSetupService {
+export class TrialSetupService implements OnApplicationShutdown {
   private readonly logger = new Logger(TrialSetupService.name);
+  /** The deliveries still in flight — each settles once its attempt is recorded, or its failure logged. */
+  private readonly deliveries = new Set<Promise<void>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -127,7 +138,11 @@ export class TrialSetupService {
     if (state !== 'trial_available' || !eligibility || !mayClaimNow(row, now)) return { state, eligible: false };
 
     const missing = missingContacts(eligibility.registrationMethod, owner);
-    const [last, lastAccepted] = await Promise.all([this.attempts(who.companyId, 1), this.lastAccepted(who.companyId)]);
+    const [last, lastAccepted, newestLink] = await Promise.all([
+      this.attempts(who.companyId, 1),
+      this.lastAccepted(who.companyId),
+      this.newestLink(who.companyId),
+    ]);
     return {
       state,
       eligible: true,
@@ -136,7 +151,7 @@ export class TrialSetupService {
       requiredContacts: requiredContacts(eligibility.registrationMethod),
       missingContacts: missing,
       destinations: verifiedDestinations(owner),
-      delivery: deliveryOf(missing, last[0] ?? null),
+      delivery: deliveryOf({ missing, last: last[0] ?? null, newestLink }, now),
       sentTo: sentTo(lastAccepted),
       lastAttemptAt: last[0]?.at.toISOString() ?? null,
       timeZone: this.entitlement.trialZone(who.companyId, row.timezone),
@@ -149,9 +164,10 @@ export class TrialSetupService {
    */
   async websiteSetup(companyId: Buffer, owner: OwnerContacts, method: TrialRegistrationMethod, now: Date): Promise<WebsiteSetup> {
     const missing = missingContacts(method, owner);
-    const [history, lastAccepted, recent, inFlight] = await Promise.all([
+    const [history, lastAccepted, newestLink, recent, inFlight] = await Promise.all([
       this.attempts(companyId, SETUP_HISTORY_SIZE),
       this.lastAccepted(companyId),
+      this.newestLink(companyId),
       this.recentAttempts(this.prisma, companyId, now),
       this.linkInFlight(this.prisma, companyId, now),
     ]);
@@ -160,7 +176,7 @@ export class TrialSetupService {
     const operational = this.operational();
     const destinations = verifiedDestinations(owner);
     return {
-      delivery: deliveryOf(missing, last),
+      delivery: deliveryOf({ missing, last, newestLink }, now),
       sentTo: sentTo(lastAccepted),
       destinations,
       lastAttemptAt: last?.at.toISOString() ?? null,
@@ -177,7 +193,8 @@ export class TrialSetupService {
    * Owner's own verified contacts. Refused, in order: not the Owner (403 `owner_only`), the business cannot claim
    * (409 `trial_not_available`), a required contact unverified (409 `contact_unverified`), too soon (429
    * `too_many_requests` with `resendAvailableAt`), nothing can carry it (503 `setup_delivery_unavailable` — the
-   * attempt is recorded). Otherwise the website's `setup` object after the attempt, `sent` or `failed`.
+   * attempt is recorded). Otherwise the website's `setup` object after the attempt: `sent` or `failed` — or `sending`,
+   * when the providers had not answered within `SETUP_DELIVERY_WAIT_MS` and the delivery goes on without the request.
    */
   async resend(who: TrialPrincipal): Promise<WebsiteSetup> {
     const outcome = await this.send(who, 'resend');
@@ -192,8 +209,9 @@ export class TrialSetupService {
   /**
    * After a contact of this person was verified and committed — the registration's own contact, or a WhatsApp number
    * verified later in the app: if the business may claim its trial, the person is its Owner and every required
-   * contact is now verified, the instructions are sent, once (`verified`). Awaited by the caller and never thrown into
-   * it: whatever happens here, the verification the person just completed stands.
+   * contact is now verified, the instructions are sent, once (`verified`). Never thrown into the caller, and never
+   * holding it longer than `SETUP_DELIVERY_WAIT_MS` for the providers (C14): whatever happens here, the verification
+   * the person just completed stands, and is answered.
    */
   async onContactsVerified(companyId: Buffer, userId: Buffer): Promise<void> {
     try {
@@ -221,6 +239,8 @@ export class TrialSetupService {
    *  3. tx B, under the lock again: the attempt with what each channel did, and the audit — last. Both carry the
    *     instant the link was issued, so the throttle's minute and the `resendAvailableAt` it promises are measured
    *     from one time, however long the providers took (C5; review finding R3-4).
+   *
+   * Steps 2 and 3 are waited for at most `SETUP_DELIVERY_WAIT_MS`; past it, `sending`, and they carry on (C14).
    */
   private async send(who: TrialPrincipal, trigger: TrialSetupTrigger): Promise<SendOutcome> {
     const issued = await this.prisma.$transaction(async (tx) => {
@@ -285,7 +305,11 @@ export class TrialSetupService {
       } satisfies Issued;
     });
     if (issued === 'skipped' || issued === 'unavailable') return issued;
+    return this.awaitBriefly(who.companyId, this.deliverAndRecord(who, trigger, issued));
+  }
 
+  /** Steps 2 and 3: the providers, then the attempt with what each did. */
+  private async deliverAndRecord(who: TrialPrincipal, trigger: TrialSetupTrigger, issued: Issued): Promise<'sent' | 'failed'> {
     const outcomes = await this.deliver(who.companyId, issued);
     if (printsDevelopmentLinks()) {
       // The local-development sink, as the development WhatsApp channel prints a code: never the application logger.
@@ -303,6 +327,61 @@ export class TrialSetupService {
       await this.record(tx, who, trigger, issued.business, issued.linkId, outcomes, issued.issuedAt);
     });
     return outcomes.email === 'accepted' || outcomes.whatsapp === 'accepted' ? 'sent' : 'failed';
+  }
+
+  /**
+   * A delivery, waited for at most `SETUP_DELIVERY_WAIT_MS`: its outcome when it settles in time — or `sending`, and it
+   * finishes in the background. It is tracked until it settles, so `idle()` and the shutdown wait for it; what it
+   * throws once nobody waits any more is logged with the company and nothing else.
+   */
+  private awaitBriefly(companyId: Buffer, delivery: Promise<'sent' | 'failed'>): Promise<SendOutcome> {
+    let waited = true;
+    const tracked = delivery.then(
+      () => undefined,
+      (e: unknown) => {
+        if (!waited) this.logger.warn(`Free trial setup attempt not recorded for company ${binToUuid(companyId)} (${(e as Error).name})`);
+      },
+    );
+    this.deliveries.add(tracked);
+    void tracked.then(() => this.deliveries.delete(tracked));
+    return new Promise<SendOutcome>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        waited = false;
+        resolve('sending');
+      }, SETUP_DELIVERY_WAIT_MS);
+      delivery.then(
+        (outcome) => {
+          clearTimeout(timer);
+          resolve(outcome);
+        },
+        (e: unknown) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      );
+    });
+  }
+
+  /** Settles once every delivery in flight has — its attempt recorded, or its failure logged. */
+  async idle(): Promise<void> {
+    while (this.deliveries.size > 0) await Promise.all(this.deliveries);
+  }
+
+  /**
+   * A process shutting down waits for the deliveries still in flight — at most `SETUP_SHUTDOWN_WAIT_MS` — so that a
+   * message a provider took is not left without its attempt (which would read `not_sent`).
+   */
+  async onApplicationShutdown(): Promise<void> {
+    if (this.deliveries.size === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    const late = await Promise.race([
+      this.idle().then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), SETUP_SHUTDOWN_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (late) this.logger.warn(`Free trial setup deliveries still in flight at shutdown: ${this.deliveries.size}`);
   }
 
   /**
@@ -457,6 +536,18 @@ export class TrialSetupService {
       select: { createdAt: true },
     });
     return rows.map((r) => r.createdAt);
+  }
+
+  /** The newest link the business was sent, and whether its attempt is recorded yet — or null when none was (C1). */
+  private async newestLink(companyId: Buffer): Promise<{ issuedAt: Date; recorded: boolean } | null> {
+    const link = await this.prisma.trialSetupLink.findFirst({
+      where: { companyId },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, createdAt: true },
+    });
+    if (!link) return null;
+    const attempt = await this.prisma.trialSetupMessage.findFirst({ where: { companyId, linkId: link.id }, select: { id: true } });
+    return { issuedAt: link.createdAt, recorded: attempt !== null };
   }
 
   /** A link issued in the last minute: an attempt still in flight, whose own record may not be written yet. */

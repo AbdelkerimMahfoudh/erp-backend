@@ -5,6 +5,9 @@ import {
 } from './registration-continuation.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
 import { hashIntentToken } from '../auth/otp/otp-code.util';
+import { HangingEmailChannel, TIMERS_ONLY, makeTrialWorld } from './__testing__/trial-world';
+import { SETUP_DELIVERY_WAIT_MS } from './trial/trial-setup-rules';
+import type { TrialSetupService } from './trial/trial-setup.service';
 
 /**
  * Finishing a registration, and everything that must NOT finish one.
@@ -23,7 +26,7 @@ import { hashIntentToken } from '../auth/otp/otp-code.util';
  * caller holding something that looks almost right, and it still gets nothing.
  */
 
-function makeWorld() {
+function makeWorld(realTrialSetup?: TrialSetupService) {
   const intents: any[] = [];
   const challenges: any[] = [];
   const users = new Map<string, any>();
@@ -167,7 +170,7 @@ function makeWorld() {
     verification,
     sessionsService,
     tokensService,
-    trialSetup as never,
+    realTrialSetup ?? (trialSetup as never),
   );
 
   function addOwner(over: Partial<any> = {}) {
@@ -228,6 +231,37 @@ describe('a registration is finished by proving THIS attempt, not an address', (
     expect((await w.service.complete(token, code)).ok).toBe(true);
     expect(w.trialSetup.onContactsVerified).toHaveBeenCalledTimes(1);
     expect(w.trialSetup.onContactsVerified).toHaveBeenCalledWith(owner.companyId, owner.id);
+  });
+
+  it('answers with the Owner’s session within SETUP_DELIVERY_WAIT_MS while the provider hangs — the instructions follow (C14)', async () => {
+    jest.useFakeTimers(TIMERS_ONLY);
+    try {
+      const email = new HangingEmailChannel();
+      const trial = makeTrialWorld({ email });
+      const shop = trial.business({ contacts: 'email' });
+      const w = makeWorld(trial.setup);
+      const owner = w.addOwner({ companyId: shop.companyId, id: shop.ownerId });
+      const { token, code } = await upToCode(w, owner);
+
+      const done = w.service.complete(token, code);
+      let answered = false;
+      void done.then(() => (answered = true));
+      await email.called;
+      await jest.advanceTimersByTimeAsync(SETUP_DELIVERY_WAIT_MS - 1);
+      expect(answered).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      // The session, the very one the transaction created — not "wrong code" after a client's timeout.
+      await expect(done).resolves.toMatchObject({ ok: true, accessToken: 'access.token' });
+      expect(w.sessions).toHaveLength(1);
+      expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
+
+      email.answer();
+      await trial.setup.idle();
+      expect(trial.messages(shop)).toEqual([expect.objectContaining({ trigger: 'verified', emailOutcome: 'accepted' })]);
+      expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sent' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('marks the contact proved on the Owner, which is what stops a second continuation', async () => {

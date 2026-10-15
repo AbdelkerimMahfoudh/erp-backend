@@ -111,6 +111,40 @@ export class TestEmailChannel implements EmailChannel {
   }
 }
 
+/**
+ * An email provider that answers only when told to — what a provider that hangs looks like from the sending, for as
+ * long as a test needs it to (C14). `called` settles at its first request.
+ */
+export class HangingEmailChannel implements EmailChannel {
+  readonly name = 'resend';
+  readonly isEnabled = true;
+  readonly calls: EmailMessage[] = [];
+  private readonly waiting: { resolve: (r: DeliveryResult) => void; reject: (e: Error) => void }[] = [];
+  private arrived: () => void = () => undefined;
+  readonly called = new Promise<void>((resolve) => {
+    this.arrived = resolve;
+  });
+
+  send(message: EmailMessage): Promise<DeliveryResult> {
+    this.calls.push(message);
+    this.arrived();
+    return new Promise((resolve, reject) => this.waiting.push({ resolve, reject }));
+  }
+
+  answer(result: DeliveryResult = { status: 'accepted', providerMessageId: `em-${this.calls.length}`, provider: this.name }): void {
+    this.waiting.shift()!.resolve(result);
+  }
+
+  fail(error: Error): void {
+    this.waiting.shift()!.reject(error);
+  }
+}
+
+/** Fake timers for the bounded waits: only the timers — promises, the world's clock and everything else run as they do. */
+export const TIMERS_ONLY: Parameters<typeof jest.useFakeTimers>[0] = {
+  doNotFake: ['Date', 'hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate'],
+};
+
 function pick(row: Row | null | undefined, select?: Row): Row | null {
   if (!row) return null;
   if (!select) return { ...row };

@@ -4,9 +4,20 @@ import { binToUuid } from '../../common/utils/uuid.util';
 import { DisabledWhatsAppChannel, TestWhatsAppChannel } from '../../messaging/channels';
 import { ProvenWhatsAppChannel } from '../../messaging/delivery-readiness';
 import { DevelopmentLogEmailChannel, DisabledEmailChannel } from '../../messaging/email-channel';
-import { NOW, SITE_ORIGIN, TestEmailChannel, makeTrialWorld, type Business, type TrialWorld, type WorldOptions } from '../__testing__/trial-world';
+import {
+  HangingEmailChannel,
+  NOW,
+  SITE_ORIGIN,
+  TIMERS_ONLY,
+  TestEmailChannel,
+  makeTrialWorld,
+  type Business,
+  type TrialWorld,
+  type WorldOptions,
+} from '../__testing__/trial-world';
 import { TrialRefusal } from './trial-refusal';
 import { TRIAL_TERMS_VERSION, setupTokenHash } from './trial-rules';
+import { SETUP_DELIVERY_WAIT_MS, SETUP_SENDING_WINDOW_MS, SETUP_SHUTDOWN_WAIT_MS } from './trial-setup-rules';
 
 /**
  * The free trial's setup instructions (0095; docs/76; the owner's correction of 2026-10-13), over the in-memory world
@@ -47,6 +58,7 @@ function emailedToken(w: TrialWorld): string {
 
 const verifiedNow = (w: TrialWorld, b: Business) => w.setup.onContactsVerified(b.companyId, b.ownerId);
 const actorOf = (b: Business) => `user:${binToUuid(b.ownerId)}`;
+
 
 describe('sent automatically once the contacts given at registration are verified', () => {
   it('email only: one email in the business’s language with the website link, one link, one attempt, one audit', async () => {
@@ -322,6 +334,133 @@ describe('a provider’s answer is reported as it was', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('a slow or hung provider never holds the caller (C14; review findings R2-1, R3-1)', () => {
+  let warn: jest.SpyInstance;
+  let log: jest.SpyInstance;
+  beforeEach(() => {
+    jest.useFakeTimers(TIMERS_ONLY);
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    warn.mockRestore();
+    log.mockRestore();
+  });
+
+  /** A call that resolves once the providers had their SETUP_DELIVERY_WAIT_MS: not a moment before. */
+  async function answeredAtTheBound<T>(email: HangingEmailChannel, call: Promise<T>): Promise<T> {
+    let answered = false;
+    void call.then(() => (answered = true));
+    await email.called;
+    await jest.advanceTimersByTimeAsync(SETUP_DELIVERY_WAIT_MS - 1);
+    expect(answered).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    return call;
+  }
+
+  it('the website’s resend answers sending at the bound; the attempt is recorded, once, when the provider answers', async () => {
+    const email = new HangingEmailChannel();
+    const w = world({ email });
+    const shop = w.business();
+    const setup = await answeredAtTheBound(email, w.setup.resend(shop.owner));
+    expect(setup).toMatchObject({ delivery: 'sending', sentTo: [], lastAttemptAt: null, history: [], canResendNow: false });
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
+    expect(w.messages(shop)).toHaveLength(0);
+
+    email.answer();
+    await w.setup.idle();
+    expect(w.messages(shop)).toEqual([expect.objectContaining({ trigger: 'resend', emailOutcome: 'accepted', createdAt: NOW })]);
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sent', sentTo: ['email'] });
+    expect((await w.service.status(shop.owner)).setup).toMatchObject({ delivery: 'sent', history: [expect.objectContaining({ trigger: 'resend' })] });
+  });
+
+  it('the automatic send after a verification returns at the bound, sends once, and is recorded once', async () => {
+    const email = new HangingEmailChannel();
+    const w = world({ email });
+    const shop = w.business();
+    await answeredAtTheBound(email, verifiedNow(w, shop));
+    expect(log.mock.calls.map(([m]) => String(m))).toContain(`Free trial setup instructions after verification for company ${binToUuid(shop.companyId)}: sending`);
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
+    // Another verification meanwhile sends nothing: the first is in flight.
+    await verifiedNow(w, shop);
+    expect(email.calls).toHaveLength(1);
+
+    email.answer();
+    await w.setup.idle();
+    await verifiedNow(w, shop);
+    expect(email.calls).toHaveLength(1);
+    expect(w.messages(shop)).toEqual([expect.objectContaining({ trigger: 'verified', emailOutcome: 'accepted' })]);
+    expect(w.links(shop)).toHaveLength(1);
+  });
+
+  it('the provider’s one retry for a temporary failure still runs — in the background, under the same key', async () => {
+    const email = new HangingEmailChannel();
+    const w = world({ email });
+    const shop = w.business();
+    await answeredAtTheBound(email, verifiedNow(w, shop));
+    email.answer({ status: 'failed', reason: 'temporary', detail: 'timeout', provider: 'resend' });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(email.calls).toHaveLength(2);
+    expect(email.calls[1].idempotencyKey).toBe(email.calls[0].idempotencyKey);
+    email.answer();
+    await w.setup.idle();
+    expect(w.messages(shop)).toEqual([expect.objectContaining({ emailOutcome: 'accepted' })]);
+  });
+
+  it('a provider that fails after the bound: logged with the company only, and recorded as failed', async () => {
+    const email = new HangingEmailChannel();
+    const w = world({ email });
+    const shop = w.business();
+    await answeredAtTheBound(email, verifiedNow(w, shop));
+    email.fail(new Error(`socket hang up for ${shop.email}`));
+    await w.setup.idle();
+    expect(w.messages(shop)).toEqual([expect.objectContaining({ trigger: 'verified', emailOutcome: 'failed' })]);
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'failed', sentTo: [] });
+    const warned = warn.mock.calls.map(([m]) => String(m));
+    expect(warned).toEqual([`Free trial setup email failed for company ${binToUuid(shop.companyId)}`]);
+  });
+
+  it('an attempt that cannot be recorded in the background is logged with the company only: sending, then not_sent', async () => {
+    const email = new HangingEmailChannel();
+    const w = world({ email });
+    const shop = w.business();
+    await answeredAtTheBound(email, verifiedNow(w, shop));
+    w.db.$transaction = () => Promise.reject(new Error(`connection lost while writing for ${shop.email}`));
+    email.answer();
+    await w.setup.idle();
+    expect(w.messages(shop)).toHaveLength(0);
+    const warned = warn.mock.calls.map(([m]) => String(m));
+    expect(warned).toEqual([`Free trial setup attempt not recorded for company ${binToUuid(shop.companyId)} (Error)`]);
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
+    w.clock.advance(SETUP_SENDING_WINDOW_MS);
+    expect(await w.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'not_sent' });
+  });
+
+  it('a process shutting down waits for a delivery in flight — and no longer than SETUP_SHUTDOWN_WAIT_MS', async () => {
+    const email = new HangingEmailChannel();
+    const w = world({ email });
+    const shop = w.business();
+    await answeredAtTheBound(email, verifiedNow(w, shop));
+    let down = false;
+    const shutdown = w.setup.onApplicationShutdown().then(() => (down = true));
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(down).toBe(false);
+    email.answer();
+    await shutdown;
+    expect(w.messages(shop)).toHaveLength(1);
+
+    const hung = new HangingEmailChannel();
+    const other = world({ email: hung });
+    const b = other.business();
+    await answeredAtTheBound(hung, other.setup.onContactsVerified(b.companyId, b.ownerId));
+    const bounded = other.setup.onApplicationShutdown();
+    await jest.advanceTimersByTimeAsync(SETUP_SHUTDOWN_WAIT_MS);
+    await bounded;
+    expect(warn.mock.calls.map(([m]) => String(m))).toContain('Free trial setup deliveries still in flight at shutdown: 1');
   });
 });
 

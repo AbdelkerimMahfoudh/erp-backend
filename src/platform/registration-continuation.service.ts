@@ -250,7 +250,9 @@ export class RegistrationContinuationService {
     /*
      * The contact is proved and committed. A business that registered itself may now be owed the free trial's setup
      * instructions (0095): sent here, once, if every contact it gave is verified — with both, only after the number
-     * is too. Awaited, and it never throws: the Owner's session below is issued whatever the sending did.
+     * is too. It never throws, and waits at most SETUP_DELIVERY_WAIT_MS for the providers before the delivery goes on
+     * in the background (C14): the continuation is already spent, so the Owner's session below must reach the client
+     * before any client gives up on the request.
      */
     await this.trialSetup.onContactsVerified(user.companyId, user.id);
 

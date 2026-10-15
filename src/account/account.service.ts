@@ -223,7 +223,9 @@ export class AccountService {
       'WhatsApp number verified by its holder',
     );
     // The free trial (0095): an Owner who registered with an email and a number is owed the setup instructions once
-    // the number is verified too — sent now, once. Awaited, and it never throws: the number stays verified regardless.
+    // the number is verified too — sent now, once. It never throws, and waits at most SETUP_DELIVERY_WAIT_MS for the
+    // providers before the delivery goes on in the background (C14): the code is spent, so the answer must reach the
+    // app — the number stays verified regardless.
     await this.trialSetup.onContactsVerified(p.companyId, p.userId);
     return { phone: challenge.candidatePhone, phoneVerifiedAt: now.toISOString() };
   }

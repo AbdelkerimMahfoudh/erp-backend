@@ -31,6 +31,22 @@ export type SetupChannel = 'email' | 'whatsapp';
 /** How many attempts the website lists, newest first. */
 export const SETUP_HISTORY_SIZE = 10;
 
+/**
+ * How long a verification, or the website's resend, waits for the providers before it answers (C14). Past it the
+ * delivery carries on in the background and the status says `sending` until its attempt is recorded: a slow or hung
+ * provider never holds the verification the person just completed — nor the session it ends with.
+ */
+export const SETUP_DELIVERY_WAIT_MS = 3_000;
+
+/**
+ * How long a link issued without its attempt recorded reads as `sending` (C1): its providers are still being asked.
+ * Past it, still without an attempt, the send was lost on the way — `not_sent`.
+ */
+export const SETUP_SENDING_WINDOW_MS = 60_000;
+
+/** How long a process shutting down waits for the deliveries still in flight, so that their attempts are recorded. */
+export const SETUP_SHUTDOWN_WAIT_MS = 15_000;
+
 /** One attempt as stored (`trial_setup_messages`): when, what triggered it, and what each channel did. */
 export interface SetupAttempt {
   at: Date;
@@ -42,12 +58,13 @@ export interface SetupAttempt {
 /**
  * Where the instructions stand, as the Owner is told it:
  *  - `waiting_for_contact` — a required contact is not verified yet, so nothing is sent, by design;
- *  - `not_sent` — the contacts are complete but no attempt is recorded (a send that crashed, say);
+ *  - `sending` — a link was issued less than a minute ago and its providers have not all answered yet;
+ *  - `not_sent` — the contacts are complete but no attempt is recorded (a send lost on the way, say);
  *  - `sent` — the last attempt was accepted by a provider on at least one channel;
  *  - `failed` — the last attempt reached providers and none accepted it;
  *  - `unavailable` — the last attempt found no channel that could carry it.
  */
-export type SetupDelivery = 'waiting_for_contact' | 'not_sent' | 'sent' | 'failed' | 'unavailable';
+export type SetupDelivery = 'waiting_for_contact' | 'sending' | 'not_sent' | 'sent' | 'failed' | 'unavailable';
 
 /** An attempt's overall outcome: anything accepted is sent; else anything failed is failed; else it was unavailable. */
 export function attemptOutcome(attempt: Pick<SetupAttempt, 'email' | 'whatsapp'>): 'sent' | 'failed' | 'unavailable' {
@@ -57,11 +74,29 @@ export function attemptOutcome(attempt: Pick<SetupAttempt, 'email' | 'whatsapp'>
   return 'unavailable';
 }
 
-/** The status from the contacts still missing and the last attempt (null: none recorded). */
-export function deliveryOf(missing: readonly TrialContact[], last: Pick<SetupAttempt, 'email' | 'whatsapp'> | null): SetupDelivery {
-  if (missing.length > 0) return 'waiting_for_contact';
-  if (!last) return 'not_sent';
-  return attemptOutcome(last);
+/** What the status is decided from, read together from the business's attempts and links. */
+export interface DeliveryFacts {
+  /** The required contacts not verified yet. */
+  missing: readonly TrialContact[];
+  /** The newest attempt recorded, or null. */
+  last: Pick<SetupAttempt, 'at' | 'email' | 'whatsapp'> | null;
+  /** The newest link issued and whether its attempt is recorded yet; null when none was ever issued. */
+  newestLink: { issuedAt: Date; recorded: boolean } | null;
+}
+
+/**
+ * The status, at `now`. A link newer than every attempt and without one of its own is a send still in flight — its
+ * attempt is written once the providers have answered — for a minute; after that, the send was lost (C1). Otherwise
+ * the last attempt says.
+ */
+export function deliveryOf(facts: DeliveryFacts, now: Date): SetupDelivery {
+  if (facts.missing.length > 0) return 'waiting_for_contact';
+  const link = facts.newestLink;
+  if (link && !link.recorded && (!facts.last || link.issuedAt.getTime() >= facts.last.at.getTime())) {
+    return now.getTime() - link.issuedAt.getTime() < SETUP_SENDING_WINDOW_MS ? 'sending' : 'not_sent';
+  }
+  if (!facts.last) return 'not_sent';
+  return attemptOutcome(facts.last);
 }
 
 /** The channels a provider accepted in this attempt — the last attempt that had one — email first. */

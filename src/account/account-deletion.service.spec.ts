@@ -7,6 +7,8 @@ import { AccountDeletionService, DeletionPrincipal, NOT_REMOVED, REDACTED_DESTIN
 import { AccountService } from './account.service';
 import { FakePrisma } from './testing/fake-prisma';
 import { DELETED_USER_NAME, UNUSABLE_PASSWORD_HASH } from './deletion-rules';
+import { HangingEmailChannel, TIMERS_ONLY, makeTrialWorld } from '../platform/__testing__/trial-world';
+import { SETUP_DELIVERY_WAIT_MS } from '../platform/trial/trial-setup-rules';
 
 /**
  * Account deletion, end to end against an in-memory database (docs/64).
@@ -451,6 +453,43 @@ describe('a WhatsApp number verified in the app (0095)', () => {
     });
     expect(h.trialSetup.onContactsVerified).toHaveBeenCalledTimes(1);
     expect(h.trialSetup.onContactsVerified).toHaveBeenCalledWith(C1, NO_PHONE);
+  });
+
+  it('answers within SETUP_DELIVERY_WAIT_MS while the provider hangs — the number verified, the instructions following (C14)', async () => {
+    jest.useFakeTimers(TIMERS_ONLY);
+    try {
+      const email = new HangingEmailChannel();
+      const trial = makeTrialWorld({ email });
+      // An Owner who registered with an email and a number, the email verified: the number completes the contacts.
+      const shop = trial.business({ contacts: 'both', verified: ['email'] });
+      const prisma = {
+        otpChallenge: { findUnique: async () => ({ candidatePhone: '+22236100001' }) },
+        user: { update: async ({ data }: { data: Record<string, unknown> }) => Object.assign(trial.owner(shop), data) },
+        authSession: { updateMany: async () => ({ count: 0 }) },
+        auditLog: { create: async () => ({}) },
+      };
+      const otp = { verify: async () => ({ ok: true, purpose: 'phone_verification' }) };
+      const account = new AccountService(prisma as never, {} as never, otp as never, {} as never, trial.setup);
+
+      const confirmed = account.confirmPhoneVerification(
+        { companyId: shop.companyId, userId: shop.ownerId, sessionId: Buffer.alloc(16) },
+        { challengeId: '01a133f9-3b4f-7871-aa38-0a8cb0304583', code: '123456' },
+      );
+      let answered = false;
+      void confirmed.then(() => (answered = true));
+      await email.called;
+      await jest.advanceTimersByTimeAsync(SETUP_DELIVERY_WAIT_MS - 1);
+      expect(answered).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(confirmed).resolves.toMatchObject({ phone: '+22236100001' });
+      expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
+
+      email.answer();
+      await trial.setup.idle();
+      expect(trial.messages(shop)).toEqual([expect.objectContaining({ trigger: 'verified', emailOutcome: 'accepted', whatsappOutcome: 'accepted' })]);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 
