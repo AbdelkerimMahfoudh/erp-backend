@@ -9,6 +9,7 @@ import { activityFee, chooseReplacementSlot, replacementDue, type ActivityPrices
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { decideActivityChange } from './activity-decision';
+import { openStoreTx as openStore, type StoreOpening } from './store-opening';
 import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
@@ -1215,77 +1216,9 @@ export class SeatAllocationService {
     return this.close(before, 'released', 'Withdrawn by the business before payment.', actor, null);
   }
 
-  /**
-   * Open a store: the branch with its activity, every Owner assigned to it so the shop can use it at once, the
-   * subscribed store count raised by one, and the timeline told why. One path for a store paid for and for one that
-   * took an archived store's place at no charge (D158), so the two can never open differently.
-   */
-  private async openStoreTx(
-    tx: BillingDb,
-    input: { companyId: Buffer; subscriptionId: Buffer; name: string; activity: Activity; actor: string; note: string },
-  ): Promise<Buffer> {
-    let branch: { id: Buffer };
-    try {
-      branch = await tx.branch.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId: input.companyId,
-          name: input.name,
-          type: 'store',
-          activity: input.activity,
-        },
-        select: { id: true },
-      });
-    } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-        throw new ConflictException({
-          code: 'store_name_in_use',
-          message: 'A store with that name already exists.',
-        });
-      }
-      throw e;
-    }
-    // Every Owner works at every store: assign them so the shop can use it at once.
-    const owners = await tx.userBranch.findMany({
-      where: {
-        companyId: input.companyId,
-        role: { key: 'owner' },
-        user: { deletedAt: null },
-      },
-      distinct: ['userId'],
-      select: { userId: true, roleId: true },
-    });
-    for (const o of owners) {
-      await tx.userBranch.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId: input.companyId,
-          userId: o.userId,
-          branchId: branch.id,
-          roleId: o.roleId,
-        },
-      });
-    }
-    const counted = await tx.subscription.update({
-      where: { id: input.subscriptionId },
-      data: {
-        subscribedBranchCount: { increment: 1 },
-        version: { increment: 1 },
-      },
-      select: { subscribedBranchCount: true },
-    });
-    await tx.subscriptionEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId: input.companyId,
-        subscriptionId: input.subscriptionId,
-        kind: 'branches_changed',
-        note: input.note.slice(0, 255),
-        branchesAfter: counted.subscribedBranchCount,
-        actor: input.actor.slice(0, 120),
-      },
-    });
-    return branch.id;
+  /** Open a store (`store-opening.ts`): the one path every store opens by, so no two can open differently. */
+  private async openStoreTx(tx: BillingDb, input: StoreOpening): Promise<Buffer> {
+    return openStore(tx, input);
   }
 
   /**
