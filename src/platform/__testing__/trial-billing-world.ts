@@ -715,6 +715,30 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     );
   }
 
+  /**
+   * The Owner closes the business (account deletion), as `AccountDeletionService.closeCompany` does to the tables this
+   * world holds — the subscription row locked first, the people de-identified and deleted, every store deactivated,
+   * the subscription cancelled, the trial eligibility closed and the company closed — in one transaction. The other
+   * tables that closure blanks (customers, receipts, sessions, …) are not held here and decide nothing below.
+   */
+  async function closeCompany(b: Business): Promise<void> {
+    await db.$transaction(async (tx: Row) => {
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM subscriptions WHERE company_id = ${b.companyId} FOR UPDATE`);
+      const at = now;
+      await tx.user.updateMany({ where: { companyId: b.companyId, deletedAt: null }, data: { isActive: false, deletedAt: at, email: null, phone: null } });
+      await tx.branch.updateMany({ where: { companyId: b.companyId }, data: { isActive: false } });
+      const sub = await tx.subscription.findFirst({ where: { companyId: b.companyId } });
+      if (sub && sub.status !== 'cancelled') {
+        await tx.subscription.update({ where: { id: sub.id }, data: { status: 'cancelled', version: { increment: 1 } } });
+        await tx.subscriptionEvent.create({
+          data: { id: newUuidV7Bin(), companyId: b.companyId, subscriptionId: sub.id, kind: 'cancelled', note: 'Business closed by its Owner (account deletion)', actor: 'owner:account-deletion' },
+        });
+      }
+      await tx.trialEligibility.updateMany({ where: { companyId: b.companyId, closedAt: null }, data: { closedAt: at, closedReason: 'cancelled' } });
+      await tx.company.update({ where: { id: b.companyId }, data: { isActive: false, closedAt: at } });
+    });
+  }
+
   const of = <M extends Model>(model: M, b: Business) => t[model].filter((r) => same(r.companyId, b.companyId));
   const uuid = (id: Buffer) => binToUuid(id);
 
@@ -756,6 +780,7 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     business,
     person,
     staff,
+    closeCompany,
     /** The Owner claims the trial on the website, now. */
     claim: (b: Business, key = `claim-${binToUuid(b.companyId)}`) =>
       trial.claim({ companyId: b.companyId, userId: b.ownerId }, { idempotencyKey: key, termsVersion: TRIAL_TERMS_VERSION }),

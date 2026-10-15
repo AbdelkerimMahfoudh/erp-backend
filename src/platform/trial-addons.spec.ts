@@ -1,9 +1,11 @@
 import { Logger } from '@nestjs/common';
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { SubscriptionRenewal } from '../billing/renewal';
 import { ALWAYS_ALLOWED } from '../entitlement/route-classification';
 import { CTX, DAY, HOUR, makeTrialBillingWorld, type Business, type TrialBillingWorld, type WorldOptions } from './__testing__/trial-billing-world';
 import { PlatformController } from './platform.controller';
+import { SeatRequestsController } from './seat-requests.controller';
+import { scheduledCoverage } from './staff-activation-rules';
 
 /**
  * Additional stores and paid employee seats during the free trial — the owner's correction of 2026-10-15 (D176).
@@ -777,6 +779,349 @@ describe('11. cancelled or refused request', () => {
     await w.sweeper.sweep();
     expect(w.request(store).status).toBe('paid');
     expect(w.periods(b)[0].assessedTotal).toBe(1000);
+  });
+});
+
+describe('12. suspended business at the scheduled activation time', () => {
+  /** What a reinstatement, a sweep or a look could change: periods, stores, requests, payments, activations. */
+  const ledger = (w: TrialBillingWorld, b: Business) =>
+    JSON.stringify({
+      periods: w.periods(b).map((p) => [p.periodStart.toISOString(), p.assessedTotal, p.assessedBranchFee, p.assessedStaffFee]),
+      payments: w.payments(b).map((p) => p.amount.toString()),
+      stores: w.branches(b).map((x) => [x.name, x.isActive]),
+      requests: w.requests(b).map((r) => [r.status, r.version, r.effectiveAt?.toISOString() ?? null]),
+      activations: w.audits(b).filter((a) => /\.activate$/.test(a.action)).length,
+    });
+
+  it('approved, then suspended before the end: put in force on schedule — the period it paid for starts on time — and still suspended', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const { person, store, seat } = await scheduledStoreAndSeat(w, b);
+    await w.lifecycle.suspend(w.uuid(b.companyId), { reason: 'documents to check' }, CTX);
+    w.clock.set(T);
+    // Nobody can look at a suspended business: the sweeper does it, at the end.
+    await w.sweeper.sweep();
+
+    expect(w.request(store)).toMatchObject({ status: 'paid', effectiveAt: T });
+    expect(w.request(seat)).toMatchObject({ status: 'paid', effectiveAt: T });
+    expect(w.branch(b, 'B')).toMatchObject({ isActive: true });
+    expect(w.periods(b)).toHaveLength(1);
+    expect(w.periods(b)[0]).toMatchObject({ periodStart: T, assessedTotal: 1100, assessedStaffFee: 100 });
+    // PQ3's default: the seat's person is activated with it — the business's suspension, not the seat, keeps them out.
+    expect(w.user(person).isActive).toBe(true);
+    expect(w.subscription(b).status).toBe('suspended');
+    await expect(w.entitlement.forCompany(b.companyId)).resolves.toMatchObject({ state: 'suspended', activeBranchCount: 2 });
+
+    // Reinstated a day later: nothing is put in force or charged a second time.
+    const settled = ledger(w, b);
+    w.clock.set(new Date(T.getTime() + DAY));
+    await expect(w.lifecycle.reinstate(w.uuid(b.companyId), { reason: 'documents received' }, CTX)).resolves.toMatchObject({ applied: true });
+    await w.sweeper.sweep();
+    expect(ledger(w, b)).toBe(settled);
+    await expect(w.entitlement.forCompany(b.companyId)).resolves.toMatchObject({ state: 'active', activeBranchCount: 2 });
+  });
+
+  it('cancelled by the Super Admin before the end (not closed): the period it paid for still starts, and the request with it (PQ3)', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const { store } = await scheduledStoreAndSeat(w, b);
+    await w.lifecycle.cancel(w.uuid(b.companyId), { reason: 'asked to stop' }, CTX);
+    w.clock.set(T);
+    await w.sweeper.sweep();
+    expect(w.request(store)).toMatchObject({ status: 'paid', effectiveAt: T });
+    expect(w.periods(b)[0]).toMatchObject({ periodStart: T, assessedTotal: 1100 });
+    expect(w.subscription(b).status).toBe('cancelled');
+  });
+
+  it('closed by its Owner (account deletion) before the end: nothing is put in force, ever — the trial’s end is still written down, once', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const { store, seat } = await scheduledStoreAndSeat(w, b);
+    await w.closeCompany(b);
+    const closed = ledger(w, b);
+    w.clock.set(T);
+    await w.sweeper.sweep();
+    // The trial did end: its record is written once, so the sweeper never comes back for it.
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['scheduled', 'scheduled']);
+    expect(w.branch(b, 'B')).toBeNull();
+    expect(ledger(w, b)).toBe(closed);
+    const after = JSON.stringify(w.t);
+    w.clock.advance(60_000);
+    await w.sweeper.sweep();
+    await w.trialEnd.applyIfDue(b.companyId);
+    expect(JSON.stringify(w.t)).toBe(after);
+  });
+
+  it('suspended with no paid access approved: the requests wait, paid and counted nowhere — no period is opened for them', async () => {
+    const { w, b } = await trialWorld();
+    const { store, seat } = await scheduledStoreAndSeat(w, b);
+    await w.lifecycle.suspend(w.uuid(b.companyId), { reason: 'documents to check' }, CTX);
+    w.clock.set(T);
+    await w.sweeper.sweep();
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['scheduled', 'scheduled']);
+    expect(w.periods(b)).toEqual([]);
+    expect(w.branch(b, 'B')).toBeNull();
+    expect(w.payments(b)).toHaveLength(2);
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+  });
+});
+
+describe('13. trial claim racing an add-on request', () => {
+  /** A self-registered business that has not claimed its trial: trial_available. */
+  function available() {
+    const w = makeTrialBillingWorld({ now: CLAIMED });
+    const b = w.business({ name: 'Boutique' });
+    return { w, b };
+  }
+
+  /**
+   * The first operation takes the subscription row; the second arrives while it holds it — started from the lock
+   * hook, so it queues behind the first's transaction exactly as a second connection waits on the row.
+   */
+  async function inOrder<A, B>(w: TrialBillingWorld, first: () => Promise<A>, second: () => Promise<B>) {
+    let queued: Promise<B> | null = null;
+    w.hooks.onLock = (_company, nowait) => {
+      if (nowait || queued) return;
+      queued = second();
+      // Never left unobserved: its outcome is read below.
+      queued.catch(() => undefined);
+    };
+    const one = await first().then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    w.hooks.onLock = null;
+    if (!queued) throw new Error('the second operation never arrived');
+    const two = await (queued as Promise<B>).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    return { one, two };
+  }
+
+  /** The counts SPEC §2.3 says a claim never changes. */
+  const counts = (w: TrialBillingWorld, b: Business) => ({ requests: w.requests(b).length, payments: w.payments(b).length, periods: w.periods(b).length });
+
+  const claimIsValid = (w: TrialBillingWorld, b: Business) => {
+    const claims = w.t.trialClaim.filter((c) => c.companyId.equals(b.companyId));
+    expect(claims).toHaveLength(1);
+    expect(claims[0].endsAt.getTime() - claims[0].startedAt.getTime()).toBe(168 * HOUR);
+    return claims[0];
+  };
+
+  for (const claimFirst of [true, false]) {
+    const order = claimFirst ? 'the claim holds the row first' : 'the request holds the row first';
+
+    it(`a store asked for while the trial is claimed — ${order}: one claim, one request awaiting payment, nothing opened`, async () => {
+      const { w, b } = available();
+      const claim = () => w.claim(b);
+      const ask = () => askStore(w, b);
+      const { one, two } = claimFirst ? await inOrder(w, claim, ask) : await inOrder(w, ask, claim);
+      expect([one.ok, two.ok]).toEqual([true, true]);
+      claimIsValid(w, b);
+      expect(w.requests(b)).toEqual([expect.objectContaining({ kind: 'store', status: 'pending_payment', label: 'B' })]);
+      expect(counts(w, b)).toEqual({ requests: 1, payments: 0, periods: 0 });
+      expect(w.branches(b).map((x) => x.name)).toEqual(['Main']);
+    });
+
+    it(`a seat asked for while the trial is claimed — ${order}: the two commute`, async () => {
+      const { w, b } = available();
+      w.person(b, { name: 'Ali', stores: ['Main'], active: true });
+      if (claimFirst) {
+        // The seat request takes no lock: it lands inside the claim's transaction and commits on its own.
+        w.hooks.onLock = async (_company, nowait) => {
+          if (nowait || w.requests(b).length > 0) return;
+          await askSeat(w, b);
+        };
+        await w.claim(b);
+        w.hooks.onLock = null;
+      } else {
+        await askSeat(w, b);
+        await w.claim(b);
+      }
+      claimIsValid(w, b);
+      expect(w.requests(b)).toEqual([expect.objectContaining({ kind: 'seat', status: 'pending_payment', monthlyAmount: 100 })]);
+      expect(counts(w, b)).toEqual({ requests: 1, payments: 0, periods: 0 });
+    });
+
+    it(`a payment confirmed while the trial is claimed — ${order}: ${claimFirst ? 'scheduled for the claim’s end' : 'refused, nothing recorded'}`, async () => {
+      const { w, b } = available();
+      const store = (await askStore(w, b)).allocation.id;
+      const before = counts(w, b);
+      const claim = () => w.claim(b);
+      const confirm = () => w.confirm(store, 500, { reference: 'BK-1' });
+      const { one, two } = claimFirst ? await inOrder(w, claim, confirm) : await inOrder(w, confirm, claim);
+      const claimed = claimIsValid(w, b);
+      const [claimOutcome, confirmOutcome] = claimFirst ? [one, two] : [two, one];
+      expect(claimOutcome.ok).toBe(true);
+      if (claimFirst) {
+        expect(confirmOutcome).toMatchObject({ ok: true, value: { applied: true, allocation: { status: 'scheduled', effectiveAt: claimed.endsAt.toISOString() } } });
+        expect(w.payments(b)).toHaveLength(1);
+      } else {
+        expect(confirmOutcome.ok).toBe(false);
+        const refused = (confirmOutcome as { error: unknown }).error;
+        expect(refused).toBeInstanceOf(ConflictException);
+        expect((refused as ConflictException).getResponse()).toMatchObject({ code: 'paid_period_not_started' });
+        expect(w.request(store)).toMatchObject({ status: 'pending_payment', version: 0, paymentId: null });
+        expect(counts(w, b)).toEqual(before);
+      }
+      // Never a store before the trial's end, and the claim itself changed no request, payment or period.
+      expect(w.branches(b).map((x) => x.name)).toEqual(['Main']);
+      expect(w.periods(b)).toEqual([]);
+      expect(w.requests(b)).toHaveLength(before.requests);
+    });
+  }
+});
+
+describe('14. correct company/store isolation', () => {
+  /** Everything held for one business: what another business's activation must leave byte for byte. */
+  const holdings = (w: TrialBillingWorld, b: Business) =>
+    JSON.stringify(
+      {
+        subscription: w.subscription(b),
+        claim: w.claimOf(b),
+        requests: w.requests(b),
+        payments: w.payments(b),
+        periods: w.periods(b),
+        branches: w.branches(b),
+        people: w.t.user.filter((u) => u.companyId.equals(b.companyId)),
+        assignments: w.t.userBranch.filter((ub) => ub.companyId.equals(b.companyId)),
+        events: w.events(b),
+        audits: w.audits(b),
+      },
+      (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
+    );
+
+  /** Two businesses on trial, each with a store "B" and a seat at its own S1 scheduled; Alpha's trial ends a day first. */
+  async function twoBusinesses() {
+    const w = makeTrialBillingWorld({ now: CLAIMED });
+    const stores = [{ name: 'S1' }, { name: 'S2' }];
+    const a = w.business({ name: 'Alpha', stores });
+    const b = w.business({ name: 'Beta', timezone: 'Europe/Paris', stores });
+    await w.claim(a);
+    w.clock.set(new Date(CLAIMED.getTime() + DAY));
+    await w.claim(b);
+    w.clock.advance(HOUR);
+    await approve(w, a);
+    await approve(w, b);
+    for (const x of [a, b]) {
+      w.person(x, { name: 'Ali', stores: ['S1'], active: true });
+      w.person(x, { name: 'Sam', stores: ['S2'], active: true });
+    }
+    // Waiting to be seated: Pia at Alpha's full S1, Sol at Alpha's full S2, Bea at Beta's full S1.
+    const pia = w.person(a, { name: 'Pia', stores: ['S1'], verified: true });
+    const sol = w.person(a, { name: 'Sol', stores: ['S2'], verified: true });
+    const bea = w.person(b, { name: 'Bea', stores: ['S1'], verified: true });
+    const ids = { a: { store: '', seat: '' }, b: { store: '', seat: '' } };
+    for (const [key, x] of [['a', a], ['b', b]] as const) {
+      ids[key].store = (await askStore(w, x)).allocation.id;
+      ids[key].seat = (await askSeat(w, x, null, 'S1')).allocation.id;
+      await w.confirm(ids[key].store, 500, { reference: `BK-${key}-1` });
+      await w.confirm(ids[key].seat, 100, { reference: `BK-${key}-2` });
+    }
+    const TA = w.claimOf(a)!.endsAt as Date;
+    const TB = w.claimOf(b)!.endsAt as Date;
+    return { w, a, b, pia, sol, bea, ids, TA, TB };
+  }
+
+  /** The console's seat routes and the Owner's, as Alpha's Owner and an administrator call them. */
+  const routesFor = (w: TrialBillingWorld, as: Business) =>
+    new SeatRequestsController(
+      w.db as never,
+      { companyId: () => as.companyId, requireUserId: () => as.ownerId } as never,
+      { confirmPassword: async () => undefined } as never,
+      w.billing,
+      w.seats,
+      w.activation,
+    );
+
+  it('Alpha’s end — looked at, then swept — changes Alpha’s rows only, taking Alpha’s lock only; Beta’s are untouched until its own end', async () => {
+    const { w, a, b, pia, sol, bea, ids, TA, TB } = await twoBusinesses();
+    expect(TB.getTime() - TA.getTime()).toBe(DAY);
+    const beta = holdings(w, b);
+    const from = w.locks.length;
+
+    w.clock.set(TA);
+    await w.entitlement.forCompany(a.companyId);
+    w.clock.advance(60_000);
+    await w.sweeper.sweep();
+
+    expect([w.request(ids.a.store).status, w.request(ids.a.seat).status]).toEqual(['paid', 'paid']);
+    expect(w.branches(a).map((x) => x.name)).toEqual(['S1', 'S2', 'B']);
+    expect(w.periods(a)[0]).toMatchObject({ assessedTotal: 1600, assessedStaffFee: 100 });
+    expect(w.user(pia).isActive).toBe(true);
+    expect(w.user(sol).isActive).toBe(false);
+    expect(new Set(w.locks.slice(from).map((l) => l.company))).toEqual(new Set([w.uuid(a.companyId)]));
+    // Beta: byte for byte as it was — its rows, its period, its people, its timeline.
+    expect(holdings(w, b)).toBe(beta);
+    expect(w.user(bea).isActive).toBe(false);
+
+    // Alpha's seat counts at Alpha's S1 only — not at its S2, and not anywhere in Beta.
+    const census = (await w.entitlement.forCompany(a.companyId)).seatsByStore;
+    expect(census.map((s) => [s.name, s.paidSeats])).toEqual([['S1', 1], ['S2', 0], ['B', 0]]);
+    expect((await w.entitlement.forCompany(b.companyId)).seatsByStore.map((s) => [s.name, s.paidSeats])).toEqual([['S1', 0], ['S2', 0]]);
+
+    w.clock.set(TB);
+    const alpha = holdings(w, a);
+    await w.sweeper.sweep();
+    expect([w.request(ids.b.store).status, w.request(ids.b.seat).status]).toEqual(['paid', 'paid']);
+    expect(w.branches(b).map((x) => x.name)).toEqual(['S1', 'S2', 'B']);
+    expect(w.user(bea).isActive).toBe(true);
+    expect(holdings(w, a)).toBe(alpha);
+  });
+
+  it('two trials ending at the same instant, one business with paid access and one without: the first’s activation leaves the second’s rows waiting', async () => {
+    const w = makeTrialBillingWorld({ now: CLAIMED });
+    const a = w.business({ name: 'Alpha' });
+    const b = w.business({ name: 'Beta' });
+    await w.claim(a);
+    await w.claim(b);
+    w.clock.advance(HOUR);
+    await approve(w, a);
+    const theirs = (await askStore(w, b)).allocation.id;
+    await w.confirm(theirs, 500, { reference: 'BK-B' });
+    const ours = (await askStore(w, a)).allocation.id;
+    await w.confirm(ours, 500, { reference: 'BK-A' });
+    w.clock.set(T);
+    // Alpha's own trigger, at the instant both are due: Beta's row is due too, but not Alpha's to put in force.
+    await w.trialEnd.applyIfDue(a.companyId);
+    expect(w.request(ours).status).toBe('paid');
+    expect(w.request(theirs)).toMatchObject({ status: 'scheduled', branchId: null });
+    expect(w.branches(b).map((x) => x.name)).toEqual(['Main']);
+    expect(w.branches(a).map((x) => x.name)).toEqual(['Main', 'B']);
+    expect(w.periods(a)[0].assessedTotal).toBe(1000);
+    expect(w.periods(b)).toEqual([]);
+  });
+
+  it('another business’s request: the console’s confirmation is refused as unknown, the Owner’s withdrawal is not found — nothing moves', async () => {
+    const { w, a, b, ids } = await twoBusinesses();
+    const pending = (await askStore(w, b, 'Annex')).allocation.id;
+    const beta = holdings(w, b);
+    const alpha = holdings(w, a);
+    const routes = routesFor(w, a);
+    const req = { platformAdmin: CTX.admin, ip: '127.0.0.1' };
+    for (const rid of [ids.b.store, pending]) {
+      const confirmed = await routes
+        .confirmSeatPayment(w.uuid(a.companyId), rid, { amount: '500', paidAt: CLAIMED.toISOString(), reference: 'BK-X' } as never, req as never)
+        .catch((e: unknown) => e);
+      expect(confirmed).toBeInstanceOf(BadRequestException);
+      expect((confirmed as BadRequestException).message).toBe('Unknown request');
+      await expect(routes.withdrawSeatRequest(rid)).rejects.toBeInstanceOf(NotFoundException);
+    }
+    expect(holdings(w, b)).toBe(beta);
+    expect(holdings(w, a)).toBe(alpha);
+  });
+
+  it('the people a seat bought during the trial covers are its own business’s, at its own store', async () => {
+    const { w, a, b, pia, sol, bea } = await twoBusinesses();
+    const db = w.db as never;
+    expect(await scheduledCoverage(db, a.companyId, a.stores.S1)).toEqual({ seats: 1, candidates: [pia] });
+    expect(await scheduledCoverage(db, a.companyId, a.stores.S2)).toEqual({ seats: 0, candidates: [] });
+    // Alpha's company, Beta's store: nothing of Alpha's is there.
+    expect(await scheduledCoverage(db, a.companyId, b.stores.S1)).toEqual({ seats: 0, candidates: [] });
+    expect(await scheduledCoverage(db, b.companyId, b.stores.S1)).toEqual({ seats: 1, candidates: [bea] });
+    await expect(w.activation.coveredByScheduledSeat(pia, a.stores.S1)).resolves.toBe(true);
+    await expect(w.activation.coveredByScheduledSeat(sol, a.stores.S2)).resolves.toBe(false);
+    await expect(w.activation.coveredByScheduledSeat(bea, b.stores.S1)).resolves.toBe(true);
+    await expect(w.activation.coveredByScheduledSeat(bea, a.stores.S1)).resolves.toBe(false);
   });
 });
 
