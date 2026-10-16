@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
@@ -342,6 +343,10 @@ export class ConsignmentsService {
      * What the two sides settled on. Accepting takes whatever offer is on the
      * table — the counter if there is one, otherwise the original — so nobody
      * can accept one number and be charged another.
+     *
+     * It is the amount for ALL the phones and lives on the consignment only.
+     * Copying it onto every line read as a per-phone price: a three-phone deal
+     * at 30 000 raised a receivable of 90 000.
      */
     const agreed =
       dto.action === 'accept'
@@ -380,13 +385,6 @@ export class ConsignmentsService {
 
       // A cancelled or rejected consignment releases its phones immediately.
       if (next === 'cancelled') await this.releaseUnits(tx, c.id);
-
-      if (dto.action === 'accept') {
-        await tx.consignmentLine.updateMany({
-          where: { consignmentId: c.id, status: 'proposed' },
-          data: { agreedAmount: agreed },
-        });
-      }
 
       await this.audit.record({
         entityType: 'Consignment',
@@ -550,8 +548,23 @@ export class ConsignmentsService {
       ? lines.filter((l) => dto.lineIds!.includes(binToUuid(l.id)))
       : lines;
     if (soldLines.length === 0) throw new BadRequestException('There is nothing to report as sold');
+    /**
+     * All of them or none. The consignment moves on as one, so reporting some
+     * phones left the others `in_custody` under a consignment that could no
+     * longer be sold, returned or cancelled — phones nobody could ever move.
+     */
+    if (soldLines.length !== lines.length) {
+      throw new BadRequestException(
+        `Report all ${lines.length} phones as sold together, or return them instead`,
+      );
+    }
 
-    const raised = soldLines.reduce((s, l) => s + Number(l.agreedAmount ?? 0), 0);
+    /**
+     * What both sides agreed, for all the phones, raised once. Never a sum over
+     * the lines: an accepted consignment from before this fix still carries the
+     * whole amount on every line.
+     */
+    const raised = num(c.agreedAmount);
 
     await this.prisma.$transaction(async (tx) => {
       const won = await tx.consignment.updateMany({
@@ -623,60 +636,67 @@ export class ConsignmentsService {
     const c = await this.mine(id);
     sideOf(c, me);
 
-    const rows = await this.ledgerRows(c.id);
-    const owed = outstanding(rows);
-
     if (dto.action === 'confirm') {
       /**
        * Only the creditor may say money arrived. The source is always the
        * creditor on a consignment: it sent the goods and is owed for them.
        */
       assertSource(c, me);
-      const reported = await this.prisma.consignmentLedgerEntry.findFirst({
-        where: { id: uuidToBin(dto.entryId ?? ''), consignmentId: c.id, kind: 'payment_reported' },
-      });
-      if (!reported) throw new NotFoundException('No such reported payment');
-
-      const already = await this.prisma.consignmentLedgerEntry.findFirst({
-        where: { refersToId: reported.id, kind: 'payment_confirmed' },
-      });
-      if (already) throw new ConflictException('That payment has already been confirmed');
-
-      try {
-        assertPaymentAllowed({
-          amount: Number(reported.amount),
-          method: (reported.method ?? 'cash') as 'cash' | 'account',
-          receivingAccountId: reported.receivingAccountId ? binToUuid(reported.receivingAccountId) : null,
-          outstanding: owed,
+      await this.prisma.$transaction(async (tx) => {
+        /**
+         * Everything below is read under the consignment's lock, so a double
+         * tap or a retry waits for the first confirmation and then finds it.
+         * Read outside, both passed the "already confirmed" check and the debt
+         * dropped twice — ten at once confirmed one payment ten times.
+         */
+        await this.lock(tx, c.id);
+        const reported = await tx.consignmentLedgerEntry.findFirst({
+          where: { id: uuidToBin(dto.entryId ?? ''), consignmentId: c.id, kind: 'payment_reported' },
         });
-      } catch (e) {
-        if (e instanceof MoneyRefused) throw new ConflictException(e.message);
-        throw e;
-      }
+        if (!reported) throw new NotFoundException('No such reported payment');
 
-      await this.prisma.consignmentLedgerEntry.create({
-        data: {
-          id: newUuidV7Bin(),
-          consignmentId: c.id,
-          sourceCompanyId: c.sourceCompanyId,
-          destinationCompanyId: c.destinationCompanyId,
-          kind: 'payment_confirmed',
-          amount: reported.amount,
-          method: reported.method,
-          receivingAccountId: reported.receivingAccountId,
-          accountLabelSnapshot: reported.accountLabelSnapshot,
-          reference: reported.reference,
-          refersToId: reported.id,
-          actingCompanyId: me,
-          actingUserId: userId,
-          entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
-        },
+        const already = await tx.consignmentLedgerEntry.findFirst({
+          where: { refersToId: reported.id, kind: 'payment_confirmed' },
+        });
+        if (already) throw new ConflictException('That payment has already been confirmed');
+
+        try {
+          assertPaymentAllowed({
+            amount: Number(reported.amount),
+            method: (reported.method ?? 'cash') as 'cash' | 'account',
+            receivingAccountId: reported.receivingAccountId ? binToUuid(reported.receivingAccountId) : null,
+            outstanding: outstanding(await this.ledgerRows(c.id, tx)),
+          });
+        } catch (e) {
+          if (e instanceof MoneyRefused) throw new ConflictException(e.message);
+          throw e;
+        }
+
+        await tx.consignmentLedgerEntry.create({
+          data: {
+            id: newUuidV7Bin(),
+            consignmentId: c.id,
+            sourceCompanyId: c.sourceCompanyId,
+            destinationCompanyId: c.destinationCompanyId,
+            kind: 'payment_confirmed',
+            amount: reported.amount,
+            method: reported.method,
+            receivingAccountId: reported.receivingAccountId,
+            accountLabelSnapshot: reported.accountLabelSnapshot,
+            reference: reported.reference,
+            refersToId: reported.id,
+            actingCompanyId: me,
+            actingUserId: userId,
+            entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+          },
+        });
+        await this.settleIfClear(c.id, 'settled', tx);
       });
-      await this.settleIfClear(c.id);
       return this.get(id);
     }
 
     // --- report ---
+    const owed = outstanding(await this.ledgerRows(c.id));
     /**
      * The fingerprint is what makes this safe to queue offline (Milestone J).
      * Replaying on the key alone would answer an edited draft with the original
@@ -781,29 +801,34 @@ export class ConsignmentsService {
     const c = await this.mine(id);
     assertSource(c, me);
 
-    const rows = await this.ledgerRows(c.id);
-    const owed = outstanding(rows);
+    await this.prisma.$transaction(async (tx) => {
+      // Under the lock, like a confirmation: two write-offs at once each saw
+      // the whole balance, and together forgave more than was owed.
+      await this.lock(tx, c.id);
+      const owed = outstanding(await this.ledgerRows(c.id, tx));
 
-    try {
-      assertForgivenessAllowed({ amount: dto.amount, reason: dto.reason, outstanding: owed });
-    } catch (e) {
-      if (e instanceof MoneyRefused) throw new BadRequestException(e.message);
-      throw e;
-    }
+      try {
+        assertForgivenessAllowed({ amount: dto.amount, reason: dto.reason, outstanding: owed });
+      } catch (e) {
+        if (e instanceof MoneyRefused) throw new BadRequestException(e.message);
+        throw e;
+      }
 
-    await this.prisma.consignmentLedgerEntry.create({
-      data: {
-        id: newUuidV7Bin(),
-        consignmentId: c.id,
-        sourceCompanyId: c.sourceCompanyId,
-        destinationCompanyId: c.destinationCompanyId,
-        kind: 'forgiven',
-        amount: dto.amount,
-        reason: dto.reason.trim(),
-        actingCompanyId: me,
-        actingUserId: userId,
-        entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
-      },
+      await tx.consignmentLedgerEntry.create({
+        data: {
+          id: newUuidV7Bin(),
+          consignmentId: c.id,
+          sourceCompanyId: c.sourceCompanyId,
+          destinationCompanyId: c.destinationCompanyId,
+          kind: 'forgiven',
+          amount: dto.amount,
+          reason: dto.reason.trim(),
+          actingCompanyId: me,
+          actingUserId: userId,
+          entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+        },
+      });
+      await this.settleIfClear(c.id, 'forgiven_settled', tx);
     });
 
     await this.audit.record({
@@ -813,7 +838,6 @@ export class ConsignmentsService {
       after: { forgiven: dto.amount, reason: dto.reason.trim() },
       branchId: c.sourceBranchId,
     });
-    await this.settleIfClear(c.id, 'forgiven_settled');
     return this.get(id);
   }
 
@@ -896,9 +920,18 @@ export class ConsignmentsService {
     return this.get(id);
   }
 
+  /**
+   * Take the consignment's row for the rest of the transaction. Every write
+   * that is decided on the ledger takes it first, so two of them run one after
+   * the other and the second reads what the first wrote.
+   */
+  private async lock(tx: Prisma.TransactionClient, consignmentId: Buffer) {
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM consignments WHERE id = ${consignmentId} FOR UPDATE`);
+  }
+
   /** Every ledger row for a consignment, as the pure module wants them. */
-  private async ledgerRows(consignmentId: Buffer) {
-    const rows = await this.prisma.consignmentLedgerEntry.findMany({
+  private async ledgerRows(consignmentId: Buffer, db: Prisma.TransactionClient = this.prisma) {
+    const rows = await db.consignmentLedgerEntry.findMany({
       where: { consignmentId },
       select: { kind: true, amount: true },
     });
@@ -911,16 +944,20 @@ export class ConsignmentsService {
    * Checked rather than assumed: a payment that exactly clears the balance and
    * one that leaves a rounding remainder must not both read as settled.
    */
-  private async settleIfClear(consignmentId: Buffer, as: 'settled' | 'forgiven_settled' = 'settled') {
-    const owed = outstanding(await this.ledgerRows(consignmentId));
+  private async settleIfClear(
+    consignmentId: Buffer,
+    as: 'settled' | 'forgiven_settled' = 'settled',
+    db: Prisma.TransactionClient = this.prisma,
+  ) {
+    const owed = outstanding(await this.ledgerRows(consignmentId, db));
     if (owed > 0) {
-      await this.prisma.consignment.updateMany({
+      await db.consignment.updateMany({
         where: { id: consignmentId, status: 'sold_awaiting_settlement' },
         data: { status: 'partially_paid' },
       });
       return;
     }
-    await this.prisma.consignment.updateMany({
+    await db.consignment.updateMany({
       where: { id: consignmentId, status: { in: ['sold_awaiting_settlement', 'partially_paid'] } },
       data: { status: as, settledAt: new Date() },
     });
