@@ -799,3 +799,63 @@ describe('decided under the lock, and what a trial’s end owes the business put
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe('recording a payment: a retry is not a second payment (docs/68 §4.2, BE1-05)', () => {
+  function paymentWorld() {
+    const sub = { id: newUuidV7Bin(), companyId: uuidToBin(COMPANY), company: { name: 'Shop', publicStoreId: 'ABCDEF1234' } };
+    const payments: any[] = [];
+    const audits: any[] = [];
+    const same = (row: any, where: any) =>
+      row.companyId.equals(where.companyId) &&
+      row.reference === where.reference &&
+      row.channel === where.channel &&
+      row.amount.equals(where.amount) &&
+      row.paidAt.getTime() === where.paidAt.getTime() &&
+      (where.confirmedAt === null ? row.confirmedAt === null : row.confirmedAt !== null);
+    // The subscription lock, as MySQL holds it: one transaction at a time.
+    let queue: Promise<unknown> = Promise.resolve();
+    const prisma: Record<string, any> = {
+      subscription: { findFirst: async () => ({ ...sub }) },
+      subscriptionPayment: {
+        findFirst: async ({ where }: any) => payments.find((p) => same(p, where)) ?? null,
+        create: async ({ data }: any) => (await new Promise((r) => setTimeout(r, 1)), payments.push(data), data),
+      },
+      $queryRaw: async () => [],
+    };
+    prisma.$transaction = (fn: (tx: unknown) => Promise<unknown>) => {
+      const run = queue.then(() => fn(prisma));
+      queue = run.catch(() => undefined);
+      return run;
+    };
+    const service = new SubscriptionLifecycleService(prisma as never, { record: async (e: unknown) => void audits.push(e) } as never, {} as never, { now: () => new Date('2026-10-16T08:00:00Z') });
+    return { service, payments, audits };
+  }
+  const body = (over: Record<string, unknown> = {}) => ({ amount: '1500', paidAt: new Date('2026-10-15T00:00:00Z'), channel: 'bank_transfer' as const, reference: 'TRX-1', confirm: true, ...over });
+
+  it('the same submission again — its answer was lost — returns the payment already recorded and writes nothing', async () => {
+    const w = paymentWorld();
+    const first = await w.service.recordPayment(COMPANY, body(), CTX);
+    const again = await w.service.recordPayment(COMPANY, body(), CTX);
+    expect(again.id.equals(first.id)).toBe(true);
+    expect(w.payments).toHaveLength(1);
+    expect(w.audits).toHaveLength(1);
+  });
+
+  it('ten identical submissions at once record one payment', async () => {
+    const w = paymentWorld();
+    const all = await Promise.all(Array.from({ length: 10 }, () => w.service.recordPayment(COMPANY, body(), CTX)));
+    expect(new Set(all.map((p) => p.id.toString('hex'))).size).toBe(1);
+    expect(w.payments).toHaveLength(1);
+  });
+
+  it('a different reference, amount or day is another payment; without a reference each is recorded, as before', async () => {
+    const w = paymentWorld();
+    await w.service.recordPayment(COMPANY, body(), CTX);
+    await w.service.recordPayment(COMPANY, body({ reference: 'TRX-2' }), CTX);
+    await w.service.recordPayment(COMPANY, body({ amount: '1600' }), CTX);
+    await w.service.recordPayment(COMPANY, body({ paidAt: new Date('2026-10-16T00:00:00Z') }), CTX);
+    await w.service.recordPayment(COMPANY, body({ reference: undefined }), CTX);
+    await w.service.recordPayment(COMPANY, body({ reference: undefined }), CTX);
+    expect(w.payments).toHaveLength(6);
+  });
+});

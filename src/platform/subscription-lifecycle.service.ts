@@ -868,6 +868,14 @@ export class SubscriptionLifecycleService {
    *
    * **No provider is contacted.** `confirmedBy` means "this named person says
    * the money is real".
+   *
+   * A retry is not a second payment (docs/68 §4.2: nothing is written twice).
+   * The console sends no key, so the request is its own: the same reference —
+   * the transfer id or receipt number — for the same amount, day, channel and
+   * confirmation, already recorded for this business, IS this payment, and is
+   * answered again with nothing written. Checked under the subscription lock, so
+   * two submissions at once cannot both miss it. Without a reference nothing
+   * tells a retry from a second payment, and each is recorded, as before.
    */
   async recordPayment(
     companyId: string,
@@ -888,23 +896,43 @@ export class SubscriptionLifecycleService {
 
     const id = this.companyIdOf(companyId);
     const sub = await this.loadOrThrow(id);
+    const reference = input.reference?.slice(0, 120) ?? null;
+    const channel = input.channel ?? 'manual';
 
-    const payment = await this.prisma.subscriptionPayment.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId: id,
-        subscriptionId: sub.id,
-        amount: new Prisma.Decimal(input.amount),
-        currency: 'MRU',
-        paidAt: input.paidAt,
-        channel: input.channel ?? 'manual',
-        reference: input.reference?.slice(0, 120) ?? null,
-        note: input.note?.slice(0, 500) ?? null,
-        recordedBy: ctx.admin.email,
-        confirmedBy: input.confirm ? ctx.admin.email : null,
-        confirmedAt: input.confirm ? this.clock.now() : null,
-      },
+    const { payment, replayed } = await this.prisma.$transaction(async (tx) => {
+      await lockSubscription(tx, id);
+      if (reference) {
+        const same = await tx.subscriptionPayment.findFirst({
+          where: {
+            companyId: id,
+            reference,
+            channel,
+            amount: new Prisma.Decimal(input.amount),
+            paidAt: input.paidAt,
+            confirmedAt: input.confirm ? { not: null } : null,
+          },
+        });
+        if (same) return { payment: same, replayed: true };
+      }
+      const created = await tx.subscriptionPayment.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: id,
+          subscriptionId: sub.id,
+          amount: new Prisma.Decimal(input.amount),
+          currency: 'MRU',
+          paidAt: input.paidAt,
+          channel,
+          reference,
+          note: input.note?.slice(0, 500) ?? null,
+          recordedBy: ctx.admin.email,
+          confirmedBy: input.confirm ? ctx.admin.email : null,
+          confirmedAt: input.confirm ? this.clock.now() : null,
+        },
+      });
+      return { payment: created, replayed: false };
     });
+    if (replayed) return payment;
 
     await this.audit.record({
       admin: ctx.admin,
