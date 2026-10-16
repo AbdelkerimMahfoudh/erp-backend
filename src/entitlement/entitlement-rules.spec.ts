@@ -747,9 +747,6 @@ describe('what a pending or suspended shop may still read', () => {
       'entitlement',
       'health',
       'platform/my-subscription',
-      // 2026-10-16: the Owner's own requests and their prices — asking is allowed in every state.
-      'platform/my-subscription/activity-options',
-      'platform/my-subscription/seat-requests',
       // 0095: the Owner's free trial card, read by a business that has not started yet.
       'platform/my-subscription/trial',
       'platform/payment-instructions',
