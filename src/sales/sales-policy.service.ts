@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
 import { SalePayStatus, Unit } from '@prisma/client';
 import { payStatusOf } from './sale-payment-rules';
+import { lineShareCents, toCents } from './sale-shares';
 
 const EPSILON = 0.005;
 
@@ -167,6 +168,52 @@ export class SalesPolicyService {
 
     if (belowCost && (!reason || reason.trim().length === 0)) {
       throw new BadRequestException('A reason is required to sell below cost');
+    }
+  }
+
+  /**
+   * A discount may not take a line below its cost (BE4-01).
+   *
+   * `assertPriceAllowed` judges each line's unit price. A line discount and the
+   * whole-sale discount come off afterwards, so on their own they reached a
+   * price that was never judged: a phone priced at its set price with a
+   * discount of most of it sold at a loss with no approval and no reason. The
+   * cost floor is enforced independently of `discount.apply` (docs/21 D2.1), so
+   * it is measured here on what the line actually sells for — its share of the
+   * invoice total, the same share the rollup and a refund use (D36).
+   *
+   * Only a line the discounts took below cost is refused: a price below cost
+   * with no discount is `assertPriceAllowed`'s, and is excepted by an approval
+   * of that exact final price, which a further discount would no longer be.
+   */
+  assertDiscountsKeepCost(
+    lines: readonly { price: number; quantity: number; discount: number; cost: number }[],
+    total: number,
+    describe: (index: number) => { index: number; unitId: string | null; identifier: string | null },
+  ): void {
+    const ids = lines.map((_, index) => {
+      const id = Buffer.alloc(4);
+      id.writeUInt32BE(index);
+      return id;
+    });
+    const shares = lineShareCents(
+      lines.map((l, index) => ({ id: ids[index], price: l.price, quantity: l.quantity, discount: l.discount })),
+      total,
+    );
+    for (const [index, line] of lines.entries()) {
+      const share = shares.get(ids[index].toString('hex')) ?? 0n;
+      const listed = toCents(line.price) * BigInt(line.quantity);
+      const cost = toCents(line.cost) * BigInt(line.quantity);
+      if (share < listed && share < cost) {
+        const where = describe(index);
+        throw new ForbiddenException({
+          code: 'discount_below_cost',
+          lineIndex: where.index,
+          unitId: where.unitId,
+          identifier: where.identifier,
+          message: 'This discount sells the item below cost. Ask the Owner to approve the final price instead.',
+        });
+      }
     }
   }
 }

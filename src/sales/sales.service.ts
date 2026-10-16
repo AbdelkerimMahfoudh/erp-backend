@@ -336,6 +336,11 @@ export class SalesService {
             },
           });
         }
+        this.policy.assertDiscountsKeepCost(prepared, total, (index) => ({
+          index,
+          unitId: prepared[index].unitId ? binToUuid(prepared[index].unitId as Buffer) : null,
+          identifier: dto.lines[index]?.identifier ?? null,
+        }));
         // Each part's payer number (D151): well formed, and never on cash — refused before anything is written.
         assertPayerNumbers(dto.payments);
         assertPaymentParts(dto.payments);
