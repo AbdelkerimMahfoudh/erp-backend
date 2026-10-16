@@ -26,7 +26,8 @@ import { generateRecoveryCodes, looksLikeRecoveryCode, normaliseRecoveryCode } f
  *  - **The secret is sealed at rest** (AES-256-GCM under `PLATFORM_MFA_KEY`); recovery codes are keyed digests,
  *    single-use, and a new set revokes the old.
  *  - **Replay and guessing:** a step at or before the last one used is refused; five failures lock the second
- *    factor for fifteen minutes (with the route throttle in front).
+ *    factor for fifteen minutes (with the route throttle in front). Both hold under concurrency: every try is claimed
+ *    atomically before its code is compared (`claimTry`), and a step is spent by a conditional write (`spendStep`).
  *  - **Step-up** for every high-impact action is the password *and* a fresh code, recorded on the session and
  *    honoured for five minutes, server-side (`assertFreshStepUp`).
  *  - **Audited:** enrolment, verification, every failure, the lock, recovery-code use and regeneration, resets.
@@ -130,6 +131,7 @@ export class PlatformMfaService {
     const pending = open(row.mfaPendingSecretEnc, key);
     const tokenStillValid = row.mfaEnrolmentTokenHash !== null && row.mfaEnrolmentExpiresAt !== null && row.mfaEnrolmentExpiresAt > now;
     if (!pending || !tokenStillValid) throw refuse(HttpStatus.CONFLICT, 'enrolment_not_started', 'Start the enrolment again with your enrolment token.');
+    await this.claimTry(admin, ip, now);
     const step = verifyTotp(pending, code, now.getTime(), null);
     if (step === null) {
       await this.fail(row, admin, ip, now);
@@ -164,6 +166,7 @@ export class PlatformMfaService {
     const row = await this.load(admin.id);
     if (this.stateOf(row) !== 'required') throw refuse(HttpStatus.CONFLICT, 'mfa_enrolment_required', 'Set up your authenticator first, with the enrolment token from the server.');
     this.assertNotLocked(row, now);
+    await this.claimTry(admin, ip, now);
 
     if (input.recoveryCode !== undefined) {
       const used = await this.useRecoveryCode(admin.id, input.recoveryCode, key, now);
@@ -181,14 +184,10 @@ export class PlatformMfaService {
     }
 
     const step = this.checkCode(row, input.code ?? '', key, now);
-    if (step === null) {
+    if (step === null || !(await this.spendStep(admin.id, step, sessionId, { mfaVerifiedAt: now }))) {
       await this.fail(row, admin, ip, now);
       throw refuse(HttpStatus.FORBIDDEN, 'mfa_code_invalid', 'That code did not match, or was already used. Wait for the next code.');
     }
-    await this.prisma.$transaction([
-      this.prisma.platformAdminSession.update({ where: { id: sessionId }, data: { mfaVerifiedAt: now } }),
-      this.prisma.platformAdmin.update({ where: { id: admin.id }, data: { mfaLastStep: BigInt(step), mfaFailedCount: 0 } }),
-    ]);
     await this.audit.record({ admin, action: 'admin.mfa.verified', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, ip });
   }
 
@@ -199,16 +198,13 @@ export class PlatformMfaService {
     const key = this.key();
     const row = await this.load(admin.id);
     this.assertNotLocked(row, now);
+    await this.claimTry(admin, ip, now);
     const passwordOk = await this.hashing.verify(row.passwordHash, password ?? '');
     const step = passwordOk ? this.checkCode(row, code ?? '', key, now) : null;
-    if (!passwordOk || step === null) {
+    if (step === null || !(await this.spendStep(admin.id, step, sessionId, { stepUpAt: now }))) {
       await this.fail(row, admin, ip, now);
       throw refuse(HttpStatus.FORBIDDEN, 'step_up_failed', 'That password or code did not match.');
     }
-    await this.prisma.$transaction([
-      this.prisma.platformAdminSession.update({ where: { id: sessionId }, data: { stepUpAt: now } }),
-      this.prisma.platformAdmin.update({ where: { id: admin.id }, data: { mfaLastStep: BigInt(step), mfaFailedCount: 0 } }),
-    ]);
     await this.audit.record({ admin, action: 'admin.step_up', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, ip });
     return { expiresAt: new Date(now.getTime() + STEP_UP_TTL_MS) };
   }
@@ -252,13 +248,57 @@ export class PlatformMfaService {
     }
   }
 
-  private async fail(row: PlatformAdmin, admin: PlatformAdminIdentity, ip: string | null, now: Date): Promise<void> {
-    const failures = row.mfaFailedCount + 1;
-    const locked = failures >= MFA_MAX_FAILURES;
-    await this.prisma.platformAdmin.update({
-      where: { id: row.id },
-      data: locked ? { mfaFailedCount: 0, mfaLockedUntil: new Date(now.getTime() + MFA_LOCK_MS) } : { mfaFailedCount: failures },
+  /**
+   * One of the five tries, claimed BEFORE the code is compared: the count is checked and raised in one statement, so
+   * of any number of concurrent guesses only the tries left are ever compared, and each is counted. A success resets
+   * the count; a failure that finds every try spent turns them into the lock (`fail`).
+   */
+  private async claimTry(admin: PlatformAdminIdentity, ip: string | null, now: Date): Promise<void> {
+    const claimed = await this.prisma.platformAdmin.updateMany({
+      where: { id: admin.id, mfaFailedCount: { lt: MFA_MAX_FAILURES }, OR: [{ mfaLockedUntil: null }, { mfaLockedUntil: { lte: now } }] },
+      data: { mfaFailedCount: { increment: 1 } },
     });
+    if (claimed.count === 1) return;
+    // No try left. The last one may still be in flight, or was never settled: the lock stands from here either way.
+    if (await this.lockIfSpent(admin.id, now)) {
+      await this.audit.record({ admin, action: 'admin.mfa.locked', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, after: { failures: MFA_MAX_FAILURES }, ip });
+    }
+    const row = await this.load(admin.id);
+    this.assertNotLocked(row, now);
+    throw refuse(HttpStatus.TOO_MANY_REQUESTS, 'mfa_locked', 'Too many wrong codes. Try again later.');
+  }
+
+  /** Every try spent → the lock, once: of concurrent failures exactly one turns the count into it. */
+  private async lockIfSpent(adminId: Buffer, now: Date): Promise<boolean> {
+    const { count } = await this.prisma.platformAdmin.updateMany({
+      where: { id: adminId, mfaFailedCount: { gte: MFA_MAX_FAILURES } },
+      data: { mfaFailedCount: 0, mfaLockedUntil: new Date(now.getTime() + MFA_LOCK_MS) },
+    });
+    return count === 1;
+  }
+
+  /**
+   * The code's step, spent by a conditional write: of two requests carrying the same code, exactly one finds the last
+   * step still behind it. The session is marked in the same transaction.
+   */
+  private async spendStep(adminId: Buffer, step: number, sessionId: Buffer, mark: { mfaVerifiedAt: Date } | { stepUpAt: Date }): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      const spent = await tx.platformAdmin.updateMany({
+        where: { id: adminId, OR: [{ mfaLastStep: null }, { mfaLastStep: { lt: BigInt(step) } }] },
+        data: { mfaLastStep: BigInt(step), mfaFailedCount: 0 },
+      });
+      if (spent.count !== 1) return false;
+      await tx.platformAdminSession.update({ where: { id: sessionId }, data: mark });
+      return true;
+    });
+  }
+
+  /** The try was counted when it was claimed; this records it, and locks once every try is spent. */
+  private async fail(row: PlatformAdmin, admin: PlatformAdminIdentity, ip: string | null, now: Date): Promise<void> {
+    const locked = await this.lockIfSpent(row.id, now);
+    const failures = locked
+      ? MFA_MAX_FAILURES
+      : ((await this.prisma.platformAdmin.findUnique({ where: { id: row.id }, select: { mfaFailedCount: true } }))?.mfaFailedCount ?? 0);
     await this.audit.record({ admin, action: locked ? 'admin.mfa.locked' : 'admin.mfa.failed', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, after: { failures }, ip });
   }
 

@@ -197,3 +197,47 @@ describe('what the audit keeps', () => {
     expect(audit).not.toContain(h.code(secret, now));
   });
 });
+
+describe('the lock and the replay guard hold under concurrency (BE1-03)', () => {
+  it(`a burst of wrong codes compares no more than ${MFA_MAX_FAILURES}, counts every one, and locks the factor`, async () => {
+    const h = harness();
+    const { secret } = await h.enrolled();
+    const { s } = await h.signIn();
+    const when = at(5 * 60_000);
+    const right = h.code(secret, when);
+    const wrong = (i: number) => String((Number(right) + 7 + i * 13) % 1_000_000).padStart(6, '0');
+    const outcomes = await Promise.allSettled(Array.from({ length: 10 }, (_, i) => h.mfa.verify(h.identity, s.sessionId, { code: wrong(i) }, null, when)));
+    const codes = outcomes.map((o) => (o as PromiseRejectedResult).reason?.response?.code);
+    expect(codes.filter((c) => c === 'mfa_code_invalid')).toHaveLength(MFA_MAX_FAILURES);
+    expect(codes.filter((c) => c === 'mfa_locked')).toHaveLength(10 - MFA_MAX_FAILURES);
+    expect(h.row().mfaLockedUntil).toBeInstanceOf(Date);
+    // Locked: the right code now waits too.
+    await expect(h.mfa.verify(h.identity, s.sessionId, { code: right }, null, when)).rejects.toMatchObject({ response: { code: 'mfa_locked' } });
+    expect(h.prisma.rows('platformAuditEvent').filter((e) => e.action === 'admin.mfa.locked')).toHaveLength(1);
+  });
+
+  it('one code presented by two sessions at once verifies exactly one of them', async () => {
+    const h = harness();
+    const { secret } = await h.enrolled();
+    const later = at(60_000);
+    const a = await h.signIn();
+    const b = await h.signIn();
+    const outcomes = await Promise.allSettled([a, b].map((x) => h.mfa.verify(h.identity, x.s.sessionId, { code: h.code(secret, later) }, null, later)));
+    expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+    const verified = await Promise.all([a, b].map((x) => h.admins.resolve(x.sessionToken)));
+    expect(verified.filter((v) => v !== null)).toHaveLength(1);
+  });
+
+  it('a step-up and a sign-in racing with one code: exactly one is honoured', async () => {
+    const h = harness();
+    const { secret, first } = await h.enrolled();
+    const later = at(60_000);
+    const b = await h.signIn();
+    const code = h.code(secret, later);
+    const outcomes = await Promise.allSettled([
+      h.mfa.stepUp(h.identity, first.s.sessionId, 'admin-pw', code, null, later),
+      h.mfa.verify(h.identity, b.s.sessionId, { code }, null, later),
+    ]);
+    expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+  });
+});

@@ -83,3 +83,49 @@ describe('what delivery did, recorded on the row', () => {
     await expect(h.service.confirm('owner@shop.mr', h.delivery.sent[0].code)).resolves.toBe(false);
   });
 });
+
+describe('the attempt limit holds under concurrency (BE1-02)', () => {
+  const wrongFor = (code: string, i: number) => String((Number(code) + 1 + i) % 1_000_000).padStart(6, '0');
+
+  it('a burst of guesses at one challenge compares no more than the attempts left — the right code among them included', async () => {
+    const h = harness();
+    await h.service.start('staff@shop.mr', 'en');
+    const code = h.delivery.sent[0].code;
+    const id = h.row().id as Buffer;
+    for (let i = 0; i < 5; i++) await expect(h.service.confirmChallenge(id, wrongFor(code, i))).resolves.toBe('wrong');
+
+    // One attempt is left. Ten guesses arrive at once, the right code last.
+    const burst = [...Array.from({ length: 9 }, (_, i) => wrongFor(code, 10 + i)), code];
+    const outcomes = await Promise.all(burst.map((c) => h.service.confirmChallenge(id, c)));
+    expect(outcomes.filter((o) => o !== 'gone')).toHaveLength(1);
+    expect(outcomes[9]).toBe('gone');
+    expect(h.row().attempts).toBe(6);
+  });
+
+  it('the right code costs no attempt, so a person sent back for a password keeps every attempt', async () => {
+    const h = harness();
+    await h.service.start('staff@shop.mr', 'en');
+    const id = h.row().id as Buffer;
+    await expect(h.service.confirmChallenge(id, h.delivery.sent[0].code)).resolves.toBe('ok');
+    await expect(h.service.confirmChallenge(id, h.delivery.sent[0].code)).resolves.toBe('ok');
+    expect(h.row().attempts).toBe(0);
+  });
+
+  it('by destination too: a burst of wrong guesses is counted to the limit and no further, and a right code then fails', async () => {
+    const h = harness();
+    await h.service.start('owner@shop.mr', 'en');
+    const code = h.delivery.sent[0].code;
+    const outcomes = await Promise.all(Array.from({ length: 10 }, (_, i) => h.service.confirm('owner@shop.mr', wrongFor(code, i))));
+    expect(outcomes.every((o) => o === false)).toBe(true);
+    expect(h.row().attempts).toBe(6);
+    await expect(h.service.confirm('owner@shop.mr', code)).resolves.toBe(false);
+  });
+
+  it('two right codes at once: exactly one consumes the code', async () => {
+    const h = harness();
+    await h.service.start('owner@shop.mr', 'en');
+    const code = h.delivery.sent[0].code;
+    const outcomes = await Promise.all([h.service.confirm('owner@shop.mr', code), h.service.confirm('owner@shop.mr', code)]);
+    expect(outcomes.filter(Boolean)).toHaveLength(1);
+  });
+});

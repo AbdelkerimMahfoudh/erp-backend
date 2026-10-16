@@ -174,21 +174,29 @@ export class ContactVerificationService {
     });
 
     if (!row) return false;
-    if (row.attempts >= MAX_ATTEMPTS) return false;
+    if (!(await this.claimAttempt(row.id))) return false;
+    if (!this.matches(row, code)) return false;
 
-    if (!this.matches(row, code)) {
-      await this.prisma.contactVerification.update({
-        where: { id: row.id },
-        data: { attempts: { increment: 1 } },
-      });
-      return false;
-    }
-
-    await this.prisma.contactVerification.update({
-      where: { id: row.id },
+    // Conditional, so of two right guesses racing exactly one consumes the code.
+    const { count } = await this.prisma.contactVerification.updateMany({
+      where: { id: row.id, consumedAt: null },
       data: { consumedAt: new Date() },
     });
-    return true;
+    return count === 1;
+  }
+
+  /**
+   * Spend one attempt BEFORE comparing, atomically: the count is checked and
+   * raised in one statement, so of any number of concurrent guesses only the
+   * attempts left are ever compared. Checking a value read earlier let every
+   * request in a burst pass the check before any of them was counted.
+   */
+  private async claimAttempt(id: Buffer): Promise<boolean> {
+    const { count } = await this.prisma.contactVerification.updateMany({
+      where: { id, consumedAt: null, expiresAt: { gt: new Date() }, attempts: { lt: MAX_ATTEMPTS } },
+      data: { attempts: { increment: 1 } },
+    });
+    return count === 1;
   }
 
   /**
@@ -228,15 +236,15 @@ export class ContactVerificationService {
     if (!row) return 'gone';
     if (row.consumedAt) return 'gone';
     if (row.expiresAt <= new Date()) return 'gone';
-    if (row.attempts >= MAX_ATTEMPTS) return 'gone';
+    if (!(await this.claimAttempt(row.id))) return 'gone';
 
-    if (!this.matches(row, code)) {
-      await this.prisma.contactVerification.update({
-        where: { id: row.id },
-        data: { attempts: { increment: 1 } },
-      });
-      return 'wrong';
-    }
+    if (!this.matches(row, code)) return 'wrong';
+    // Only a wrong guess costs an attempt: the right one is given its back, so a
+    // person told to add a password still has every attempt they had.
+    await this.prisma.contactVerification.update({
+      where: { id: row.id },
+      data: { attempts: { decrement: 1 } },
+    });
     return 'ok';
   }
 

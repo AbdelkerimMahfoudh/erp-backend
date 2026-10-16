@@ -3,7 +3,7 @@
  *
  * It implements the subset of the query API the account services use —
  * equality and a few operators in `where`, `select` as a projection,
- * `orderBy` on one column, `increment`, interactive transactions, and the
+ * `orderBy` on one column, `increment` and `decrement`, interactive transactions, and the
  * subscription lock as the one raw statement it accepts — and it
  * enforces the two constraints the deletion design leans on: the UNIQUE
  * `active_key` on deletion requests and on OTP challenges. A double that
@@ -82,6 +82,13 @@ function same(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
+/** Two dates, or two numbers (a BigInt column against a BigInt or a number): what SQL would order. NULL never is. */
+function comparable(a: unknown, b: unknown): boolean {
+  if (a instanceof Date || b instanceof Date) return a instanceof Date && b instanceof Date;
+  const numeric = (v: unknown) => typeof v === 'number' || typeof v === 'bigint';
+  return numeric(a) && numeric(b);
+}
+
 function matches(row: Row, where: Row): boolean {
   for (const [key, cond] of Object.entries(where)) {
     if (key === 'OR') {
@@ -114,16 +121,16 @@ function matches(row: Row, where: Row): boolean {
             if ((value as unknown[]).some((v) => same(actual, v))) return false;
             break;
           case 'gte':
-            if (!(actual instanceof Date && actual >= (value as Date))) return false;
+            if (!(comparable(actual, value) && (actual as number) >= (value as number))) return false;
             break;
           case 'gt':
-            if (!(actual instanceof Date && actual > (value as Date))) return false;
+            if (!(comparable(actual, value) && (actual as number) > (value as number))) return false;
             break;
           case 'lte':
-            if (!(actual instanceof Date && actual <= (value as Date))) return false;
+            if (!(comparable(actual, value) && (actual as number) <= (value as number))) return false;
             break;
           case 'lt':
-            if (!(actual instanceof Date && actual < (value as Date))) return false;
+            if (!(comparable(actual, value) && (actual as number) < (value as number))) return false;
             break;
           default:
             throw new Error(`fake-prisma: unsupported where operator "${op}" on "${key}"`);
@@ -147,6 +154,8 @@ function apply(row: Row, data: Row): void {
   for (const [k, v] of Object.entries(data)) {
     if (v !== null && typeof v === 'object' && !Buffer.isBuffer(v) && !(v instanceof Date) && 'increment' in (v as Row)) {
       row[k] = ((row[k] as number) ?? 0) + ((v as Row).increment as number);
+    } else if (v !== null && typeof v === 'object' && !Buffer.isBuffer(v) && !(v instanceof Date) && 'decrement' in (v as Row)) {
+      row[k] = ((row[k] as number) ?? 0) - ((v as Row).decrement as number);
     } else {
       row[k] = v;
     }
