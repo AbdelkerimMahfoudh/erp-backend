@@ -1,4 +1,4 @@
-import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -128,6 +128,7 @@ export class AnomaliesService {
     if (!this.may('report.view')) throw new ForbiddenException('Not allowed to dismiss anomalies');
     const userId = this.tenant.userId();
     if (!userId) throw new ForbiddenException('Not signed in');
+    this.assertShownTo(key);
 
     const now = new Date();
     /*
@@ -179,6 +180,7 @@ export class AnomaliesService {
   async undismiss(key: string) {
     if (!this.may('report.view')) throw new ForbiddenException('Not allowed to dismiss anomalies');
     if (!this.tenant.userId()) throw new ForbiddenException('Not signed in');
+    this.assertShownTo(key);
 
     const now = new Date();
     const standing = await this.db.anomalyDismissal.findFirst({
@@ -199,6 +201,24 @@ export class AnomaliesService {
       after: { event: 'anomaly_undismissed', anomalyKey: key, ended: ended.count },
     });
     return { key, restored: true };
+  }
+
+  /**
+   * Only a recipient may dismiss (A3): the key must belong to a rule `list`
+   * would show this caller, by the same gates. The key arrives from the client,
+   * so without this a Store Manager could silence the Owner-only below-cost and
+   * margin alerts about themselves for the whole company. A key no rule makes,
+   * or wider than the column, is no anomaly at all.
+   */
+  private assertShownTo(key: string): void {
+    const code = key.split(':', 1)[0];
+    const shown =
+      key.length <= 160 &&
+      (code === 'anomaly.dead_stock' ||
+        (code === 'anomaly.overdue_debt' && this.may('loan.view')) ||
+        (code === 'anomaly.cash_shortfall' && (this.may('closing.perform') || this.isOwner())) ||
+        ((code === 'anomaly.seller_margin_drop' || code === 'anomaly.below_cost_cluster') && this.isOwner()));
+    if (!shown) throw new NotFoundException('No such anomaly');
   }
 
   /**
