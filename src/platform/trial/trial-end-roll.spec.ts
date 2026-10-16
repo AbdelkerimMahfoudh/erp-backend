@@ -500,8 +500,12 @@ describe('the sweeper: a business nobody looks at gets what it paid for, on time
     expect(none).toEqual([]);
 
     const { w, b, store } = await scheduledWorld();
-    w.hold(b);
-    const seen = pauses(w, () => w.sweeper.onModuleDestroy());
+    const release = w.hold(b);
+    // Stopped during the first pause — and the row let go then too: the pass looks no more, and leaves it busy.
+    const seen = pauses(w, () => {
+      w.sweeper.onModuleDestroy();
+      release();
+    });
     w.clock.set(new Date(T.getTime() + 30_000));
     await expect(w.sweeper.sweep()).resolves.toMatchObject({ outcomes: { busy: 1 } });
     expect(seen).toHaveLength(1);

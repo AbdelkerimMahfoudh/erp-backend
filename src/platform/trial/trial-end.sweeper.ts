@@ -133,6 +133,7 @@ export class TrialEndSweeper implements OnApplicationBootstrap, OnModuleDestroy 
     const wasBusy = busy.size;
     while (busy.size > 0 && !this.stopped && Date.now() + BUSY_RETRY_MS <= started + BUSY_RETRY_BUDGET_MS) {
       await this.pause(BUSY_RETRY_MS);
+      if (this.stopped) break;
       for (const [key, companyId] of [...busy]) {
         const outcome = await this.trialEnd.applyIfDue(companyId);
         if (outcome === 'busy') continue;
