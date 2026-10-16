@@ -53,6 +53,57 @@ export const MAX_SHEETS = 50;
  */
 export const MAX_WORKBOOK_CELLS = 2_000_000;
 
+/**
+ * How much the parts of a workbook may unpack to, together (reviews BE5-06, NW2-02).
+ *
+ * The cell limit above is counted on XML already unpacked, so a zip bomb — an 8 MB upload that inflates to gigabytes
+ * of padding — exhausted the API before it applied. Every part is now inflated in chunks and the read stops the
+ * moment the workbook passes this, before the excess is ever held. 160 MB is several times the XML of a workbook at
+ * the cell limit.
+ */
+export const MAX_INFLATED_BYTES = 160 * 1024 * 1024;
+
+const tooLargeUnpacked = () =>
+  new BadRequestException({ code: 'file_too_large', message: 'That workbook is too large once unpacked' });
+
+/** A part of the archive as text, read in chunks against what is left of the workbook's budget. */
+function inflateBounded(file: JSZip.JSZipObject, budget: { left: number }, keep = true): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const stream = file.nodeStream('nodebuffer');
+    stream.on('data', (chunk: Buffer) => {
+      budget.left -= chunk.length;
+      if (budget.left < 0) {
+        stream.pause();
+        (stream as unknown as { destroy?: () => void }).destroy?.();
+        reject(tooLargeUnpacked());
+        return;
+      }
+      if (keep) chunks.push(chunk);
+    });
+    stream.on('error', reject);
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+  });
+}
+
+/**
+ * Refuses a workbook whose parts unpack past `limit`, holding no more than a chunk at a time. For readers that unzip
+ * on their own (the opening-inventory import hands the file to exceljs): run first. A file that is not a zip is left
+ * to that reader to refuse in its own words.
+ */
+export async function assertWorkbookUnpacksWithin(buffer: Buffer, limit = MAX_INFLATED_BYTES): Promise<void> {
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(buffer);
+  } catch {
+    return;
+  }
+  const budget = { left: limit };
+  for (const file of Object.values(zip.files)) {
+    if (!file.dir) await inflateBounded(file, budget, false);
+  }
+}
+
 /** XML text content, unescaped. */
 function text(s: string): string {
   return s
@@ -146,19 +197,24 @@ function cellValue(c: string, shared: string[]): SheetCell {
   return { text: value, ...(formula ? { formula: true } : {}), ...(rounded ? { rounded: true } : {}) };
 }
 
-export async function readWorkbook(buffer: Buffer): Promise<WorkbookSheet[]> {
+export async function readWorkbook(buffer: Buffer, inflateLimit = MAX_INFLATED_BYTES): Promise<WorkbookSheet[]> {
   let zip: JSZip;
   try {
     zip = await JSZip.loadAsync(buffer);
   } catch {
     throw new BadRequestException({ code: 'file_unreadable', message: 'That file is not a readable .xlsx workbook' });
   }
-  const workbookXml = await zip.file('xl/workbook.xml')?.async('string');
+  const budget = { left: inflateLimit };
+  const part = async (path: string): Promise<string | undefined> => {
+    const file = zip.file(path);
+    return file ? inflateBounded(file, budget) : undefined;
+  };
+  const workbookXml = await part('xl/workbook.xml');
   if (!workbookXml) {
     throw new BadRequestException({ code: 'file_unreadable', message: 'That file is not a readable .xlsx workbook' });
   }
-  const relsXml = (await zip.file('xl/_rels/workbook.xml.rels')?.async('string')) ?? '';
-  const shared = sharedStrings((await zip.file('xl/sharedStrings.xml')?.async('string')) ?? null);
+  const relsXml = (await part('xl/_rels/workbook.xml.rels')) ?? '';
+  const shared = sharedStrings((await part('xl/sharedStrings.xml')) ?? null);
 
   const rels = new Map<string, string>();
   for (const r of all(relsXml, 'Relationship')) {
@@ -174,7 +230,7 @@ export async function readWorkbook(buffer: Buffer): Promise<WorkbookSheet[]> {
     const name = text(attr(decl, 'name') ?? 'Sheet ' + String(order + 1));
     const rid = attr(decl, 'r:id') ?? attr(decl, 'id');
     const path = (rid && rels.get(rid)) ?? 'worksheets/sheet' + String(order + 1) + '.xml';
-    const xml = await zip.file('xl/' + path)?.async('string');
+    const xml = await part('xl/' + path);
     if (!xml) continue;
 
     const rows: SheetCell[][] = [];

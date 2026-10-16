@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { parseCsv } from './csv';
+import { assertWorkbookUnpacksWithin } from '../receiving-files/xlsx-reader';
 
 /**
  * Turning an uploaded file into rows of text (Milestone G).
@@ -69,6 +70,9 @@ export async function readSheet(buffer: Buffer, filename: string): Promise<Sheet
     // to do next, and the answer is usually "save it as .xlsx".
     throw new BadRequestException('Send a .xlsx spreadsheet or a .csv file');
   }
+
+  // exceljs unzips on its own and without a bound: a zip bomb is refused before it sees the file (review BE5-06).
+  await assertWorkbookUnpacksWithin(buffer);
 
   // Required lazily so a CSV import never pays for the spreadsheet library.
   const ExcelJS = await import('exceljs');
