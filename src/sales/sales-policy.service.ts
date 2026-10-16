@@ -211,7 +211,7 @@ export class SalesPolicyService {
           lineIndex: where.index,
           unitId: where.unitId,
           identifier: where.identifier,
-          message: 'This discount sells the item below cost. Ask the Owner to approve the final price instead.',
+          message: 'This discount sells the item below cost. Remove it or make it smaller.',
         });
       }
     }
