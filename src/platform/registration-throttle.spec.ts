@@ -105,7 +105,17 @@ describe('the two registration doors share one throttle budget per step (C15)', 
   it('the public routes outside the registration keep their own budget', async () => {
     for (let i = 0; i < LIMIT; i += 1) await post(PATHS.start[0], BODY.start());
     expect((await post(PATHS.start[1], BODY.start())).status).toBe(429);
-    // Contact verification is not a registration step: its limit is untouched (its handler is a stub here).
-    expect((await post('/api/v1/platform/verify-contact/start', { destination: 'aicha@example.test', language: 'en' })).status).not.toBe(429);
+    // Accepting an Owner invitation is not a registration step: its limit is untouched (its handler is a stub here).
+    expect((await post('/api/v1/platform/owner-invitation/accept', { token: 't'.repeat(43), password: 'password-1' })).status).not.toBe(429);
+  });
+
+  /*
+   * BE1-01: the destination-wide `verify-contact/*` door is gone. Anybody could send a code to any contact through
+   * it, and every code it issued killed that contact's live registration or staff code and spent its hourly budget.
+   * Registration and staff activation prove a contact through their own bound challenges; nothing called this.
+   */
+  it('no public route sends or proves a code for an arbitrary contact', async () => {
+    expect((await post('/api/v1/platform/verify-contact/start', { destination: 'aicha@example.test', language: 'en' })).status).toBe(404);
+    expect((await post('/api/v1/platform/verify-contact/confirm', { destination: 'aicha@example.test', code: '123456' })).status).toBe(404);
   });
 });

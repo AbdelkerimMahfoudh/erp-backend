@@ -1245,7 +1245,6 @@ describe('the scheduled requests as the website and the console read them', () =
       { timeline: async () => ({ events: [], payments: [] }) } as never,
       unused,
       w.billing,
-      unused,
       w.entitlement,
       { companyId: () => b.companyId } as never,
       unused,

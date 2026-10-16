@@ -48,7 +48,6 @@ import { RegistrationService } from './registration.service';
 import { OwnerInvitationService, OWNER_PASSWORD_MIN_LENGTH } from './owner-invitation.service';
 import { BillingService } from '../billing/billing.service';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
-import { ContactVerificationService } from './contact-verification.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { randomBytes } from 'node:crypto';
@@ -235,16 +234,6 @@ class PaymentDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
-class VerifyStartDto {
-  @IsString() @MinLength(3) @MaxLength(160) destination: string;
-  @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
-}
-
-class VerifyConfirmDto {
-  @IsString() @MinLength(3) @MaxLength(160) destination: string;
-  @IsString() @MinLength(1) @MaxLength(12) code: string;
-}
-
 export class PlanVersionDto {
   /** The electronics store price. */
   @IsInt() @Min(0) branchMonthly: number;
@@ -269,7 +258,6 @@ export class PlatformController {
     private readonly lifecycle: SubscriptionLifecycleService,
     private readonly registration: RegistrationService,
     private readonly billing: BillingService,
-    private readonly verification: ContactVerificationService,
     private readonly entitlement: EntitlementService,
     private readonly tenant: TenantContext,
     private readonly handoff: PortalHandoffService,
@@ -313,39 +301,6 @@ export class PlatformController {
   async continueConfirm(@Body() dto: ContinueConfirmDto, @Req() req: Request) {
     return this.flow.confirmVerification(dto, { ip: req.ip, userAgent: req.headers['user-agent'] });
   }
-
-  // ── Contact verification ─────────────────────────────────────────────────
-
-  /**
-   * Send a code to a contact.
-   *
-   * Rate-limited and public, because it necessarily runs before any account
-   * exists. The response says what actually HAPPENED — sent, or queued in the
-   * development outbox — and never pretends a message went out when no
-   * provider sent one.
-   */
-  @Public()
-  @Throttle(PUBLIC_THROTTLE)
-  @Post('verify-contact/start')
-  @HttpCode(HttpStatus.OK)
-  async verifyStart(@Body() dto: VerifyStartDto) {
-    return this.verification.start(dto.destination, dto.language);
-  }
-
-  @Public()
-  @Throttle(PUBLIC_THROTTLE)
-  @Post('verify-contact/confirm')
-  @HttpCode(HttpStatus.OK)
-  async verifyConfirm(@Body() dto: VerifyConfirmDto) {
-    const ok = await this.verification.confirm(dto.destination, dto.code);
-    if (!ok) {
-      // Generic: an expired code, a wrong one and an unknown destination all
-      // answer the same way, so this cannot be used to probe addresses.
-      throw new BadRequestException('That code did not match.');
-    }
-    return { verified: true };
-  }
-
 
   // ── Administrator sign-in ────────────────────────────────────────────────
 

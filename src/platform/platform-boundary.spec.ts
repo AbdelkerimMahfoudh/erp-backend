@@ -163,8 +163,6 @@ describe('the controller, from the platform’s side', () => {
     'register',
     'continueStart',
     'continueConfirm',
-    'verifyStart',
-    'verifyConfirm',
     'adminSignIn',
     'exchangePortalHandoff',
     'portalSignOut',
@@ -276,7 +274,7 @@ describe('the controller, from the platform’s side', () => {
     const stub = {} as never;
     function controllerWith(registration: unknown, delivery: unknown) {
       const flow = new RegistrationFlowService(registration as never, stub, delivery as never);
-      return new PlatformController(stub, stub, stub, stub, registration as never, stub, stub, stub, stub, stub, stub, flow);
+      return new PlatformController(stub, stub, stub, stub, registration as never, stub, stub, stub, stub, stub, flow);
     }
     const attempt = {
       idempotencyKey: 'k-1',

@@ -24,7 +24,6 @@ const platformWith = (over: Partial<Record<string, unknown>> = {}) =>
     (over.lifecycle ?? stub) as never,
     stub,
     (over.billing ?? stub) as never,
-    stub,
     (over.entitlement ?? stub) as never,
     (over.tenant ?? stub) as never,
     stub,
