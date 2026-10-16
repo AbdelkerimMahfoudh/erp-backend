@@ -8,17 +8,45 @@
  *
  * UUIDv7 is time-ordered, which keeps the InnoDB clustered PK sequential.
  * In raw SQL, MySQL's native BIN_TO_UUID(x, 0) / UUID_TO_BIN(x, 0) do the same.
+ *
+ * Monotonic within the process (RFC 9562 §6.2, method 1): the 12 bits after
+ * the version are a counter. A new millisecond seeds it at random in its lower
+ * half, leaving at least 2048 increments; the same millisecond — or a clock
+ * that stepped back — counts on from the last id, so every id this process
+ * makes sorts after the one before it. Past 4096 in one millisecond, the next
+ * millisecond is borrowed. Across processes, ids still sort only by their
+ * millisecond: nothing may rely on them to order rows written on two clocks
+ * (billing.service.ts `NEWEST_PERIOD_FIRST`).
  */
 import { randomBytes } from 'node:crypto';
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-/** Generate a new UUIDv7 as a 16-byte Buffer (BINARY(16)-ready). */
+/** The millisecond the last id was made in, and its counter (`rand_a`). */
+let lastMs = -1;
+let counter = 0;
+
+/** A fresh counter for a new millisecond: random, in the lower half of 12 bits. */
+const seed = (): number => randomBytes(2).readUInt16BE(0) & 0x7ff;
+
+/** Generate a new UUIDv7 as a 16-byte Buffer (BINARY(16)-ready), after every id made before it in this process. */
 export function newUuidV7Bin(): Buffer {
+  const now = Date.now();
+  if (now > lastMs) {
+    lastMs = now;
+    counter = seed();
+  } else {
+    counter += 1;
+    if (counter > 0xfff) {
+      lastMs += 1;
+      counter = seed();
+    }
+  }
   const buf = Buffer.alloc(16);
-  buf.writeUIntBE(Date.now(), 0, 6); // 48-bit big-endian ms timestamp
-  randomBytes(10).copy(buf, 6);
-  buf[6] = (buf[6] & 0x0f) | 0x70; // version 7
+  buf.writeUIntBE(lastMs, 0, 6); // 48-bit big-endian ms timestamp
+  buf[6] = 0x70 | (counter >> 8); // version 7, then the counter's top 4 bits
+  buf[7] = counter & 0xff;
+  randomBytes(8).copy(buf, 8);
   buf[8] = (buf[8] & 0x3f) | 0x80; // variant 10xx
   return buf;
 }
