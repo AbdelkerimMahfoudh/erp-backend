@@ -394,12 +394,27 @@ export class DashboardService {
       .slice(0, limit ?? Number.MAX_SAFE_INTEGER);
   }
 
-  /** Revenue/profit per branch over a window (always company-wide). */
+  /**
+   * Revenue/profit per branch over a window, for every branch whose reports the
+   * caller may read — the whole company for the Owner, assigned everywhere.
+   *
+   * `report.view` is held per branch: a Store Manager of one branch must not see
+   * another branch's revenue and profit (docs/03 §2). Gating the route on it
+   * alone handed a one-branch manager every branch's figures, on the dashboard
+   * and in the profit-by-branch export.
+   */
   async branchComparison(days: number) {
     const from = this.windowStart(days);
+    const readable = await this.db.userBranch.findMany({
+      where: {
+        userId: this.tenant.requireUserId(),
+        role: { rolePermissions: { some: { permission: { key: 'report.view' } } } },
+      },
+      select: { branchId: true },
+    });
     const grouped = await this.db.dailyRollup.groupBy({
       by: ['branchId'],
-      where: { day: { gte: from } },
+      where: { day: { gte: from }, branchId: { in: readable.map((r) => r.branchId) } },
       _sum: NET_SUM,
     });
     const branches = grouped.length
