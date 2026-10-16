@@ -29,6 +29,7 @@ function makeService(rows: Row[]) {
   };
 
   const db = {
+    userBranch: { findMany: async () => [] },
     notification: {
       findMany: async ({ where, cursor, skip, take }: never) => {
         const w = where as unknown as Record<string, unknown>;

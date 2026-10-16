@@ -36,7 +36,7 @@ export class NotificationsService {
     opts: { onlyUnread?: boolean; cursor?: Buffer; limit?: number } = {},
   ): Promise<{ rows: Notification[]; nextCursor: string | null; unreadCount: number }> {
     const limit = Math.min(Math.max(opts.limit ?? 25, 1), 50);
-    const scope = { OR: [{ targetUserId: userId }, { targetUserId: null }] };
+    const scope = await this.visibleTo(userId);
 
     const rows = await this.db.notification.findMany({
       where: { ...scope, ...(opts.onlyUnread ? { isRead: false } : {}) },
@@ -54,9 +54,28 @@ export class NotificationsService {
     };
   }
 
+  /**
+   * What one user may see: their own notifications, and broadcasts that name no
+   * branch or a branch they are assigned to.
+   *
+   * A broadcast row carries the branch it is about, but the list used to ignore
+   * it, so every user of every branch read another branch's sales (invoice and
+   * total), closings and staff shortages (docs/25 §10 recorded the defect; docs/03
+   * §2: a manager cannot see other branches' data).
+   */
+  private async visibleTo(userId: Buffer) {
+    const assigned = await this.db.userBranch.findMany({ where: { userId }, select: { branchId: true } });
+    return {
+      OR: [
+        { targetUserId: userId },
+        { targetUserId: null, OR: [{ branchId: null }, { branchId: { in: assigned.map((a) => a.branchId) } }] },
+      ],
+    };
+  }
+
   async markRead(userId: Buffer, id: Buffer): Promise<{ updated: number }> {
     const result = await this.db.notification.updateMany({
-      where: { id, OR: [{ targetUserId: userId }, { targetUserId: null }] },
+      where: { id, ...(await this.visibleTo(userId)) },
       data: { isRead: true },
     });
     return { updated: result.count };
