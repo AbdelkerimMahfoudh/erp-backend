@@ -388,7 +388,7 @@ export class AnomaliesService {
     const day = dayKey(now);
 
     for (const item of notifying) {
-      const recipients = await this.recipientsFor(item.code);
+      const recipients = await this.recipientsFor(item.code, branchId);
       for (const userId of recipients) {
         try {
           await this.db.notification.create({
@@ -421,8 +421,14 @@ export class AnomaliesService {
    *
    * A below-cost cluster is the Owner's to judge; a shortfall belongs to
    * whoever closes the drawer; a debt belongs to whoever chases it.
+   *
+   * And only for the branch the figures are about (review NW2-01): a reading
+   * of one branch goes to those who hold the permission there; a company-wide
+   * reading carries every branch's figures, so it goes only to those who hold
+   * it in every active branch. A one-branch manager was told another branch's
+   * overdue debts.
    */
-  private async recipientsFor(code: Anomaly['code']): Promise<Buffer[]> {
+  private async recipientsFor(code: Anomaly['code'], branchId: Buffer | null): Promise<Buffer[]> {
     const permission =
       code === 'anomaly.below_cost_cluster'
         ? 'discount.override'
@@ -432,12 +438,22 @@ export class AnomaliesService {
 
     const assignments = await this.db.userBranch.findMany({
       where: {
+        ...(branchId ? { branchId } : {}),
         user: { isActive: true, deletedAt: null },
+        branch: { isActive: true, deletedAt: null },
         role: { rolePermissions: { some: { permission: { key: permission } } } },
       },
-      select: { userId: true },
-      distinct: ['userId'],
+      select: { userId: true, branchId: true },
     });
-    return assignments.map((a) => a.userId);
+    const branchesOf = new Map<string, { userId: Buffer; branches: Set<string> }>();
+    for (const a of assignments) {
+      const key = a.userId.toString('hex');
+      const entry = branchesOf.get(key) ?? { userId: a.userId, branches: new Set<string>() };
+      entry.branches.add(a.branchId.toString('hex'));
+      branchesOf.set(key, entry);
+    }
+    if (branchId || branchesOf.size === 0) return [...branchesOf.values()].map((e) => e.userId);
+    const active = await this.db.branch.count({ where: { isActive: true, deletedAt: null } });
+    return [...branchesOf.values()].filter((e) => e.branches.size >= active).map((e) => e.userId);
   }
 }
