@@ -137,6 +137,25 @@ describe('two identical submissions racing', () => {
     expect((caught as ConflictException).getResponse()).toMatchObject({ code: 'idempotency_conflict' });
   });
 
+  it('the loser that finds its unit already sold by its twin also answers with that sale (real-HTTP race, 2026-10-16)', async () => {
+    const { service, db } = harness(null);
+    // The twin committed before this request read the unit: assertSellable refused it as sold.
+    db.sale.findFirst.mockResolvedValueOnce(null).mockResolvedValue(sale);
+    db.$transaction = jest.fn(async () => { throw new ConflictException(`Unit ${IMEI} is 'sold' and cannot be sold`); });
+
+    const r = (await service.createSale(base as never)) as { invoiceNo: string; id: string };
+
+    expect(r.invoiceNo).toBe('00042');
+    expect(r.id).toBe(binToUuid(SALE));
+  });
+
+  it('a unit sold by ANOTHER sale is still a conflict when the key made nothing', async () => {
+    const { service, db } = harness(null);
+    db.$transaction = jest.fn(async () => { throw new ConflictException(`Unit ${IMEI} is 'sold' and cannot be sold`); });
+
+    await expect(service.createSale(base as never)).rejects.toMatchObject({ message: expect.stringMatching(/cannot be sold/) });
+  });
+
   it('a key that made nothing is a real conflict: a unit taken by another sale at the same moment', async () => {
     const { service, db } = harness(null);
     db.$transaction = jest.fn(async () => { throw raced(); });
