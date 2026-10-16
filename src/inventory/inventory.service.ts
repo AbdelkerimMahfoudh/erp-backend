@@ -529,6 +529,17 @@ export class InventoryService {
     return taken > 0 ? { ...NO_CONFLICT, alreadyInInventory: true, elsewhere: true } : NO_CONFLICT;
   }
 
+  /**
+   * The branch filter for a stock listing. With an active branch (already
+   * assignment-checked by the caller), that branch. Without one, the branches
+   * the caller is assigned to — never the whole company: dropping the
+   * `X-Branch-Id` header used to list every branch's units and stock to anyone
+   * signed in, the same leak H1.4.1 closed for a header naming a foreign branch.
+   */
+  private async listingBranchScope(branchId: Buffer | undefined): Promise<{ branchId: Buffer | { in: Buffer[] } }> {
+    return { branchId: branchId ?? { in: await this.accessibleBranchIds() } };
+  }
+
   /** Branches this user is actually assigned to — the visibility boundary. */
   private async accessibleBranchIds(): Promise<Buffer[]> {
     const userId = this.tenant.userId();
@@ -795,6 +806,16 @@ export class InventoryService {
       },
     });
     if (!unit) throw new NotFoundException('Unit not found');
+    /*
+     * A unit in a branch this user is not assigned to answers exactly as one
+     * that does not exist — the boundary `describeIdentifierConflict` and the
+     * sale lookup already keep. The route carries no `@RequirePermissions`, and
+     * the detail includes the purchase, the cost and an audit timeline naming
+     * staff, so without this any signed-in user could read another branch's
+     * phone by its IMEI.
+     */
+    const visible = await this.accessibleBranchIds();
+    if (!visible.some((b) => b.equals(unit.branchId))) throw new NotFoundException('Unit not found');
     return unit;
   }
 
@@ -882,6 +903,7 @@ export class InventoryService {
     if (branchId) {
       await assertAssignedToBranch(this.db, this.tenant.requireUserId(), branchId);
     }
+    const branchScope = await this.listingBranchScope(branchId);
 
     /*
      * `in_stock` and nothing else. A reserved, sold, faulty, in-transit or
@@ -891,7 +913,7 @@ export class InventoryService {
      */
     const grouped = await this.db.unit.groupBy({
       by: ['productId'],
-      where: { status: 'in_stock', ...(branchId ? { branchId } : {}) },
+      where: { status: 'in_stock', ...branchScope },
       _count: { _all: true },
     });
 
@@ -1033,6 +1055,7 @@ export class InventoryService {
     if (branchId) {
       await assertAssignedToBranch(this.db, this.tenant.requireUserId(), branchId);
     }
+    const branchScope = await this.listingBranchScope(branchId);
     const productId = filter.productId ? uuidToBin(filter.productId) : undefined;
     const limit = Math.min(Math.max(filter.limit ?? DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
     const cursor = filter.cursor ? decodeCursor(filter.cursor) : null;
@@ -1044,7 +1067,7 @@ export class InventoryService {
       (!filter.status || filter.status === 'in_stock') && (!filter.trackingType || filter.trackingType === 'quantity');
 
     const unitWhere = {
-      ...(branchId ? { branchId } : {}),
+      ...branchScope,
       // A phone whose purchase was cancelled is in no list unless asked for by its status (0079).
       status: filter.status ?? { not: 'voided' as const },
       ...(productId ? { productId } : {}),
@@ -1052,7 +1075,7 @@ export class InventoryService {
       ...(search ? { OR: unitSearchClauses(search) } : {}),
     };
     const stockWhere = {
-      ...(branchId ? { branchId } : {}),
+      ...branchScope,
       ...(productId ? { productId } : {}),
       // A zero row is a product that once had stock here; it is not stock.
       quantity: { gt: 0 },
@@ -1179,8 +1202,11 @@ export class InventoryService {
    */
   async correctUnit(unitIdStr: string, dto: CorrectUnitDto): Promise<Unit> {
     const id = uuidToBin(unitIdStr);
+    const branchId = this.tenant.requireBranchId();
     const unit = await this.db.unit.findUnique({ where: { id }, include: { product: true } });
-    if (!unit) throw new NotFoundException('Unit not found');
+    // `unit.add` was granted at the active branch, so the unit must be there:
+    // another branch's unit answers as one that does not exist.
+    if (!unit || !unit.branchId.equals(branchId)) throw new NotFoundException('Unit not found');
     if (unit.status !== 'in_stock') {
       throw new ConflictException(
         'Only a unit that is in stock can be corrected. This one has already moved on — use the workflow for its current state.',
@@ -1318,7 +1344,7 @@ export class InventoryService {
         // Compare-and-swap on updatedAt AND status: the unit must still be the
         // one the client read, and still in stock. Zero rows means it moved.
         const result = await tx.unit.updateMany({
-          where: { id, updatedAt: expected, status: 'in_stock' },
+          where: { id, branchId, updatedAt: expected, status: 'in_stock' },
           data,
         });
         if (result.count === 0) {
@@ -1371,8 +1397,10 @@ export class InventoryService {
 
   async markFaulty(unitId: string): Promise<Unit> {
     const id = uuidToBin(unitId);
+    const branchId = this.tenant.requireBranchId();
     const unit = await this.db.unit.findUnique({ where: { id } });
-    if (!unit) throw new NotFoundException('Unit not found');
+    // Same object-level rule as `correctUnit`: only a unit of the active branch.
+    if (!unit || !unit.branchId.equals(branchId)) throw new NotFoundException('Unit not found');
     assertTransition(unit.status, 'faulty');
 
     return this.db.$transaction(async (tx) => {
