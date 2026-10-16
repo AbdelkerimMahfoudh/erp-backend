@@ -447,7 +447,15 @@ describe('a closed business stays closed on the server', () => {
       'platform/my-subscription/trial/link',
       'platform/my-subscription/trial/setup/resend',
     ]);
-    expect(allowedReads).toEqual(['platform/my-subscription', 'platform/payment-instructions', 'platform/my-subscription/trial']);
+    // What was asked, and what asking would cost (2026-10-16): the reads behind the requests above, which may be made
+    // in every state — refused, the Owner's requests card waited for ever. The Super Admin's queue stays closed.
+    expect(allowedReads).toEqual([
+      'platform/my-subscription',
+      'platform/payment-instructions',
+      'platform/my-subscription/trial',
+      'platform/my-subscription/seat-requests',
+      'platform/my-subscription/activity-options',
+    ]);
   });
 });
 

@@ -205,6 +205,15 @@ export const ALWAYS_READABLE: readonly ReadRule[] = [
    */
   readable('platform/my-subscription/trial', 'The Owner’s free trial card: read by a business that has not started yet, and holding no operational data'),
   /*
+   * The Owner's own seat, store and activity requests, and what each would cost (2026-10-16). Asking is allowed in
+   * every state (`ALWAYS_ALLOWED` above, D154) — but the list of what was asked, and the server's prices for asking,
+   * sat outside this list. The screenshot matrix found what that meant: on the account page of a pending, suspended or
+   * not-started business, the requests card waited forever and the activity change could not be priced, while the
+   * forms to ask still worked. The other half of the same page, as `payment-instructions` is; no operational data.
+   */
+  readable('platform/my-subscription/seat-requests', 'The Owner’s own requests, which may be made in every state: the other half of the account page, and no operational data'),
+  readable('platform/my-subscription/activity-options', 'What asking for another activity or a new store would cost, the server’s own figures for a request allowed in every state; no operational data'),
+  /*
    * The same business in the app (0095): whether it may claim its trial on the website and whether the setup
    * instructions reached the Owner — display data only, no action, nothing operational.
    */

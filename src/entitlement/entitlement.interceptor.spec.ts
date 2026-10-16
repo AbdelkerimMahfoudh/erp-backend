@@ -100,6 +100,23 @@ describe('a refused write names the subscription state (D161)', () => {
       await expect(lastValueFrom(await closed.intercept(request('GET', '/api/v1/agent/transactions/client/:clientUuid'), handler))).resolves.toBe('ran');
     }
   });
+
+  it('the Owner reads their own requests and what asking costs in every closed state, as they may ask in every state', async () => {
+    /*
+     * The screenshot matrix (2026-10-16): a pending or suspended Owner could send a seat, store or activity request,
+     * but the list of them answered 403 — the account page waited on it forever — and so did the activity prices.
+     */
+    for (const status of ['suspended', 'cancelled', 'pending_activation', 'rejected']) {
+      const closed = interceptorFor({ status, currentPeriodEnd: null });
+      for (const path of ['/api/v1/platform/my-subscription/seat-requests', '/api/v1/platform/my-subscription/activity-options']) {
+        await expect(lastValueFrom(await closed.intercept(request('GET', path), handler))).resolves.toBe('ran');
+      }
+      await expect(lastValueFrom(await closed.intercept(request('POST', '/api/v1/platform/my-subscription/seat-requests'), handler))).resolves.toBe('ran');
+    }
+    // The Super Admin's request queue is not the Owner's page and stays closed to a closed tenant.
+    const body = await refusalOf({ status: 'suspended', currentPeriodEnd: null }, 'GET', '/api/v1/platform/seat-requests');
+    expect(body).toMatchObject({ code: ENTITLEMENT_SUSPENDED });
+  });
 });
 
 describe('the free trial at the gate (0095)', () => {
