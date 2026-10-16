@@ -71,6 +71,14 @@ describe('the settings that fail open', () => {
     expect(productionConfigProblems({ ...SAFE, COOKIE_SECURE: value })).toHaveLength(1);
   });
 
+  it.each([undefined, '', 'yes'])('refuses SWAGGER_ENABLED=%p: only an explicit false keeps /docs closed', (value) => {
+    // Left unset, the schema's default `true` published the API documentation while this guard looked only for
+    // `true` (production-readiness review BE2-01, 2026-10-16).
+    const problems = productionConfigProblems({ ...SAFE, SWAGGER_ENABLED: value });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('SWAGGER_ENABLED');
+  });
+
   it('refuses SWAGGER_ENABLED=true', () => {
     // The schema default is `true`, so this is what happens when nobody says
     // otherwise — the whole API surface published to anyone who asks.

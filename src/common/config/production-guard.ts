@@ -108,11 +108,13 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
   }
 
   // The API surface, published. Not a vulnerability by itself, and a map of
-  // every route and payload shape handed to anyone who asks.
-  if (truthy(env.SWAGGER_ENABLED)) {
+  // every route and payload shape handed to anyone who asks. The schema
+  // default is `true`, so production requires an explicit `false`: a variable
+  // nobody set published `/docs` while this check looked only for `true`.
+  if (!falsy(env.SWAGGER_ENABLED)) {
     problems.push(
-      'SWAGGER_ENABLED is true. Production must not publish the API documentation. ' +
-        'Set SWAGGER_ENABLED=false.',
+      `SWAGGER_ENABLED is ${env.SWAGGER_ENABLED?.trim() ? 'not false' : 'unset, and defaults to true'}. ` +
+        'Production must not publish the API documentation. Set SWAGGER_ENABLED=false.',
     );
   }
 
