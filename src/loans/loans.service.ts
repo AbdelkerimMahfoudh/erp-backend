@@ -326,52 +326,58 @@ export class LoansService {
       throw new ConflictException('Nothing has been agreed to pay yet');
     }
 
-    const rows = await this.ledgerRows(loan.id);
-    const owed = remaining(rows);
-
     if (dto.action === 'confirm') {
       this.assertCreditor(loan, me);
 
-      const reported = await this.prisma.loanLedgerEntry.findFirst({
-        where: { id: uuidToBin(dto.entryId ?? ''), loanId: loan.id, kind: 'payment_reported' },
-      });
-      if (!reported) throw new NotFoundException('No such reported payment');
-      const already = await this.prisma.loanLedgerEntry.findFirst({
-        where: { refersToId: reported.id, kind: 'payment_confirmed' },
-      });
-      if (already) throw new ConflictException('That payment has already been confirmed');
-
-      try {
-        assertPaymentAllowed({
-          amount: num(reported.amount),
-          method: (reported.method ?? 'cash') as 'cash' | 'account',
-          receivingAccountId: reported.receivingAccountId ? binToUuid(reported.receivingAccountId) : null,
-          remaining: owed,
+      await this.prisma.$transaction(async (tx) => {
+        /**
+         * Everything below is read under the loan's lock, so a double tap or a
+         * retry waits for the first confirmation and then finds it. Read
+         * outside, both passed the "already confirmed" check and the debt
+         * dropped twice — ten at once confirmed one payment seven times.
+         */
+        await this.lock(tx, loan.id);
+        const reported = await tx.loanLedgerEntry.findFirst({
+          where: { id: uuidToBin(dto.entryId ?? ''), loanId: loan.id, kind: 'payment_reported' },
         });
-      } catch (e) {
-        if (e instanceof LoanRefused) throw new ConflictException(e.message);
-        throw e;
-      }
+        if (!reported) throw new NotFoundException('No such reported payment');
+        const already = await tx.loanLedgerEntry.findFirst({
+          where: { refersToId: reported.id, kind: 'payment_confirmed' },
+        });
+        if (already) throw new ConflictException('That payment has already been confirmed');
 
-      await this.prisma.loanLedgerEntry.create({
-        data: {
-          id: newUuidV7Bin(),
-          loanId: loan.id,
-          companyId: loan.companyId,
-          counterpartyCompanyId: loan.counterpartyCompanyId,
-          kind: 'payment_confirmed',
-          amount: reported.amount,
-          method: reported.method,
-          receivingAccountId: reported.receivingAccountId,
-          accountLabelSnapshot: reported.accountLabelSnapshot,
-          reference: reported.reference,
-          refersToId: reported.id,
-          actingCompanyId: me,
-          actingUserId: userId,
-          entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
-        },
+        try {
+          assertPaymentAllowed({
+            amount: num(reported.amount),
+            method: (reported.method ?? 'cash') as 'cash' | 'account',
+            receivingAccountId: reported.receivingAccountId ? binToUuid(reported.receivingAccountId) : null,
+            remaining: remaining(await this.ledgerRows(loan.id, tx)),
+          });
+        } catch (e) {
+          if (e instanceof LoanRefused) throw new ConflictException(e.message);
+          throw e;
+        }
+
+        await tx.loanLedgerEntry.create({
+          data: {
+            id: newUuidV7Bin(),
+            loanId: loan.id,
+            companyId: loan.companyId,
+            counterpartyCompanyId: loan.counterpartyCompanyId,
+            kind: 'payment_confirmed',
+            amount: reported.amount,
+            method: reported.method,
+            receivingAccountId: reported.receivingAccountId,
+            accountLabelSnapshot: reported.accountLabelSnapshot,
+            reference: reported.reference,
+            refersToId: reported.id,
+            actingCompanyId: me,
+            actingUserId: userId,
+            entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+          },
+        });
+        await this.settleIfClear(loan.id, 'settled', tx);
       });
-      await this.settleIfClear(loan.id);
       return this.get(id);
     }
 
@@ -383,40 +389,47 @@ export class LoansService {
        */
       this.assertCreditor(loan, me);
       if (!dto.reason?.trim()) throw new BadRequestException('Say why you are reversing it');
+      const reason = dto.reason.trim();
 
-      const confirmed = await this.prisma.loanLedgerEntry.findFirst({
-        where: { id: uuidToBin(dto.entryId ?? ''), loanId: loan.id, kind: 'payment_confirmed' },
-      });
-      if (!confirmed) throw new NotFoundException('No such confirmed payment');
-      const undone = await this.prisma.loanLedgerEntry.findFirst({
-        where: { refersToId: confirmed.id, kind: 'payment_corrected' },
-      });
-      if (undone) throw new ConflictException('That payment has already been reversed');
+      await this.prisma.$transaction(async (tx) => {
+        // Under the lock, like a confirmation: one reversal, however many taps.
+        await this.lock(tx, loan.id);
+        const confirmed = await tx.loanLedgerEntry.findFirst({
+          where: { id: uuidToBin(dto.entryId ?? ''), loanId: loan.id, kind: 'payment_confirmed' },
+        });
+        if (!confirmed) throw new NotFoundException('No such confirmed payment');
+        const undone = await tx.loanLedgerEntry.findFirst({
+          where: { refersToId: confirmed.id, kind: 'payment_corrected' },
+        });
+        if (undone) throw new ConflictException('That payment has already been reversed');
 
-      await this.prisma.loanLedgerEntry.create({
-        data: {
-          id: newUuidV7Bin(),
-          loanId: loan.id,
-          companyId: loan.companyId,
-          counterpartyCompanyId: loan.counterpartyCompanyId,
-          kind: 'payment_corrected',
-          amount: confirmed.amount,
-          reason: dto.reason.trim(),
-          refersToId: confirmed.id,
-          actingCompanyId: me,
-          actingUserId: userId,
-          entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
-        },
-      });
-      // The debt is back, so a settled loan reopens.
-      await this.prisma.loan.updateMany({
-        where: { id: loan.id, status: { in: ['settled', 'forgiven_settled'] } },
-        data: { status: 'partially_paid', settledAt: null },
+        await tx.loanLedgerEntry.create({
+          data: {
+            id: newUuidV7Bin(),
+            loanId: loan.id,
+            companyId: loan.companyId,
+            counterpartyCompanyId: loan.counterpartyCompanyId,
+            kind: 'payment_corrected',
+            amount: confirmed.amount,
+            reason,
+            refersToId: confirmed.id,
+            actingCompanyId: me,
+            actingUserId: userId,
+            entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+          },
+        });
+        // The debt is back, so a settled loan reopens.
+        await tx.loan.updateMany({
+          where: { id: loan.id, status: { in: ['settled', 'forgiven_settled'] } },
+          data: { status: 'partially_paid', settledAt: null },
+        });
       });
       return this.get(id);
     }
 
     // --- report ---
+    const owed = remaining(await this.ledgerRows(loan.id));
+
     /**
      * The fingerprint is what makes this safe to queue offline (Milestone J).
      *
@@ -511,27 +524,33 @@ export class LoansService {
 
     if (!loan.principal) throw new ConflictException('Nothing has been agreed to write off');
 
-    const owed = remaining(await this.ledgerRows(loan.id));
-    try {
-      assertForgivenessAllowed({ amount: dto.amount, reason: dto.reason, remaining: owed });
-    } catch (e) {
-      if (e instanceof LoanRefused) throw new BadRequestException(e.message);
-      throw e;
-    }
+    await this.prisma.$transaction(async (tx) => {
+      // Under the lock, like a confirmation: two write-offs at once each saw
+      // the whole balance, and together forgave more than was owed.
+      await this.lock(tx, loan.id);
+      const owed = remaining(await this.ledgerRows(loan.id, tx));
+      try {
+        assertForgivenessAllowed({ amount: dto.amount, reason: dto.reason, remaining: owed });
+      } catch (e) {
+        if (e instanceof LoanRefused) throw new BadRequestException(e.message);
+        throw e;
+      }
 
-    await this.prisma.loanLedgerEntry.create({
-      data: {
-        id: newUuidV7Bin(),
-        loanId: loan.id,
-        companyId: loan.companyId,
-        counterpartyCompanyId: loan.counterpartyCompanyId,
-        kind: 'forgiven',
-        amount: dto.amount,
-        reason: dto.reason.trim(),
-        actingCompanyId: me,
-        actingUserId: userId,
-        entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
-      },
+      await tx.loanLedgerEntry.create({
+        data: {
+          id: newUuidV7Bin(),
+          loanId: loan.id,
+          companyId: loan.companyId,
+          counterpartyCompanyId: loan.counterpartyCompanyId,
+          kind: 'forgiven',
+          amount: dto.amount,
+          reason: dto.reason.trim(),
+          actingCompanyId: me,
+          actingUserId: userId,
+          entryDate: new Date(`${dayKey(new Date())}T00:00:00.000Z`),
+        },
+      });
+      await this.settleIfClear(loan.id, 'forgiven_settled', tx);
     });
 
     await this.audit.record({
@@ -541,7 +560,6 @@ export class LoansService {
       after: { forgiven: dto.amount, reason: dto.reason.trim() },
       branchId: loan.branchId ?? undefined,
     });
-    await this.settleIfClear(loan.id, 'forgiven_settled');
     return this.get(id);
   }
 
@@ -626,24 +644,37 @@ export class LoansService {
     }
   }
 
-  private async ledgerRows(loanId: Buffer) {
-    const rows = await this.prisma.loanLedgerEntry.findMany({
+  /**
+   * Take the loan's row for the rest of the transaction. Every write that is
+   * decided on the ledger takes it first, so two of them run one after the
+   * other and the second reads what the first wrote.
+   */
+  private async lock(tx: Prisma.TransactionClient, loanId: Buffer) {
+    await tx.$queryRaw(Prisma.sql`SELECT id FROM loans WHERE id = ${loanId} FOR UPDATE`);
+  }
+
+  private async ledgerRows(loanId: Buffer, db: Prisma.TransactionClient = this.prisma) {
+    const rows = await db.loanLedgerEntry.findMany({
       where: { loanId },
       select: { kind: true, amount: true },
     });
     return rows.map((r) => ({ kind: r.kind as LedgerKind, amount: num(r.amount) }));
   }
 
-  private async settleIfClear(loanId: Buffer, as: 'settled' | 'forgiven_settled' = 'settled') {
-    const owed = remaining(await this.ledgerRows(loanId));
+  private async settleIfClear(
+    loanId: Buffer,
+    as: 'settled' | 'forgiven_settled' = 'settled',
+    db: Prisma.TransactionClient = this.prisma,
+  ) {
+    const owed = remaining(await this.ledgerRows(loanId, db));
     if (owed > 0) {
-      await this.prisma.loan.updateMany({
+      await db.loan.updateMany({
         where: { id: loanId, status: { in: ['accepted', 'payment_awaiting_confirmation'] } },
         data: { status: 'partially_paid' },
       });
       return;
     }
-    await this.prisma.loan.updateMany({
+    await db.loan.updateMany({
       where: { id: loanId, status: { in: ['accepted', 'partially_paid', 'payment_awaiting_confirmation'] } },
       data: { status: as, settledAt: new Date() },
     });
