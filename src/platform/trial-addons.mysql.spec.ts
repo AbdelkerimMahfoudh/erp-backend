@@ -754,7 +754,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
       expect(await ledger(w.b)).toEqual(l);
     });
 
-    it('each other row on its own — the business’s row, the claim, the store request, an Owner, the Owner’s role — held: never a wait, never half-done; released, done once', async () => {
+    it('each other row on its own — the business’s row, the claim, the store request, the seats’ store, an Owner, the Owner’s role — held: never a wait, never half-done; released, done once', async () => {
       // Held until both rounds are over: an evaluation that waited for it would wait out innodb_lock_wait_timeout (50 s).
       // One that does not wait answers within 200 ms — or, with only the claim held, within the activation's own work,
       // which Tx B then does in full inside that evaluation (about 0.1 s here).
@@ -762,6 +762,8 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
         { what: 'the business’s row', sql: (w) => Prisma.sql`SELECT id FROM companies WHERE id = ${w.b.companyId} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: false },
         { what: 'the claim', sql: (w) => Prisma.sql`SELECT id FROM trial_claims WHERE company_id = ${w.b.companyId} FOR UPDATE`, activatesMeanwhile: true, recordsMeanwhile: false },
         { what: 'the store request', sql: (w) => Prisma.sql`SELECT id FROM seat_allocations WHERE id = ${bin(w.store)} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: true },
+        // Moving a seat rewrites its (branch, status) index entry: MySQL checks the store's row as it would for an insert.
+        { what: 'the seats’ store (Main)', sql: (w) => Prisma.sql`SELECT id FROM branches WHERE id = ${w.b.stores.Main} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: true },
         { what: 'the Owner', sql: (w) => Prisma.sql`SELECT id FROM users WHERE id = ${w.b.ownerId} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: true },
         { what: 'the Owner’s role', sql: (w) => Prisma.sql`SELECT id FROM roles WHERE id = ${w.ownerRole} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: true },
       ];

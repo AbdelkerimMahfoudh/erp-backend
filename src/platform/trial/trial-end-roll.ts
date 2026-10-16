@@ -81,6 +81,8 @@ const later = (a: Date, b: Date): Date => (a.getTime() >= b.getTime() ? a : b);
  *    the business makes share it too, so they never make this busy;
  *  - `claim` — the claim whose expiry Tx A records;
  *  - `period` — the paid period Tx B raises;
+ *  - `store` — the store of each seat Tx B moves, shared: moving a seat's status rewrites its (branch, status) index
+ *    entry, and MySQL checks that entry's foreign key — the store's row — as it does for an insert;
  *  - `request` — each scheduled request Tx B moves;
  *  - `person` — each person Tx B may activate (their row is updated);
  *  - `owner` and `role` — each Owner a store opened by Tx B is assigned to, and the role they hold there, shared (the
@@ -99,6 +101,7 @@ const NOWAIT = {
   company: (id: Buffer) => Prisma.sql`SELECT id FROM companies WHERE id = ${id} FOR SHARE NOWAIT`,
   claim: (id: Buffer) => Prisma.sql`SELECT id FROM trial_claims WHERE id = ${id} FOR UPDATE NOWAIT`,
   period: (id: Buffer) => Prisma.sql`SELECT id FROM billing_periods WHERE id = ${id} FOR UPDATE NOWAIT`,
+  store: (id: Buffer) => Prisma.sql`SELECT id FROM branches WHERE id = ${id} FOR SHARE NOWAIT`,
   request: (id: Buffer) => Prisma.sql`SELECT id FROM seat_allocations WHERE id = ${id} FOR UPDATE NOWAIT`,
   person: (id: Buffer) => Prisma.sql`SELECT id FROM users WHERE id = ${id} FOR UPDATE NOWAIT`,
   owner: (id: Buffer) => Prisma.sql`SELECT id FROM users WHERE id = ${id} FOR SHARE NOWAIT`,
@@ -200,9 +203,9 @@ export interface AddOnActivation {
  * people it was bought for, first invited first. Activation only — nobody's request is created here.
  *
  * Before anything is written, every row this locks or checks is taken with NOWAIT (N1): the business's row, the
- * period, each request, each person who may be activated, and — when a store opens — each Owner it is assigned to
- * and their role. A row another writer holds throws MySQL's 3572 at once (the caller's `busy`), and nothing has been
- * written.
+ * period, each seat's store, each request, each person who may be activated, and — when a store opens — each Owner it
+ * is assigned to and their role. A row another writer holds throws MySQL's 3572 at once (the caller's `busy`), and
+ * nothing has been written.
  */
 export async function activateDueAddOnsTx(
   tx: BillingDb,
@@ -242,9 +245,11 @@ export async function activateDueAddOnsTx(
     if (!waiting.has(key)) waiting.set(key, (await scheduledCoverage(db, companyId, row.branchId)).candidates);
   }
 
-  // Every row the work below locks or checks, now, never waited for (N1): the period it raises, the requests it moves,
-  // the people it may activate, and the Owners (and their role) a store it opens is assigned to.
+  // Every row the work below locks or checks, now, never waited for (N1): the period it raises, the stores of the seats
+  // and the requests it moves, the people it may activate, and the Owners (and their role) a store it opens is assigned
+  // to.
   await lockNowait(tx, 'period', period.id);
+  for (const id of distinctIds(due.flatMap((row) => (row.kind === 'seat' && row.branchId ? [row.branchId] : [])))) await lockNowait(tx, 'store', id);
   for (const row of due) await lockNowait(tx, 'request', row.id);
   const activating = distinctIds([
     ...due.flatMap((row) => (row.kind === 'seat' && row.user && row.user.activatedAt === null && row.user.deletedAt === null ? [row.user.id] : [])),

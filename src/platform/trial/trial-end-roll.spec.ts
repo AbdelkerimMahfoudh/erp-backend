@@ -220,6 +220,8 @@ describe('never waiting on any other row the end’s work needs (N1)', () => {
       // Tx B
       row('companies', b.companyId, 'share'),
       row('billing_periods', p1.id, 'update'),
+      // The seat's store: moving the seat rewrites its (branch, status) index entry, which MySQL checks.
+      row('branches', b.stores.Main, 'share'),
       // In the order they are put in force: both start at the end and were asked at one instant, so by id.
       ...[store, seat].sort().map((id) => row('seat_allocations', id, 'update')),
       row('users', uma, 'update'),
@@ -235,6 +237,7 @@ describe('never waiting on any other row the end’s work needs (N1)', () => {
   const holders: { what: string; row: (x: Awaited<ReturnType<typeof coveredWorld>>) => [string, Buffer] }[] = [
     { what: 'the business’s row', row: ({ b }) => ['companies', b.companyId] },
     { what: 'the period it raises', row: ({ w, b }) => ['billing_periods', w.periods(b)[0].id] },
+    { what: 'the seat’s store', row: ({ b }) => ['branches', b.stores.Main] },
     { what: 'the store request', row: ({ w, store }) => ['seat_allocations', w.request(store).id] },
     { what: 'the seat request', row: ({ w, seat }) => ['seat_allocations', w.request(seat).id] },
     { what: 'the person the seat covers', row: ({ uma }) => ['users', uma] },
