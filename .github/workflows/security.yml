@@ -63,6 +63,13 @@ jobs:
       - run: npx prisma validate
       - run: npx tsc --noEmit -p tsconfig.json
       - run: npx jest --ci
+      # A host starts the API with `npm run start:prod`: the file it names must be the one `npm run build` writes
+      # (tsconfig includes prisma/, so the entry lands at dist/src/main.js, not dist/main.js).
+      - name: the production start command names a file the build writes
+        run: |
+          npm run build
+          entry=$(node -p "require('./package.json').scripts['start:prod'].split(' ').pop()")
+          test -f "$entry" || { echo "start:prod runs $entry, which npm run build did not write"; exit 1; }
   database:
     name: migrations, catalogue, identities, real-MySQL spec
     # The runner image's own MySQL 8.0, started for this job and thrown away with it (root's password is the
