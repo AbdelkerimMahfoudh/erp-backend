@@ -220,8 +220,8 @@ describe('never waiting on any other row the end’s work needs (N1)', () => {
       // Tx B
       row('companies', b.companyId, 'share'),
       row('billing_periods', p1.id, 'update'),
-      row('seat_allocations', store, 'update'),
-      row('seat_allocations', seat, 'update'),
+      // In the order they are put in force: both start at the end and were asked at one instant, so by id.
+      ...[store, seat].sort().map((id) => row('seat_allocations', id, 'update')),
       row('users', uma, 'update'),
       row('users', b.ownerId, 'share'),
       row('roles', b.roles.owner, 'share'),
