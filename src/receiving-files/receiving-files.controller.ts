@@ -3,6 +3,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { BadRequestException } from '@nestjs/common';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
+import { uploadLimits } from '../common/upload/upload-limits';
 import { MAX_FILE_BYTES, ReceivingFilesService } from './receiving-files.service';
 
 /**
@@ -27,7 +28,7 @@ export class ReceivingFilesController {
 
   @Post('parse')
   @RequirePermissions('import.run', 'purchase.manage')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_FILE_BYTES } }))
+  @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_FILE_BYTES) }))
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {

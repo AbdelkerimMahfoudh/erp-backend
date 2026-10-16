@@ -3,6 +3,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
+import { uploadLimits } from '../common/upload/upload-limits';
 import { ExpensesService } from './expenses.service';
 import { MAX_RECEIPT_BYTES } from './receipt-rules';
 import { CreateExpenseDto, DecideExpenseDto, ListExpensesDto } from './dto/create-expense.dto';
@@ -64,7 +65,7 @@ export class ExpensesController {
    */
   @Post(':id/receipt')
   @RequirePermissions('expense.submit')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_RECEIPT_BYTES } }))
+  @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_RECEIPT_BYTES) }))
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Attach a receipt photo to an expense' })
   attachReceipt(@Param('id') id: string, @UploadedFile() file: { buffer: Buffer } | undefined) {

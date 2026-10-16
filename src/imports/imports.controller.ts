@@ -11,6 +11,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
+import { uploadLimits } from '../common/upload/upload-limits';
 import { ImportsService } from './imports.service';
 import { CommitImportDto } from './dto/commit-import.dto';
 
@@ -40,7 +41,7 @@ export class ImportsController {
     FileInterceptor('file', {
       // 10 MB. A stock list of 20 000 rows is well under this; the cap stops a
       // mis-selected video from being read into memory.
-      limits: { fileSize: 10 * 1024 * 1024 },
+      limits: uploadLimits(10 * 1024 * 1024),
     }),
   )
   @ApiConsumes('multipart/form-data')
