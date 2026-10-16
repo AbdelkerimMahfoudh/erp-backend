@@ -109,18 +109,8 @@ export class ExpensesService {
      * that is not a retry.
      */
     if (dto.clientUuid) {
-      const replay = await this.db.expense.findFirst({
-        where: { companyId, clientUuid: uuidToBin(dto.clientUuid) },
-      });
-      if (replay) {
-        if (replay.clientRequestHash !== fingerprint) {
-          throw new ConflictException({
-            code: 'idempotency_conflict',
-            message: 'That request id was already used for a different expense.',
-          });
-        }
-        return this.detail(binToUuid(replay.id));
-      }
+      const replayed = await this.replay(companyId, dto.clientUuid, fingerprint);
+      if (replayed) return replayed;
     }
 
     /**
@@ -146,32 +136,46 @@ export class ExpensesService {
     }
 
     const id = newUuidV7Bin();
-    await this.db.expense.create({
-      data: {
-        id,
-        companyId,
-        branchId,
-        category: dto.category.trim(),
-        amount: dto.amount,
-        // Kept for continuity with the pre-workflow column; the ACCOUNTING date
-        // is `confirmationDate` (variable) or `dueDate` (fixed).
-        spentOn: dateValue(dto.spentOn ?? (await this.businessDay.today(branchId))),
-        status: 'reported',
-        expenseClass: cls,
-        isSalary: dto.isSalary ?? false,
-        dueDate: dto.dueDate ? new Date(`${dto.dueDate}T00:00:00.000Z`) : null,
-        method,
-        receivingAccountId: dto.receivingAccountId ? uuidToBin(dto.receivingAccountId) : null,
-        accountLabelSnapshot: accountLabel,
-        reference: dto.reference?.trim() || null,
-        note: dto.note?.trim() || null,
-        reportedById: userId ?? null,
-        reportedAt: new Date(),
-        createdById: userId ?? null,
-        clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
-        clientRequestHash: dto.clientUuid ? fingerprint : null,
-      },
-    });
+    try {
+      await this.db.expense.create({
+        data: {
+          id,
+          companyId,
+          branchId,
+          category: dto.category.trim(),
+          amount: dto.amount,
+          // Kept for continuity with the pre-workflow column; the ACCOUNTING date
+          // is `confirmationDate` (variable) or `dueDate` (fixed).
+          spentOn: dateValue(dto.spentOn ?? (await this.businessDay.today(branchId))),
+          status: 'reported',
+          expenseClass: cls,
+          isSalary: dto.isSalary ?? false,
+          dueDate: dto.dueDate ? new Date(`${dto.dueDate}T00:00:00.000Z`) : null,
+          method,
+          receivingAccountId: dto.receivingAccountId ? uuidToBin(dto.receivingAccountId) : null,
+          accountLabelSnapshot: accountLabel,
+          reference: dto.reference?.trim() || null,
+          note: dto.note?.trim() || null,
+          reportedById: userId ?? null,
+          reportedAt: new Date(),
+          createdById: userId ?? null,
+          clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
+          clientRequestHash: dto.clientUuid ? fingerprint : null,
+        },
+      });
+    } catch (e) {
+      /**
+       * Two identical reports racing — the same client key sent twice at once, as a phone retrying on a bad connection
+       * does. Both passed the replay check above before either wrote, and the unique key on (company, client_uuid)
+       * refused the loser. Its expense exists, made by its twin: it is answered with it exactly as a replay is, and a
+       * different payload under the key is still a 409.
+       */
+      if (dto.clientUuid && e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        const replayed = await this.replay(companyId, dto.clientUuid, fingerprint);
+        if (replayed) return replayed;
+      }
+      throw e;
+    }
 
     await this.audit.record({
       entityType: 'Expense',
@@ -183,6 +187,25 @@ export class ExpensesService {
 
     // Deliberately NO rollup recompute: a report changes no figure.
     return this.detail(binToUuid(id));
+  }
+
+  /**
+   * The idempotent replay, checked before any work and again when the unique key refuses a racing twin. Same key and
+   * same payload returns the original; same key and a different payload is a 409, because that is not a retry. Null
+   * when the key recorded nothing.
+   */
+  private async replay(companyId: Buffer, clientUuid: string, fingerprint: string) {
+    const replay = await this.db.expense.findFirst({
+      where: { companyId, clientUuid: uuidToBin(clientUuid) },
+    });
+    if (!replay) return null;
+    if (replay.clientRequestHash !== fingerprint) {
+      throw new ConflictException({
+        code: 'idempotency_conflict',
+        message: 'That request id was already used for a different expense.',
+      });
+    }
+    return this.detail(binToUuid(replay.id));
   }
 
   // ─────────────────────────────── decide ────────────────────────────────
