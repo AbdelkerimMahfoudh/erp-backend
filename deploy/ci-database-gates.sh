@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# The database gates CI runs on every push (docs/48 controls 2 and 20; docs/22).
+#
+#   CI_DATABASE_GATES=disposable ROOT_PW=… MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 deploy/ci-database-gates.sh
+#   CI_DATABASE_GATES=disposable MYSQL_SOCKET=/path/mysqld.sock deploy/ci-database-gates.sh
+#
+# On a FRESH, DISPOSABLE MySQL 8 server only — the runner's own, or a scratch server on a developer's machine. It
+# refuses to start unless CI_DATABASE_GATES=disposable and the server has no `phonestore` or `addon_ci` schema, so it
+# can never run against a database that holds anything.
+#
+# What it proves, in the order production does it:
+#   1. the four identities are created from deploy/mysql-identities.sql, with passwords made here and never printed;
+#   2. every migration applies from empty under MySQL 8's default strict sql_mode, as the migrator, and
+#      `prisma migrate status` then reports nothing pending;
+#   3. the permission catalogue and the role grants match the code (the deploy-time gate);
+#   4. each identity is refused what it must not do, the audit triggers included (deploy/verify-mysql-identities.sh);
+#   5. the env-gated real-MySQL spec (InnoDB locks, NOWAIT, CHECKs, concurrency) runs on its own `addon_ci` schema.
+# Any failure exits non-zero.
+set -euo pipefail
+
+if [ "${CI_DATABASE_GATES:-}" != "disposable" ]; then
+  echo "Refusing: set CI_DATABASE_GATES=disposable to confirm this server is disposable." >&2
+  exit 2
+fi
+
+HOST=${MYSQL_HOST:-127.0.0.1}
+PORT=${MYSQL_PORT:-3306}
+if [ -n "${MYSQL_SOCKET:-}" ]; then CONN=(--socket "$MYSQL_SOCKET"); else CONN=(-h "$HOST" -P "$PORT" --protocol=TCP); fi
+root() { MYSQL_PWD="${ROOT_PW:-}" mysql "${CONN[@]}" -u root -N -B "$@"; }
+
+existing=$(root -e "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name IN ('phonestore', 'addon_ci')")
+if [ "$existing" != "0" ]; then
+  echo "Refusing: this server already has a phonestore or addon_ci schema." >&2
+  exit 2
+fi
+
+# Prisma talks TCP. With a socket, the URL still needs a host: the socket goes in its query string.
+if [ -n "${MYSQL_SOCKET:-}" ]; then URL_HOST="localhost"; URL_TAIL="?socket=$MYSQL_SOCKET"; else URL_HOST="$HOST:$PORT"; URL_TAIL=""; fi
+url() { printf 'mysql://%s:%s@%s/%s%s' "$1" "$2" "$URL_HOST" "$3" "$URL_TAIL"; }
+
+# MySQL 8's own default: the strict mode production runs (docs/22). Triggers need the binary-log setting (see
+# deploy/mysql-identities.sql).
+root -e "SET GLOBAL sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'; SET GLOBAL log_bin_trust_function_creators = 1"
+
+echo "== 1. identities"
+MIGRATOR_PW=$(openssl rand -hex 24)
+APP_PW=$(openssl rand -hex 24)
+BACKUP_PW=$(openssl rand -hex 24)
+ADMIN_PW=$(openssl rand -hex 24)
+root -e "CREATE DATABASE phonestore CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+{ printf "SET @migrator_pw='%s', @app_pw='%s', @backup_pw='%s', @admin_pw='%s';\n" \
+    "$MIGRATOR_PW" "$APP_PW" "$BACKUP_PW" "$ADMIN_PW"
+  cat deploy/mysql-identities.sql; } | root
+
+echo "== 2. migrations from empty, as the migrator, strict sql_mode"
+DATABASE_URL=$(url phonestore_migrator "$MIGRATOR_PW" phonestore) npx prisma migrate deploy
+DATABASE_URL=$(url phonestore_migrator "$MIGRATOR_PW" phonestore) npx prisma migrate status
+
+echo "== 3. permission catalogue and role grants"
+DATABASE_URL=$(url phonestore_app "$APP_PW" phonestore) npx ts-node --transpile-only scripts/verify-permission-catalogue.ts
+
+echo "== 4. what each identity cannot do"
+# One fictitious business with a subscription and one event, so the append-only trigger probes have rows that
+# exist: an UPDATE matching nothing fires no trigger (this schema is disposable).
+root phonestore -e "SET @c = UNHEX(REPLACE(UUID(), '-', '')), @s = UNHEX(REPLACE(UUID(), '-', ''));
+  INSERT INTO companies (id, name, settings, updated_at, public_store_id) VALUES (@c, 'CI identity probe', JSON_OBJECT(), NOW(6), 'CIPROBE0001');
+  INSERT INTO subscriptions (id, company_id) VALUES (@s, @c);
+  INSERT INTO subscription_events (id, company_id, subscription_id, kind, note) VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @s, 'created', 'CI identity probe')"
+DB=phonestore APP_PW="$APP_PW" BACKUP_PW="$BACKUP_PW" MIGRATOR_PW="$MIGRATOR_PW" bash deploy/verify-mysql-identities.sh
+
+echo "== 5. the real-MySQL spec, on its own schema"
+root -e "CREATE DATABASE addon_ci CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON addon_ci.* TO 'phonestore_app'@'%'"
+DATABASE_URL=$(url root "${ROOT_PW:-}" addon_ci) npx prisma migrate deploy
+ADDON_ROOT_URL=$(url root "${ROOT_PW:-}" addon_ci) ADDON_APP_URL=$(url phonestore_app "$APP_PW" addon_ci) \
+  npx jest --ci src/platform/trial-addons.mysql.spec.ts

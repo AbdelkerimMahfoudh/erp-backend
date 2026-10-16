@@ -245,7 +245,8 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
     root = new PrismaClient({ datasourceUrl: ROOT_URL });
     app = new PrismaClient({ datasourceUrl: APP_URL });
     const [who] = await app.$queryRaw<{ u: string }[]>`SELECT CURRENT_USER() AS u`;
-    expect(who.u).toBe('phonestore_app@127.0.0.1');
+    // The application account, whatever host its grant names (`'%'` in deploy/mysql-identities.sql).
+    expect(who.u).toMatch(/^phonestore_app@/);
     const [applied] = await root.$queryRaw<{ n: bigint }[]>`
       SELECT COUNT(*) AS n FROM _prisma_migrations WHERE migration_name = '0097_scheduled_addons' AND finished_at IS NOT NULL AND rolled_back_at IS NULL`;
     expect(Number(applied.n)).toBe(1);

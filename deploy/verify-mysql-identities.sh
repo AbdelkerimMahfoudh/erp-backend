@@ -42,9 +42,17 @@ if [ -n "$COMPANY_HEX" ]; then
   must_pass "app can append an audit row"      phonestore_app "$APP_PW" "INSERT INTO audit_logs (company_id, entity_type, action, reason) VALUES (UNHEX('$COMPANY_HEX'), 'IdentityProbe', 'create', 'verify-mysql-identities')"
   must_fail "app cannot UPDATE an audit row (trigger)" phonestore_app "$APP_PW" "UPDATE audit_logs SET reason='tampered' WHERE entity_type='IdentityProbe'" "append-only"
   must_fail "app cannot DELETE an audit row (trigger)" phonestore_app "$APP_PW" "DELETE FROM audit_logs WHERE entity_type='IdentityProbe'" "append-only"
-  must_fail "app cannot rewrite a subscription event (trigger)" phonestore_app "$APP_PW" "UPDATE subscription_events SET note='tampered' WHERE company_id=UNHEX('$COMPANY_HEX')" "append-only"
 else
   echo "SKIP audit-trigger probes: no company row in $DB"
+fi
+
+# An UPDATE that matches no row fires no trigger and proves nothing, so this probe aims at an event that exists.
+EVENT_HEX=$(MYSQL_PWD="$APP_PW" mysql "${CONN[@]}" -u phonestore_app -N -B "$DB" -e "SELECT HEX(id) FROM subscription_events LIMIT 1" 2>/dev/null)
+if [ -n "$EVENT_HEX" ]; then
+  must_fail "app cannot rewrite a subscription event (trigger)" phonestore_app "$APP_PW" "UPDATE subscription_events SET note='tampered' WHERE id=UNHEX('$EVENT_HEX')" "append-only"
+  must_fail "app cannot delete a subscription event (trigger)" phonestore_app "$APP_PW" "DELETE FROM subscription_events WHERE id=UNHEX('$EVENT_HEX')" "append-only"
+else
+  echo "SKIP subscription-event trigger probes: no subscription event in $DB"
 fi
 
 # --- the backup account: read everything, change nothing ----------------------

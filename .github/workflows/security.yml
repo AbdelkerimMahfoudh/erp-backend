@@ -2,8 +2,10 @@
 #
 # Every push and pull request: the whole git history is scanned for secrets
 # (gitleaks, and the project's own scanner so the same check runs anywhere),
-# dependencies are audited with the lockfile, and the code must type-check and
-# pass its tests. A failure here is a red build, never a warning.
+# dependencies are audited with the lockfile, the code must type-check and pass
+# its tests, and every migration must apply from empty under strict sql_mode,
+# with the permission catalogue, the database identities and the real-MySQL
+# spec checked on that schema. A failure here is a red build, never a warning.
 name: security
 on:
   push:
@@ -48,6 +50,9 @@ jobs:
   build-and-test:
     name: type-check, schema, tests
     runs-on: ubuntu-latest
+    env:
+      # `prisma validate` reads the datasource's variable but never connects: a host-only URL, no credential.
+      DATABASE_URL: mysql://ci@127.0.0.1:3306/validate_only
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -58,5 +63,23 @@ jobs:
       - run: npx prisma validate
       - run: npx tsc --noEmit -p tsconfig.json
       - run: npx jest --ci
-      - name: permission catalogue drift
-        run: npx ts-node --transpile-only scripts/verify-permission-catalogue.ts || true
+  database:
+    name: migrations, catalogue, identities, real-MySQL spec
+    # The runner image's own MySQL 8.0, started for this job and thrown away with it (root's password is the
+    # image's documented default). Pinned so the server does not change under the gate.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: sudo systemctl start mysql.service
+      - name: database gates (deploy/ci-database-gates.sh)
+        env:
+          CI_DATABASE_GATES: disposable
+          ROOT_PW: root
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: '3306'
+        run: bash deploy/ci-database-gates.sh
