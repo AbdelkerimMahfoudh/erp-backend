@@ -56,11 +56,22 @@ export function newUuidV7(): string {
   return binToUuid(newUuidV7Bin());
 }
 
-/** Canonical UUID string -> 16-byte Buffer. Throws on malformed input. */
+/**
+ * What `uuidToBin` throws on malformed input. Its own class so the exception filter can answer it as the client's
+ * mistake (400 `id_invalid`, as `RecordIdPipe` does) wherever the value came from — a path id, a body field, a query.
+ */
+export class InvalidUuidError extends Error {
+  constructor(value: string) {
+    super(`Invalid UUID string: "${value}"`);
+    this.name = 'InvalidUuidError';
+  }
+}
+
+/** Canonical UUID string -> 16-byte Buffer. Throws `InvalidUuidError` on malformed input. */
 export function uuidToBin(uuid: string): Buffer {
   const hex = uuid.replace(/-/g, '');
   if (hex.length !== 32 || !/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`Invalid UUID string: "${uuid}"`);
+    throw new InvalidUuidError(uuid);
   }
   return Buffer.from(hex, 'hex');
 }

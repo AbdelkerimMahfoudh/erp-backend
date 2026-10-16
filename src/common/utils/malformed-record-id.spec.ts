@@ -11,8 +11,9 @@ import { TransfersService } from '../../transfers/transfers.service';
  * A record id that is not a uuid — a mistyped deep link, a stale notification,
  * a probe — is "not found", never a crash.
  *
- * `uuidToBin` throws a plain Error on anything but 36 uuid characters, and a
- * plain Error is a 500 with a stack trace in the log. Every read by id answers
+ * `uuidToBin` throws on anything but 36 uuid characters; that was a 500 with a
+ * stack trace in the log until the filter learned to answer it as 400
+ * `id_invalid` (2026-10-16, `malformed-id.spec.ts`). Every read by id here answers
  * exactly as it does for a well-formed id that names nothing: 404, before the
  * database is asked anything. Sales, returns, expenses and corrections already
  * did; these did not.

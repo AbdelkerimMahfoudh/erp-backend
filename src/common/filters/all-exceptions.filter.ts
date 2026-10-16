@@ -12,6 +12,7 @@ import { Request, Response } from 'express';
 import { AppClsStore } from '../context/request-context';
 import { scrubUrl } from '../http/log-scrub';
 import { MissingTenantContextError } from '../../prisma/tenant.extension';
+import { InvalidUuidError } from '../utils/uuid.util';
 
 interface ErrorBody {
   statusCode: number;
@@ -263,6 +264,17 @@ export class AllExceptionsFilter implements ExceptionFilter {
        * is logged with the answer only, never with the body the parser attached to it (C16).
        */
       return { status: exception.status, message: exception.message, details: {} };
+    }
+
+    if (exception instanceof InvalidUuidError) {
+      /*
+       * A record id that is not a uuid reached `uuidToBin` (2026-10-16: nine routes, among them GET /categories/:id,
+       * PATCH /categories/:id, POST /imports/:id/commit and POST /users/:id/cancel-invitation, answered 500). It is the
+       * client's mistake, answered as `RecordIdPipe` answers it (D161): a phone replaying a queued write treats a 5xx
+       * as "the outcome is unknown", which for a malformed id it never stops being. Ids read from the database are
+       * Buffers and never pass through `uuidToBin`.
+       */
+      return { status: HttpStatus.BAD_REQUEST, message: 'That record id is not valid.', code: 'id_invalid', details: {} };
     }
 
     if (exception instanceof MissingTenantContextError) {
