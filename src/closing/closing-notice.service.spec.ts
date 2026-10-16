@@ -15,14 +15,15 @@ const BRANCH = newUuidV7Bin();
 const OWNER_A = newUuidV7Bin();
 const OWNER_B = newUuidV7Bin();
 
-function makeService(owners: { id: Buffer; phone: string | null }[]) {
+function makeService(owners: { id: Buffer; phone: string | null; phoneVerifiedAt?: Date | null }[]) {
   const inserted = new Set<string>();
   const created: unknown[] = [];
   const prisma: any = {
     branch: { findUnique: async () => ({ name: 'Main Store' }) },
     company: { findUnique: async () => ({ timezone: 'Africa/Nouakchott', currency: 'MRU' }) },
     companySettings: { findUnique: async () => ({ whatsappLanguage: 'fr', whatsappIncludeAmounts: true }) },
-    userBranch: { findMany: async () => owners.map((u) => ({ user: u })) },
+    // A number is verified unless a case says otherwise: the notice goes only to a proven number (review F17).
+    userBranch: { findMany: async () => owners.map((u) => ({ user: { phoneVerifiedAt: u.phone ? new Date('2026-09-01T00:00:00Z') : null, ...u } })) },
     notification: {
       create: async ({ data }: { data: { dedupeKey: string; targetUserId: Buffer } }) => {
         const key = `${data.dedupeKey}:${data.targetUserId.toString('hex')}`;
@@ -44,6 +45,14 @@ const ctx = { branchName: 'Main Store', timezone: 'Africa/Nouakchott', businessD
 const sale = { saleIdHex: 'ab'.repeat(16), soldAt: new Date('2026-09-23T18:45:00Z'), total: 2500, amountPaid: 2500, balanceDue: 0, itemLabel: 'Google Pixel 8', itemCount: 1 };
 
 describe('ClosingNoticeService.deliver', () => {
+  it('sends nothing to an Owner number that was never verified — it may be someone else’s (review F17)', async () => {
+    const { service, channel, created } = makeService([{ id: OWNER_A, phone: '+22200000009', phoneVerifiedAt: null }]);
+    const outcome = await service.deliver(COMPANY, BRANCH, saleNotice(ctx, sale));
+    expect(outcome).toEqual({ notified: 1, deduplicated: 0, sent: 0, failures: ['owner_has_no_phone'] });
+    expect(created).toHaveLength(1);
+    expect(channel.messages).toHaveLength(0);
+  });
+
   it('tells every Owner once in-app, and sends by WhatsApp only to those with a number', async () => {
     const { service, channel, created } = makeService([
       { id: OWNER_A, phone: '+22200000001' },

@@ -3,7 +3,7 @@ import { OtpService } from '../auth/otp/otp.service';
 import { DisabledWhatsAppChannel, TestWhatsAppChannel } from '../messaging/channels';
 import { ACCOUNT_DELETED_TEMPLATE, ACCOUNT_DELETION_TEMPLATE } from '../messaging/templates';
 import { uuidToBin } from '../common/utils/uuid.util';
-import { AccountDeletionService, DeletionPrincipal, NOT_REMOVED, REDACTED_DESTINATION } from './account-deletion.service';
+import { AccountDeletionService, DeletionPrincipal, NOT_REMOVED, REDACTED_DESTINATION, REDACTED_REQUEST_HASH } from './account-deletion.service';
 import { AccountService } from './account.service';
 import { FakePrisma } from './testing/fake-prisma';
 import { DELETED_USER_NAME, UNUSABLE_PASSWORD_HASH } from './deletion-rules';
@@ -662,6 +662,28 @@ describe('closing the business', () => {
     expect(h.prisma.rows('payment')).toHaveLength(3);
   });
 
+  it('leaves no fingerprint that would give the numbers back, no requester address, and no name of a cancelled invitee (review F03, F07, F11)', async () => {
+    const h = harness();
+    // Each fingerprint hashed the number with the rest of the row: 10^8 tries would find it again.
+    h.prisma.seed(
+      'payment',
+      { id: id('9611'), companyId: C1, method: 'mobile', amount: 300, payerNumber: '+22236123456', clientRequestHash: 'a'.repeat(64) },
+      { id: id('9612'), companyId: C2, method: 'mobile', amount: 100, payerNumber: '+22245000000', clientRequestHash: 'b'.repeat(64) },
+    );
+    h.prisma.seed('agentTransaction', { id: id('5711'), companyId: C1, customerNumber: '36123456', customerNumberLast4: '3456', clientRequestHash: 'c'.repeat(64), recordedById: OWNER, recordedByName: 'Aminata Owner' });
+    // An invitation cancelled before the closure: the row was soft-deleted with its name kept.
+    h.prisma.seed('user', { id: id('7701'), ...user({ name: 'Invited Then Cancelled', login: 'cancelled', phone: null, email: null, deletedAt: new Date('2026-10-01T00:00:00Z'), isActive: false }) });
+    await h.service.start(h.principal(OWNER), { password: 'owner-pw', ip: '203.0.113.7' });
+    const view = await h.service.confirm(h.principal(OWNER), h.lastCode()!);
+    expect(view.status).toBe('completed');
+
+    expect(h.row('payment', id('9611'))).toMatchObject({ payerNumber: null, clientRequestHash: null });
+    expect(h.row('payment', id('9612'))).toMatchObject({ payerNumber: '+22245000000', clientRequestHash: 'b'.repeat(64) });
+    expect(h.row('agentTransaction', id('5711'))).toMatchObject({ customerNumber: '', clientRequestHash: REDACTED_REQUEST_HASH });
+    expect(h.row('user', id('7701'))).toMatchObject({ name: DELETED_USER_NAME, email: null, phone: null });
+    for (const r of h.prisma.rows('accountDeletionRequest')) expect(r.requestIp).toBeNull();
+  });
+
   it('removes every person, contact and credential in it, closes it, and keeps the books', async () => {
     const h = harness();
     await h.service.start(h.principal(OWNER), { password: 'owner-pw', language: 'ar' });
@@ -815,6 +837,8 @@ describe('what a deletion leaves of the person, wherever it was copied (privacy 
     h.prisma.seed('contactVerification', { id: id('5301'), channel: 'whatsapp', destination: '+22231234568' }, { id: id('5302'), channel: 'whatsapp', destination: '+22299999999' });
     h.prisma.seed('verificationIntent', { id: id('5401'), companyId: C1, userId: EMPLOYEE, consumedAt: null }, { id: id('5402'), companyId: C1, userId: OWNER, consumedAt: null });
     h.prisma.seed('registrationAttempt', { id: id('9802'), companyId: null, ownerName: 'Moussa Employee', email: null, phone: '+22231234568' });
+    // The same number applied for another business, which is that business's record (review F04).
+    h.prisma.seed('registrationAttempt', { id: id('9803'), companyId: Buffer.alloc(16, 0xbb), ownerName: 'Moussa Employee', email: null, phone: '+22231234568' });
     h.prisma.seed('seatAllocation', { id: id('5501'), companyId: C1, requestedBy: '+22231234568', confirmedBy: null, closedBy: null }, { id: id('5502'), companyId: C1, requestedBy: 'user:someone-else', confirmedBy: null, closedBy: null });
     h.prisma.seed('outboxChange', { id: id('5601'), companyId: C1, deviceId: 'phone-1', payload: { name: 'Moussa' } }, { id: id('5602'), companyId: C1, deviceId: 'phone-2', payload: {} });
     h.prisma.seed(
@@ -845,6 +869,7 @@ describe('what a deletion leaves of the person, wherever it was copied (privacy 
     expect(h.prisma.rows('contactVerification').map((r) => r.destination)).toEqual(['+22299999999']);
     expect(h.prisma.rows('verificationIntent').map((r) => (r.userId as Buffer).equals(OWNER))).toEqual([true]);
     expect(h.row('registrationAttempt', id('9802'))).toMatchObject({ ownerName: DELETED_USER_NAME, phone: null });
+    expect(h.row('registrationAttempt', id('9803'))).toMatchObject({ ownerName: 'Moussa Employee', phone: '+22231234568' });
     expect(h.row('seatAllocation', id('5501')).requestedBy).toBe(DELETED_USER_NAME);
     expect(h.row('seatAllocation', id('5502')).requestedBy).toBe('user:someone-else');
     expect(h.prisma.rows('outboxChange').map((r) => r.deviceId)).toEqual(['phone-2']);

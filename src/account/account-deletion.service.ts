@@ -57,6 +57,8 @@ import {
 
 /** What a code's destination reads once its person is deleted: the row stays, the number does not. */
 export const REDACTED_DESTINATION = '[deleted]';
+/** What replaces a request fingerprint that hashed a deleted number: a value no request can produce. */
+export const REDACTED_REQUEST_HASH = '0'.repeat(64);
 
 /** The copies a deletion cannot reach, named in its summary rather than claimed gone. */
 export const NOT_REMOVED = ['audit_logs', 'subscription_events', 'platform_audit_events', 'agent_append_only_snapshots', 'backups'] as const;
@@ -424,6 +426,8 @@ export class AccountDeletionService {
               status: 'completed',
               completedAt: new Date(),
               activeKey: null,
+              // The address the request came from goes with the person (review F07); the request itself stays, as proof.
+              requestIp: null,
               retainedSummary: summary as Prisma.InputJsonValue,
               version: { increment: 1 },
             },
@@ -509,6 +513,8 @@ export class AccountDeletionService {
     await lockSubscription(tx, companyId);
     const people = await tx.user.findMany({ where: { companyId, deletedAt: null }, select: { id: true, email: true, phone: true } });
     const forgotten = await this.forgetPeople(tx, companyId, people, now, request.userId);
+    // People already removed before the closure — a cancelled invitation keeps its name — are forgotten too (review F11).
+    await tx.user.updateMany({ where: { companyId, deletedAt: { not: null } }, data: { name: DELETED_USER_NAME, email: null, phone: null } });
     await tx.notification.deleteMany({ where: { companyId } });
     await tx.outboxChange.deleteMany({ where: { companyId } });
     // Every challenge and session of the company, whoever's — a login deleted earlier included.
@@ -525,9 +531,15 @@ export class AccountDeletionService {
     });
     await tx.counterparty.updateMany({ where: { companyId, kind: { in: ['manual_store', 'connected_store'] } }, data: { phone: null, note: null } });
     // The numbers payments came from are people's contact details too (D151); the money itself stays.
-    await tx.payment.updateMany({ where: { companyId, payerNumber: { not: null } }, data: { payerNumber: null } });
-    // The numbers the money services counter served: blanked, the amounts and legs kept (the 0092 trigger allows exactly this).
-    const agentNumbers = await tx.agentTransaction.updateMany({ where: { companyId }, data: { customerNumber: '', customerNumberLast4: '' } });
+    // Each payment's request fingerprint hashed the number with the rest of the row: left, it would give the number back
+    // to anyone who tried every 8-digit one (review F03). A closed business sends no more requests to compare it with.
+    await tx.payment.updateMany({ where: { companyId }, data: { payerNumber: null, clientRequestHash: null } });
+    // The numbers the money services counter served: blanked, the amounts and legs kept (the 0092 trigger allows exactly
+    // this, and does not guard the fingerprint) — and the fingerprint that hashed the number replaced, for the same reason.
+    const agentNumbers = await tx.agentTransaction.updateMany({
+      where: { companyId },
+      data: { customerNumber: '', customerNumberLast4: '', clientRequestHash: REDACTED_REQUEST_HASH },
+    });
     await tx.agentMistakeReport.updateMany({ where: { companyId }, data: { note: null, decisionNote: null } });
     // Free text and receipts: written by people, about people.
     const receipts = await tx.expense.findMany({ where: { companyId, receiptKey: { not: null } }, select: { receiptKey: true } });
@@ -640,7 +652,12 @@ export class AccountDeletionService {
       const registrations: Prisma.RegistrationAttemptWhereInput[] = [];
       if (emails.length > 0) registrations.push({ email: { in: emails } });
       if (phones.length > 0) registrations.push({ phone: { in: phones } });
-      await tx.registrationAttempt.updateMany({ where: { OR: registrations }, data: { ownerName: DELETED_USER_NAME, email: null, phone: null } });
+      // Their applications for this business, or for none yet — never another business's, which the same contact may
+      // have applied for and which stays that business's record (review F04).
+      await tx.registrationAttempt.updateMany({
+        where: { AND: [{ OR: registrations }, { OR: [{ companyId }, { companyId: null }] }] },
+        data: { ownerName: DELETED_USER_NAME, email: null, phone: null },
+      });
     }
     const devicesSynced = await tx.syncDevice.findMany({ where: { userId: { in: ids } }, select: { deviceId: true } });
     if (devicesSynced.length > 0) await tx.outboxChange.deleteMany({ where: { companyId, deviceId: { in: devicesSynced.map((d) => d.deviceId) } } });

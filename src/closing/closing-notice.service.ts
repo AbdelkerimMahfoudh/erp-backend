@@ -57,14 +57,17 @@ export class ClosingNoticeService {
     };
   }
 
-  /** Every active Owner of the company, with their WhatsApp number when they have one. */
+  /**
+   * Every active Owner of the company, with their WhatsApp number only once it is verified (review F17): a number typed
+   * by hand and never proven may be someone else's, and a closing notice names the branch and what was sold.
+   */
   private async owners(companyId: Buffer): Promise<{ id: Buffer; phone: string | null }[]> {
     const rows = await this.prisma.userBranch.findMany({
       where: { companyId, role: { key: 'owner' }, user: { isActive: true, deletedAt: null } },
-      select: { user: { select: { id: true, phone: true } } },
+      select: { user: { select: { id: true, phone: true, phoneVerifiedAt: true } } },
     });
     const seen = new Map<string, { id: Buffer; phone: string | null }>();
-    for (const r of rows) seen.set(r.user.id.toString('hex'), r.user);
+    for (const r of rows) seen.set(r.user.id.toString('hex'), { id: r.user.id, phone: r.user.phoneVerifiedAt ? r.user.phone : null });
     return [...seen.values()];
   }
 
