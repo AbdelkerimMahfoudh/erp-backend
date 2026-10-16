@@ -905,6 +905,35 @@ describe('12. suspended business at the scheduled activation time', () => {
     expect(JSON.stringify(w.t)).toBe(after);
   });
 
+  it('closed by its Owner, then a payment confirmed during the trial — today’s behaviour, awaiting the owner (a PQ3/PQ4 follow-up): recorded and scheduled, said to start at the trial’s end, never put in force, never flagged', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const store = (await askStore(w, b)).allocation.id;
+    await w.closeCompany(b);
+    // The console's queue still offers it for payment: the queue does not read a business's closure.
+    expect((await w.seats.queue('pending_payment')).map((r) => r.id)).toContain(store);
+    const confirmed = await w.confirm(store, 500, { reference: 'BK-CLOSED' });
+    expect(confirmed).toMatchObject({
+      applied: true,
+      allocation: { status: 'scheduled', effectiveAt: T.toISOString(), activation: { startsAt: T.toISOString(), timeZone: 'Africa/Casablanca', waitsFor: 'trial_end' } },
+    });
+    for (const at of [T, new Date(T.getTime() + 61_000), new Date(T.getTime() + DAY)]) {
+      w.clock.set(at);
+      await w.trialEnd.applyIfDue(b.companyId);
+      await w.sweeper.sweep();
+    }
+    // Paid for, kept, and never delivered; nothing on the request or in the audit tells anybody to settle it.
+    expect(w.request(store)).toMatchObject({ status: 'scheduled', reason: null });
+    expect(w.payments(b).map((p) => p.amount.toString())).toEqual(['500']);
+    expect(w.branch(b, 'B')).toBeNull();
+    expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([500]);
+    expect(w.audits(b).filter((a) => /activat/.test(a.action))).toEqual([]);
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    // And what the website and the console read still promises the trial's end.
+    expect((await w.seats.listForCompany(b.companyId)).map((r) => r.activation)).toEqual([
+      { startsAt: T.toISOString(), timeZone: 'Africa/Casablanca', waitsFor: 'trial_end' },
+    ]);
+  });
+
   it('suspended with no paid access approved: the requests wait, paid and counted nowhere — no period is opened for them', async () => {
     const { w, b } = await trialWorld();
     const { store, seat } = await scheduledStoreAndSeat(w, b);

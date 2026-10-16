@@ -858,6 +858,62 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
     });
   });
 
+  describe('closed by its Owner around a payment confirmed during the trial — today’s behaviour, awaiting the owner (a PQ3/PQ4 follow-up)', () => {
+    /** The real closure, as the application account runs it (account deletion). */
+    async function closeCompany(b: Business, at: Date): Promise<void> {
+      const deletion = new AccountDeletionService(app as never, {} as never, {} as never, {} as never);
+      await app.$transaction((tx) =>
+        (deletion as unknown as { closeCompany: (tx: unknown, r: unknown, now: Date) => Promise<unknown> }).closeCompany(tx, { companyId: b.companyId, userId: b.ownerId }, at),
+      );
+    }
+
+    for (const order of ['closed, then confirmed', 'confirmed, then closed'] as const) {
+      it(`${order}: the payment is recorded and the store scheduled, said to start at the trial’s end — never put in force, and nothing flags it`, async () => {
+        const { s, b, T, clock } = await inTrial({ approve: true });
+        const store = (await s.seats.requestStore(b.companyId, { name: 'B', activity: 'electronics', requestedBy: 'owner' })).allocation.id;
+        let confirmed: Awaited<ReturnType<typeof confirm>>;
+        if (order === 'closed, then confirmed') {
+          await closeCompany(b, clock.now());
+          // The console's queue still offers it for payment: the queue does not read a business's closure.
+          expect((await s.seats.queue('pending_payment')).some((r) => r.id === store)).toBe(true);
+          confirmed = await confirm(s, store, 500, 'BK-CLOSED');
+        } else {
+          confirmed = await confirm(s, store, 500, 'BK-CLOSED');
+          await closeCompany(b, clock.now());
+        }
+        expect((await root.company.findUniqueOrThrow({ where: { id: b.companyId } })).closedAt).not.toBeNull();
+        expect(confirmed).toMatchObject({
+          applied: true,
+          allocation: { status: 'scheduled', effectiveAt: T.toISOString(), activation: { startsAt: T.toISOString(), timeZone: 'Africa/Casablanca', waitsFor: 'trial_end' } },
+        });
+
+        // The end, a minute later, a day later: the trigger and the sweeper each look.
+        for (const at of [T, new Date(T.getTime() + 61_000), new Date(T.getTime() + DAY)]) {
+          clock.set(at);
+          await s.trialEnd.applyIfDue(b.companyId);
+          await s.sweeper.sweep();
+        }
+        const l = await ledger(b);
+        expect(l).toMatchObject({
+          requests: [expect.objectContaining({ status: 'scheduled', effectiveAt: T.toISOString() })],
+          payments: ['500'],
+          periods: [expect.objectContaining({ total: 500 })],
+          activations: 0,
+          expiries: 1,
+        });
+        expect(l.branches).not.toContain('B');
+        // Nothing on the request or in the audit tells the Super Admin to settle the payment kept for it.
+        expect((await root.seatAllocation.findUniqueOrThrow({ where: { id: bin(store) } })).reason).toBeNull();
+        const audits = await root.platformAuditEvent.findMany({ where: { targetId: b.companyId }, select: { action: true } });
+        expect(audits.filter((a) => /activat/.test(a.action))).toEqual([]);
+        // What the website and the console read still promises the trial's end.
+        const listed = await s.seats.listForCompany(b.companyId);
+        expect(listed.map((r) => r.activation)).toEqual([{ startsAt: T.toISOString(), timeZone: 'Africa/Casablanca', waitsFor: 'trial_end' }]);
+        note(`closed (${order}): ${JSON.stringify({ status: listed[0].status, activation: listed[0].activation, payments: l.payments, periods: l.periods.map((p) => p.total) })}`);
+      });
+    }
+  });
+
   describe('supporting — an approval decided under the lock', () => {
     it('ten times: two approvals at once, neither naming a version — one transition, one first period, the other applied: false', async () => {
       for (let i = 0; i < 10; i += 1) {
