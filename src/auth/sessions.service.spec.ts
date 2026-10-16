@@ -1,3 +1,4 @@
+import { FakePrisma } from '../account/testing/fake-prisma';
 import { SessionsService } from './sessions.service';
 import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 
@@ -59,5 +60,39 @@ describe('SessionsService.isAccessValid', () => {
   it('rejects a session that belongs to a different user', async () => {
     const svc = makeService(validRow({ userId: newUuidV7Bin() }));
     expect(await svc.isAccessValid(SID, binToUuid(USER))).toBe(false);
+  });
+});
+
+/**
+ * `rotate` is the refresh token's one-time use (docs/15 §5): a token rotates once, and a token that is no longer the
+ * current one is reuse and revokes the session — under concurrency too (BE2-02).
+ */
+describe('SessionsService.rotate', () => {
+  function rotating() {
+    const prisma = new FakePrisma();
+    // Argon2 takes real time: the verify yields, so concurrent refreshes all read the row before any writes it.
+    const hashing = {
+      hash: async (s: string) => `h:${s}`,
+      verify: async (h: string, s: string) => (await new Promise((r) => setTimeout(r, 5)), h === `h:${s}`),
+    };
+    prisma.seed('authSession', { id: SID, userId: USER, companyId: USER, refreshTokenHash: 'h:first', revokedAt: null, expiresAt: future() });
+    const svc = new SessionsService(prisma as never, hashing as never, {} as never);
+    const row = () => prisma.rows('authSession')[0];
+    return { svc, row };
+  }
+
+  it('rotates once; the old token presented again is reuse and revokes the session', async () => {
+    const { svc, row } = rotating();
+    await expect(svc.rotate(SID, 'first', 'second')).resolves.toMatchObject({ userId: USER });
+    expect(row()).toMatchObject({ refreshTokenHash: 'h:second', revokedAt: null });
+    await expect(svc.rotate(SID, 'first', 'third')).resolves.toBeNull();
+    expect(row().revokedAt).toBeInstanceOf(Date);
+  });
+
+  it('ten refreshes with the same token at once: one rotates, the rest are reuse, and the session is revoked', async () => {
+    const { svc, row } = rotating();
+    const results = await Promise.all(Array.from({ length: 10 }, (_, i) => svc.rotate(SID, 'first', `next-${i}`)));
+    expect(results.filter((r) => r !== null)).toHaveLength(1);
+    expect(row().revokedAt).toBeInstanceOf(Date);
   });
 });

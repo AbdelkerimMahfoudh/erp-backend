@@ -67,6 +67,12 @@ export class SessionsService {
    * Validate + rotate a session. Returns the owner on success (with the session
    * re-hashed to `newSecret`); returns null on any failure. A secret mismatch on
    * an otherwise-valid session is treated as reuse and revokes the session.
+   *
+   * One-time use holds under concurrency too: the new hash is written only if
+   * the hash just verified is still the stored one. Of two requests presenting
+   * the same token at once exactly one rotates; the other presented a token
+   * that is no longer current — reuse, exactly as if it had arrived a moment
+   * later — and the session is revoked.
    */
   async rotate(
     sessionId: Buffer,
@@ -79,18 +85,21 @@ export class SessionsService {
     }
 
     const valid = await this.hashing.verify(session.refreshTokenHash, presentedSecret);
-    if (!valid) {
+    const rotated =
+      valid &&
+      (
+        await this.prisma.authSession.updateMany({
+          where: { id: sessionId, revokedAt: null, refreshTokenHash: session.refreshTokenHash },
+          data: { refreshTokenHash: await this.hashing.hash(newSecret), lastUsedAt: new Date() },
+        })
+      ).count === 1;
+    if (!rotated) {
       await this.prisma.authSession.update({
         where: { id: sessionId },
         data: { revokedAt: new Date() },
       });
       return null;
     }
-
-    await this.prisma.authSession.update({
-      where: { id: sessionId },
-      data: { refreshTokenHash: await this.hashing.hash(newSecret), lastUsedAt: new Date() },
-    });
     return { userId: session.userId, companyId: session.companyId };
   }
 
