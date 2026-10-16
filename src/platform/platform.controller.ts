@@ -974,7 +974,7 @@ export class PlatformController {
   async payment(@Param('id') id: string, @Body() dto: PaymentDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
-    const p = await this.lifecycle.recordPayment(
+    const { payment: p, applied } = await this.lifecycle.recordPayment(
       id,
       {
         amount: dto.amount,
@@ -991,6 +991,10 @@ export class PlatformController {
       amount: p.amount.toString(),
       currency: p.currency,
       confirmedAt: p.confirmedAt?.toISOString() ?? null,
+      /** False when this request matched a payment already recorded: nothing new was written. */
+      applied,
+      recordedBy: p.recordedBy,
+      recordedAt: p.createdAt.toISOString(),
       /** Stated on every response, so no caller can infer otherwise. */
       providerVerified: false,
     };

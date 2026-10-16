@@ -899,6 +899,8 @@ export class SubscriptionLifecycleService {
     const reference = input.reference?.slice(0, 120) ?? null;
     const channel = input.channel ?? 'manual';
 
+    // The payment and its audit row commit together (review R-1): a payment is never recorded without its audit, so a
+    // resubmit after a failed audit write cannot be answered as a replay of a payment nobody audited.
     const { payment, replayed } = await this.prisma.$transaction(async (tx) => {
       await lockSubscription(tx, id);
       if (reference) {
@@ -930,31 +932,34 @@ export class SubscriptionLifecycleService {
           confirmedAt: input.confirm ? this.clock.now() : null,
         },
       });
+      await this.audit.record(
+        {
+          admin: ctx.admin,
+          action: input.confirm ? 'payment.record_and_confirm' : 'payment.record',
+          targetType: 'Company',
+          targetId: id,
+          targetLabel: sub.company.name,
+          reason: input.note ?? null,
+          after: {
+            paymentId: binToUuid(created.id),
+            amount: input.amount,
+            currency: 'MRU',
+            channel: created.channel,
+            reference: created.reference,
+            // Said explicitly, so nobody reading the log later infers otherwise.
+            providerVerified: false,
+          },
+          ip: ctx.ip ?? null,
+        },
+        tx,
+      );
       return { payment: created, replayed: false };
     });
-    if (replayed) return payment;
-
-    await this.audit.record({
-      admin: ctx.admin,
-      action: input.confirm ? 'payment.record_and_confirm' : 'payment.record',
-      targetType: 'Company',
-      targetId: id,
-      targetLabel: sub.company.name,
-      reason: input.note ?? null,
-      after: {
-        paymentId: binToUuid(payment.id),
-        amount: input.amount,
-        currency: 'MRU',
-        channel: payment.channel,
-        reference: payment.reference,
-        // Said explicitly, so nobody reading the log later infers otherwise.
-        providerVerified: false,
-      },
-      ip: ctx.ip ?? null,
-    });
-
-    return payment;
+    // A replay says so (review R-2): the console tells the administrator nothing new was recorded, and who recorded
+    // the payment it matched, instead of "Done" over a second payment that was silently not written.
+    return { payment, applied: !replayed };
   }
+
 
   /** The complete, ordered story of one subscription. */
   async timeline(companyId: string) {

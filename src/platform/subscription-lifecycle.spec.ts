@@ -822,12 +822,14 @@ describe('recording a payment: a retry is not a second payment (docs/68 §4.2, B
       },
       $queryRaw: async () => [],
     };
+    // The transaction client is marked, so a write can be seen to happen inside it.
     prisma.$transaction = (fn: (tx: unknown) => Promise<unknown>) => {
-      const run = queue.then(() => fn(prisma));
+      const run = queue.then(() => fn({ ...prisma, inTransaction: true }));
       queue = run.catch(() => undefined);
       return run;
     };
-    const service = new SubscriptionLifecycleService(prisma as never, { record: async (e: unknown) => void audits.push(e) } as never, {} as never, { now: () => new Date('2026-10-16T08:00:00Z') });
+    const record = async (e: unknown, db?: { inTransaction?: boolean }) => void audits.push({ e, inTransaction: db?.inTransaction === true });
+    const service = new SubscriptionLifecycleService(prisma as never, { record } as never, {} as never, { now: () => new Date('2026-10-16T08:00:00Z') });
     return { service, payments, audits };
   }
   const body = (over: Record<string, unknown> = {}) => ({ amount: '1500', paidAt: new Date('2026-10-15T00:00:00Z'), channel: 'bank_transfer' as const, reference: 'TRX-1', confirm: true, ...over });
@@ -836,15 +838,29 @@ describe('recording a payment: a retry is not a second payment (docs/68 §4.2, B
     const w = paymentWorld();
     const first = await w.service.recordPayment(COMPANY, body(), CTX);
     const again = await w.service.recordPayment(COMPANY, body(), CTX);
-    expect(again.id.equals(first.id)).toBe(true);
+    expect(again.payment.id.equals(first.payment.id)).toBe(true);
     expect(w.payments).toHaveLength(1);
     expect(w.audits).toHaveLength(1);
+  });
+
+  it('a replay says nothing new was recorded, so the console never answers "Done" over it (review R-2)', async () => {
+    const w = paymentWorld();
+    const first = await w.service.recordPayment(COMPANY, body(), CTX);
+    const again = await w.service.recordPayment(COMPANY, body(), CTX);
+    expect([first.applied, again.applied]).toEqual([true, false]);
+  });
+
+  it('the payment and its audit row are written in one transaction (review R-1)', async () => {
+    const w = paymentWorld();
+    await w.service.recordPayment(COMPANY, body(), CTX);
+    expect(w.audits).toEqual([expect.objectContaining({ inTransaction: true })]);
   });
 
   it('ten identical submissions at once record one payment', async () => {
     const w = paymentWorld();
     const all = await Promise.all(Array.from({ length: 10 }, () => w.service.recordPayment(COMPANY, body(), CTX)));
-    expect(new Set(all.map((p) => p.id.toString('hex'))).size).toBe(1);
+    expect(new Set(all.map((p) => p.payment.id.toString('hex'))).size).toBe(1);
+    expect(all.filter((p) => p.applied)).toHaveLength(1);
     expect(w.payments).toHaveLength(1);
   });
 
