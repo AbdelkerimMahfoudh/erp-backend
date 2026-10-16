@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { BillingService, periodRunning } from './billing.service';
+import { BillingService, NEWEST_PERIOD_FIRST, periodRunning } from './billing.service';
 import { rollDue } from './renewal';
 import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
 
@@ -10,7 +10,8 @@ import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
  * when it is written. Every reader of a company's periods must take it as the one paid for: the running period for
  * pricing and for growth, never due for a roll before it ends. And when a grant made during the trial closes that
  * period at the instant it starts and opens the next at the same instant, the newer of the two is the latest, for
- * every reader, deterministically.
+ * every reader, deterministically — told apart by what the closed one is (it ended at its own start), never by
+ * which id is larger.
  */
 
 const BILLING = readFileSync('src/billing/billing.service.ts', 'utf8');
@@ -37,11 +38,19 @@ function compare(a: unknown, b: unknown): number {
   return 0;
 }
 
-/** Rows in the order Prisma's `orderBy` asks for — every key in turn, as MySQL would apply them. */
+/** Rows in the order Prisma's `orderBy` asks for — every key in turn, as MySQL would apply them, NULLs where asked. */
 function ordered(rows: Row[], orderBy: Row | Row[]): Row[] {
-  const keys = (Array.isArray(orderBy) ? orderBy : [orderBy]).map((o) => Object.entries(o)[0] as [string, 'asc' | 'desc']);
+  const keys = (Array.isArray(orderBy) ? orderBy : [orderBy]).map((o) => {
+    const [key, spec] = Object.entries(o)[0] as [string, 'asc' | 'desc' | { sort: 'asc' | 'desc'; nulls?: 'first' | 'last' }];
+    return typeof spec === 'string' ? { key, dir: spec, nulls: undefined } : { key, dir: spec.sort, nulls: spec.nulls };
+  });
+  const isNull = (v: unknown) => v === null || v === undefined;
   return [...rows].sort((a, b) => {
-    for (const [key, dir] of keys) {
+    for (const { key, dir, nulls } of keys) {
+      if (isNull(a[key]) !== isNull(b[key])) {
+        const first = nulls ?? (dir === 'asc' ? 'first' : 'last');
+        return isNull(a[key]) === (first === 'first') ? -1 : 1;
+      }
       const c = compare(a[key], b[key]);
       if (c !== 0) return dir === 'desc' ? -c : c;
     }
@@ -99,16 +108,29 @@ describe('two periods that start at the same instant: the one opened later is th
   const P1 = { id: idAt(NOW.getTime() - 60_000, 1), periodStart: TRIAL_END, periodEnd: TRIAL_END, ...prices(500), assessedBranchFee: 500, assessedStaffFee: 0, assessedActivityFeeByBranch: {} };
   const P2 = { id: idAt(NOW.getTime(), 2), periodStart: TRIAL_END, periodEnd: PAID_END, ...prices(600), assessedBranchFee: 600, assessedStaffFee: 0, assessedActivityFeeByBranch: {} };
 
-  it('every reader orders newest first, and breaks a tie by the newer id', async () => {
-    const w = makeWorld([P1, P2], { branches: [store(MAIN, 'Main')] });
-    expect((await w.billing.latestPeriod(COMPANY))?.id).toEqual(P2.id);
+  /** Every reader of the periods, against these rows: each must take `latest`. */
+  async function everyReaderTakes(periods: Row[], latest: Row) {
+    const w = makeWorld(periods, { branches: [store(MAIN, 'Main')] });
+    expect((await w.billing.latestPeriod(COMPANY))?.id).toEqual(latest.id);
     await w.billing.closeCurrentPeriod(COMPANY, new Date(PAID_END.getTime() - 1));
-    expect(w.updates.map((u) => u.id)).toEqual([P2.id]);
-    await expect(w.billing.chargeablePricing(COMPANY)).resolves.toEqual({ running: true, pricing: prices(600) });
-    expect((await w.billing.pricingFor(COMPANY)).currentPeriod.assessedTotal).toBe(600);
+    expect(w.updates.map((u) => u.id)).toEqual(latest.periodEnd === null || latest.periodEnd.getTime() > PAID_END.getTime() - 1 ? [latest.id] : []);
+    await expect(w.billing.chargeablePricing(COMPANY)).resolves.toEqual({ running: true, pricing: prices(latest.branchMonthly) });
+    expect((await w.billing.pricingFor(COMPANY)).currentPeriod.assessedTotal).toBe(latest.assessedBranchFee);
     await w.billing.assessNow(COMPANY);
     expect(w.orderBys.length).toBeGreaterThanOrEqual(5);
-    for (const orderBy of w.orderBys) expect(orderBy).toEqual([{ periodStart: 'desc' }, { id: 'desc' }]);
+    for (const orderBy of w.orderBys) expect(orderBy).toEqual(NEWEST_PERIOD_FIRST);
+  }
+
+  it('every reader orders newest first: the period closed at its own start comes after the one that replaced it', async () => {
+    await everyReaderTakes([P1, P2], P2);
+  });
+
+  it('whatever their ids: the closed one made later on another clock, or with a larger id in the same millisecond, is still not the latest', async () => {
+    await everyReaderTakes([P2, { ...P1, id: idAt(NOW.getTime() + 60_000, 1) }], P2);
+    await everyReaderTakes([P2, { ...P1, id: idAt(NOW.getTime(), 0xff) }], P2);
+    // The one that replaced it has no end (an open grant): it still comes first.
+    const open = { ...P2, periodEnd: null };
+    await everyReaderTakes([{ ...P1, id: idAt(NOW.getTime() + 60_000, 1) }, open], open);
   });
 
   it('no reader of the periods keeps a start-only order', () => {

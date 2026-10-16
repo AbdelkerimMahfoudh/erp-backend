@@ -3,7 +3,7 @@ import { Prisma, type SeatAllocationKind, type SeatAllocationStatus } from '@pri
 import { PrismaService } from '../prisma/prisma.service';
 import { PlatformAuditService } from './platform-audit.service';
 import { AuditService } from '../common/audit/audit.service';
-import { BillingService, periodInForce, periodRunning, type BillingDb, type PeriodState } from '../billing/billing.service';
+import { BillingService, NEWEST_PERIOD_FIRST, periodInForce, periodRunning, type BillingDb, type PeriodState } from '../billing/billing.service';
 import { SubscriptionRenewal, lockSubscription } from '../billing/renewal';
 import { activityFee, chooseReplacementSlot, replacementDue, type ActivityPrices } from '../billing/pricing-rules';
 import { CLOCK, type Clock } from '../entitlement/clock';
@@ -1638,7 +1638,7 @@ export class SeatAllocationService {
     if (rows.some((r) => r.status === 'scheduled')) {
       const periods = await this.prisma.billingPeriod.findMany({
         where: { companyId: { in: rows.map((r) => r.companyId) } },
-        orderBy: [{ companyId: 'asc' }, { periodStart: 'desc' }, { id: 'desc' }],
+        orderBy: [{ companyId: 'asc' }, ...NEWEST_PERIOD_FIRST],
         select: { companyId: true, periodStart: true, periodEnd: true },
       });
       for (const p of periods) {

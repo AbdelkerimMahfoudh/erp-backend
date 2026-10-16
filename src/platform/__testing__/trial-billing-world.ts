@@ -28,8 +28,9 @@ import { evaluationColumnsOf, isEvaluationRead } from '../../entitlement/__testi
  *
  *  - **Prisma's reads** — `where` with equality, `in`, `notIn`, `not`, `lt`/`lte`/`gt`/`gte`, `OR`/`AND`/`NOT`, and
  *    relation filters (`is`-style objects, `some`/`none`/`every`); `select`/`include` through the relations the
- *    services read; `orderBy` on several keys (NULL first, as MySQL); `take`, `distinct`. An unsupported filter throws
- *    loudly, so a changed query cannot pass here by accident.
+ *    services read; `orderBy` on several keys (NULL first in ascending order and last in descending, as MySQL, or
+ *    where `{ sort, nulls }` puts it); `take`, `distinct`. An unsupported filter throws loudly, so a changed query
+ *    cannot pass here by accident.
  *  - **the keys and the CHECK** — one store name per company, one claim and one eligibility per company, the two keys
  *    of `branch_replacements`, and 0097's `ck_seat_alloc_scheduled`, each refusing as MySQL would;
  *  - **the census SQL** — the staff and held-seat queries of `seat-census.ts`, computed from the tables;
@@ -406,12 +407,18 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
   function query(model: Model, rows: Row[], args: Row = {}): Row[] {
     let out = rows.filter((r) => matches(model, r, args.where));
     if (args.orderBy) {
-      const keys = asArray(args.orderBy as Row).map((o) => Object.entries(o)[0] as [string, 'asc' | 'desc']);
+      const keys = asArray(args.orderBy as Row).map((o) => {
+        const [k, spec] = Object.entries(o)[0] as [string, 'asc' | 'desc' | { sort: 'asc' | 'desc'; nulls?: 'first' | 'last' }];
+        return typeof spec === 'string' ? { k, dir: spec, nulls: undefined } : { k, dir: spec.sort, nulls: spec.nulls };
+      });
+      const isNull = (v: unknown) => v === null || v === undefined;
       out = out
         .map((row, index) => ({ row, index }))
         .sort((a, b) => {
-          for (const [k, dir] of keys) {
-            const c = compare(a.row[k], b.row[k]);
+          for (const { k, dir, nulls } of keys) {
+            const [x, y] = [a.row[k], b.row[k]];
+            if (nulls && isNull(x) !== isNull(y)) return isNull(x) === (nulls === 'first') ? -1 : 1;
+            const c = compare(x, y);
             if (c !== 0) return dir === 'desc' ? -c : c;
           }
           return a.index - b.index;
@@ -851,7 +858,11 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     requests: (b: Business) => of('seatAllocation', b),
     request: (id: string) => t.seatAllocation.find((r) => binToUuid(r.id) === id)!,
     payments: (b: Business) => of('subscriptionPayment', b),
-    periods: (b: Business) => of('billingPeriod', b).sort((x, y) => compare(x.periodStart, y.periodStart) || compare(x.id, y.id)),
+    /** Oldest first: the reverse of the order every reader takes them in (billing.service.ts `NEWEST_PERIOD_FIRST`). */
+    periods: (b: Business) =>
+      query('billingPeriod', of('billingPeriod', b), {
+        orderBy: [{ periodStart: 'asc' }, { periodEnd: { sort: 'asc', nulls: 'last' } }, { id: 'asc' }],
+      }),
     events: (b: Business, kind?: string) => of('subscriptionEvent', b).filter((e) => !kind || e.kind === kind),
     audits: (b: Business, action?: string) => t.platformAuditEvent.filter((a) => same(a.targetId, b.companyId) && (!action || a.action === action)),
     user: (id: Buffer) => t.user.find((u) => same(u.id, id))!,

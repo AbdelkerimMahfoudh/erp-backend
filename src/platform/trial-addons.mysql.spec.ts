@@ -823,6 +823,41 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
     });
   });
 
+  describe('supporting — the latest period, whatever the ids (review 2026-10-16)', () => {
+    it('approved, then granted during the trial, the closed first period holding the larger id: every reader takes the grant’s period, and nothing renews at the end', async () => {
+      const { s, b, T, clock } = await inTrial({ approve: true });
+      // The approval's first period, as an instance whose clock runs three minutes ahead would have written it.
+      const first = await root.billingPeriod.findFirstOrThrow({ where: { companyId: b.companyId } });
+      const ahead = Buffer.from(first.id);
+      ahead.writeUIntBE(ahead.readUIntBE(0, 6) + 3 * 60_000, 0, 6);
+      await root.$executeRaw`UPDATE billing_periods SET id = ${ahead} WHERE id = ${first.id}`;
+      const store = (await s.seats.requestStore(b.companyId, { name: 'B', activity: 'electronics', requestedBy: 'owner' })).allocation.id;
+      await confirm(s, store, 500, 'BK-B');
+      await s.lifecycle.activateByGrant(b.id, { days: 30, reason: 'pilot shop' }, CTX);
+
+      const periods = await root.billingPeriod.findMany({ where: { companyId: b.companyId } });
+      const closed = periods.find((p) => p.id.equals(ahead))!;
+      const granted = periods.find((p) => !p.id.equals(ahead))!;
+      expect(periods).toHaveLength(2);
+      expect(closed.periodEnd?.getTime()).toBe(closed.periodStart.getTime());
+      expect(granted.periodStart.getTime()).toBe(T.getTime());
+      expect(Buffer.compare(closed.id, granted.id)).toBeGreaterThan(0);
+      // Read as MySQL orders them, through Prisma's own SQL: the grant's period, never the closed one.
+      expect((await s.billing.latestPeriod(b.companyId))?.id.equals(granted.id)).toBe(true);
+      expect((await s.seats.queue('scheduled')).find((r) => r.id === store)?.activation).toMatchObject({ waitsFor: 'trial_end' });
+
+      clock.set(new Date(T.getTime() + 60_000));
+      await s.entitlement.forCompany(b.companyId);
+      await s.renewal.rollIfDue(b.companyId);
+      await s.sweeper.sweep();
+      const after = await root.billingPeriod.findMany({ where: { companyId: b.companyId } });
+      expect(after).toHaveLength(2);
+      expect(after.find((p) => p.id.equals(granted.id))).toMatchObject({ assessedTotal: 1000 });
+      expect(after.find((p) => p.id.equals(ahead))).toMatchObject({ assessedTotal: 500 });
+      expect(await ledger(b)).toMatchObject({ requests: [expect.objectContaining({ status: 'paid', effectiveAt: T.toISOString() })], activations: 1, payments: ['500'] });
+    });
+  });
+
   describe('supporting — an approval decided under the lock', () => {
     it('ten times: two approvals at once, neither naming a version — one transition, one first period, the other applied: false', async () => {
       for (let i = 0; i < 10; i += 1) {

@@ -422,9 +422,10 @@ describe('7. one charge only', () => {
     },
   ];
 
-  for (const { order, run, earlier } of cases) {
-    it(`${order}: each add-on raises the period it joins once — 500 and 100 — paid once, and nothing again on any re-run`, async () => {
+  /** One order, then the end: each add-on joins the latest period once, and nothing more is ever charged. */
+  async function chargedOnce(run: (w: TrialBillingWorld, b: Business) => Promise<void>, earlier: number[], prepare?: (w: TrialBillingWorld, b: Business) => void) {
       const { w, b } = await trialWorld();
+      prepare?.(w, b);
       await run(w, b);
       w.clock.set(new Date(Math.max(w.clock.now().getTime(), T.getTime()) + 5 * 60_000));
       await w.entitlement.forCompany(b.companyId);
@@ -465,8 +466,51 @@ describe('7. one charge only', () => {
       w.clock.advance(2 * 60_000);
       await w.entitlement.maySeat(b.companyId);
       expect(ledger(w, b)).toBe(settled);
-    });
   }
+
+  for (const { order, run, earlier } of cases) {
+    it(`${order}: each add-on raises the period it joins once — 500 and 100 — paid once, and nothing again on any re-run`, () => chargedOnce(run, earlier));
+  }
+
+  describe('the grant’s period is the latest whatever the periods’ ids (review 2026-10-16)', () => {
+    const orderF = cases[cases.length - 1];
+
+    it('twenty-five times with every id made in one millisecond (the clock frozen): the closed first period keeps the base; the add-ons join the grant’s once', async () => {
+      expect(orderF.order).toMatch(/then granted during the trial/);
+      for (let i = 0; i < 25; i += 1) {
+        const frozen = jest.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 9, 16, 3, 0, 0, 0));
+        try {
+          await chargedOnce(orderF.run, orderF.earlier);
+        } finally {
+          frozen.mockRestore();
+        }
+      }
+    });
+
+    it('the first period written with the larger id — as an instance whose clock runs ahead would: the grant’s period is still the latest, and no renewal opens at the end', async () => {
+      let ahead: Buffer | null = null;
+      let seen: { w: TrialBillingWorld; b: Business } | null = null;
+      await chargedOnce(orderF.run, orderF.earlier, (w, b) => {
+        seen = { w, b };
+        // The approval's first period, the moment it is written, takes an id from a clock three minutes ahead: larger
+        // than the grant's, which comes later.
+        w.hooks.onEvent = (event) => {
+          if (event.kind !== 'renewed' || ahead) return;
+          const [first] = w.periods(b);
+          ahead = Buffer.from(first.id);
+          ahead.writeUIntBE(ahead.readUIntBE(0, 6) + 3 * 60_000, 0, 6);
+          first.id = ahead;
+        };
+      });
+      expect(ahead).not.toBeNull();
+      // Two periods, the closed first one holding the larger id — and the grant's the one every reader took.
+      const { w, b } = seen as unknown as { w: TrialBillingWorld; b: Business };
+      const [closed, granted] = w.periods(b);
+      expect(closed.periodEnd).toEqual(closed.periodStart);
+      expect(Buffer.compare(closed.id, granted.id)).toBeGreaterThan(0);
+      expect((await w.billing.latestPeriod(b.companyId))?.id).toEqual(granted.id);
+    });
+  });
 
   it('R1, a store paid for before the approval: the first period opens at 500, not 1000; at the end it is 1000 — never 1500', async () => {
     const { w, b } = await trialWorld();

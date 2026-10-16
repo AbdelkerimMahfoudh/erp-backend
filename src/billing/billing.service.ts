@@ -138,10 +138,20 @@ export function periodInForce(period: Pick<PeriodState, 'periodStart' | 'periodE
  *
  * Two periods can share a `periodStart` (0095): a grant or a correction made while a deferred period waits for a
  * free trial to end closes that period at the instant it starts and opens the next at the same instant. The one
- * opened later must win, every time and for every reader: ids are UUIDv7, time-ordered to the millisecond, so
- * `id desc` breaks the tie in favour of the newer row.
+ * opened later must win, every time and for every reader — and the closed one is told apart by what it is, not by
+ * its id: it ended at its own start. Among periods sharing a start, the one with no end comes first, then the later
+ * end, so a period closed at its own start always comes after the period that replaced it. Ids only break what is
+ * left, which nothing writes.
+ *
+ * Never the id alone (review 2026-10-16): a UUIDv7 orders rows by the millisecond they were made, and only on one
+ * clock. Two ids made in the same millisecond came out in either order (an approval and a grant run back to back
+ * opened a spurious renewal at the trial's end), and two API instances' clocks differ.
  */
-const NEWEST_PERIOD_FIRST: Prisma.BillingPeriodOrderByWithRelationInput[] = [{ periodStart: 'desc' }, { id: 'desc' }];
+export const NEWEST_PERIOD_FIRST: Prisma.BillingPeriodOrderByWithRelationInput[] = [
+  { periodStart: 'desc' },
+  { periodEnd: { sort: 'desc', nulls: 'first' } },
+  { id: 'desc' },
+];
 
 /** An applicant may describe at most this many stores in one estimate. */
 export const ESTIMATE_MAX_STORES = 50;
