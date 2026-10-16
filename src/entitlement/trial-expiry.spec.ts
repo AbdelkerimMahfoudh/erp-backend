@@ -9,8 +9,9 @@ import { evaluationColumnsOf, isEvaluationRead } from './__testing__/evaluation-
  *
  * Access stops at the exact end because the state is computed from the stored instants; this is the RECORD that it
  * did — the claim marked, a `trial_expired` event and a platform audit — written once, by the first evaluation at or
- * after the end, all three or none, and never at the cost of the request that happened to notice: the row is taken
- * with NOWAIT, a held row is left for a later evaluation, one attempt runs per company, and a failure backs off.
+ * after the end, all three or none, and never at the cost of the request that happened to notice: the subscription
+ * row, then the business's row and the claim, are taken with NOWAIT (N1); a held row is left for a later evaluation,
+ * one attempt runs per company, and a failure backs off.
  */
 
 const COMPANY = newUuidV7Bin();
@@ -40,7 +41,7 @@ function makeWorld(now: { t: Date }, opts: WorldOptions = {}): {
   audits: Record<string, any>[];
   order: string[];
   queries: string[];
-  lock: { held: boolean; stall: Promise<void> | null };
+  lock: { held: boolean; stall: Promise<void> | null; rows: Set<'company' | 'claim'> };
 } {
   const claim = opts.shared?.claim ?? { id: newUuidV7Bin(), claimedAt: START, startedAt: START, endsAt: END, expiryRecordedAt: null as Date | null };
   const sub = {
@@ -59,8 +60,15 @@ function makeWorld(now: { t: Date }, opts: WorldOptions = {}): {
   const order: string[] = opts.shared?.order ?? [];
   /** Every read this world answered, by kind: what an evaluation costs. */
   const queries: string[] = [];
-  /** Another connection holds the row (NOWAIT fails at once), or the lock statement takes its time (`stall`). */
-  const lock: { held: boolean; stall: Promise<void> | null } = opts.shared?.lock ?? { held: false, stall: null };
+  /**
+   * Another connection holds the subscription row (NOWAIT fails at once), or the lock statement takes its time
+   * (`stall`); `rows`: it holds the business's row or the claim instead (N1).
+   */
+  const lock: { held: boolean; stall: Promise<void> | null; rows: Set<'company' | 'claim'> } = opts.shared?.lock ?? {
+    held: false,
+    stall: null,
+    rows: new Set(),
+  };
   let staleReads = opts.staleReads ?? 0;
   let failEvents = opts.failEvents ?? 0;
 
@@ -126,13 +134,18 @@ function makeWorld(now: { t: Date }, opts: WorldOptions = {}): {
         ];
       }
       const text = (q.strings ?? []).join('?');
-      if (/FOR UPDATE NOWAIT/.test(text)) {
+      // What Prisma gives on MySQL when another connection holds the row (3572), at once.
+      const busy = () => new Prisma.PrismaClientKnownRequestError('Raw query failed. Code: `3572`.', { code: 'P2010', clientVersion: 'test', meta: { code: '3572' } });
+      if (/^SELECT id FROM subscriptions WHERE company_id = \? FOR UPDATE NOWAIT$/.test(text)) {
         order.push('lock nowait');
         if (lock.stall) await lock.stall;
-        // What Prisma gives on MySQL when another connection holds the row (3572), at once.
-        if (lock.held) {
-          throw new Prisma.PrismaClientKnownRequestError('Raw query failed. Code: `3572`.', { code: 'P2010', clientVersion: 'test', meta: { code: '3572' } });
-        }
+        if (lock.held) throw busy();
+      } else if (/^SELECT id FROM companies WHERE id = \? FOR SHARE NOWAIT$/.test(text)) {
+        order.push('company nowait');
+        if (lock.rows.has('company')) throw busy();
+      } else if (/^SELECT id FROM trial_claims WHERE id = \? FOR UPDATE NOWAIT$/.test(text)) {
+        order.push('claim nowait');
+        if (lock.rows.has('claim')) throw busy();
       } else if (/FOR UPDATE/.test(text)) {
         order.push('lock');
       }
@@ -154,6 +167,11 @@ function makeWorld(now: { t: Date }, opts: WorldOptions = {}): {
   const service = new EntitlementService(prisma as never, { companyId: () => COMPANY } as never, { now: () => now.t });
   return { service, claim, sub, events, audits, order, queries, lock };
 }
+
+/** The rows a recording takes, in order, each with NOWAIT: the subscription, the business (shared), the claim (N1). */
+const TAKEN = ['lock nowait', 'company nowait', 'claim nowait'];
+/** …then the mark, the event and the audit. */
+const RECORDED = [...TAKEN, 'mark', 'event', 'audit'];
 
 let warn: jest.SpyInstance;
 beforeEach(() => {
@@ -177,8 +195,9 @@ describe('the end of a free trial, written down once', () => {
       message: 'The free trial has ended. You can still read and export everything.',
       state: 'trial_expired',
     });
-    // Subscription first — never waited for — audit last: the order every writer here keeps.
-    expect(w.order).toEqual(['lock nowait', 'mark', 'event', 'audit']);
+    // Subscription first, then the business's row (the event's parent) and the claim — none waited for (N1) — audit
+    // last: the order every writer here keeps.
+    expect(w.order).toEqual(RECORDED);
     // Every instant from the server clock: the evaluation's own.
     expect(w.claim.expiryRecordedAt).toEqual(END);
     expect(w.events).toEqual([
@@ -210,14 +229,14 @@ describe('the end of a free trial, written down once', () => {
     const now = { t: new Date(END.getTime() + HOUR) };
     const w = makeWorld(now);
     await w.service.writeRefusal(COMPANY);
-    expect(w.order).toEqual(['lock nowait', 'mark', 'event', 'audit']);
+    expect(w.order).toEqual(RECORDED);
     const asked = w.queries.length;
     now.t = new Date(END.getTime() + 24 * HOUR);
     await w.service.writeRefusal(COMPANY);
     await w.service.current();
     // Two evaluations: the row read (and the renewal check's), and nothing else — no lock, no "anything due?".
     expect(w.queries.slice(asked).filter((q) => q !== 'subscription')).toEqual([]);
-    expect(w.order).toEqual(['lock nowait', 'mark', 'event', 'audit']);
+    expect(w.order).toEqual(RECORDED);
     expect(w.events).toHaveLength(1);
     expect(w.audits).toHaveLength(1);
     expect(w.claim.expiryRecordedAt).toEqual(new Date(END.getTime() + HOUR));
@@ -230,7 +249,7 @@ describe('the end of a free trial, written down once', () => {
     await first.service.writeRefusal(COMPANY);
     await second.service.writeRefusal(COMPANY);
     // The second saw no mark, tried under the lock, and the update matched nothing: no event, no audit.
-    expect(first.order).toEqual(['lock nowait', 'mark', 'event', 'audit', 'lock nowait', 'mark']);
+    expect(first.order).toEqual([...RECORDED, ...TAKEN, 'mark']);
     expect(first.events).toHaveLength(1);
     expect(first.audits).toHaveLength(1);
   });
@@ -292,10 +311,31 @@ describe('never waiting on the subscription row (R1-F2)', () => {
     expect(w.order).toEqual(['lock nowait']);
     now.t = new Date(now.t.getTime() + 500);
     await Promise.all(Array.from({ length: 12 }, () => w.service.writeRefusal(COMPANY)));
-    expect(w.order).toEqual(['lock nowait', 'lock nowait', 'mark', 'event', 'audit']);
+    expect(w.order).toEqual(['lock nowait', ...RECORDED]);
     expect(w.events).toHaveLength(1);
     expect(w.audits).toHaveLength(1);
   });
+
+  for (const held of ['company', 'claim'] as const) {
+    it(`another writer holds the ${held === 'company' ? 'business’s row (the event’s parent)' : 'claim'}: nothing waits, nothing is written — and after the back-off it is recorded, once (N1)`, async () => {
+      const now = { t: new Date(END.getTime() + 60_000) };
+      const w = makeWorld(now);
+      w.lock.rows.add(held);
+      const answers = await Promise.all(Array.from({ length: 12 }, () => w.service.writeRefusal(COMPANY)));
+      expect(answers.every((a) => a?.state === 'trial_expired')).toBe(true);
+      // One attempt: the subscription row taken, the held row refused at once — rolled back with nothing written.
+      expect(w.order).toEqual(held === 'company' ? ['lock nowait', 'company nowait'] : TAKEN);
+      expect([w.claim.expiryRecordedAt, w.events, w.audits]).toEqual([null, [], []]);
+      expect(warn).not.toHaveBeenCalled();
+
+      w.lock.rows.clear();
+      now.t = new Date(now.t.getTime() + 1_000);
+      await w.service.writeRefusal(COMPANY);
+      expect(w.order.slice(-RECORDED.length)).toEqual(RECORDED);
+      expect([w.events.length, w.audits.length]).toEqual([1, 1]);
+      expect(w.claim.expiryRecordedAt).toEqual(now.t);
+    });
+  }
 
   it('one attempt in flight per company: concurrent evaluations skip it rather than wait for it', async () => {
     const now = { t: END };
@@ -311,7 +351,7 @@ describe('never waiting on the subscription row (R1-F2)', () => {
     w.lock.stall = null;
     go();
     await first;
-    expect(w.order).toEqual(['lock nowait', 'mark', 'event', 'audit']);
+    expect(w.order).toEqual(RECORDED);
     expect(w.events).toHaveLength(1);
   });
 

@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
 import type { Clock } from '../../entitlement/clock';
 import { BillingService, periodInForce, type BillingDb } from '../../billing/billing.service';
@@ -7,7 +7,7 @@ import { lockSubscriptionNowait } from '../../billing/renewal';
 import { isLockBusy } from '../../common/db/deadlock-retry';
 import { binToUuid, newUuidV7Bin } from '../../common/utils/uuid.util';
 import { redact } from '../platform-audit.service';
-import { openStoreTx } from '../store-opening';
+import { openStoreTx, storeOwners } from '../store-opening';
 import { activateIfReadyTx, scheduledCoverage, type ActivationDb } from '../staff-activation-rules';
 import { TRIAL_DURATION_DAYS } from './trial-rules';
 
@@ -24,9 +24,11 @@ import { TRIAL_DURATION_DAYS } from './trial-rules';
  *    force once a paid period is in force in an open company: the store opened, the seat counted, that period raised
  *    by exactly that request, the people it was for activated. A failure here never undoes or re-queues Tx A.
  *
- * Both take the subscription row with `FOR UPDATE NOWAIT` (R1-F2): when another writer holds it, the attempt returns
- * at once as `busy` and a later evaluation, an administrator's action or the sweeper finishes the work — a request
- * never waits on it, and never fails because of it. Both read their instant after the lock.
+ * Both take the subscription row with `FOR UPDATE NOWAIT` (R1-F2), and then, before writing anything, every other row
+ * their work locks or checks — the business's row, the claim, the period, the requests, the people (N1) — the same
+ * way. When another writer holds any of them, the attempt returns at once as `busy` and a later evaluation, an
+ * administrator's action or the sweeper finishes the work — a request never waits on it, and never fails because of
+ * it. Both read their instant after the subscription lock.
  *
  * Constructed by hand, as `SubscriptionRenewal` is: the entitlement check (global module), the seat requests, the
  * staff activation, the lifecycle and the sweeper each hold one. The in-process guards of the lazy path
@@ -42,7 +44,15 @@ export interface TrialClaimRow {
 
 export type TrialEndOutcome = 'busy' | 'nothing_due' | 'done' | 'failed';
 
-/** Explicit bounds for both transactions: a connection within 2 s, the whole work within 10 s. */
+/**
+ * The two transactions' limits: a connection from the pool within 2 s (`maxWait`), and Prisma's limit on a
+ * transaction's life (`timeout`). The timeout is a backstop, not the bound: Prisma checks it between statements and
+ * never interrupts one that waits for a lock. Measured with Prisma 5.22 on MySQL 8.0 (review 2026-10-16): a statement
+ * waiting on a row another connection held for 12 s ran on until it was let go — only MySQL's innodb_lock_wait_timeout
+ * (50 s) limits such a wait — and the expired transaction's connection was then closed under whoever next took it from
+ * the pool. The bound is that nothing here waits: every row either transaction locks or checks is taken with NOWAIT
+ * before anything is written ({@link lockNowait}), so a row another writer holds makes the attempt `busy` at once (N1).
+ */
 const TX_OPTIONS = { maxWait: 2_000, timeout: 10_000 } as const;
 /** After `busy`: somebody holds the row and is about to finish; look again a second later. */
 const BUSY_BACKOFF_MS = 1_000;
@@ -63,9 +73,51 @@ const nameTaken = (name: string): string =>
 const later = (a: Date, b: Date): Date => (a.getTime() >= b.getTime() ? a : b);
 
 /**
+ * The rows the trial's end takes before it writes anything, each with NOWAIT (N1). The subscription row comes first
+ * (`lockSubscriptionNowait`), then these, in this order:
+ *
+ *  - `company` — the business's own row, shared: the parent that the events, the new store and its assignments
+ *    written here check through their foreign keys. Shared, as those checks are: the inserts every other request of
+ *    the business makes share it too, so they never make this busy;
+ *  - `claim` — the claim whose expiry Tx A records;
+ *  - `period` — the paid period Tx B raises;
+ *  - `request` — each scheduled request Tx B moves;
+ *  - `person` — each person Tx B may activate (their row is updated);
+ *  - `owner` and `role` — each Owner a store opened by Tx B is assigned to, and the role they hold there, shared (the
+ *    assignment's foreign keys).
+ *
+ * One statement per row, by its primary key: MySQL then locks exactly that record. A list (`id IN (…)`) can be read
+ * through a covering secondary index instead — a shared lock then lands on that index and misses a writer holding the
+ * row itself, and an exclusive one locks every row the scan passes.
+ *
+ * What is left is what an insert checks on its own index entries — the gap before a new event, audit, store or
+ * assignment, and a duplicate store name. Nothing in this product holds those for long: the events and the audits are
+ * append-only and never read with a lock, and stores and assignments are written for this business only by a writer
+ * holding its subscription row, which this attempt holds.
+ */
+const NOWAIT = {
+  company: (id: Buffer) => Prisma.sql`SELECT id FROM companies WHERE id = ${id} FOR SHARE NOWAIT`,
+  claim: (id: Buffer) => Prisma.sql`SELECT id FROM trial_claims WHERE id = ${id} FOR UPDATE NOWAIT`,
+  period: (id: Buffer) => Prisma.sql`SELECT id FROM billing_periods WHERE id = ${id} FOR UPDATE NOWAIT`,
+  request: (id: Buffer) => Prisma.sql`SELECT id FROM seat_allocations WHERE id = ${id} FOR UPDATE NOWAIT`,
+  person: (id: Buffer) => Prisma.sql`SELECT id FROM users WHERE id = ${id} FOR UPDATE NOWAIT`,
+  owner: (id: Buffer) => Prisma.sql`SELECT id FROM users WHERE id = ${id} FOR SHARE NOWAIT`,
+  role: (id: Buffer) => Prisma.sql`SELECT id FROM roles WHERE id = ${id} FOR SHARE NOWAIT`,
+} as const;
+
+/** Take one of {@link NOWAIT}'s rows now, or fail at once with MySQL's 3572 (`isLockBusy`). */
+export async function lockNowait(tx: BillingDb, row: keyof typeof NOWAIT, id: Buffer): Promise<void> {
+  await tx.$queryRaw(NOWAIT[row](id));
+}
+
+/** Distinct ids, in a stable order: the order rows are locked in, so two attempts never take them differently. */
+const distinctIds = (ids: Buffer[]): Buffer[] =>
+  [...new Map(ids.map((id) => [id.toString('hex'), id])).entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, id]) => id);
+
+/**
  * Tx A's body (moved unchanged from the entitlement service): mark the claim, append the `trial_expired` event and the
- * platform audit — all three or none, in the caller's transaction, which holds the subscription row. True when this
- * call marked it.
+ * platform audit — all three or none, in the caller's transaction, which holds the subscription row. The business's
+ * row (the event's parent) and the claim are taken first, with NOWAIT (N1). True when this call marked it.
  *
  * The audit row goes through the transaction with `redact()` rather than `PlatformAuditService`: that service writes
  * outside any transaction, and the platform module imports the global entitlement module — importing it back would
@@ -81,6 +133,8 @@ export async function recordTrialExpiryTx(
   now: Date,
 ): Promise<boolean> {
   const endsAt = claimEndsAt.toISOString();
+  await lockNowait(tx, 'company', companyId);
+  await lockNowait(tx, 'claim', claimId);
   const marked = await tx.trialClaim.updateMany({
     where: { id: claimId, expiryRecordedAt: null },
     data: { expiryRecordedAt: now },
@@ -144,6 +198,11 @@ export interface AddOnActivation {
  *
  * Then the people: each activated seat's own person, and at each store that gained a seat nobody holds, the pending
  * people it was bought for, first invited first. Activation only — nobody's request is created here.
+ *
+ * Before anything is written, every row this locks or checks is taken with NOWAIT (N1): the business's row, the
+ * period, each request, each person who may be activated, and — when a store opens — each Owner it is assigned to
+ * and their role. A row another writer holds throws MySQL's 3572 at once (the caller's `busy`), and nothing has been
+ * written.
  */
 export async function activateDueAddOnsTx(
   tx: BillingDb,
@@ -153,6 +212,7 @@ export async function activateDueAddOnsTx(
   actor: string,
 ): Promise<AddOnActivation> {
   const done: AddOnActivation = { activated: [], blocked: [] };
+  await lockNowait(tx, 'company', companyId);
   const company = await tx.company.findUnique({ where: { id: companyId }, select: { name: true, closedAt: true } });
   if (!company || company.closedAt !== null) return done;
   const period = await billing.latestPeriod(companyId, tx);
@@ -182,7 +242,23 @@ export async function activateDueAddOnsTx(
     if (!waiting.has(key)) waiting.set(key, (await scheduledCoverage(db, companyId, row.branchId)).candidates);
   }
 
-  const owners: Buffer[] = [];
+  // Every row the work below locks or checks, now, never waited for (N1): the period it raises, the requests it moves,
+  // the people it may activate, and the Owners (and their role) a store it opens is assigned to.
+  await lockNowait(tx, 'period', period.id);
+  for (const row of due) await lockNowait(tx, 'request', row.id);
+  const activating = distinctIds([
+    ...due.flatMap((row) => (row.kind === 'seat' && row.user && row.user.activatedAt === null && row.user.deletedAt === null ? [row.user.id] : [])),
+    ...[...waiting.values()].flat(),
+  ]);
+  for (const id of activating) await lockNowait(tx, 'person', id);
+  if (due.some((row) => row.kind === 'store')) {
+    const taken = new Set(activating.map((id) => id.toString('hex')));
+    const owners = await storeOwners(tx, companyId);
+    for (const id of distinctIds(owners.map((o) => o.userId)).filter((x) => !taken.has(x.toString('hex')))) await lockNowait(tx, 'owner', id);
+    for (const id of distinctIds(owners.map((o) => o.roleId))) await lockNowait(tx, 'role', id);
+  }
+
+  const people: Buffer[] = [];
   const gained = new Set<string>();
   for (const row of due) {
     const requestId = binToUuid(row.id);
@@ -250,7 +326,7 @@ export async function activateDueAddOnsTx(
           createdAt: now,
         },
       });
-      if (row.user && row.user.activatedAt === null && row.user.deletedAt === null) owners.push(row.user.id);
+      if (row.user && row.user.activatedAt === null && row.user.deletedAt === null) people.push(row.user.id);
       else if (row.branchId) gained.add(binToUuid(row.branchId));
     }
     await billing.assessNow(companyId, tx, now);
@@ -282,7 +358,7 @@ export async function activateDueAddOnsTx(
     done.activated.push(requestId);
   }
 
-  for (const userId of owners) await activateIfReadyTx(db, userId, now, actor);
+  for (const userId of people) await activateIfReadyTx(db, userId, now, actor);
   for (const store of gained) {
     for (const userId of waiting.get(store) ?? []) await activateIfReadyTx(db, userId, now, actor);
   }

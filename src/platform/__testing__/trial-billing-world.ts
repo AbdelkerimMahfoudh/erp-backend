@@ -35,6 +35,9 @@ import { evaluationColumnsOf, isEvaluationRead } from '../../entitlement/__testi
  *  - **the census SQL** — the staff and held-seat queries of `seat-census.ts`, computed from the tables;
  *  - **the subscription row's lock** — `FOR UPDATE` waits while a test holds a company's row, `FOR UPDATE NOWAIT`
  *    fails at once with the P2010 / 3572 Prisma gives on MySQL;
+ *  - **the other rows the trial's end takes with NOWAIT** (N1) — a business, a claim, a period, a request, a person,
+ *    a role — fail the same way while a test holds the row as another connection would (exclusively, or shared: a
+ *    shared hold refuses only an exclusive NOWAIT, as InnoDB's lock modes do);
  *  - **one transaction at a time, all or nothing** — `$transaction` runs its callbacks in turn (what the subscription
  *    lock gives every path that takes it), each on its own client; a callback that throws undoes exactly what it
  *    wrote through that client, newest first, while a write made outside it in the meantime (an autocommitted
@@ -310,6 +313,10 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
   const held = new Map<string, { released: Promise<void>; release: () => void }>();
   /** Every subscription lock asked for, in order. */
   const locks: { company: string; nowait: boolean; outcome: 'taken' | 'busy' | 'waited' }[] = [];
+  /** Other rows a test holds as another connection would, by `table:id`, and how (N1). */
+  const heldRows = new Map<string, 'update' | 'share'>();
+  /** Every other row taken with NOWAIT, in order (N1). */
+  const rowLocks: { table: string; id: string; mode: 'update' | 'share'; outcome: 'taken' | 'busy' }[] = [];
   /** Every transaction's options, in order. */
   const txOptions: unknown[] = [];
   const hooks = {
@@ -543,6 +550,15 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     return sub ? [{ id: sub.id }] : [];
   }
 
+  /** `SELECT id FROM <table> WHERE id = ? FOR UPDATE|SHARE NOWAIT`: taken, or refused at once while held. */
+  function rowLock(table: string, id: Buffer, mode: 'update' | 'share'): Row[] {
+    const held = heldRows.get(`${table}:${binToUuid(id)}`);
+    const busy = held !== undefined && (held === 'update' || mode === 'update');
+    rowLocks.push({ table, id: binToUuid(id), mode, outcome: busy ? 'busy' : 'taken' });
+    if (busy) throw lockBusy();
+    return [{ id }];
+  }
+
   async function queryRaw(q: unknown, ...rest: unknown[]): Promise<Row[]> {
     const strings: readonly string[] = Array.isArray(q) ? (q as readonly string[]) : ((q as { strings: readonly string[] }).strings ?? []);
     const values: unknown[] = Array.isArray(q) ? rest : ((q as { values: unknown[] }).values ?? []);
@@ -559,6 +575,8 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     }
     if (/^SELECT id FROM subscriptions WHERE company_id = \? FOR UPDATE NOWAIT$/.test(text)) return lock(values[0] as Buffer, true);
     if (/^SELECT id FROM subscriptions WHERE company_id = \? FOR UPDATE$/.test(text)) return lock(values[0] as Buffer, false);
+    const row = /^SELECT id FROM (companies|trial_claims|billing_periods|seat_allocations|users|roles) WHERE id = \? FOR (UPDATE|SHARE) NOWAIT$/.exec(text);
+    if (row) return rowLock(row[1], values[0] as Buffer, row[2] === 'SHARE' ? 'share' : 'update');
     if (/^SELECT id FROM branches WHERE id = \? AND company_id = \? FOR UPDATE$/.test(text)) return [];
     if (text.includes('COUNT(DISTINCT u.id)')) {
       const companyId = values[0] as Buffer;
@@ -777,7 +795,19 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     },
     hooks,
     locks,
+    rowLocks,
     txOptions,
+    /**
+     * Hold another row as another connection would (N1) — `companies`, `trial_claims`, `billing_periods`,
+     * `seat_allocations`, `users` or `roles`, by id, exclusively or shared — until the returned function is called.
+     */
+    holdRow(table: string, id: Buffer, mode: 'update' | 'share' = 'update'): () => void {
+      const key = `${table}:${binToUuid(id)}`;
+      heldRows.set(key, mode);
+      return () => {
+        heldRows.delete(key);
+      };
+    },
     /** Hold a company's subscription row as another connection would, until the returned function is called. */
     hold(b: Business): () => void {
       let release!: () => void;

@@ -355,6 +355,8 @@ describe('`scheduled` has one writer: the confirmation made while a trial runs',
     expect(sql.map((s) => `${s.file} ${s.within}`).sort()).toEqual([
       'src/entitlement/seat-census.ts seatCensus',
       'src/platform/seat-allocation.service.ts SeatAllocationService.scheduleTx',
+      // The trial's end takes each due request by its primary key with NOWAIT before moving it (N1): no status read.
+      'src/platform/trial/trial-end-roll.ts NOWAIT',
       'src/platform/trial/trial-end.sweeper.ts TrialEndSweeper.sweep',
     ]);
   });

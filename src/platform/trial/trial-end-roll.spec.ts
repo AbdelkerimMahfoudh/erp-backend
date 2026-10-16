@@ -198,6 +198,79 @@ describe('never waiting on the subscription row (R1-F2)', () => {
   });
 });
 
+describe('never waiting on any other row the end’s work needs (N1)', () => {
+  /** Store B and an unnamed seat at Main scheduled; Ali holds Main's included seat, so Uma, waiting there, is covered. */
+  async function coveredWorld() {
+    const x = await scheduledWorld();
+    x.w.person(x.b, { name: 'Ali', stores: ['Main'], active: true });
+    const uma = x.w.person(x.b, { name: 'Uma', stores: ['Main'], verified: true });
+    return { ...x, uma };
+  }
+
+  it('every row is taken before anything is written, each with NOWAIT and once: the business, the claim; then the business, the period, the requests, the people, the Owners and their role', async () => {
+    const { w, b, store, seat, uma } = await coveredWorld();
+    w.clock.set(T);
+    await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('done');
+    const [p1] = w.periods(b);
+    const row = (table: string, id: Buffer | string, mode: 'update' | 'share') => ({ table, id: typeof id === 'string' ? id : w.uuid(id), mode, outcome: 'taken' });
+    expect(w.rowLocks).toEqual([
+      // Tx A
+      row('companies', b.companyId, 'share'),
+      row('trial_claims', w.claimOf(b)!.id, 'update'),
+      // Tx B
+      row('companies', b.companyId, 'share'),
+      row('billing_periods', p1.id, 'update'),
+      row('seat_allocations', store, 'update'),
+      row('seat_allocations', seat, 'update'),
+      row('users', uma, 'update'),
+      row('users', b.ownerId, 'share'),
+      row('roles', b.roles.owner, 'share'),
+    ]);
+    // …and the work they guard was done once: the store open, the seat counted, Uma activated by it.
+    expect(w.request(store).status).toBe('paid');
+    expect(w.user(uma)).toMatchObject({ isActive: true, activatedAt: T });
+    expect(p1.assessedTotal).toBe(1100);
+  });
+
+  const holders: { what: string; row: (x: Awaited<ReturnType<typeof coveredWorld>>) => [string, Buffer] }[] = [
+    { what: 'the business’s row', row: ({ b }) => ['companies', b.companyId] },
+    { what: 'the period it raises', row: ({ w, b }) => ['billing_periods', w.periods(b)[0].id] },
+    { what: 'the store request', row: ({ w, store }) => ['seat_allocations', w.request(store).id] },
+    { what: 'the seat request', row: ({ w, seat }) => ['seat_allocations', w.request(seat).id] },
+    { what: 'the person the seat covers', row: ({ uma }) => ['users', uma] },
+    { what: 'an Owner the store is assigned to', row: ({ b }) => ['users', b.ownerId] },
+    { what: 'the Owner’s role', row: ({ b }) => ['roles', b.roles.owner] },
+  ];
+  for (const { what, row } of holders) {
+    it(`${what} held by another writer: busy at once, nothing of the activation written — released, it is all done once`, async () => {
+      const x = await coveredWorld();
+      const { w, b, store, seat, uma } = x;
+      w.clock.set(T);
+      const release = w.holdRow(...row(x));
+      await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('busy');
+      // Refused once per transaction that needs it: the business's row by both, every other row by Tx B alone.
+      expect(w.rowLocks.filter((l) => l.outcome === 'busy')).toHaveLength(row(x)[0] === 'companies' ? 2 : 1);
+      // Nothing of Tx B: no store, nothing counted or raised, nobody activated, no audit.
+      expect([w.request(store).status, w.request(seat).status]).toEqual(['scheduled', 'scheduled']);
+      expect(w.branch(b, 'B')).toBeNull();
+      expect(w.periods(b)[0].assessedTotal).toBe(500);
+      expect(w.user(uma).activatedAt).toBeNull();
+      expect(w.audits(b).filter((a) => /\.activate$/.test(a.action))).toEqual([]);
+      // Tx A needs only the business's row and the claim: it stands unless the business's row is the one held.
+      expect(w.events(b, 'trial_expired')).toHaveLength(row(x)[0] === 'companies' ? 0 : 1);
+      expect(warn).not.toHaveBeenCalled();
+
+      release();
+      await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('done');
+      expect([w.request(store).status, w.request(seat).status]).toEqual(['paid', 'paid']);
+      expect(w.periods(b)[0].assessedTotal).toBe(1100);
+      expect(w.user(uma).activatedAt).toEqual(T);
+      expect(w.events(b, 'trial_expired')).toHaveLength(1);
+      expect(w.audits(b).filter((a) => /\.activate$/.test(a.action))).toHaveLength(2);
+    });
+  }
+});
+
 describe('the activation’s gate: a paid period in force, in an open company', () => {
   it('no paid access by the end: the expiry is recorded, the requests wait — paid, counted nowhere', async () => {
     const { w, b, store, seat } = await scheduledWorld({ approve: false });

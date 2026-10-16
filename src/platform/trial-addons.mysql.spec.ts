@@ -679,6 +679,111 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
     });
   });
 
+  describe('supporting — N1: any other row the end’s work needs, held by another writer — nothing waits, nothing is half-done', () => {
+    /** Approved during the trial; Ali holds Main's included seat; store B, a seat for nobody and Sara's seat paid for during it. */
+    async function threeScheduled() {
+      const w = await inTrial({ approve: true });
+      await person(w.b, { name: 'Ali', store: 'Main', active: true, invitedAt: w.clock.now() });
+      const sara = await person(w.b, { name: 'Sara', store: 'Main', invitedAt: w.clock.now() });
+      const store = (await w.s.seats.requestStore(w.b.companyId, { name: 'B', activity: 'electronics', requestedBy: 'owner' })).allocation.id;
+      const unnamed = (await w.s.seats.requestSeat(w.b.companyId, { branchId: w.b.stores.Main, requestedBy: 'owner' })).allocation.id;
+      const seat = (await w.s.seats.requestSeat(w.b.companyId, { branchId: w.b.stores.Main, userId: sara, requestedBy: 'owner' })).allocation.id;
+      await confirm(w.s, store, 500, 'BK-B');
+      await confirm(w.s, unnamed, 100, 'BK-S0');
+      await confirm(w.s, seat, 100, 'BK-SARA');
+      const p1 = (await root.billingPeriod.findFirstOrThrow({ where: { companyId: w.b.companyId } })).id;
+      const ownerRole = w.b.roles.owner;
+      return { ...w, sara, store, unnamed, seat, p1, ownerRole };
+    }
+
+    /** All of the activation or none of it: the three requests, the store, the raise and the audits move together. */
+    async function wholeOrNothing(b: Business): Promise<'none' | 'all'> {
+      const l = await ledger(b);
+      const paid = l.requests.filter((r) => r.status === 'paid').length;
+      expect([0, 3]).toContain(paid);
+      expect(l.branches).toEqual(paid === 3 ? ['Main', 'B'] : ['Main']);
+      expect(l.periods.map((p) => p.total)).toEqual([paid === 3 ? 1200 : 500]);
+      expect(l.activations).toBe(paid);
+      expect(l.payments).toEqual(['500', '100', '100']);
+      return paid === 3 ? 'all' : 'none';
+    }
+
+    /** One round of looking: twelve evaluations at once, another instance's, and the administrator's trigger. */
+    async function round(w: Awaited<ReturnType<typeof threeScheduled>>): Promise<number[]> {
+      const other = servicesAt(Object.assign(new TestClock(), { now: () => w.clock.now() }) as TestClock);
+      const timings = await Promise.all([
+        ...Array.from({ length: 12 }, () => timed(() => w.s.entitlement.writeRefusal(w.b.companyId))),
+        timed(() => other.entitlement.forCompany(w.b.companyId)),
+        timed(() => w.s.trialEnd.applyIfDue(w.b.companyId)),
+      ]);
+      return timings.map((t) => t.ms);
+    }
+
+    it('the person’s row and the first period held for 8 s: every evaluation answers at once, the end is recorded, nothing of the activation is written — released, it is all done once', async () => {
+      const w = await threeScheduled();
+      const holders = [
+        hold(Prisma.sql`SELECT id FROM users WHERE id = ${w.sara} FOR UPDATE`),
+        hold(Prisma.sql`SELECT id FROM billing_periods WHERE id = ${w.p1} FOR UPDATE`),
+      ];
+      await Promise.all(holders.map((h) => h.held));
+      w.clock.runFrom(new Date(w.T.getTime() + 1_000));
+      const ms: number[] = [];
+      const started = Date.now();
+      while (Date.now() - started < 8_000) {
+        ms.push(...(await round(w)));
+        expect(await wholeOrNothing(w.b)).toBe('none');
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      note(`N1 users + P1 held 8 s: ${ms.length} evaluations, slowest ${Math.max(...ms).toFixed(1)} ms`);
+      expect(Math.max(...ms)).toBeLessThan(200);
+      // The end itself needs neither row: written down once, meanwhile.
+      expect((await ledger(w.b)).expiries).toBe(1);
+      expect(await root.user.findUniqueOrThrow({ where: { id: w.sara } })).toMatchObject({ isActive: false, activatedAt: null });
+
+      for (const h of holders) h.release();
+      await Promise.all(holders.map((h) => h.done));
+      // Past the lazy path's second of back-off, one evaluation does all of it, once.
+      await new Promise((r) => setTimeout(r, 1_100));
+      await w.s.entitlement.forCompany(w.b.companyId);
+      expect(await wholeOrNothing(w.b)).toBe('all');
+      const l = await ledger(w.b);
+      expect(l.requests.map((r) => r.effectiveAt)).toEqual([w.T.toISOString(), w.T.toISOString(), w.T.toISOString()]);
+      expect(l.expiries).toBe(1);
+      expect(await root.user.findUniqueOrThrow({ where: { id: w.sara } })).toMatchObject({ isActive: true });
+      await round(w);
+      expect(await ledger(w.b)).toEqual(l);
+    });
+
+    it('each other row on its own — the business’s row, the claim, the store request, an Owner, the Owner’s role — held: never a wait, never half-done; released, done once', async () => {
+      const cases: { what: string; sql: (w: Awaited<ReturnType<typeof threeScheduled>>) => Prisma.Sql; activatesMeanwhile: boolean; recordsMeanwhile: boolean }[] = [
+        { what: 'the business’s row', sql: (w) => Prisma.sql`SELECT id FROM companies WHERE id = ${w.b.companyId} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: false },
+        { what: 'the claim', sql: (w) => Prisma.sql`SELECT id FROM trial_claims WHERE company_id = ${w.b.companyId} FOR UPDATE`, activatesMeanwhile: true, recordsMeanwhile: false },
+        { what: 'the store request', sql: (w) => Prisma.sql`SELECT id FROM seat_allocations WHERE id = ${bin(w.store)} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: true },
+        { what: 'the Owner', sql: (w) => Prisma.sql`SELECT id FROM users WHERE id = ${w.b.ownerId} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: true },
+        { what: 'the Owner’s role', sql: (w) => Prisma.sql`SELECT id FROM roles WHERE id = ${w.ownerRole} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: true },
+      ];
+      const lines: string[] = [];
+      for (const c of cases) {
+        const w = await threeScheduled();
+        const h = hold(c.sql(w));
+        await h.held;
+        w.clock.runFrom(new Date(w.T.getTime() + 1_000));
+        const ms = [...(await round(w)), ...(await round(w))];
+        expect(Math.max(...ms)).toBeLessThan(200);
+        expect(await wholeOrNothing(w.b)).toBe(c.activatesMeanwhile ? 'all' : 'none');
+        expect((await ledger(w.b)).expiries).toBe(c.recordsMeanwhile ? 1 : 0);
+        lines.push(`${c.what}: slowest ${Math.max(...ms).toFixed(1)} ms`);
+        h.release();
+        await h.done;
+        await new Promise((r) => setTimeout(r, 1_100));
+        await w.s.entitlement.forCompany(w.b.companyId);
+        expect(await wholeOrNothing(w.b)).toBe('all');
+        expect((await ledger(w.b)).expiries).toBe(1);
+      }
+      note(`N1 one row held: ${lines.join('; ')}`);
+    });
+  });
+
   describe('supporting — an approval decided under the lock', () => {
     it('ten times: two approvals at once, neither naming a version — one transition, one first period, the other applied: false', async () => {
       for (let i = 0; i < 10; i += 1) {
