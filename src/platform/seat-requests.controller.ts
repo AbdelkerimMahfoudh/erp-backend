@@ -111,8 +111,9 @@ function idOf(value: string, what: string): Buffer {
  *  - **anybody**: the plan in force and a stateless estimate — prices, never a
  *    business;
  *  - **the Owner**, on their tenant session: their own requests, asking for a
- *    seat, a store or another activity for a branch, withdrawing an unpaid or
- *    scheduled request;
+ *    seat, a store or another activity for a branch, withdrawing an unpaid
+ *    request or an activity change scheduled for the renewal — never a store
+ *    or seat paid for during a free trial (status `scheduled`, D176);
  *  - **a platform administrator**, on the cookie realm with step-up: the queue,
  *    confirming a payment with a reference, refusing, releasing.
  *
