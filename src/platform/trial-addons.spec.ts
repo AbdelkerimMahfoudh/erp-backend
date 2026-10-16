@@ -563,9 +563,19 @@ describe('9. concurrent expiry and payment confirmation', () => {
     expect(asked.every((l) => l.nowait && l.outcome === 'busy')).toBe(true);
     expect(w.claimOf(b)!.expiryRecordedAt).toBeNull();
     expect(w.requests(b).map((r) => r.status)).toEqual(['scheduled', 'scheduled']);
-    // The administrator's trigger and the sweeper do not wait either.
+    // The administrator's trigger and the sweeper do not wait either. The sweeper looks again every second of its
+    // pass (N2) — each look refused at once — and leaves the business to the next pass when the row stays held.
     await expect(w.trialEnd.applyIfDue(b.companyId)).resolves.toBe('busy');
+    let at = Date.now();
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => at);
+    const pause = jest
+      .spyOn(w.sweeper as unknown as { pause: (ms: number) => Promise<void> }, 'pause')
+      .mockImplementation(async (ms: number) => void (at += ms));
     await expect(w.sweeper.sweep()).resolves.toMatchObject({ outcomes: { busy: 1 } });
+    expect(pause).toHaveBeenCalledTimes(30);
+    expect(w.locks.slice(from).every((l) => l.nowait && l.outcome === 'busy')).toBe(true);
+    now.mockRestore();
+    pause.mockRestore();
 
     release();
     w.clock.advance(1_000);

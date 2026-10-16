@@ -23,11 +23,21 @@ import { TrialEndRoll, type TrialEndOutcome } from './trial-end-roll';
  * pass once there were 200 of them, and a business that is due, and that nobody looks at, would never be reached.
  * Its approval puts its requests in force (the lifecycle's trigger), and so does the first pass after a period
  * starts. Its trial's end is still written down once, through the claims query.
+ *
+ * "Busy" — another writer held the business's subscription row, or a row its end needs, when the pass reached it — is
+ * looked at again a second later, and again, within the pass (N2): in this product a writer holds such a row for the
+ * milliseconds of its own transaction, and a business must not wait a minute for a holder that let go at once. So what
+ * is due is put in force within a minute of its start (PQ11), or within about a second of the moment its row is free.
+ * A row held longer than the pass's budget is left to the next pass.
  */
 
 const SWEEP_INTERVAL_MS = 60_000;
 /** Companies handled per pass; the rest wait for the next minute. */
 const BATCH_SIZE = 200;
+/** A business found busy is looked at again this long after… */
+const BUSY_RETRY_MS = 1_000;
+/** …until this long after the pass began: well inside the minute, so the next pass starts on time. */
+const BUSY_RETRY_BUDGET_MS = 30_000;
 
 export interface TrialEndSweep {
   companies: number;
@@ -41,6 +51,8 @@ export class TrialEndSweeper implements OnApplicationBootstrap, OnModuleDestroy 
   private timer: NodeJS.Timeout | null = null;
   /** The pass running in this process; a call during it joins it. */
   private running: Promise<TrialEndSweep | null> | null = null;
+  /** Set when the module is destroyed: a pass looking again at busy businesses stops, and leaves them to the next. */
+  private stopped = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -58,6 +70,7 @@ export class TrialEndSweeper implements OnApplicationBootstrap, OnModuleDestroy 
   }
 
   onModuleDestroy(): void {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
   }
 
@@ -76,8 +89,12 @@ export class TrialEndSweeper implements OnApplicationBootstrap, OnModuleDestroy 
     return this.running;
   }
 
-  /** One pass: every company with something due, up to the batch, one at a time. */
+  /**
+   * One pass: every company with something due, up to the batch, one at a time; then the busy ones again, a second
+   * apart, until each is free or the pass's budget is spent. Each company is counted once, by how it ended.
+   */
   async sweep(): Promise<TrialEndSweep> {
+    const started = Date.now();
     const now = this.clock.now();
     const [scheduled, unrecorded] = await Promise.all([
       // The activation's gate (trial-end-roll.ts `activateDueAddOnsTx`): an open company with a paid period in force.
@@ -107,13 +124,35 @@ export class TrialEndSweeper implements OnApplicationBootstrap, OnModuleDestroy 
       companies.set(id.toString('hex'), id);
     }
     const outcomes: Record<TrialEndOutcome, number> = { busy: 0, nothing_due: 0, done: 0, failed: 0 };
-    for (const companyId of companies.values()) {
-      outcomes[await this.trialEnd.applyIfDue(companyId)] += 1;
+    const busy = new Map<string, Buffer>();
+    for (const [key, companyId] of companies) {
+      const outcome = await this.trialEnd.applyIfDue(companyId);
+      if (outcome === 'busy') busy.set(key, companyId);
+      else outcomes[outcome] += 1;
+    }
+    const wasBusy = busy.size;
+    while (busy.size > 0 && !this.stopped && Date.now() + BUSY_RETRY_MS <= started + BUSY_RETRY_BUDGET_MS) {
+      await this.pause(BUSY_RETRY_MS);
+      for (const [key, companyId] of [...busy]) {
+        const outcome = await this.trialEnd.applyIfDue(companyId);
+        if (outcome === 'busy') continue;
+        busy.delete(key);
+        outcomes[outcome] += 1;
+      }
+    }
+    outcomes.busy = busy.size;
+    if (wasBusy > 0) {
+      this.log.log(`free trial end sweep: ${wasBusy} busy at first look; ${wasBusy - busy.size} finished on a later look, ${busy.size} left to the next pass`);
     }
     if (outcomes.failed > 0) {
       this.log.warn(`free trial end sweep: ${outcomes.failed} of ${companies.size} companies failed; retried next minute`);
     }
     if (outcomes.done > 0) this.log.log(`free trial end sweep: ${outcomes.done} companies brought up to date`);
     return { companies: companies.size, outcomes };
+  }
+
+  /** A real second between looks: the injected clock dates the work, it does not pace it. Never holds the process open. */
+  private pause(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms).unref?.());
   }
 }

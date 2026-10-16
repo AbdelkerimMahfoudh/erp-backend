@@ -784,6 +784,45 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
     });
   });
 
+  describe('supporting — N2: the sweeper looks again at a business it found busy, within its pass', () => {
+    it('a business’s row held when the pass reaches it: put in force about a second after the holder lets go, in the same pass — another due business on the first look', async () => {
+      const claimedAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 123);
+      const held = await inTrial({ approve: true, claimedAt });
+      const free = await inTrial({ approve: true, claimedAt });
+      for (const w of [held, free]) {
+        const store = (await w.s.seats.requestStore(w.b.companyId, { name: 'B', activity: 'electronics', requestedBy: 'owner' })).allocation.id;
+        await confirm(w.s, store, 500, `BK-${w.b.id.slice(-4)}`);
+      }
+      const holder = hold(Prisma.sql`SELECT id FROM subscriptions WHERE company_id = ${held.b.companyId} FOR UPDATE`);
+      await holder.held;
+      const clock = new TestClock();
+      clock.set(new Date(held.T.getTime() + 40_000));
+      const started = Date.now();
+      const pass = servicesAt(clock).sweeper.sweep();
+      await until('the free business to be put in force by the first look', async () => (await ledger(free.b)).activations === 1, 5_000);
+      // Held across the pass's first look and its next two: the business waits for the holder, never for a minute.
+      await new Promise((r) => setTimeout(r, Math.max(0, 2_500 - (Date.now() - started))));
+      expect((await ledger(held.b)).activations).toBe(0);
+      holder.release();
+      await holder.done;
+      const released = Date.now();
+      const result = await pass;
+      const after = Date.now() - released;
+      note(`N2: held for ${released - started} ms of the pass; put in force ${after} ms after the release; pass ${JSON.stringify(result)}`);
+      expect(after).toBeLessThan(1_500);
+      expect(result.outcomes.busy).toBe(0);
+      for (const w of [held, free]) {
+        expect(await ledger(w.b)).toMatchObject({
+          requests: [expect.objectContaining({ status: 'paid', effectiveAt: w.T.toISOString() })],
+          branches: ['Main', 'B'],
+          periods: [expect.objectContaining({ total: 1000 })],
+          activations: 1,
+          expiries: 1,
+        });
+      }
+    });
+  });
+
   describe('supporting — an approval decided under the lock', () => {
     it('ten times: two approvals at once, neither naming a version — one transition, one first period, the other applied: false', async () => {
       for (let i = 0; i < 10; i += 1) {

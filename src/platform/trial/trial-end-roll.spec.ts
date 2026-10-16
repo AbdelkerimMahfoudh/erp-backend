@@ -441,6 +441,73 @@ describe('the sweeper: a business nobody looks at gets what it paid for, on time
     expect(w.events(other)).toEqual([]);
   });
 
+  /** The sweeper's pause between looks at a busy business, observed — and driven — by the test. */
+  const pauses = (w: TrialBillingWorld, each: (n: number, ms: number) => void = () => undefined) => {
+    const seen: number[] = [];
+    jest.spyOn(w.sweeper as unknown as { pause: (ms: number) => Promise<void> }, 'pause').mockImplementation(async (ms: number) => {
+      seen.push(ms);
+      each(seen.length, ms);
+    });
+    return seen;
+  };
+
+  it('a business whose row another writer holds when the pass reaches it is looked at again a second later — in the same pass, not the next minute (N2)', async () => {
+    const { w, b, store, seat } = await scheduledWorld();
+    const release = w.hold(b);
+    // The holder lets go during the second pause: the third look finds the row free.
+    const seen = pauses(w, (n) => n === 2 && release());
+    w.clock.set(new Date(T.getTime() + 30_000));
+    const from = w.locks.length;
+    await expect(w.sweeper.sweep()).resolves.toEqual({ companies: 1, outcomes: { busy: 0, nothing_due: 0, done: 1, failed: 0 } });
+    expect(seen).toEqual([1_000, 1_000]);
+    expect([w.request(store).status, w.request(seat).status]).toEqual(['paid', 'paid']);
+    expect(w.request(store).effectiveAt).toEqual(T);
+    expect(w.events(b, 'trial_expired')).toHaveLength(1);
+    // Three looks: busy, busy, done — each a NOWAIT for Tx A and Tx B.
+    expect(w.locks.slice(from).map((l) => [l.nowait, l.outcome])).toEqual([
+      [true, 'busy'],
+      [true, 'busy'],
+      [true, 'busy'],
+      [true, 'busy'],
+      [true, 'taken'],
+      [true, 'taken'],
+    ]);
+  });
+
+  it('a row held past the pass’s budget is left to the next pass, counted busy once — nothing written meanwhile', async () => {
+    const { w, b, store } = await scheduledWorld();
+    const release = w.hold(b);
+    // Real time, as the pause spends it: a second per pause, and nothing else moves it.
+    let at = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => at);
+    const seen = pauses(w, (_n, ms) => (at += ms));
+    w.clock.set(new Date(T.getTime() + 30_000));
+    await expect(w.sweeper.sweep()).resolves.toEqual({ companies: 1, outcomes: { busy: 1, nothing_due: 0, done: 0, failed: 0 } });
+    // Looked at again every second for the pass's thirty.
+    expect(seen).toHaveLength(30);
+    expect(w.request(store).status).toBe('scheduled');
+    expect(w.events(b, 'trial_expired')).toEqual([]);
+    release();
+    await expect(w.sweeper.sweep()).resolves.toMatchObject({ outcomes: { done: 1, busy: 0 } });
+    expect(w.request(store).status).toBe('paid');
+  });
+
+  it('nothing busy: the pass never pauses; stopped while looking again, it ends and leaves the rest to the next pass', async () => {
+    const quiet = await scheduledWorld();
+    const none = pauses(quiet.w);
+    quiet.w.clock.set(new Date(T.getTime() + 30_000));
+    await quiet.w.sweeper.sweep();
+    expect(none).toEqual([]);
+
+    const { w, b, store } = await scheduledWorld();
+    w.hold(b);
+    const seen = pauses(w, () => w.sweeper.onModuleDestroy());
+    w.clock.set(new Date(T.getTime() + 30_000));
+    await expect(w.sweeper.sweep()).resolves.toMatchObject({ outcomes: { busy: 1 } });
+    expect(seen).toHaveLength(1);
+    expect(w.request(store).status).toBe('scheduled');
+  });
+
   it('one pass at a time in a process: a call during a pass joins it', async () => {
     const { w } = await scheduledWorld();
     w.clock.set(T);
