@@ -58,11 +58,19 @@ describe('deploy/verify-mysql-identities.sh', () => {
 
   it('passes a trigger probe only on the trigger refusing it, never on a missing grant', () => {
     const probes = verify.split('\n').filter((l) => l.includes('must_fail') && l.includes('(trigger)'));
-    expect(probes).toHaveLength(3);
+    // UPDATE and DELETE on audit_logs, UPDATE and DELETE on subscription_events.
+    expect(probes).toHaveLength(4);
     for (const line of probes) {
       expect(line.trim().endsWith('"append-only"')).toBe(true);
       expect(line).not.toMatch(/denied/);
     }
+  });
+
+  it('aims each subscription-event probe at a row that exists: a statement matching nothing fires no trigger', () => {
+    const events = verify.split('\n').filter((l) => l.includes('must_fail') && l.includes('subscription_events'));
+    expect(events).toHaveLength(2);
+    for (const line of events) expect(line).toMatch(/WHERE id=UNHEX\('\$EVENT_HEX'\)/);
+    expect(verify).toMatch(/EVENT_HEX=\$\(.*SELECT HEX\(id\) FROM subscription_events LIMIT 1/);
   });
 });
 

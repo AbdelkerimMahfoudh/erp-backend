@@ -187,15 +187,19 @@ describe('the QR fixtures', () => {
     expect(size(dual)).toBeGreaterThan(size(single));
   });
 
-  it('proves the fixture, and NOT the decoding', () => {
+  // The documentation repository nests this one (../docs); on the owner's PC it sits beside it (../erp-docs/docs). It
+  // is private, and CI holds no credential for it, so only there may it be absent; anywhere else its absence fails.
+  const docs = [join(__dirname, '..', '..', '..', 'docs'), join(__dirname, '..', '..', '..', 'erp-docs', 'docs')].find((d) => existsSync(d));
+  const onCiWithoutDocs = !docs && Boolean(process.env.CI);
+
+  (onCiWithoutDocs ? it.skip : it)(`proves the fixture, and NOT the decoding${onCiWithoutDocs ? ' (skipped on CI: the private documentation repository is not checked out)' : ''}`, () => {
     /*
      * The distinction this whole sheet rests on. Generating a correct symbol
      * says the fixture is right. Whether a camera reads it through glass, at an
      * angle, in a shop's lighting, is a question only a phone answers — and
      * `docs/24` §9n keeps it open.
      */
-    // The documentation repository nests this one (../docs); on the owner's PC it sits beside it (../erp-docs/docs).
-    const docs = [join(__dirname, '..', '..', '..', 'docs'), join(__dirname, '..', '..', '..', 'erp-docs', 'docs')].find((d) => existsSync(d))!;
+    if (!docs) throw new Error('the documentation repository is not beside this checkout (../docs or ../erp-docs/docs)');
     const checklist = readFileSync(join(docs, '24_DEVICE_QA_CHECKLIST.md'), 'utf8');
     expect(checklist).toMatch(/no camera has read anything/i);
   });
