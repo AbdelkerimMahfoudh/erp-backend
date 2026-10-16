@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
+import JSZip from 'jszip';
 import { REQUIRE_PERMISSIONS_KEY } from '../rbac/require-permissions.decorator';
 import { ReceivingFilesController } from './receiving-files.controller';
 import { ReceivingFilesService } from './receiving-files.service';
-import { columnIndex, readWorkbook } from './xlsx-reader';
+import { columnIndex, MAX_WORKBOOK_CELLS, readWorkbook } from './xlsx-reader';
 import { currencyInHeading, guessColumns, missingRequired, normaliseHeading, sheetScore } from './file-columns';
 import {
   buildEntry,
@@ -283,6 +284,39 @@ describe('columnIndex', () => {
     expect(columnIndex('A1')).toBe(0);
     expect(columnIndex('K101')).toBe(10);
     expect(columnIndex('AB7')).toBe(27);
+  });
+});
+
+/**
+ * A workbook is untrusted input, and its cell references decide how much the
+ * reader allocates. These files are a few kilobytes each; before the cell
+ * budget the first one exhausted the heap and took the API process with it.
+ */
+describe('a workbook cannot make the reader allocate without limit', () => {
+  const workbook = async (rows: string) => {
+    const zip = new JSZip();
+    zip.file('xl/workbook.xml', '<workbook><sheets><sheet name="Phones" sheetId="1"/></sheets></workbook>');
+    zip.file('xl/worksheets/sheet1.xml', `<worksheet><sheetData>${rows}</sheetData></worksheet>`);
+    return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  };
+  const tooLarge = { response: expect.objectContaining({ code: 'file_too_large' }) };
+
+  it('refuses one cell placed eight billion columns to the right', async () => {
+    const file = await workbook('<row r="2"><c r="ZZZZZZZ2"><v>1</v></c></row>');
+    await expect(readWorkbook(file)).rejects.toMatchObject(tooLarge);
+  });
+
+  it('refuses rows that each reach column XFD once together they pass the budget', async () => {
+    const rows = Math.ceil(MAX_WORKBOOK_CELLS / 16_384) + 1;
+    let xml = '';
+    for (let r = 1; r <= rows; r++) xml += `<row r="${r}"><c r="XFD${r}"><v>1</v></c></row>`;
+    await expect(readWorkbook(await workbook(xml))).rejects.toMatchObject(tooLarge);
+  });
+
+  it('still places an ordinary sparse row by its column letters', async () => {
+    const file = await workbook('<row r="1"><c r="A1" t="inlineStr"><is><t>IMEI</t></is></c><c r="C1"><v>5</v></c></row>');
+    const [sheet] = await readWorkbook(file);
+    expect(sheet.rows[0].map((c) => c.text)).toEqual(['IMEI', '', '5']);
   });
 });
 

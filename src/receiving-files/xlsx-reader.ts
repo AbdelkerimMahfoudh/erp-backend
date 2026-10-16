@@ -40,6 +40,19 @@ export interface WorkbookSheet {
 export const MAX_SHEET_ROWS = 20_000;
 export const MAX_SHEETS = 50;
 
+/**
+ * Cells the whole workbook may make us hold, blank padding included.
+ *
+ * A cell's position comes from its `r` attribute, and the gap before it is
+ * filled with blanks, so the file — not its size — decides how much memory a
+ * read takes: one cell at `ZZZZZZZ2` asks for eight billion blanks, and twenty
+ * thousand rows each ending at column XFD (Excel's own last column) for three
+ * hundred million. Either is a workbook of a few kilobytes that takes the
+ * whole API down. Two million is a hundred columns across the row cap, far
+ * beyond any delivery a shop is sent.
+ */
+export const MAX_WORKBOOK_CELLS = 2_000_000;
+
 /** XML text content, unescaped. */
 function text(s: string): string {
   return s
@@ -155,6 +168,7 @@ export async function readWorkbook(buffer: Buffer): Promise<WorkbookSheet[]> {
   }
 
   const sheets: WorkbookSheet[] = [];
+  let cellBudget = MAX_WORKBOOK_CELLS;
   const declared = all(workbookXml, 'sheet').slice(0, MAX_SHEETS);
   for (const [order, decl] of declared.entries()) {
     const name = text(attr(decl, 'name') ?? 'Sheet ' + String(order + 1));
@@ -176,6 +190,14 @@ export async function readWorkbook(buffer: Buffer): Promise<WorkbookSheet[]> {
       for (const c of all(row, 'c')) {
         const ref = attr(c, 'r');
         const at = ref ? columnIndex(ref) : cells.length;
+        // Counted before padding, so an absurd reference is refused, not allocated.
+        cellBudget -= Math.max(at + 1 - cells.length, 1);
+        if (cellBudget < 0) {
+          throw new BadRequestException({
+            code: 'file_too_large',
+            message: 'That workbook has more than ' + String(MAX_WORKBOOK_CELLS) + ' cells',
+          });
+        }
         while (cells.length < at) cells.push({ text: '' });
         cells[at] = cellValue(c, shared);
       }
