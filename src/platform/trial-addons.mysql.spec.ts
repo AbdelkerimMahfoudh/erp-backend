@@ -755,6 +755,9 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
     });
 
     it('each other row on its own — the business’s row, the claim, the store request, an Owner, the Owner’s role — held: never a wait, never half-done; released, done once', async () => {
+      // Held until both rounds are over: an evaluation that waited for it would wait out innodb_lock_wait_timeout (50 s).
+      // One that does not wait answers within 200 ms — or, with only the claim held, within the activation's own work,
+      // which Tx B then does in full inside that evaluation (about 0.1 s here).
       const cases: { what: string; sql: (w: Awaited<ReturnType<typeof threeScheduled>>) => Prisma.Sql; activatesMeanwhile: boolean; recordsMeanwhile: boolean }[] = [
         { what: 'the business’s row', sql: (w) => Prisma.sql`SELECT id FROM companies WHERE id = ${w.b.companyId} FOR UPDATE`, activatesMeanwhile: false, recordsMeanwhile: false },
         { what: 'the claim', sql: (w) => Prisma.sql`SELECT id FROM trial_claims WHERE company_id = ${w.b.companyId} FOR UPDATE`, activatesMeanwhile: true, recordsMeanwhile: false },
@@ -769,7 +772,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
         await h.held;
         w.clock.runFrom(new Date(w.T.getTime() + 1_000));
         const ms = [...(await round(w)), ...(await round(w))];
-        expect(Math.max(...ms)).toBeLessThan(200);
+        expect(Math.max(...ms)).toBeLessThan(c.activatesMeanwhile ? 1_000 : 200);
         expect(await wholeOrNothing(w.b)).toBe(c.activatesMeanwhile ? 'all' : 'none');
         expect((await ledger(w.b)).expiries).toBe(c.recordsMeanwhile ? 1 : 0);
         lines.push(`${c.what}: slowest ${Math.max(...ms).toFixed(1)} ms`);
