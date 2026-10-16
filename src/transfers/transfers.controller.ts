@@ -5,6 +5,7 @@ import { TransfersService } from './transfers.service';
 import {
   CreateTransferDto,
   ListTransfersDto,
+  ReceiveConfirmTransferDto,
   ReceiveTransferDto,
   SetTransferPrefixDto,
   TransferDecisionDto,
@@ -91,7 +92,7 @@ export class TransfersController {
   @Post(':id/receive/confirm')
   @RequirePermissions('transfer.receive')
   @ApiOperation({ summary: 'Confirm receipt → apply inventory, status, audit, notifications' })
-  receiveConfirm(@Param('id') id: string, @Body() dto: ReceiveTransferDto & TransferDecisionDto) {
+  receiveConfirm(@Param('id') id: string, @Body() dto: ReceiveConfirmTransferDto) {
     return this.transfers.receiveConfirm(id, dto);
   }
 

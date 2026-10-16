@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, ValidationPipe } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { binToUuid } from '../common/utils/uuid.util';
 import {
@@ -18,6 +18,8 @@ import {
   THIRD,
 } from './__testing__/transfer-db';
 import { Harness, makeHarness } from './__testing__/harness';
+import { ReceiveConfirmTransferDto } from './dto/transfer.dto';
+import { TransfersController } from './transfers.controller';
 
 /**
  * The seven H1.2 behaviour requirements, reconciled (H1.3 CP1).
@@ -413,6 +415,64 @@ describe('every decision carries the version the caller last saw', () => {
     expect(row.status).toBe('pending_approval');
     expect(row.decisionReason ?? null).toBeNull();
     expect(unitStatus(t.identifier)).toBe('reserved');
+  });
+
+  /**
+   * The receipt is the transition whose effects are not idempotent: a quantity
+   * line adds stock, and only the transfer's own swap stops a second receipt
+   * adding it again. Two receipts that both read `in_transit` must not both
+   * land — even if the version never arrived, which an unvalidated body allowed.
+   */
+  it('a receipt read before another one landed is refused, even with no version', async () => {
+    asManager();
+    const t = await request();
+    await h.service.ship(t.id, { expectedVersion: 0 });
+    h.act({ branchId: DEST });
+    const readByTheSecond = { ...db.stockTransfer.find((r) => binToUuid(r.id) === t.id)! };
+
+    await h.service.receiveConfirm(t.id, { identifiers: [t.identifier], expectedVersion: 1 });
+
+    jest.spyOn(h.service as unknown as { load: () => Promise<unknown> }, 'load').mockResolvedValueOnce(readByTheSecond);
+    await expect(
+      h.service.receiveConfirm(t.id, { identifiers: [t.identifier] } as unknown as ReceiveConfirmTransferDto),
+    ).rejects.toThrow(ConflictException);
+    expect(db.stockTransfer.find((r) => binToUuid(r.id) === t.id)!.version).toBe(2);
+  });
+});
+
+/**
+ * The body is checked before the service sees it.
+ *
+ * Run through the same global pipe `main.ts` installs, against the parameter
+ * type the controller really declares — an intersection type erased to
+ * `Object` here once, and the pipe skips `Object` without checking anything.
+ */
+describe('a receipt confirmation body is validated', () => {
+  const pipe = new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+    transformOptions: { enableImplicitConversion: false },
+  });
+  const [, metatype] = Reflect.getMetadata('design:paramtypes', TransfersController.prototype, 'receiveConfirm') as [
+    unknown,
+    new () => unknown,
+  ];
+  const check = (body: unknown) => pipe.transform(body, { type: 'body', metatype });
+
+  it('refuses a confirmation without the version the caller last saw', async () => {
+    await expect(check({ identifiers: [] })).rejects.toThrow(BadRequestException);
+  });
+
+  it('refuses identifiers that are not a list of strings', async () => {
+    await expect(check({ identifiers: 5, expectedVersion: 1 })).rejects.toThrow(BadRequestException);
+  });
+
+  it('accepts what the app sends', async () => {
+    await expect(check({ identifiers: ['356938035643809'], expectedVersion: 1 })).resolves.toMatchObject({
+      identifiers: ['356938035643809'],
+      expectedVersion: 1,
+    });
   });
 });
 

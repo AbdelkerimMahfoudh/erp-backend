@@ -80,6 +80,9 @@ const RELATIONS: Record<string, { model: keyof Db; fk: string; on?: string; list
 export function matches(db: Db, model: keyof Db, row: Row, where: unknown): boolean {
   if (!where || typeof where !== 'object') return true;
   for (const [key, cond] of Object.entries(where as Record<string, unknown>)) {
+    // Prisma drops an `undefined` filter rather than matching it; so must we, or
+    // a compare-and-swap whose value never arrived looks safe here and is not.
+    if (cond === undefined) continue;
     if (key === 'OR') {
       if (!(cond as unknown[]).some((c) => matches(db, model, row, c))) return false;
       continue;

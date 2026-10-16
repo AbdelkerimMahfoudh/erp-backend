@@ -27,6 +27,7 @@ import { computeActions, requestedAtOf, shippedAt } from './transfer-view';
 import {
   CreateTransferDto,
   ListTransfersDto,
+  ReceiveConfirmTransferDto,
   ReceiveTransferDto,
   TransferDecisionDto,
   TRANSFER_STATUSES,
@@ -518,8 +519,13 @@ export class TransfersService {
     extra: Record<string, unknown> = {},
   ): Promise<void> {
     assertTransferTransition(transfer.status, to);
+    /**
+     * The status read is part of the swap, not only the version. Prisma drops an
+     * `undefined` filter, so a version that never arrived would otherwise match
+     * every row — and two receipts would both land, adding quantity stock twice.
+     */
     const moved = await tx.stockTransfer.updateMany({
-      where: { id: transfer.id, companyId: this.tenant.companyId(), version: expectedVersion },
+      where: { id: transfer.id, companyId: this.tenant.companyId(), version: expectedVersion, status: transfer.status },
       data: { status: to, version: { increment: 1 }, ...extra },
     });
     if (moved.count === 0) {
@@ -875,7 +881,7 @@ export class TransfersService {
   }
 
   /** Step 2: explicit confirm → apply inventory, status, audit, notification. */
-  async receiveConfirm(idStr: string, dto: ReceiveTransferDto & { expectedVersion: number }) {
+  async receiveConfirm(idStr: string, dto: ReceiveConfirmTransferDto) {
     const toBranchId = this.tenant.requireBranchId();
     const transfer = await this.load(idStr);
     if (!transfer.toBranchId.equals(toBranchId)) {

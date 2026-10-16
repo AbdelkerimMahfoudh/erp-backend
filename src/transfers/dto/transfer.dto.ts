@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, IntersectionType } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMinSize,
@@ -220,3 +220,13 @@ export class TransferDecisionDto {
   @MaxLength(500)
   reason?: string;
 }
+
+/**
+ * Confirming a receipt is a scan AND a lifecycle decision, so it carries both.
+ *
+ * A named class on purpose. `ReceiveTransferDto & TransferDecisionDto` erases to
+ * `Object` at runtime, and the global ValidationPipe validates nothing typed
+ * `Object` — so the body went unchecked, and a missing `expectedVersion`
+ * silently switched the version compare-and-swap off.
+ */
+export class ReceiveConfirmTransferDto extends IntersectionType(ReceiveTransferDto, TransferDecisionDto) {}
