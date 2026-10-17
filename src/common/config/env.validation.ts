@@ -36,11 +36,23 @@ export const envValidationSchema = Joi.object({
 
   // ── Messaging + OTP (F1 Stage 4A; the Cloud API since 2026-09-30) ─────────
   // "disabled" is the default. "development-log" is refused in production by
-  // MessagingModule. "cloud-api" is the WhatsApp Business Cloud API and needs
-  // the credentials below; the production guard refuses it without them.
-  WHATSAPP_CHANNEL: Joi.string().valid('disabled', 'development-log', 'cloud-api').default('disabled'),
+  // MessagingModule. "cloud" is the WhatsApp Business Cloud API ("cloud-api" is
+  // the same, kept for existing configurations) and needs the credentials below;
+  // the production guard refuses it without them.
+  WHATSAPP_CHANNEL: Joi.string().valid('disabled', 'development-log', 'cloud', 'cloud-api').default('disabled'),
+  // D181 §4 — independent controls. "test" sends ONLY to the exact numbers of
+  // WHATSAPP_TEST_RECIPIENTS; "live" sends to real customers, and only once
+  // WHATSAPP_LIVE_SENDS=enabled (production refuses to boot in live mode otherwise).
+  WHATSAPP_MODE: Joi.string().valid('test', 'live').default('test'),
+  WHATSAPP_TEST_RECIPIENTS: Joi.string().allow('').default(''),
+  WHATSAPP_LIVE_SENDS: Joi.string().valid('disabled', 'enabled').default('disabled'),
+  // The Meta app's id (not a secret): the live-mode credential check asks the provider about the token with it.
+  WHATSAPP_APP_ID: Joi.string().allow('').pattern(/^\d*$/).default(''),
+  WHATSAPP_MAX_SENDS_PER_SECOND: Joi.number().integer().min(1).max(80).default(20),
+  WHATSAPP_RECIPIENT_MIN_INTERVAL_MS: Joi.number().integer().min(0).max(60_000).default(1000),
+  WHATSAPP_WEBHOOK_RETENTION_DAYS: Joi.number().integer().min(8).max(365).default(30),
   WHATSAPP_API_BASE_URL: Joi.string().uri({ scheme: ['https', 'http'] }).default('https://graph.facebook.com'),
-  WHATSAPP_API_VERSION: Joi.string().pattern(/^v\d+\.\d+$/).default('v21.0'),
+  WHATSAPP_API_VERSION: Joi.string().pattern(/^v\d+\.\d+$/).default('v26.0'),
   // The sending number's id at the provider — an identifier, not a secret.
   WHATSAPP_PHONE_NUMBER_ID: Joi.string().allow('').default(''),
   // A system-user access token. Secret: server-side configuration only.
@@ -88,9 +100,33 @@ export const envValidationSchema = Joi.object({
   // ── Email (correction phase, 2026-10-12; messaging/email-channel.ts) ─────
   // "disabled" is the default. "development-log" is refused in production. "resend" needs a key and a sender on a
   // domain with SPF, DKIM and DMARC (docs/64); no provider is connected without TSX-MR's credentials and approval.
-  EMAIL_CHANNEL: Joi.string().valid('disabled', 'development-log', 'resend').default('disabled'),
+  // "smtp" (D181) is Brevo's SMTP relay: port 587, STARTTLS required, TLS 1.2 minimum.
+  EMAIL_CHANNEL: Joi.string().valid('disabled', 'development-log', 'resend', 'smtp').default('disabled'),
+  // The fallback sender (no-reply@…), and one sender per class; an empty class falls back to EMAIL_FROM.
   EMAIL_FROM: Joi.string().allow('').default(''),
+  EMAIL_FROM_VERIFICATION: Joi.string().allow('').default(''),
+  EMAIL_FROM_NOTIFICATIONS: Joi.string().allow('').default(''),
+  // Configuration only: no report or receipt email is sent (D111).
+  EMAIL_FROM_REPORTS: Joi.string().allow('').default(''),
+  EMAIL_FROM_RECEIPTS: Joi.string().allow('').default(''),
   EMAIL_REPLY_TO: Joi.string().allow('').default(''),
+  SMTP_HOST: Joi.string().hostname().default('smtp-relay.brevo.com'),
+  SMTP_PORT: Joi.number().integer().min(1).max(65535).default(587),
+  SMTP_USERNAME: Joi.string().allow('').default(''),
+  // Secret: server-side configuration only.
+  SMTP_PASSWORD: Joi.string().allow('').default(''),
+  SMTP_CONNECTION_TIMEOUT_MS: Joi.number().integer().min(1000).max(60_000).default(10_000),
+  SMTP_GREETING_TIMEOUT_MS: Joi.number().integer().min(1000).max(60_000).default(10_000),
+  SMTP_SOCKET_TIMEOUT_MS: Joi.number().integer().min(1000).max(120_000).default(20_000),
+  // The application's own safety limit per UTC day (Brevo's free plan: 300/day) and the part of it kept for
+  // essential email (codes); not a reflection of Brevo's own account count.
+  EMAIL_DAILY_SAFETY_LIMIT: Joi.number().integer().min(1).max(1_000_000).default(300),
+  EMAIL_DAILY_RESERVE: Joi.number().integer().min(0).max(1_000_000).default(50),
+  EMAIL_RECIPIENT_DAILY_LIMIT: Joi.number().integer().min(1).max(1000).default(20),
+  // Message records (D181 §7): metadata kept this long, then deleted.
+  MESSAGE_LOG_RETENTION_DAYS: Joi.number().integer().min(7).max(730).default(180),
+  // Secret: keys the recipient hashes of the message records (32+ characters). No default, deliberately.
+  MESSAGING_HASH_KEY: Joi.string().allow('').default(''),
   // Secret: server-side configuration only.
   RESEND_API_KEY: Joi.string().allow('').default(''),
   RESEND_API_BASE_URL: Joi.string().uri({ scheme: ['https', 'http'] }).default('https://api.resend.com'),

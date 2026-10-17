@@ -1,5 +1,9 @@
-import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
 import type { ContactChannel } from '@prisma/client';
+import { AppConfigService } from '../common/config/app-config.service';
+import { normalisePhone } from '../auth/identifier';
+import { WhatsAppRecords } from '../messaging/whatsapp-records';
+import { acceptedConsentVersion, consentRequired } from '../messaging/whatsapp-consent';
 import { RegistrationService } from './registration.service';
 import { RegistrationContinuationService, CONTINUATION_TTL_SECONDS } from './registration-continuation.service';
 import { ContactDeliveryProvider } from './contact-delivery';
@@ -20,6 +24,8 @@ export class RegistrationFlowService {
     private readonly registration: RegistrationService,
     private readonly continuation: RegistrationContinuationService,
     private readonly delivery: ContactDeliveryProvider,
+    @Optional() private readonly config?: AppConfigService,
+    @Optional() private readonly whatsappRecords?: WhatsAppRecords,
   ) {}
 
   /** Create the business, its Owner and its pending subscription, and hand back the continuation that finishes it. */
@@ -39,7 +45,21 @@ export class RegistrationFlowService {
      * which ones, so the person can drop that contact and continue.
      */
     const given = (['email', 'phone'] as const).filter((channel) => (channel === 'email' ? dto.email : dto.phone)?.trim());
-    const unavailable: ContactChannel[] = given.filter((channel) => !this.delivery.canDeliver(channel));
+    const phone = dto.phone?.trim() ? normalisePhone(dto.phone) : null;
+    /*
+     * The WhatsApp consent (D181 §5), checked before anything is saved: a stale copy is refused, and while WhatsApp
+     * runs live a number without the person's agreement is refused too — the number is the account's mandatory
+     * verified contact, and the consent says so.
+     */
+    const consentVersion = dto.phone?.trim()
+      ? acceptedConsentVersion(
+          dto.whatsappConsentVersion,
+          this.config ? consentRequired(this.config.whatsappChannel, this.config.whatsappMode) : false,
+        )
+      : null;
+    const unavailable: ContactChannel[] = given.filter(
+      (channel) => !this.delivery.canDeliver(channel, channel === 'phone' ? (phone ?? undefined) : undefined),
+    );
     if (unavailable.length > 0) {
       throw new ServiceUnavailableException({
         code: 'registration_unavailable',
@@ -77,6 +97,17 @@ export class RegistrationFlowService {
      * otherwise a public idempotency key would be a way to mint one.
      */
     const owner = await this.registration.pendingOwnerFor(result.companyId);
+    // The agreement is recorded against the Owner it belongs to, with an audit event (a retry records it again, as
+    // the same person agreeing again).
+    if (owner && phone && consentVersion && this.whatsappRecords) {
+      await this.whatsappRecords.recordConsent({
+        number: phone,
+        version: consentVersion,
+        companyId: owner.companyId,
+        userId: owner.userId,
+        source: 'owner_registration',
+      });
+    }
     const continuation = owner
       ? await this.continuation.issue(owner.companyId, owner.userId)
       : null;

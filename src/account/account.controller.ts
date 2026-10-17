@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
@@ -13,6 +13,8 @@ import {
   ResendDeletionCodeDto,
   StartDeletionDto,
   StartPhoneVerificationDto,
+  WhatsAppConsentDto,
+  WhatsAppOptOutDto,
 } from './account.dto';
 
 /**
@@ -112,6 +114,31 @@ export class AccountController {
   @ApiOperation({ summary: 'Prove a WhatsApp number: my password again, then a code to that number' })
   startPhone(@CurrentUser() user: AuthUser, @Body() dto: StartPhoneVerificationDto) {
     return this.account.startPhoneVerification(this.principal(user), dto);
+  }
+
+  @Get('whatsapp/consent')
+  @ApiOperation({ summary: 'My WhatsApp consent: the current copy, what I agreed to, my opt-out, and what a withdrawal stops' })
+  whatsappConsent(@CurrentUser() user: AuthUser, @Query('language') language?: string) {
+    return this.account.whatsappConsent(this.principal(user), language === 'fr' || language === 'ar' ? language : 'en');
+  }
+
+  @Post('whatsapp/consent')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(SENSITIVE_THROTTLE)
+  @ApiOperation({ summary: 'Agree to the current WhatsApp consent for my verified number (ends any opt-out)' })
+  grantWhatsappConsent(@CurrentUser() user: AuthUser, @Body() dto: WhatsAppConsentDto, @Query('language') language?: string) {
+    return this.account.grantWhatsappConsent(this.principal(user), dto.version, language === 'fr' || language === 'ar' ? language : 'en');
+  }
+
+  @Post('whatsapp/opt-out')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(SENSITIVE_THROTTLE)
+  @ApiOperation({
+    summary: 'Stop optional WhatsApp notifications (scope optional), or withdraw WhatsApp as my account contact (scope all)',
+    description: 'A withdrawal answers with the account functions that become unavailable until I agree again.',
+  })
+  optOutWhatsapp(@CurrentUser() user: AuthUser, @Body() dto: WhatsAppOptOutDto) {
+    return this.account.optOutWhatsapp(this.principal(user), dto.scope, dto.language ?? 'en');
   }
 
   @Post('whatsapp/verify/confirm')

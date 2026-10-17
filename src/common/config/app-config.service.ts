@@ -71,6 +71,39 @@ export class AppConfigService {
   get whatsappChannel(): string {
     return this.get('WHATSAPP_CHANNEL');
   }
+  /** test (default: only the exact allowlist) | live (real customers, once WHATSAPP_LIVE_SENDS=enabled). D181 §4. */
+  get whatsappMode(): 'test' | 'live' {
+    return (this.config.get<string>('WHATSAPP_MODE') ?? 'test').trim().toLowerCase() === 'live' ? 'live' : 'test';
+  }
+  /** The raw allowlist (comma-separated E.164); parsed and validated by `messaging/whatsapp-policy.ts`. */
+  get whatsappTestRecipients(): string {
+    return (this.config.get<string>('WHATSAPP_TEST_RECIPIENTS') ?? '').trim();
+  }
+  get whatsappLiveSends(): boolean {
+    return (this.config.get<string>('WHATSAPP_LIVE_SENDS') ?? 'disabled').trim().toLowerCase() === 'enabled';
+  }
+  /** The Meta app's id — an identifier, not a secret. Used by the live-mode credential check only. */
+  get whatsappAppId(): string {
+    return (this.config.get<string>('WHATSAPP_APP_ID') ?? '').trim();
+  }
+  get whatsappMaxSendsPerSecond(): number {
+    return this.get('WHATSAPP_MAX_SENDS_PER_SECOND');
+  }
+  get whatsappRecipientMinIntervalMs(): number {
+    return this.get('WHATSAPP_RECIPIENT_MIN_INTERVAL_MS');
+  }
+  get whatsappWebhookRetentionDays(): number {
+    return this.get('WHATSAPP_WEBHOOK_RETENTION_DAYS');
+  }
+  /** How long email and WhatsApp message metadata is kept (D181 §7). */
+  get messageLogRetentionDays(): number {
+    return this.get('MESSAGE_LOG_RETENTION_DAYS');
+  }
+  /** Secret. Keys the recipient hashes of the message records; null when unset. Never logged. */
+  get messagingHashKey(): string | null {
+    const value = (this.config.get<string>('MESSAGING_HASH_KEY') ?? '').trim();
+    return value ? value : null;
+  }
 
   // ── Email (messaging/email-channel.ts) ──
   get emailChannel(): string {
@@ -90,6 +123,47 @@ export class AppConfigService {
   }
   get emailSendTimeoutMs(): number {
     return this.get('EMAIL_SEND_TIMEOUT_MS');
+  }
+  /** The From address per sender class; each falls back to EMAIL_FROM when empty (email-channel.ts). */
+  get emailSenders(): { verification: string; notifications: string; reports: string; receipts: string; fallback: string } {
+    const read = (key: string) => (this.config.get<string>(key) ?? '').trim();
+    return {
+      verification: read('EMAIL_FROM_VERIFICATION'),
+      notifications: read('EMAIL_FROM_NOTIFICATIONS'),
+      reports: read('EMAIL_FROM_REPORTS'),
+      receipts: read('EMAIL_FROM_RECEIPTS'),
+      fallback: read('EMAIL_FROM'),
+    };
+  }
+  get smtpHost(): string {
+    return this.get('SMTP_HOST');
+  }
+  get smtpPort(): number {
+    return this.get('SMTP_PORT');
+  }
+  get smtpUsername(): string {
+    return (this.config.get<string>('SMTP_USERNAME') ?? '').trim();
+  }
+  /** Secret. Handed to the SMTP transport and nothing else; never returned, logged or put in an error. */
+  get smtpPassword(): string {
+    return this.config.get<string>('SMTP_PASSWORD') ?? '';
+  }
+  get smtpTimeouts(): { connectionMs: number; greetingMs: number; socketMs: number } {
+    return {
+      connectionMs: this.get('SMTP_CONNECTION_TIMEOUT_MS'),
+      greetingMs: this.get('SMTP_GREETING_TIMEOUT_MS'),
+      socketMs: this.get('SMTP_SOCKET_TIMEOUT_MS'),
+    };
+  }
+  /** The application's own daily safety limit and its reserve for essential email — not Brevo's account count. */
+  get emailDailySafetyLimit(): number {
+    return this.get('EMAIL_DAILY_SAFETY_LIMIT');
+  }
+  get emailDailyReserve(): number {
+    return this.get('EMAIL_DAILY_RESERVE');
+  }
+  get emailRecipientDailyLimit(): number {
+    return this.get('EMAIL_RECIPIENT_DAILY_LIMIT');
   }
 
   /** Provider template id for the auth OTP; empty until approved at the provider. */

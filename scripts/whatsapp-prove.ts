@@ -8,10 +8,15 @@
 //
 // A production deployment sends no WhatsApp message — no sign-in code, no
 // deletion code, no invitation — until each of en, fr and ar has a DELIVERED
-// proof. This command makes the sends (to the operator's own number, with the
-// approved `delivery.check` template); the provider's signed delivery report,
-// received by the webhook, completes each proof. Nothing here can mark a proof
-// delivered, and nothing here is an attestation an operator could type.
+// proof for the configured sending number. This command makes the sends (to the
+// operator's own number, with the approved `delivery.check` template); the
+// provider's signed delivery report, received by the webhook, completes each
+// proof. Nothing here can mark a proof delivered, and nothing here is an
+// attestation an operator could type.
+//
+// D181 §4: it runs ONLY in test mode (WHATSAPP_MODE=test) and ONLY to a number
+// listed in WHATSAPP_TEST_RECIPIENTS — so readiness is established without
+// enabling live sends, and no real customer is ever reached from here.
 //
 // Prints a masked number only, never a token, never a provider payload.
 // Reads the environment the API reads (`.env`, or the deployment's own).
@@ -25,7 +30,8 @@ import { NestFactory } from '@nestjs/core';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
-import { WHATSAPP_RAW_CHANNEL } from '../src/messaging/messaging.module';
+import { WHATSAPP_GOVERNED_CHANNEL, isCloudChannel, sendControlsFrom } from '../src/messaging/messaging.module';
+import { AppConfigService } from '../src/common/config/app-config.service';
 import { PROOF_LANGUAGES, WhatsAppReadiness } from '../src/messaging/delivery-readiness';
 import { DELIVERY_CHECK_TEMPLATE } from '../src/messaging/templates';
 import { maskDestination } from '../src/messaging/channels';
@@ -43,11 +49,16 @@ async function main(): Promise<void> {
   try {
     const prisma = app.get(PrismaService);
     const readiness = app.get(WhatsAppReadiness);
-    const channel = app.get<WhatsAppChannel>(WHATSAPP_RAW_CHANNEL);
+    const channel = app.get<WhatsAppChannel>(WHATSAPP_GOVERNED_CHANNEL);
+    const config = app.get(AppConfigService);
 
     if (process.argv.includes('--status')) {
       await readiness.refresh();
-      const proofs = await prisma.messagingDeliveryProof.findMany({ where: { channel: 'whatsapp' }, orderBy: { createdAt: 'desc' }, take: 20 });
+      const proofs = await prisma.messagingDeliveryProof.findMany({
+        where: { channel: 'whatsapp', phoneNumberId: config.whatsappPhoneNumberId },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      });
       console.log(`\n  WhatsApp delivery: ${readiness.isProven ? 'PROVEN' : `NOT PROVEN — missing ${readiness.missing.join(', ')}`}\n`);
       for (const p of proofs) {
         const state = p.deliveredAt ? `delivered ${p.deliveredAt.toISOString()}` : p.failureDetail ? `failed: ${p.failureDetail}` : p.acceptedAt ? 'accepted, waiting for the signed report' : 'not accepted';
@@ -58,8 +69,15 @@ async function main(): Promise<void> {
 
     const to = normalisePhone(arg('--to') ?? '');
     if (!to) throw new Error('Give the operator’s own WhatsApp number: --to +2223XXXXXXX');
-    if (!channel.isEnabled || channel.name !== 'cloud-api') {
-      throw new Error(`Nothing to prove: WHATSAPP_CHANNEL is "${channel.name}". Configure cloud-api first (docs/64).`);
+    if (!isCloudChannel(config.whatsappChannel) || channel.name !== 'cloud-api') {
+      throw new Error(`Nothing to prove: WHATSAPP_CHANNEL is "${config.whatsappChannel}". Configure cloud first (docs/64, docs/97).`);
+    }
+    const controls = sendControlsFrom(config);
+    if (controls.mode !== 'test') {
+      throw new Error('The delivery proof runs in test mode only (D181 §4): set WHATSAPP_MODE=test. Live sends are never needed to prove delivery.');
+    }
+    if (!controls.testRecipients.has(to)) {
+      throw new Error(`${maskDestination(to)} is not in WHATSAPP_TEST_RECIPIENTS: the proof goes only to an allowlisted number.`);
     }
 
     console.log(`\n  Sending the delivery check to ${maskDestination(to)} in ${PROOF_LANGUAGES.join(', ')}\n`);
@@ -80,6 +98,7 @@ async function main(): Promise<void> {
           template: DELIVERY_CHECK_TEMPLATE.key,
           language,
           destinationMasked: maskDestination(to),
+          phoneNumberId: config.whatsappPhoneNumberId,
           providerMessageId: result.status === 'accepted' ? result.providerMessageId : null,
           acceptedAt: result.status === 'accepted' ? new Date() : null,
           failureDetail: result.status === 'failed' ? `${result.reason}: ${result.detail}`.slice(0, 200) : null,

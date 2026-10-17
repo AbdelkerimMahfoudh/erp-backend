@@ -25,6 +25,12 @@ export class RegisterDto {
 
   @IsString() @MinLength(8) @MaxLength(200) password: string;
   @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
+
+  /**
+   * The version of the WhatsApp consent copy the person agreed to (`GET messaging/whatsapp/consent`; D181 §5), when
+   * a WhatsApp number is given. Required while WhatsApp runs live; a stale version is always refused.
+   */
+  @IsOptional() @IsString() @MaxLength(40) whatsappConsentVersion?: string;
 }
 
 export class ContinueStartDto {

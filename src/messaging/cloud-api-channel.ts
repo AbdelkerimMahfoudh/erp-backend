@@ -30,7 +30,7 @@ import { maskDestination } from './channels';
 export interface CloudApiConfig {
   /** `https://graph.facebook.com` in every real deployment; a local mock in tests. */
   baseUrl: string;
-  /** `v21.0` and the like. */
+  /** `v26.0` and the like (WHATSAPP_API_VERSION). */
   apiVersion: string;
   /** The sending number's id at the provider. An identifier, not a secret. */
   phoneNumberId: string;
@@ -70,6 +70,25 @@ export function classifyGraphFailure(httpStatus: number, code?: number): Deliver
   }
   if (httpStatus === 429 || httpStatus >= 500) return 'temporary';
   return 'rejected';
+}
+
+/**
+ * A short, payload-free description of the provider's code — what support needs to act — for `detail` and the
+ * message record. The provider's own message text is never used: it can echo a parameter.
+ */
+export function describeGraphCode(code?: number, subcode?: number): string {
+  if (code === 190) {
+    if (subcode === 463) return 'the access token has expired';
+    if (subcode === 460 || subcode === 467) return 'the access token is no longer valid';
+    return 'the access token is invalid';
+  }
+  if (code === 10 || (code !== undefined && code >= 200 && code <= 299)) return 'a permission is missing for this token';
+  if (code === 131047) return 'outside the 24-hour customer-service window; only an approved template may be sent';
+  if (code === 131026) return 'the number cannot receive this message';
+  if (code === 131056) return 'too many messages to this number in a short time';
+  if (code === 130429 || code === 80007 || code === 4) return 'the provider is throttling this sender';
+  if (code === 132001) return 'the template does not exist in this language or is not approved';
+  return code !== undefined ? `provider code ${code}` : 'no provider code';
 }
 
 /**
@@ -186,17 +205,19 @@ export class CloudApiWhatsAppChannel implements WhatsAppChannel {
     }
 
     const code = payload.error?.code;
+    const subcode = payload.error?.error_subcode;
     const reason = classifyGraphFailure(response.status, code);
     this.logger.warn(
       `WhatsApp send refused for ${maskDestination(message.to)} (${message.template}): HTTP ${response.status}, provider code ${code ?? 'none'}`,
     );
     return this.failed(
       reason,
-      `Provider answered HTTP ${response.status}${code !== undefined ? ` (code ${code})` : ''}`,
+      `Provider answered HTTP ${response.status}${code !== undefined ? ` (code ${code}): ${describeGraphCode(code, subcode)}` : ''}`,
+      code,
     );
   }
 
-  private failed(reason: DeliveryFailureReason, detail: string): DeliveryResult {
-    return { status: 'failed', reason, detail, provider: this.name };
+  private failed(reason: DeliveryFailureReason, detail: string, providerCode?: number): DeliveryResult {
+    return { status: 'failed', reason, detail: detail.slice(0, 200), provider: this.name, ...(providerCode !== undefined ? { providerCode } : {}) };
   }
 }

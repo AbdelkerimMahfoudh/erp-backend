@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import type { DeliveryFailureReason, DeliveryResult, MessageLanguage } from './whatsapp-channel';
+import { SmtpEmailChannel, type SmtpConfig } from './smtp-email-channel';
 
 /**
  * The email boundary (correction phase, 2026-10-12).
@@ -11,11 +12,14 @@ import type { DeliveryFailureReason, DeliveryResult, MessageLanguage } from './w
  *  - **no provider type escapes.** Failures are classified into the WhatsApp boundary's four reasons;
  *  - **nothing is claimed that did not happen.** `disabled` is the default and sends nothing; `development-log`
  *    writes the destination and template — never a code — and is refused in production; `resend` refuses to be
- *    built without its key and sender, and is refused in production over plain HTTP.
+ *    built without its key and sender, and is refused in production over plain HTTP; `smtp` (Brevo, D181) refuses
+ *    to be built without its credentials and a sender (`smtp-email-channel.ts`).
  *
- * No provider is connected by this file: `resend` stays inert until TSX-MR supplies an account, a verified sending
- * domain (SPF, DKIM, DMARC — docs/64) and a key, and approves the connection. The key lives in server-side
- * configuration only.
+ * Every email carries a plain-text and an HTML alternative composed here from the same reviewed text: every variable
+ * HTML-escaped, Arabic laid out right to left, no remote image, no tracking pixel, no stylesheet from anywhere. The
+ * From address follows the message's class ({@link senderFor}); Reply-To is the support address.
+ *
+ * `resend` stays dormant (D181 §2). The credentials of either provider live in server-side configuration only.
  */
 
 export type EmailTemplateKey = 'contact.verification' | 'staff.invitation' | 'password.recovery' | 'security.alert' | 'trial.setup';
@@ -38,7 +42,30 @@ export interface EmailChannel {
 
 export const EMAIL_CHANNEL = Symbol('EMAIL_CHANNEL');
 
+/**
+ * Which From address a message goes out under (D181): codes and security messages from the verification sender,
+ * operational messages from the notifications sender. The report and receipt senders exist in configuration only —
+ * no report or receipt email is sent (D111).
+ */
+export type EmailSenderClass = 'verification' | 'notifications';
+
+export interface EmailSenders {
+  verification: string;
+  notifications: string;
+  reports: string;
+  receipts: string;
+  /** EMAIL_FROM (no-reply@…): used for any class whose own sender is empty. */
+  fallback: string;
+}
+
 interface EmailTemplate {
+  /** The From address class. */
+  sender: EmailSenderClass;
+  /**
+   * A code or a security message the person needs now: it may use the reserve of the daily safety limit
+   * (`email-log.ts`). Everything else stops at the limit minus the reserve.
+   */
+  essential: boolean;
   variables: readonly string[];
   /**
    * Wired to a flow, or held for one that does not exist yet. A held template cannot be sent: there is no
@@ -53,6 +80,8 @@ interface EmailTemplate {
 /** Text a person reviewed. `{name}` placeholders only; nothing else is interpolated. */
 export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
   'contact.verification': {
+    sender: 'verification',
+    essential: true,
     variables: ['code', 'ttlMinutes'],
     wired: true,
     subject: { en: 'Your Dukan ERP code', fr: 'Votre code Dukan ERP', ar: 'رمز Dukan ERP الخاص بك' },
@@ -63,6 +92,8 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
     },
   },
   'staff.invitation': {
+    sender: 'verification',
+    essential: true,
     variables: ['code', 'ttlMinutes', 'business'],
     // Invitations go out today as a contact verification code; this text waits for an invitation flow of its own.
     wired: false,
@@ -74,6 +105,8 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
     },
   },
   'password.recovery': {
+    sender: 'verification',
+    essential: true,
     variables: ['code', 'ttlMinutes'],
     wired: false,
     subject: { en: 'Reset your Dukan ERP password', fr: 'Réinitialiser votre mot de passe Dukan ERP', ar: 'إعادة تعيين كلمة مرور Dukan ERP' },
@@ -84,6 +117,8 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
     },
   },
   'security.alert': {
+    sender: 'verification',
+    essential: true,
     variables: ['what', 'when'],
     wired: false,
     subject: { en: 'Dukan ERP security notice', fr: 'Avis de sécurité Dukan ERP', ar: 'تنبيه أمني من Dukan ERP' },
@@ -101,6 +136,8 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
    * payment instruction: the one sentence about money says that none is required.
    */
   'trial.setup': {
+    sender: 'notifications',
+    essential: false,
     variables: ['business', 'link'],
     wired: true,
     subject: {
@@ -116,8 +153,53 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
   },
 };
 
+/** The template's sender class and whether it is essential; undefined for an unknown template. */
+export function emailTemplateClass(template: string): { sender: EmailSenderClass; essential: boolean } | undefined {
+  const t = (EMAIL_TEMPLATES as Record<string, EmailTemplate | undefined>)[template];
+  return t ? { sender: t.sender, essential: t.essential } : undefined;
+}
+
+/** The From address for a template: its class's sender, or EMAIL_FROM when that class has none. Empty if neither. */
+export function senderFor(template: EmailTemplateKey, senders: EmailSenders): string {
+  const cls = emailTemplateClass(template)?.sender;
+  return ((cls ? senders[cls] : '') || senders.fallback || '').trim();
+}
+
+export function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
+}
+
+/** Variables shown left to right inside any paragraph (a code, an address), so Arabic text never reorders them. */
+const LTR_VARIABLES = new Set(['code', 'link']);
+
+/**
+ * The HTML alternative: the same reviewed text, paragraph for paragraph. Each variable is escaped; a `link` that is
+ * an https:// address becomes a link to itself (the address shown is the address followed); nothing else is markup.
+ */
+export function renderEmailHtml(language: MessageLanguage, subject: string, body: string, variables: Record<string, string>): string {
+  const rtl = language === 'ar';
+  const fill = (line: string) =>
+    escapeHtml(line).replace(/\{(\w+)\}/g, (_, k: string) => {
+      const value = variables[k] ?? '';
+      const safe = escapeHtml(value);
+      if (k === 'link' && /^https:\/\/[^\s"'<>]+$/.test(value)) return `<a href="${safe}" dir="ltr" style="color:#0b57d0;word-break:break-all">${safe}</a>`;
+      if (k === 'code') return `<strong dir="ltr" style="font-size:20px;letter-spacing:2px">${safe}</strong>`;
+      return LTR_VARIABLES.has(k) ? `<span dir="ltr">${safe}</span>` : safe;
+    });
+  const paragraphs = body
+    .split(/\n{2,}/)
+    .map((p) => `<p style="margin:0 0 16px">${p.split('\n').map(fill).join('<br>')}</p>`)
+    .join('');
+  return (
+    `<!doctype html><html lang="${language}" dir="${rtl ? 'rtl' : 'ltr'}"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(subject)}</title></head>` +
+    `<body style="margin:0;padding:24px 16px;background:#ffffff;color:#1a1a1a;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.5">` +
+    `<div dir="${rtl ? 'rtl' : 'ltr'}" style="max-width:560px;margin:0 auto;text-align:${rtl ? 'right' : 'left'}">${paragraphs}</div></body></html>`
+  );
+}
+
 /** Subject and body, or a refusal: an unknown, held, incomplete or over-filled template never reaches a provider. */
-export function composeEmail(message: Pick<EmailMessage, 'template' | 'language' | 'variables'>): { subject: string; text: string } {
+export function composeEmail(message: Pick<EmailMessage, 'template' | 'language' | 'variables'>): { subject: string; text: string; html: string } {
   const template = EMAIL_TEMPLATES[message.template];
   if (!template) throw new Error(`Unknown email template "${message.template}"`);
   if (!template.wired) throw new Error(`Email template "${message.template}" is not wired to any flow and cannot be sent`);
@@ -127,7 +209,12 @@ export function composeEmail(message: Pick<EmailMessage, 'template' | 'language'
     throw new Error(`Email template "${message.template}" needs exactly: ${template.variables.join(', ')}`);
   }
   const fill = (s: string) => s.replace(/\{(\w+)\}/g, (_, k: string) => message.variables[k]);
-  return { subject: fill(template.subject[message.language]), text: fill(template.body[message.language]) };
+  const subject = fill(template.subject[message.language]);
+  return {
+    subject,
+    text: fill(template.body[message.language]),
+    html: renderEmailHtml(message.language, subject, template.body[message.language], message.variables),
+  };
 }
 
 const failed = (provider: string, reason: DeliveryFailureReason, detail: string): DeliveryResult => ({ status: 'failed', reason, detail, provider });
@@ -172,7 +259,7 @@ export class ResendEmailChannel implements EmailChannel {
   ) {}
 
   async send(message: EmailMessage): Promise<DeliveryResult> {
-    let composed: { subject: string; text: string };
+    let composed: { subject: string; text: string; html: string };
     try {
       composed = composeEmail(message);
     } catch {
@@ -223,6 +310,7 @@ export interface EmailSelection {
   channel: string;
   isProduction: boolean;
   resend?: ResendConfig | null;
+  smtp?: SmtpConfig | null;
 }
 
 export function createEmailChannel(selection: EmailSelection): EmailChannel {
@@ -240,5 +328,16 @@ export function createEmailChannel(selection: EmailSelection): EmailChannel {
     if (selection.isProduction && !/^https:\/\//i.test(c.baseUrl)) throw new Error('RESEND_API_BASE_URL must be an https:// address in production.');
     return new ResendEmailChannel(c);
   }
-  throw new Error(`Unknown EMAIL_CHANNEL "${selection.channel}". Valid values: disabled, development-log (non-production only), resend.`);
+  if (choice === 'smtp') {
+    const c = selection.smtp;
+    if (!c || !c.username.trim() || !c.password || !c.host.trim()) {
+      throw new Error('EMAIL_CHANNEL=smtp needs SMTP_HOST, SMTP_USERNAME and SMTP_PASSWORD. Nothing is faked: set them, or set EMAIL_CHANNEL=disabled.');
+    }
+    if (!c.senders.fallback.trim() && !c.senders.verification.trim()) {
+      throw new Error('EMAIL_CHANNEL=smtp needs a sender: EMAIL_FROM, or EMAIL_FROM_VERIFICATION and EMAIL_FROM_NOTIFICATIONS.');
+    }
+    if (selection.isProduction && c.port !== 587) throw new Error('SMTP_PORT must be 587 (STARTTLS) in production.');
+    return new SmtpEmailChannel(c);
+  }
+  throw new Error(`Unknown EMAIL_CHANNEL "${selection.channel}". Valid values: disabled, development-log (non-production only), resend, smtp.`);
 }

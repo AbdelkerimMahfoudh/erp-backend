@@ -140,6 +140,11 @@ export class OtpService {
     return this.isEnabled && this.channel.isEnabled;
   }
 
+  /** {@link canDeliver}, for one number: a channel in test mode reaches only its exact allowlist (D181 §4). */
+  canDeliverTo(destination: string): boolean {
+    return this.canDeliver && (this.channel.accepts ? this.channel.accepts(destination) : true);
+  }
+
   // ------------------------------------------------------------- requesting
 
   /**

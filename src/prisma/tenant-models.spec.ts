@@ -21,7 +21,22 @@ const GLOBAL_REFERENCE = ['Permission', 'TacCatalog', 'DeviceBrand', 'DeviceMode
 
 /** The platform realm (docs/15 §4): no company at all, reached only by platform code on the unscoped client. */
 // MessagingDeliveryProof (0093): the operator's proof that a channel delivers on this deployment — no company.
-const PLATFORM_REALM = ['PlatformAdmin', 'PlatformAdminSession', 'PlatformAuditEvent', 'ContactVerification', 'MessagingDeliveryProof', 'PlatformAdminRecoveryCode'];
+// The message records (0098, D181): keyed by a number or address hash, not by a company — one person can be in two
+// businesses, and an opt-out received on the webhook knows no company. Reached only by messaging code on the unscoped
+// client; a consent names the business that acted as its actor, not as its owner.
+const PLATFORM_REALM = [
+  'PlatformAdmin',
+  'PlatformAdminSession',
+  'PlatformAuditEvent',
+  'ContactVerification',
+  'MessagingDeliveryProof',
+  'PlatformAdminRecoveryCode',
+  'EmailMessage',
+  'WhatsAppMessage',
+  'WhatsAppWebhookEvent',
+  'WhatsAppContact',
+  'WhatsAppConsent',
+];
 
 /**
  * Records that BELONG to a company but are keyed differently: the company row

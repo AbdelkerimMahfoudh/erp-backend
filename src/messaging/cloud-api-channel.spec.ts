@@ -209,7 +209,7 @@ describe('what the provider answers', () => {
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
       expect(result.reason).toBe('not_authorized');
-      expect(result.detail).toBe('Provider answered HTTP 401 (code 190)');
+      expect(result.detail).toBe('Provider answered HTTP 401 (code 190): the access token is invalid');
     }
   });
 
@@ -334,5 +334,25 @@ describe('classification table', () => {
     [400, undefined, 'rejected'],
   ])('HTTP %s with provider code %s → %s', (http, code, expected) => {
     expect(classifyGraphFailure(http, code)).toBe(expected);
+  });
+});
+
+describe('the provider codes D181 names', () => {
+  it.each([
+    [401, 190, 463, 'not_authorized', /expired/],
+    [401, 190, 467, 'not_authorized', /no longer valid/],
+    [403, 10, undefined, 'not_authorized', /permission is missing/],
+    [400, 131047, undefined, 'rejected', /24-hour customer-service window/],
+    [400, 131026, undefined, 'rejected', /cannot receive this message/],
+    [400, 131056, undefined, 'temporary', /too many messages to this number/],
+    [429, 130429, undefined, 'temporary', /throttling/],
+  ])('HTTP %i code %i/%p is %s, with the code kept as a number and no provider text', async (status, code, subcode, reason, detail) => {
+    const { fetchImpl } = fakeFetch(() => json(status, { error: { message: 'echo +22236963839 482913', code, error_subcode: subcode } }));
+    const result = await new CloudApiWhatsAppChannel(config({ fetchImpl })).send(otp);
+    expect(result).toMatchObject({ status: 'failed', reason, providerCode: code });
+    if (result.status === 'failed') {
+      expect(result.detail).toMatch(detail);
+      expect(result.detail).not.toMatch(/echo|482913|36963839/);
+    }
   });
 });

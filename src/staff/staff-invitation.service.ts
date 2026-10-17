@@ -277,7 +277,7 @@ export class StaffInvitationService {
       throw new BadRequestException(
         `This account has no ${channel === 'email' ? 'email address' : 'WhatsApp number'} to send to.`,
       );
-    if (!this.delivery.canDeliver(channel)) {
+    if (!this.delivery.canDeliver(channel, destination)) {
       throw new ServiceUnavailableException({
         code: 'delivery_unavailable',
         message:
@@ -433,7 +433,7 @@ export class StaffInvitationService {
     const destination = classify(rawDestination);
     if (!destination)
       throw new BadRequestException('Enter the email address or WhatsApp number the invitation was sent to.');
-    if (!this.delivery.canDeliver(destination.channel)) {
+    if (!this.delivery.canDeliver(destination.channel, destination.value)) {
       throw new ServiceUnavailableException({
         code: 'delivery_unavailable',
         message: 'No verification code can be sent right now. Ask the business Owner to try again later.',
@@ -488,7 +488,7 @@ export class StaffInvitationService {
     for (const channel of ['email', 'phone'] as const) {
       const destination = channel === 'email' ? user.email : user.phone;
       if (!destination) continue;
-      if (!this.delivery.canDeliver(channel as ContactChannel)) {
+      if (!this.delivery.canDeliver(channel as ContactChannel, destination)) {
         states[channel] = 'unavailable';
         continue;
       }

@@ -44,6 +44,18 @@ export type MessageLanguage = 'en' | 'ar' | 'fr';
  */
 export type ProviderKind = 'authentication' | 'utility';
 
+/**
+ * Who a send serves (D181 §5) — what an opt-out, consent and the test/live controls decide by.
+ *
+ *  - `essential` — a message the person asked for, or that secures their own account: sign-in and contact
+ *    verification codes, employee invitation codes, account-deletion codes and the deletion confirmation. Sent after
+ *    an opt-out of optional notifications; never after the person withdrew the WhatsApp channel itself.
+ *  - `optional` — an operational notice the person did not ask for at that moment (closing notices, the trial's
+ *    setup instructions). Never sent after any opt-out; in live mode, only to a number with a recorded consent.
+ *  - `operator` — the operator's own delivery proof (docs/64): test mode only, to an allowlisted number only.
+ */
+export type TemplateUse = 'essential' | 'optional' | 'operator';
+
 export interface TemplateDefinition {
   /** Stable internal key. Never sent to a provider — see `configKey`. */
   readonly key: string;
@@ -52,6 +64,7 @@ export interface TemplateDefinition {
   readonly variables: readonly string[];
   readonly languages: readonly MessageLanguage[];
   readonly providerKind: ProviderKind;
+  readonly use: TemplateUse;
   /** The environment variable holding the provider's approved template name. */
   readonly configKey: string;
   /**
@@ -76,6 +89,7 @@ export const AUTH_OTP_TEMPLATE: TemplateDefinition = {
   variables: ['code', 'ttlMinutes'],
   languages: ['en', 'ar', 'fr'],
   providerKind: 'authentication',
+  use: 'essential',
   configKey: 'WHATSAPP_TEMPLATE_AUTH_OTP',
 };
 
@@ -93,6 +107,7 @@ export const ACCOUNT_DELETION_TEMPLATE: TemplateDefinition = {
   variables: ['code', 'ttlMinutes'],
   languages: ['en', 'ar', 'fr'],
   providerKind: 'utility',
+  use: 'essential',
   configKey: 'WHATSAPP_TEMPLATE_ACCOUNT_DELETION',
 };
 
@@ -106,6 +121,7 @@ export const ACCOUNT_DELETED_TEMPLATE: TemplateDefinition = {
   variables: ['what'],
   languages: ['en', 'ar', 'fr'],
   providerKind: 'utility',
+  use: 'essential',
   configKey: 'WHATSAPP_TEMPLATE_ACCOUNT_DELETED',
 };
 
@@ -121,6 +137,7 @@ export const CLOSING_REOPENED_TEMPLATE: TemplateDefinition = {
   variables: ['branch', 'time', 'date', 'what'],
   languages: ['en', 'ar', 'fr'],
   providerKind: 'utility',
+  use: 'optional',
   configKey: 'WHATSAPP_TEMPLATE_CLOSING_REOPENED',
 };
 
@@ -130,6 +147,7 @@ export const CLOSING_SALE_TEMPLATE: TemplateDefinition = {
   variables: ['branch', 'time', 'date', 'item', 'money'],
   languages: ['en', 'ar', 'fr'],
   providerKind: 'utility',
+  use: 'optional',
   configKey: 'WHATSAPP_TEMPLATE_CLOSING_SALE',
 };
 
@@ -139,6 +157,7 @@ export const CLOSING_RECLOSED_TEMPLATE: TemplateDefinition = {
   variables: ['branch', 'time', 'date', 'since', 'whole'],
   languages: ['en', 'ar', 'fr'],
   providerKind: 'utility',
+  use: 'optional',
   configKey: 'WHATSAPP_TEMPLATE_CLOSING_RECLOSED',
 };
 
@@ -154,6 +173,7 @@ export const DELIVERY_CHECK_TEMPLATE: TemplateDefinition = {
   variables: ['reference'],
   languages: ['en', 'ar', 'fr'],
   providerKind: 'utility',
+  use: 'operator',
   configKey: 'WHATSAPP_TEMPLATE_DELIVERY_CHECK',
 };
 
@@ -171,6 +191,7 @@ export const TRIAL_SETUP_TEMPLATE: TemplateDefinition = {
   variables: ['business', 'token'],
   languages: ['en', 'ar', 'fr'],
   providerKind: 'utility',
+  use: 'optional',
   configKey: 'WHATSAPP_TEMPLATE_TRIAL_SETUP',
   urlButton: 'token',
 };

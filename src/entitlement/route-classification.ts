@@ -97,6 +97,8 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
   allow('POST', 'account/deletion/cancel', 'Withdrawing a deletion request changes nothing but the request'),
   allow('POST', 'account/whatsapp/verify/start', 'Proving the number a deletion code can be sent to; a pending shop must be able to do this before it is approved'),
   allow('POST', 'account/whatsapp/verify/confirm', 'Completes the number proof; writes one contact on the caller own row and nothing else'),
+  allow('POST', 'account/whatsapp/consent', 'Agreeing to the WhatsApp consent for the caller own number (D181); a consent record, no business record'),
+  allow('POST', 'account/whatsapp/opt-out', 'Stopping WhatsApp notices or withdrawing the channel is the person right in any subscription state (D181); a consent record only'),
   /*
    * The free trial on the website (0095). A business that may claim it is, by
    * definition, one that has not started — closed like a pending one — so
@@ -216,6 +218,7 @@ export const ALWAYS_READABLE: readonly ReadRule[] = [
    * data, and all of it needed in exactly the states that close everything else.
    */
   readable('account', 'The person’s own account page: their sign-in identifier and their number, needed to leave in any state'),
+  readable('account/whatsapp/consent', 'The person own WhatsApp consent and opt-out state, and what a withdrawal stops (D181); display only'),
   readable('account/deletion', 'Whether the person’s own deletion request is pending; a right the subscription cannot withhold'),
   /*
    * What became of the phone's own money record (D161, docs/73 §11.4). A phone

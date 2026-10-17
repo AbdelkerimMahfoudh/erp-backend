@@ -635,6 +635,10 @@ describe('route classification fails closed', () => {
       'POST account/deletion/confirm',
       'POST account/deletion/request',
       'POST account/deletion/resend',
+      // D181 (2026-10-17): the person's own WhatsApp consent and opt-out — a consent record, no business record; a
+      // pending or lapsed shop's people keep the right to stop messages or withdraw the channel.
+      'POST account/whatsapp/consent',
+      'POST account/whatsapp/opt-out',
       'POST account/whatsapp/verify/confirm',
       'POST account/whatsapp/verify/start',
       'POST auth/login',
@@ -739,6 +743,8 @@ describe('what a pending or suspended shop may still read', () => {
       'account/deletion',
       // 0095: the Owner's free trial status in the app — display data only, no action.
       'account/trial-setup',
+      // D181: the person's own WhatsApp consent state and what a withdrawal stops — display only.
+      'account/whatsapp/consent',
       // D161 (2026-10-10): what became of the phone's own money record, under its own key.
       'agent/transactions/client/:clientUuid',
       'auth/logout',
@@ -795,7 +801,8 @@ describe('what a pending or suspended shop may still read', () => {
 
   it('names only account routes, and the one money-record lookup — never another business read', () => {
     // The lookup is the single argued exception (D161, 2026-10-10): one record, under the phone's own key, masked.
-    const accountish = /^(entitlement|health|auth\/|account(\/deletion|\/trial-setup)?$|platform\/(my-subscription|payment-instructions))/;
+    // D181: the person's own WhatsApp consent is an account route too.
+    const accountish = /^(entitlement|health|auth\/|account(\/deletion|\/trial-setup|\/whatsapp\/consent)?$|platform\/(my-subscription|payment-instructions))/;
     for (const { path } of ALWAYS_READABLE.filter((r) => r.path !== 'agent/transactions/client/:clientUuid')) {
       expect([path, accountish.test(path)]).toEqual([path, true]);
     }

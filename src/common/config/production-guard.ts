@@ -56,12 +56,32 @@ export interface ProductionGuardEnv {
   RESEND_API_BASE_URL?: string;
   WHATSAPP_APP_SECRET?: string;
   WHATSAPP_WEBHOOK_VERIFY_TOKEN?: string;
+  WHATSAPP_MODE?: string;
+  WHATSAPP_TEST_RECIPIENTS?: string;
+  WHATSAPP_LIVE_SENDS?: string;
+  WHATSAPP_APP_ID?: string;
+  MESSAGING_HASH_KEY?: string;
+  EMAIL_FROM_VERIFICATION?: string;
+  EMAIL_FROM_NOTIFICATIONS?: string;
+  EMAIL_FROM_REPORTS?: string;
+  EMAIL_FROM_RECEIPTS?: string;
+  EMAIL_REPLY_TO?: string;
+  SMTP_HOST?: string;
+  SMTP_PORT?: string;
+  SMTP_USERNAME?: string;
+  SMTP_PASSWORD?: string;
   OTP_PEPPER?: string;
   APP_ENV?: string;
   PLATFORM_ADMIN_KEY?: string;
   PLATFORM_MFA_KEY?: string;
   SEED_DEMO?: string;
   PUBLIC_SITE_ORIGIN?: string;
+}
+
+/** A sender address that is real: an address (optionally "Name <address>") on no example or test domain. */
+function realSender(value: string): boolean {
+  const address = value.replace(/^.*<([^>]+)>\s*$/, '$1').trim();
+  return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address) && !/example\.|\.test\b|\.invalid\b|localhost/i.test(address);
 }
 
 /** A `.env` value that means "yes", matching `cookieSecure()`. */
@@ -194,9 +214,9 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
   }
   const channel = (env.WHATSAPP_CHANNEL ?? 'disabled').trim().toLowerCase();
   if (channel === 'development-log') {
-    problems.push('WHATSAPP_CHANNEL=development-log writes one-time codes to a log sink. Use cloud-api or disabled.');
+    problems.push('WHATSAPP_CHANNEL=development-log writes one-time codes to a log sink. Use cloud or disabled.');
   }
-  if (channel === 'cloud-api') {
+  if (channel === 'cloud' || channel === 'cloud-api') {
     if (env.WHATSAPP_API_BASE_URL && !/^https:\/\//i.test(env.WHATSAPP_API_BASE_URL.trim())) {
       problems.push('WHATSAPP_API_BASE_URL must be an https:// address in production.');
     }
@@ -234,12 +254,68 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
     }
     // WHATSAPP_TEMPLATE_TRIAL_SETUP is deliberately NOT required: without it the free trial's setup instructions do
     // not go by WhatsApp, the Owner's status says so honestly, and the Owner can still start the trial on the website.
+
+    /*
+     * Test and live sending are separate (D181 §4). Test mode reaches only an exact allowlist, so it needs one, and
+     * an "enabled" live switch in test mode is a contradiction worth a refusal rather than a guess. Live mode needs
+     * the explicit switch and the app id the start-up credential check uses (messaging/whatsapp-live-check.ts).
+     */
+    const mode = (env.WHATSAPP_MODE ?? 'test').trim().toLowerCase();
+    const liveSends = (env.WHATSAPP_LIVE_SENDS ?? 'disabled').trim().toLowerCase();
+    if (mode === 'live') {
+      if (liveSends !== 'enabled') {
+        problems.push('WHATSAPP_MODE=live needs WHATSAPP_LIVE_SENDS=enabled, stated explicitly. Otherwise use WHATSAPP_MODE=test.');
+      }
+      if (!/^\d+$/.test(env.WHATSAPP_APP_ID?.trim() ?? '')) {
+        problems.push('WHATSAPP_MODE=live needs WHATSAPP_APP_ID: the access token is checked with the provider at start-up.');
+      }
+    } else {
+      const recipients = (env.WHATSAPP_TEST_RECIPIENTS ?? '').split(/[\s,;]+/).filter(Boolean);
+      if (recipients.length === 0 || recipients.some((n) => !/^\+[1-9]\d{7,14}$/.test(n))) {
+        problems.push('WHATSAPP_MODE=test needs WHATSAPP_TEST_RECIPIENTS: the exact E.164 numbers test sends may reach, and nothing else.');
+      }
+      if (liveSends === 'enabled') {
+        problems.push('WHATSAPP_LIVE_SENDS=enabled has no meaning in test mode. Set WHATSAPP_MODE=live, or WHATSAPP_LIVE_SENDS=disabled.');
+      }
+    }
+    if (!env.MESSAGING_HASH_KEY || env.MESSAGING_HASH_KEY.trim().length < 32) {
+      problems.push('WHATSAPP_CHANNEL=cloud needs MESSAGING_HASH_KEY (32+ characters): message records key every number with it.');
+    }
   }
 
   // Email (messaging/email-channel.ts): the same rules as WhatsApp — nothing faked, nothing in clear text.
   const email = (env.EMAIL_CHANNEL ?? 'disabled').trim().toLowerCase();
   if (email === 'development-log') {
-    problems.push('EMAIL_CHANNEL=development-log only logs that an email would go out. Use resend or disabled.');
+    problems.push('EMAIL_CHANNEL=development-log only logs that an email would go out. Use smtp or disabled.');
+  }
+  if (email === 'smtp') {
+    // Brevo's relay (D181): credentials, port 587 (STARTTLS, enforced by the transport), real senders and Reply-To.
+    if (!env.SMTP_USERNAME?.trim() || !env.SMTP_PASSWORD) {
+      problems.push('EMAIL_CHANNEL=smtp without SMTP_USERNAME and SMTP_PASSWORD. Set both from the secret manager, or set EMAIL_CHANNEL=disabled.');
+    }
+    if (env.SMTP_PORT !== undefined && env.SMTP_PORT.trim() !== '' && env.SMTP_PORT.trim() !== '587') {
+      problems.push('SMTP_PORT must be 587 in production: STARTTLS is required.');
+    }
+    const fallback = env.EMAIL_FROM?.trim() ?? '';
+    const classes = { EMAIL_FROM_VERIFICATION: env.EMAIL_FROM_VERIFICATION, EMAIL_FROM_NOTIFICATIONS: env.EMAIL_FROM_NOTIFICATIONS };
+    for (const [name, value] of Object.entries(classes)) {
+      const sender = value?.trim() || fallback;
+      if (!realSender(sender)) {
+        problems.push(`${name} (or EMAIL_FROM) must be a real sender on a domain with SPF, DKIM and DMARC, not an example address.`);
+      }
+    }
+    for (const [name, value] of Object.entries({ EMAIL_FROM: env.EMAIL_FROM, EMAIL_FROM_REPORTS: env.EMAIL_FROM_REPORTS, EMAIL_FROM_RECEIPTS: env.EMAIL_FROM_RECEIPTS })) {
+      if (value?.trim() && !realSender(value.trim())) problems.push(`${name} must be a real sender address, not an example address.`);
+    }
+    if (!realSender(env.EMAIL_REPLY_TO?.trim() ?? '')) {
+      problems.push('EMAIL_REPLY_TO must be the real support address every email answers to.');
+    }
+    if (!env.OTP_PEPPER || env.OTP_PEPPER.length < 32) {
+      problems.push('EMAIL_CHANNEL=smtp needs OTP_PEPPER (32+ characters): verification codes are stored as keyed hashes.');
+    }
+  }
+  if ((email === 'smtp' || email === 'resend') && (!env.MESSAGING_HASH_KEY || env.MESSAGING_HASH_KEY.trim().length < 32)) {
+    problems.push(`EMAIL_CHANNEL=${email} needs MESSAGING_HASH_KEY (32+ characters): email records key every address with it.`);
   }
   if (email === 'resend') {
     if (!env.RESEND_API_KEY?.trim()) problems.push('EMAIL_CHANNEL=resend without RESEND_API_KEY. Set it, or set EMAIL_CHANNEL=disabled.');

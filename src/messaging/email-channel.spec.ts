@@ -65,7 +65,9 @@ describe('choosing the channel', () => {
     expect(() => createEmailChannel({ channel: 'resend', isProduction: false, resend: { ...config, apiKey: '' } })).toThrow(/RESEND_API_KEY and EMAIL_FROM/);
     expect(() => createEmailChannel({ channel: 'resend', isProduction: true, resend: { ...config, baseUrl: 'http://api.resend.test' } })).toThrow(/https/);
     expect(createEmailChannel({ channel: 'resend', isProduction: true, resend: config }).name).toBe('resend');
-    expect(() => createEmailChannel({ channel: 'smtp', isProduction: false })).toThrow(/Unknown EMAIL_CHANNEL/);
+    // D181: smtp exists now, and refuses to be built without its credentials.
+    expect(() => createEmailChannel({ channel: 'smtp', isProduction: false })).toThrow(/SMTP_HOST, SMTP_USERNAME and SMTP_PASSWORD/);
+    expect(() => createEmailChannel({ channel: 'postmark', isProduction: false })).toThrow(/Unknown EMAIL_CHANNEL/);
   });
 
   it('a log line names a masked address, never the address', () => {
@@ -76,8 +78,11 @@ describe('choosing the channel', () => {
 
 describe('the free trial’s setup instructions (0095; docs/76)', () => {
   const link = 'https://dukan.example.com/account/trial#t=Zp3k9QeR7xVb2LmN8sTq4WyH6jUc1AfD0gKoEiPrS5v';
-  const setup = (language: 'en' | 'fr' | 'ar') =>
-    composeEmail({ template: 'trial.setup', language, variables: { business: 'Boutique Aicha', link } });
+  const setup = (language: 'en' | 'fr' | 'ar') => {
+    // The text alternative; the HTML one is proven in smtp-email.spec.ts.
+    const { subject, text } = composeEmail({ template: 'trial.setup', language, variables: { business: 'Boutique Aicha', link } });
+    return { subject, text };
+  };
 
   it('composes the approved text in each language: eligible, not started, the link, 24 hours, 7 days from confirming', () => {
     expect(setup('en')).toEqual({

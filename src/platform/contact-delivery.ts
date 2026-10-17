@@ -91,7 +91,7 @@ export abstract class ContactDeliveryProvider {
    * "nothing was saved" is honest; a pending business whose Owner waits for a
    * code that is never coming is not (`docs/67` RC-02).
    */
-  abstract canDeliver(channel: ContactChannel): boolean;
+  abstract canDeliver(channel: ContactChannel, destination?: string): boolean;
 }
 
 /**
@@ -187,8 +187,8 @@ export class SelectedContactDelivery extends ContactDeliveryProvider {
     return this.choose().name;
   }
 
-  canDeliver(channel: ContactChannel): boolean {
-    return this.choose().canDeliver(channel);
+  canDeliver(channel: ContactChannel, destination?: string): boolean {
+    return this.choose().canDeliver(channel, destination);
   }
 
   send(req: DeliveryRequest): Promise<DeliveryResult> {
@@ -233,9 +233,15 @@ export class WhatsAppContactDeliveryProvider extends ContactDeliveryProvider {
     super();
   }
 
-  /** A WhatsApp number while WhatsApp is on; an email address while a real email provider is on. */
-  canDeliver(channel: ContactChannel): boolean {
-    if (channel === 'phone') return this.channel.isEnabled;
+  /**
+   * A WhatsApp number while WhatsApp is on — and, given the number, only one the channel would send to (test mode
+   * reaches its exact allowlist only, D181 §4); an email address while a real email provider is on.
+   */
+  canDeliver(channel: ContactChannel, destination?: string): boolean {
+    if (channel === 'phone') {
+      if (!this.channel.isEnabled) return false;
+      return destination && this.channel.accepts ? this.channel.accepts(destination) : true;
+    }
     return this.email !== undefined && isRealChannel(this.email);
   }
 

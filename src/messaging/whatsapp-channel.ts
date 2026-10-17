@@ -75,6 +75,11 @@ export type DeliveryResult =
        */
       detail: string;
       provider: string;
+      /**
+       * The provider's numeric error code, when it gave one (e.g. 131026, 131047). A number, never a payload: it lets
+       * the send policy react (an undeliverable number is remembered) without parsing `detail`.
+       */
+      providerCode?: number;
     };
 
 /**
@@ -87,6 +92,12 @@ export interface WhatsAppChannel {
   readonly name: string;
   /** False when the deployment has no provider — callers must not pretend otherwise. */
   readonly isEnabled: boolean;
+  /**
+   * Whether a send to THIS number could leave the server at all, asked before anything is created for somebody to
+   * wait on. Absent means "any number" — true of every channel except one in test mode, which sends only to its
+   * exact allowlist (D181 §4).
+   */
+  accepts?(to: E164): boolean;
   send(message: WhatsAppMessage): Promise<DeliveryResult>;
 }
 

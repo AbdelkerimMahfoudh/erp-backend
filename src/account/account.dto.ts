@@ -30,6 +30,21 @@ export class StartPhoneVerificationDto {
   @IsString() @MinLength(1) @MaxLength(200) password: string;
 
   @IsOptional() @IsIn(ACCOUNT_LANGUAGES) language?: AccountLanguage;
+
+  /** The WhatsApp consent version agreed to (D181 §5). Required while WhatsApp runs live; a stale one is refused. */
+  @IsOptional() @IsString() @MaxLength(40) whatsappConsentVersion?: string;
+}
+
+/** Stop optional WhatsApp notifications, or withdraw WhatsApp as the account contact (D181 §5). */
+export class WhatsAppOptOutDto {
+  @IsIn(['optional', 'all']) scope: 'optional' | 'all';
+
+  @IsOptional() @IsIn(ACCOUNT_LANGUAGES) language?: AccountLanguage;
+}
+
+/** Agree to the current WhatsApp consent copy for my verified number. */
+export class WhatsAppConsentDto {
+  @IsString() @MaxLength(40) version: string;
 }
 
 export class ConfirmPhoneVerificationDto {

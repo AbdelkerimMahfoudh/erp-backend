@@ -357,6 +357,9 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
         WHATSAPP_APP_SECRET: 'app-secret',
         WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-token',
         OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+        // D181: test mode (the default) reaches only its allowlist, and the records need their key.
+        WHATSAPP_TEST_RECIPIENTS: '+22236000000',
+        MESSAGING_HASH_KEY: 'a-messaging-hash-key-of-at-least-32-characters',
       }),
     ).toEqual([]);
   });
@@ -390,6 +393,7 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
         RESEND_API_KEY: 're_live_key',
         EMAIL_FROM: 'Dukan ERP <no-reply@mail.dukan-erp.mr>',
         OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+        MESSAGING_HASH_KEY: 'a-messaging-hash-key-of-at-least-32-characters',
       }),
     ).toEqual([]);
   });
@@ -408,6 +412,8 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
       WHATSAPP_APP_SECRET: 's',
       WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'v',
       OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+      WHATSAPP_TEST_RECIPIENTS: '+22236000000',
+      MESSAGING_HASH_KEY: 'a-messaging-hash-key-of-at-least-32-characters',
     });
     expect(problems).toHaveLength(1);
     expect(problems[0]).toContain('https://');
@@ -474,6 +480,8 @@ describe("the website's origin, for the free trial's setup links (0095; docs/76)
       WHATSAPP_APP_SECRET: 'app-secret',
       WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-token',
       OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+      WHATSAPP_TEST_RECIPIENTS: '+22236000000',
+      MESSAGING_HASH_KEY: 'a-messaging-hash-key-of-at-least-32-characters',
     };
     expect(productionConfigProblems({ ...complete, WHATSAPP_TEMPLATE_TRIAL_SETUP: '' })).toEqual([]);
     expect(productionConfigProblems({ ...complete, WHATSAPP_TEMPLATE_TRIAL_SETUP: 'erp_trial_setup' })).toEqual([]);
@@ -487,5 +495,95 @@ describe("the website's origin, for the free trial's setup links (0095; docs/76)
       expect({ file, line: readFileSync(file, 'utf8').match(/^PUBLIC_SITE_ORIGIN=(.*)$/m)?.[1] }).toEqual({ file, line: '' });
     }
     expect(readFileSync('.env.example', 'utf8')).toMatch(/^WHATSAPP_TEMPLATE_TRIAL_SETUP=$/m);
+  });
+});
+
+describe('test and live WhatsApp sending in production (D181 §4)', () => {
+  const CLOUD = {
+    ...SAFE,
+    WHATSAPP_CHANNEL: 'cloud',
+    WHATSAPP_PHONE_NUMBER_ID: '1297799316760335',
+    WHATSAPP_ACCESS_TOKEN: 'EAAG-real-token',
+    WHATSAPP_TEMPLATE_AUTH_OTP: 'erp_auth_code',
+    WHATSAPP_TEMPLATE_ACCOUNT_DELETION: 'erp_delete_code',
+    WHATSAPP_TEMPLATE_ACCOUNT_DELETED: 'erp_deleted',
+    WHATSAPP_TEMPLATE_DELIVERY_CHECK: 'erp_delivery_check',
+    WHATSAPP_APP_SECRET: 'app-secret',
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-token',
+    OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+    MESSAGING_HASH_KEY: 'a-messaging-hash-key-of-at-least-32-characters',
+  };
+
+  it('test mode (the default) needs an exact allowlist, and refuses an "enabled" live switch as a contradiction', () => {
+    expect(productionConfigProblems(CLOUD).join('\n')).toMatch(/WHATSAPP_MODE=test needs WHATSAPP_TEST_RECIPIENTS/);
+    expect(productionConfigProblems({ ...CLOUD, WHATSAPP_TEST_RECIPIENTS: '222 36963839' }).join('\n')).toMatch(/WHATSAPP_TEST_RECIPIENTS/);
+    expect(productionConfigProblems({ ...CLOUD, WHATSAPP_TEST_RECIPIENTS: '+22236963839' })).toEqual([]);
+    expect(productionConfigProblems({ ...CLOUD, WHATSAPP_TEST_RECIPIENTS: '+22236963839', WHATSAPP_LIVE_SENDS: 'enabled' }).join('\n')).toMatch(/no meaning in test mode/);
+  });
+
+  it('live mode refuses to boot without the explicit live-send switch and the app id of the token check', () => {
+    const live = { ...CLOUD, WHATSAPP_MODE: 'live' };
+    const problems = productionConfigProblems(live).join('\n');
+    expect(problems).toMatch(/WHATSAPP_MODE=live needs WHATSAPP_LIVE_SENDS=enabled/);
+    expect(problems).toMatch(/WHATSAPP_MODE=live needs WHATSAPP_APP_ID/);
+    expect(productionConfigProblems({ ...live, WHATSAPP_LIVE_SENDS: 'enabled', WHATSAPP_APP_ID: '1103715978699774' })).toEqual([]);
+  });
+
+  it('live mode still needs everything cloud needs: credentials, templates, the webhook', () => {
+    const problems = productionConfigProblems({ ...SAFE, WHATSAPP_CHANNEL: 'cloud', WHATSAPP_MODE: 'live', WHATSAPP_LIVE_SENDS: 'enabled', WHATSAPP_APP_ID: '1' }).join('\n');
+    for (const missing of [/WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_ACCESS_TOKEN/, /WHATSAPP_TEMPLATE_AUTH_OTP/, /WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN/, /MESSAGING_HASH_KEY/]) {
+      expect(problems).toMatch(missing);
+    }
+  });
+
+  it('the records key is required whenever a real channel is configured', () => {
+    expect(productionConfigProblems({ ...CLOUD, WHATSAPP_TEST_RECIPIENTS: '+22236963839', MESSAGING_HASH_KEY: 'short' }).join('\n')).toMatch(/MESSAGING_HASH_KEY/);
+  });
+});
+
+describe('SMTP email in production (D181 §1)', () => {
+  const SMTP = {
+    ...SAFE,
+    EMAIL_CHANNEL: 'smtp',
+    SMTP_USERNAME: 'login@smtp-brevo.com',
+    SMTP_PASSWORD: 'from-the-secret-manager',
+    EMAIL_FROM: 'Dukan ERP <no-reply@tsxmr.com>',
+    EMAIL_FROM_VERIFICATION: 'Dukan ERP <verification@tsxmr.com>',
+    EMAIL_FROM_NOTIFICATIONS: 'Dukan ERP <notifications@tsxmr.com>',
+    EMAIL_REPLY_TO: 'support@tsxmr.com',
+    OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+    MESSAGING_HASH_KEY: 'a-messaging-hash-key-of-at-least-32-characters',
+  };
+
+  it('accepts a complete configuration on port 587', () => {
+    expect(productionConfigProblems(SMTP)).toEqual([]);
+    expect(productionConfigProblems({ ...SMTP, SMTP_PORT: '587' })).toEqual([]);
+  });
+
+  it('refuses missing credentials, another port, example senders, no Reply-To, no pepper and no records key', () => {
+    const problems = productionConfigProblems({
+      ...SAFE,
+      EMAIL_CHANNEL: 'smtp',
+      SMTP_PORT: '465',
+      EMAIL_FROM_VERIFICATION: 'codes@example.com',
+    }).join('\n');
+    for (const p of [/SMTP_USERNAME and SMTP_PASSWORD/, /SMTP_PORT must be 587/, /EMAIL_FROM_VERIFICATION \(or EMAIL_FROM\) must be a real sender/, /EMAIL_FROM_NOTIFICATIONS \(or EMAIL_FROM\)/, /EMAIL_REPLY_TO/, /OTP_PEPPER/, /MESSAGING_HASH_KEY/]) {
+      expect(problems).toMatch(p);
+    }
+  });
+
+  it('a class sender may fall back to EMAIL_FROM; the report and receipt senders are checked only when given', () => {
+    expect(productionConfigProblems({ ...SMTP, EMAIL_FROM_VERIFICATION: '', EMAIL_FROM_NOTIFICATIONS: '' })).toEqual([]);
+    expect(productionConfigProblems({ ...SMTP, EMAIL_FROM_REPORTS: 'reports@localhost' }).join('\n')).toMatch(/EMAIL_FROM_REPORTS/);
+  });
+
+  it('never lets .env.example carry a secret value', () => {
+    const example = readFileSync('.env.example', 'utf8');
+    for (const key of ['SMTP_PASSWORD', 'SMTP_USERNAME', 'MESSAGING_HASH_KEY', 'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN', 'WHATSAPP_TEST_RECIPIENTS']) {
+      expect({ key, line: example.match(new RegExp(`^${key}=(.*)$`, 'm'))?.[1] }).toEqual({ key, line: '' });
+    }
+    expect(example).toMatch(/^WHATSAPP_MODE=test$/m);
+    expect(example).toMatch(/^WHATSAPP_LIVE_SENDS=disabled$/m);
+    expect(example).toMatch(/^WHATSAPP_API_VERSION=v26\.0$/m);
   });
 });

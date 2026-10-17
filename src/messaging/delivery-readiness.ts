@@ -1,4 +1,5 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
+import { AppConfigService } from '../common/config/app-config.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { DeliveryResult, MessageLanguage, WhatsAppChannel, WhatsAppMessage } from './whatsapp-channel';
 
@@ -23,7 +24,11 @@ export class WhatsAppReadiness implements OnModuleInit {
   private readonly logger = new Logger(WhatsAppReadiness.name);
   private delivered = new Set<string>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    /** Present in the application: proofs count only for the configured sending number (0098). */
+    @Optional() private readonly config?: AppConfigService,
+  ) {}
 
   async onModuleInit(): Promise<void> {
     await this.refresh();
@@ -33,7 +38,12 @@ export class WhatsAppReadiness implements OnModuleInit {
   async refresh(): Promise<void> {
     try {
       const rows = await this.prisma.messagingDeliveryProof.findMany({
-        where: { channel: 'whatsapp', deliveredAt: { not: null } },
+        where: {
+          channel: 'whatsapp',
+          deliveredAt: { not: null },
+          // A proof made with Meta's test number never opens the channel for the real one (0098).
+          ...(this.config ? { phoneNumberId: this.config.whatsappPhoneNumberId } : {}),
+        },
         select: { language: true },
       });
       this.delivered = new Set(rows.map((r) => r.language));
@@ -70,6 +80,10 @@ export class ProvenWhatsAppChannel implements WhatsAppChannel {
 
   get isEnabled(): boolean {
     return this.inner.isEnabled && this.readiness.isProven;
+  }
+
+  accepts(to: string): boolean {
+    return this.isEnabled && (this.inner.accepts?.(to) ?? true);
   }
 
   async send(message: WhatsAppMessage): Promise<DeliveryResult> {

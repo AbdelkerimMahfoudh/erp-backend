@@ -26,6 +26,8 @@ import { AllExceptionsFilter } from '../filters/all-exceptions.filter';
 import { newUuidV7 } from '../utils/uuid.util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WhatsAppReadiness } from '../../messaging/delivery-readiness';
+import { RecipientHasher } from '../../messaging/recipient-hash';
+import { WhatsAppWebhookWorker } from '../../messaging/whatsapp-webhook.worker';
 import { WhatsAppWebhookController } from '../../messaging/whatsapp-webhook.controller';
 import { ADMIN_SESSION_COOKIE, PORTAL_SESSION_COOKIE } from './cookies';
 import { requestLogOptions } from './request-log';
@@ -211,6 +213,9 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
         },
         { provide: PrismaService, useValue: {} },
         { provide: WhatsAppReadiness, useValue: {} },
+        // 0098: the webhook stores what it receives through the worker, keyed by the recipient hasher.
+        { provide: RecipientHasher, useValue: { hash: () => '0'.repeat(64) } },
+        { provide: WhatsAppWebhookWorker, useValue: { enqueue: async () => undefined, processNow: async () => undefined } },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ bufferLogs: true, rawBody: true });
