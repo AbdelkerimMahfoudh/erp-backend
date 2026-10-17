@@ -30,6 +30,7 @@ import { ListSalesDto } from './dto/list-sales.dto';
 import { evaluateEligibility, NO_RETURNS, resolveWindowForSale, snapshotPolicy } from './return-policy';
 import { assertDebtorForBalance, assertPaymentParts, chooseDebtor, type DebtorChoice, STORE_KINDS } from './sale-payment-rules';
 import { assertPayerNumbers, payerNumberFor } from './payer-number';
+import { debtDueDays, dueDateFor, parseCustomerPhone, phoneRefusal } from './customer-debt';
 import { assertMayStartDealing } from '../consignment/dealing-authorization';
 import { paymentSelect, toPaymentView } from './sale-payments.service';
 import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
@@ -145,6 +146,7 @@ export class SalesService {
       payStatus: Sale['payStatus'];
       soldAt: Date;
       businessDate: string;
+      dueDate: string | null;
       returnWindowHours: number;
       returnDeadlineAt: Date | null;
     };
@@ -357,7 +359,12 @@ export class SalesService {
           counterpartyId: dto.counterpartyId,
         });
         assertDebtorForBalance(balanceDue, debtorChoice);
-        const debtor = await this.resolveDebtor(tx as unknown as Prisma.TransactionClient, companyId, debtorChoice);
+        // The debt's terms (the owner's brief of 2026-10-17): when it is due, and a number to call the customer on.
+        const dueDays = debtDueDays(balanceDue, dto.dueInDays);
+        const debtor = await this.resolveDebtor(tx as unknown as Prisma.TransactionClient, companyId, debtorChoice, {
+          owes: balanceDue > 0,
+          customerPhone: dto.customerPhone,
+        });
 
         const invoiceNo = await this.invoiceNumbers.next(
           tx as unknown as Prisma.TransactionClient,
@@ -411,6 +418,8 @@ export class SalesService {
             invoiceNo,
             soldAt,
             businessDate: dateValue(businessDate),
+            // From the sale's own business day, never the phone's clock; none when nothing is owed.
+            dueDate: dueDays === null ? null : dateValue(dueDateFor(businessDate, dueDays)),
             subtotal,
             discount: discountTotal,
             taxTotal: 0,
@@ -690,6 +699,7 @@ export class SalesService {
           payStatus,
           soldAt,
           businessDate,
+          dueDate: dueDays === null ? null : dueDateFor(businessDate, dueDays),
           returnWindowHours: policySnapshot.windowHours,
           returnDeadlineAt: policySnapshot.deadlineAt,
         };
@@ -750,6 +760,8 @@ export class SalesService {
       // and it is not the one in the customer's hand.
       soldAt: result.soldAt,
       businessDate: result.businessDate,
+      // When what is owed is due (the owner's brief of 2026-10-17); null when nothing is.
+      dueDate: result.dueDate,
       // A receipt that does not state the return policy is how a shop ends up
       // arguing about one.
       returnPolicy: {
@@ -812,6 +824,7 @@ export class SalesService {
     tx: Prisma.TransactionClient,
     companyId: Buffer,
     choice: DebtorChoice,
+    debt: { owes: boolean; customerPhone?: string },
   ): Promise<{ customerId: Buffer | null; counterpartyId: Buffer | null }> {
     switch (choice.kind) {
       case 'none':
@@ -820,15 +833,31 @@ export class SalesService {
       case 'customer_existing': {
         const found = await tx.customer.findFirst({
           where: { id: uuidToBin(choice.customerId), deletedAt: null },
-          select: { id: true },
+          select: { id: true, phone: true },
         });
         if (!found) throw new BadRequestException({ code: 'customer_not_found', message: 'That customer does not exist' });
+        /*
+         * A customer who owes must be reachable. One with no number yet gets the
+         * one typed at the counter; a saved number is never changed from a sale.
+         */
+        if (debt.owes && !found.phone?.trim()) {
+          const phone = parseCustomerPhone(debt.customerPhone);
+          if (!phone.ok) throw phoneRefusal(phone.reason);
+          await tx.customer.update({ where: { id: found.id }, data: { phone: phone.value } });
+        }
         return { customerId: found.id, counterpartyId: null };
       }
 
       case 'customer_new': {
+        // Typed at the counter as the debtor: the number is required when money is owed, and checked whenever given.
+        let phone: string | null = null;
+        if (debt.owes || choice.phone) {
+          const parsed = parseCustomerPhone(choice.phone);
+          if (!parsed.ok) throw phoneRefusal(parsed.reason);
+          phone = parsed.value;
+        }
         const id = newUuidV7Bin();
-        await tx.customer.create({ data: { id, companyId, name: choice.name, phone: choice.phone } });
+        await tx.customer.create({ data: { id, companyId, name: choice.name, phone } });
         return { customerId: id, counterpartyId: null };
       }
 
@@ -866,6 +895,7 @@ export class SalesService {
         amountPaid: true,
         balanceDue: true,
         payStatus: true,
+        dueDate: true,
         customer: { select: { id: true, name: true, phone: true } },
         counterparty: { select: { id: true, name: true, phone: true } },
         items: {
@@ -899,7 +929,10 @@ export class SalesService {
         received: number;
         remaining: number;
         payStatus: string;
+        dueDate: string | null;
       }[];
+      /** The earliest due date among this debtor's open sales, if any carries one. */
+      nextDue: string | null;
     };
     const groups = new Map<string, Group>();
     for (const s of sales) {
@@ -911,7 +944,9 @@ export class SalesService {
             // Listed honestly rather than hidden.
             { kind: 'unknown' as const, id: null, name: null, phone: null };
       const key = `${debtor.kind}:${debtor.id ?? ''}`;
-      const group = groups.get(key) ?? { ...debtor, owed: 0, oldest: s.soldAt, sales: [] };
+      const group = groups.get(key) ?? { ...debtor, owed: 0, oldest: s.soldAt, sales: [], nextDue: null };
+      const due = s.dueDate ? dayKey(s.dueDate) : null;
+      if (due && (group.nextDue === null || due < group.nextDue)) group.nextDue = due;
       group.owed = Math.round((group.owed + Number(s.balanceDue)) * 100) / 100;
       if (s.soldAt < group.oldest) group.oldest = s.soldAt;
       const item = s.items[0];
@@ -924,6 +959,7 @@ export class SalesService {
         received: Number(s.amountPaid),
         remaining: Number(s.balanceDue),
         payStatus: s.payStatus,
+        dueDate: due,
       });
       groups.set(key, group);
     }
@@ -1269,7 +1305,7 @@ export class SalesService {
       amountPaid: Number(sale.amountPaid),
       balanceDue: Number(sale.balanceDue),
       payStatus: sale.payStatus,
-      dueDate: sale.dueDate,
+      dueDate: sale.dueDate ? dayKey(sale.dueDate) : null,
       isReversed: sale.isReversed,
       lines: sale.items.map((i) => ({
         id: binToUuid(i.id),
@@ -1450,7 +1486,11 @@ export class SalesService {
       stored.every((s, i) => s === requested[i]) &&
       storedPayments.length === requestedPayments.length &&
       storedPayments.every((s, i) => s === requestedPayments[i]) &&
-      requestedDiscount === Number(existing.discount);
+      requestedDiscount === Number(existing.discount) &&
+      // The same balance due on another day is a different debt: a retry sends the same days.
+      (dto.dueInDays === undefined ||
+        existing.dueDate === null ||
+        dueDateFor(dayKey(existing.businessDate), dto.dueInDays) === dayKey(existing.dueDate));
 
     if (!same) {
       throw new ConflictException({
@@ -1468,6 +1508,7 @@ export class SalesService {
       margin: Number(sale.margin),
       balanceDue: Number(sale.balanceDue),
       payStatus: sale.payStatus,
+      dueDate: sale.dueDate ? dayKey(sale.dueDate) : null,
       soldAt: sale.soldAt,
       returnPolicy: {
         windowHours: sale.returnWindowHours,

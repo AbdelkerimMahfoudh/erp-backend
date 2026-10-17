@@ -19,6 +19,7 @@ import {
 } from 'class-validator';
 import { IsMoney } from '../../common/money/is-money.decorator';
 import { PAYER_NUMBER_MAX_INPUT } from '../payer-number';
+import { DEBT_DUE_MAX_DAYS } from '../customer-debt';
 
 /**
  * A sale line is EITHER a serialized unit (scan its `identifier` — IMEI or
@@ -104,8 +105,9 @@ export class PaymentInputDto {
  * A customer typed at the counter because they are not on the list yet.
  *
  * The name is what the shop will ask for when the balance is chased, so it is
- * required. The phone is optional: plenty of customers will not give one, and
- * refusing the sale over it would only push the shop back to the notebook.
+ * required — and so is the phone (the owner's brief of 2026-10-17, superseding
+ * the optional phone of 0074): a balance nobody can be called about is a debt
+ * the shop will not collect. The service checks it (`parseCustomerPhone`).
  */
 export class NewCustomerDto {
   @ApiProperty({ maxLength: 160 })
@@ -158,6 +160,30 @@ export class CreateSaleDto {
   @ValidateNested()
   @Type(() => NewCustomerDto)
   customer?: NewCustomerDto;
+
+  /**
+   * The phone number of an EXISTING customer who owes the balance and has none
+   * saved yet (the owner's brief of 2026-10-17). Saved on the customer only
+   * when they have no number; an existing number is never changed from a sale.
+   */
+  @ApiPropertyOptional({ maxLength: 40 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  customerPhone?: string;
+
+  /**
+   * In how many days whatever this sale leaves owing is due (the owner's brief
+   * of 2026-10-17). Required when money is owed, ignored when nothing is. The
+   * server turns it into the due date from the sale's own business day; the
+   * Owner is reminded by the overdue-debt notice from the day after.
+   */
+  @ApiPropertyOptional({ minimum: 1, maximum: DEBT_DUE_MAX_DAYS, description: 'Days until the balance is due' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(DEBT_DUE_MAX_DAYS)
+  dueInDays?: number;
 
   /**
    * A partner store — connected or manual — that owes the balance (0074).
