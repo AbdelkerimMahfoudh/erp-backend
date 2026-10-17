@@ -235,3 +235,19 @@ describe('the email boundary (correction phase, 2026-10-12)', () => {
     expect(selectContactDelivery(new DisabledWhatsAppChannel(), real, new OutboxDeliveryProvider(), unconfigured, false, new DisabledEmailChannel())).toBe(unconfigured);
   });
 });
+
+describe('the outbox log keeps neither the code nor the whole contact (staging logs leave the box)', () => {
+  it('logs a masked email or number, never the code', async () => {
+    const outbox = new OutboxDeliveryProvider();
+    const lines: string[] = [];
+    (outbox as unknown as { log: { log: (m: string) => void } }).log = { log: (m: string) => lines.push(m) };
+    await outbox.send({ channel: 'email' as never, destination: 'tester.one@example.test', code: '482913', language: 'en' });
+    await outbox.send({ channel: 'phone' as never, destination: '+22236000001', code: '771204', language: 'fr' });
+    const all = lines.join('\n');
+    expect(all).not.toMatch(/482913|771204/);
+    expect(all).not.toContain('tester.one@example.test');
+    expect(all).not.toContain('+22236000001');
+    expect(all).toContain('t***@example.test');
+    expect(all).toContain('+222***01');
+  });
+});

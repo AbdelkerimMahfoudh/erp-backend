@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Optional } from '@nestjs/common';
-import { createHash, createHmac, randomInt, timingSafeEqual } from 'node:crypto';
+import { randomInt, timingSafeEqual } from 'node:crypto';
+import { otpHash } from './otp-hash';
 import { AppConfigService } from '../common/config/app-config.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
@@ -48,9 +49,7 @@ export class ContactVerificationService {
    * so a code stolen for one contact cannot be replayed against another.
    */
   private hash(destination: string, code: string, version: number): string {
-    const pepper = this.config?.otpPepper ?? null;
-    if (version === 2 && pepper) return createHmac('sha256', pepper).update(`${destination}:${code}`).digest('hex');
-    return createHash('sha256').update(`${destination}:${code}`).digest('hex');
+    return otpHash(destination, code, version, this.config?.otpPepper ?? null);
   }
 
   /** The version a new code is hashed with: keyed whenever a pepper exists. */

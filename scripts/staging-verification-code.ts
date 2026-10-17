@@ -22,7 +22,7 @@
 
 import { config as loadEnv } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
-import { createHash } from 'node:crypto';
+import { recoverOtp } from '../src/platform/otp-hash';
 
 /*
  * `override` is load-bearing. Do not remove it.
@@ -42,23 +42,16 @@ import { createHash } from 'node:crypto';
  */
 loadEnv({ path: '.env.staging', override: true });
 
-/**
+/*
  * The stored value is a hash, so the code cannot simply be read back.
  *
  * That is the correct design and this script does not weaken it: it re-derives
- * the hash for each candidate code and matches. Six digits is a small enough
- * space to walk, which is exactly why the code is short-lived, single-use and
- * attempt-limited in the first place.
+ * the hash for each candidate code and matches (src/platform/otp-hash.ts, the
+ * server's own function). Six digits is a small enough space to walk, which is
+ * exactly why the code is short-lived, single-use and attempt-limited in the
+ * first place. A keyed row (version 2) needs the server's OTP_PEPPER, read from
+ * the same environment the API runs with; it is never printed.
  */
-function findCode(destination: string, hash: string): string | null {
-  for (let i = 0; i < 1_000_000; i++) {
-    const candidate = String(i).padStart(6, '0');
-    if (createHash('sha256').update(`${destination}:${candidate}`).digest('hex') === hash) {
-      return candidate;
-    }
-  }
-  return null;
-}
 
 async function main() {
   /*
@@ -104,9 +97,13 @@ async function main() {
       return;
     }
 
-    const code = findCode(destination, row.codeHash);
+    const code = recoverOtp(destination, row.codeHash, row.hashVersion, process.env.OTP_PEPPER?.trim() || null);
     if (!code) {
-      console.log('A code exists but could not be re-derived. It may use a newer format.');
+      console.log(
+        row.hashVersion === 2 && !process.env.OTP_PEPPER
+          ? 'A code exists but is keyed with OTP_PEPPER, which this shell does not have. Run it with the API environment.'
+          : 'A code exists but could not be re-derived. It may use a newer format.',
+      );
       return;
     }
 

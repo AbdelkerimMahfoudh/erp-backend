@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import type { ContactChannel } from '@prisma/client';
 import { DeliveryResult as ChannelResult, WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel';
 import { AUTH_OTP_TEMPLATE } from '../messaging/templates';
-import { EMAIL_CHANNEL, EmailChannel } from '../messaging/email-channel';
+import { EMAIL_CHANNEL, EmailChannel, maskEmail } from '../messaging/email-channel';
+import { maskDestination } from '../messaging/channels';
 
 /**
  * Sending a code to a contact.
@@ -64,6 +65,11 @@ export function codeMayBeReturned(env: NodeJS.ProcessEnv = process.env): boolean
   return (env.NODE_ENV ?? '') !== 'production';
 }
 
+/** A contact as a log may show it: the email's first letter and domain, or a number's prefix and last two digits. */
+export function maskContact(destination: string): string {
+  return destination.includes('@') ? maskEmail(destination) : maskDestination(destination);
+}
+
 export interface DeliveryRequest {
   channel: ContactChannel;
   /** Normalised: a lowercased email, or an E.164 number. */
@@ -118,9 +124,9 @@ export class OutboxDeliveryProvider extends ContactDeliveryProvider {
 
   async send(req: DeliveryRequest): Promise<DeliveryResult> {
     this.recent.set(req.destination, { code: req.code, at: new Date() });
-    // The destination, never the code. A log file is not a safe place for a
-    // working credential, even a short-lived one.
-    this.log.log(`verification code queued in the dev outbox for ${req.destination}`);
+    // Neither the code nor the full destination. A log file is not a safe place for a working credential, even a
+    // short-lived one, and staging logs leave the box: a masked contact is enough to tell two testers apart.
+    this.log.log(`verification code queued in the dev outbox for ${maskContact(req.destination)}`);
     return { delivery: 'outbox', provider: this.name };
   }
 

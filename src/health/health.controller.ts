@@ -4,6 +4,7 @@ import { HealthCheck, HealthCheckService } from '@nestjs/terminus';
 import { Public } from '../common/decorators/public.decorator';
 import { PrismaHealthIndicator } from './prisma.health';
 import { PrismaService } from '../prisma/prisma.service';
+import { migrationsOnDisk, missingMigrations } from './migrations-on-disk';
 
 /**
  * Liveness, readiness and build identity.
@@ -17,6 +18,9 @@ import { PrismaService } from '../prisma/prisma.service';
 @ApiTags('health')
 @Controller({ path: 'health', version: VERSION_NEUTRAL })
 export class HealthController {
+  /** The names of the migrations shipped beside this build, listed once: they cannot change while it runs. */
+  private readonly carried = migrationsOnDisk();
+
   constructor(
     private readonly health: HealthCheckService,
     private readonly db: PrismaHealthIndicator,
@@ -42,11 +46,16 @@ export class HealthController {
    * unready — most usefully while its migrations are behind the code, which is
    * exactly the window in which a deployment would otherwise start serving
    * requests against a schema that has not caught up.
+   *
+   * "Behind" means both: a migration row that never finished, and a migration
+   * this build carries that the database has not applied at all (a new image
+   * started before its `prisma migrate deploy`). Counts only, never names.
    */
   @Get('ready')
   async ready() {
     let migrationsApplied: number | null = null;
     let pendingMigrations: number | null = null;
+    let missing: number | null = null;
     let databaseReachable = false;
 
     try {
@@ -59,6 +68,14 @@ export class HealthController {
         'SELECT COUNT(*) AS n FROM _prisma_migrations WHERE finished_at IS NULL',
       );
       pendingMigrations = Number(failed[0]?.n ?? 0);
+
+      const applied = await this.prisma.$queryRawUnsafe<{ migration_name: string }[]>(
+        'SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL',
+      );
+      missing = missingMigrations(
+        this.carried,
+        applied.map((r) => r.migration_name),
+      ).length;
       databaseReachable = true;
     } catch {
       // Swallowed on purpose: the shape below reports "not ready" without
@@ -66,13 +83,15 @@ export class HealthController {
       databaseReachable = false;
     }
 
-    const ready = databaseReachable && pendingMigrations === 0;
+    const ready = databaseReachable && pendingMigrations === 0 && missing === 0;
 
     return {
       ready,
       databaseReachable,
       migrationsApplied,
       pendingMigrations,
+      migrationsInBuild: this.carried?.length ?? null,
+      migrationsMissing: missing,
       environment: process.env.APP_ENV ?? process.env.NODE_ENV ?? 'development',
       checkedAt: new Date().toISOString(),
     };

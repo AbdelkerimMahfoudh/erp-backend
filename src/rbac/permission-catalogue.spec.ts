@@ -326,10 +326,13 @@ describe('the deployment contract', () => {
           : e.name.endsWith('.ts') ? [join(dir, e.name)] : [],
       );
 
+    // One file may LIST the migration directories, for readiness (every carried migration applied): names only.
+    const lister = join(__dirname, '..', 'health', 'migrations-on-disk.ts');
     const offenders = walk(join(__dirname, '..'))
-      .filter((f) => !f.endsWith('.spec.ts'))
-      .filter((f) => /prisma\/migrations|prisma\\\\migrations/.test(readFileSync(f, 'utf8')));
+      .filter((f) => !f.endsWith('.spec.ts') && f !== lister)
+      .filter((f) => /prisma\/migrations|prisma\\\\migrations|'migrations'/.test(readFileSync(f, 'utf8')));
     expect(offenders).toEqual([]);
+    expect(readFileSync(lister, 'utf8')).not.toMatch(/readFile|createReadStream|migration\.sql|import\(|require\(/);
   });
 
   it('the verification command exists and refuses on a bad catalogue', () => {
