@@ -5536,10 +5536,13 @@ model MessagingDeliveryProof {
   acceptedAt        DateTime? @map("accepted_at") @db.DateTime(6)
   deliveredAt       DateTime? @map("delivered_at") @db.DateTime(6)
   failureDetail     String?   @map("failure_detail") @db.VarChar(200)
+  /// The sending number the proof was made with (0098): a proof made with the test number does not prove the real one.
+  phoneNumberId     String?   @map("phone_number_id") @db.VarChar(40)
   createdAt         DateTime  @default(now()) @map("created_at") @db.DateTime(6)
 
   @@unique([provider, providerMessageId], map: "ux_delivery_proof_message")
   @@index([channel, language, deliveredAt], map: "ix_delivery_proof_channel")
+  @@index([phoneNumberId, channel, deliveredAt], map: "ix_delivery_proof_number")
   @@map("messaging_delivery_proofs")
 }
 
@@ -5722,4 +5725,152 @@ model TrialSetupMessage {
 
   @@index([companyId, createdAt], map: "ix_trial_setup_messages_company")
   @@map("trial_setup_messages")
+}
+
+/// One email handed to a provider (0098; docs/97, D181): metadata only. Never a body, a code, a one-time link or
+/// token, nor a complete address — the recipient is a keyed HMAC (MESSAGING_HASH_KEY) and a masked form. One row per
+/// logical message: a retry of the same message (same idempotency key, same code) adds an attempt to the same row.
+/// Deleted after MESSAGE_LOG_RETENTION_DAYS.
+model EmailMessage {
+  id                Bytes     @id @db.Binary(16)
+  idempotencyKey    String    @map("idempotency_key") @db.VarChar(191)
+  template          String    @db.VarChar(60)
+  /// The sender class the From address was chosen by: verification | notifications.
+  category          String    @db.VarChar(20)
+  /// Essential messages (codes, security) may use the reserve of the daily safety limit; the others may not.
+  essential         Boolean
+  language          String    @db.VarChar(5)
+  /// TSX-MR's own From address — not personal data.
+  sender            String    @db.VarChar(191)
+  recipientHash     String    @map("recipient_hash") @db.Char(64)
+  recipientMasked   String    @map("recipient_masked") @db.VarChar(80)
+  provider          String    @db.VarChar(40)
+  /// sending | accepted | failed | refused (an internal limit refused it before any provider was called).
+  status            String    @db.VarChar(12)
+  failureReason     String?   @map("failure_reason") @db.VarChar(20)
+  detail            String?   @db.VarChar(200)
+  providerMessageId String?   @map("provider_message_id") @db.VarChar(191)
+  attempts          Int       @default(0)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(6)
+  acceptedAt        DateTime? @map("accepted_at") @db.DateTime(6)
+
+  @@unique([idempotencyKey], map: "ux_email_messages_idempotency")
+  @@index([createdAt], map: "ix_email_messages_created")
+  @@index([recipientHash, createdAt], map: "ix_email_messages_recipient")
+  @@map("email_messages")
+}
+
+/// One WhatsApp template send (0098; docs/97, D181): metadata and the provider's status, never the variables (a code,
+/// a token) nor the complete number. Statuses move forward only (accepted → sent → delivered → read; failed only
+/// before delivered). Deleted after MESSAGE_LOG_RETENTION_DAYS.
+model WhatsAppMessage {
+  id                Bytes     @id @db.Binary(16)
+  idempotencyKey    String    @map("idempotency_key") @db.VarChar(191)
+  providerMessageId String?   @map("provider_message_id") @db.VarChar(191)
+  phoneNumberId     String    @map("phone_number_id") @db.VarChar(40)
+  /// test | live — the mode the send was made in.
+  mode              String    @db.VarChar(8)
+  template          String    @db.VarChar(60)
+  /// essential | optional | operator (templates.ts).
+  templateUse       String    @map("template_use") @db.VarChar(12)
+  language          String    @db.VarChar(5)
+  recipientHash     String    @map("recipient_hash") @db.Char(64)
+  recipientMasked   String    @map("recipient_masked") @db.VarChar(40)
+  /// refused | failed | accepted | sent | delivered | read
+  status            String    @db.VarChar(12)
+  failureReason     String?   @map("failure_reason") @db.VarChar(20)
+  errorCode         Int?      @map("error_code")
+  detail            String?   @db.VarChar(200)
+  attempts          Int       @default(0)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  statusAt          DateTime  @default(now()) @map("status_at") @db.DateTime(6)
+  deliveredAt       DateTime? @map("delivered_at") @db.DateTime(6)
+  readAt            DateTime? @map("read_at") @db.DateTime(6)
+  failedAt          DateTime? @map("failed_at") @db.DateTime(6)
+
+  @@unique([idempotencyKey], map: "ux_whatsapp_messages_idempotency")
+  @@unique([providerMessageId], map: "ux_whatsapp_messages_provider_id")
+  @@index([recipientHash, createdAt], map: "ix_whatsapp_messages_recipient")
+  @@index([createdAt], map: "ix_whatsapp_messages_created")
+  @@map("whatsapp_messages")
+}
+
+/// One item of a signed webhook delivery, stored before the provider is answered and worked by a leased worker
+/// (0098; D181 §8). No payload: only what processing needs — a status, or an inbound message's id, its sender as a
+/// keyed hash and an opt-out signal decided in memory. The message text is never stored. Provider retries collapse
+/// on `dedupe_key`. Once processed, the sender fields are cleared; rows are deleted after
+/// WHATSAPP_WEBHOOK_RETENTION_DAYS.
+model WhatsAppWebhookEvent {
+  id                Bytes     @id @db.Binary(16)
+  /// `s:<message id>:<status>` for a status, `m:<message id>` for an inbound message.
+  dedupeKey         String    @map("dedupe_key") @db.VarChar(191)
+  /// status | inbound
+  kind              String    @db.VarChar(10)
+  providerMessageId String    @map("provider_message_id") @db.VarChar(191)
+  status            String?   @db.VarChar(20)
+  errorCode         Int?      @map("error_code")
+  senderHash        String?   @map("sender_hash") @db.Char(64)
+  senderMasked      String?   @map("sender_masked") @db.VarChar(40)
+  /// stop | start — decided from the text in memory at receipt; the text itself is discarded.
+  optOutSignal      String?   @map("opt_out_signal") @db.VarChar(8)
+  occurredAt        DateTime? @map("occurred_at") @db.DateTime(6)
+  /// pending | processing | done | failed
+  state             String    @default("pending") @db.VarChar(12)
+  attempts          Int       @default(0)
+  claimToken        Bytes?    @map("claim_token") @db.Binary(16)
+  claimedUntil      DateTime? @map("claimed_until") @db.DateTime(6)
+  nextAttemptAt     DateTime  @default(now()) @map("next_attempt_at") @db.DateTime(6)
+  lastError         String?   @map("last_error") @db.VarChar(200)
+  receivedAt        DateTime  @default(now()) @map("received_at") @db.DateTime(6)
+  processedAt       DateTime? @map("processed_at") @db.DateTime(6)
+
+  @@unique([dedupeKey], map: "ux_whatsapp_webhook_events_dedupe")
+  @@index([state, nextAttemptAt], map: "ix_whatsapp_webhook_events_due")
+  @@index([receivedAt], map: "ix_whatsapp_webhook_events_received")
+  @@map("whatsapp_webhook_events")
+}
+
+/// What is known about one WhatsApp number (0098; D181 §3, §5): its opt-out, the last inbound message (the 24-hour
+/// customer-service window) and whether the provider called it undeliverable. Keyed by an HMAC of the number.
+model WhatsAppContact {
+  id              Bytes     @id @db.Binary(16)
+  numberHash      String    @map("number_hash") @db.Char(64)
+  numberMasked    String    @map("number_masked") @db.VarChar(40)
+  /// none | optional (optional notifications stopped) | all (the mandatory channel withdrawn).
+  optOutScope     String    @default("none") @map("opt_out_scope") @db.VarChar(10)
+  optOutAt        DateTime? @map("opt_out_at") @db.DateTime(6)
+  /// inbound_keyword | account
+  optOutSource    String?   @map("opt_out_source") @db.VarChar(20)
+  lastInboundAt   DateTime? @map("last_inbound_at") @db.DateTime(6)
+  undeliverableAt DateTime? @map("undeliverable_at") @db.DateTime(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(6)
+
+  @@unique([numberHash], map: "ux_whatsapp_contacts_number")
+  @@map("whatsapp_contacts")
+}
+
+/// The history of a number's WhatsApp consent (0098; D181 §5): every grant (with its copy's version and purposes),
+/// opt-out and withdrawal made through the application, with who made it. Append-only.
+model WhatsAppConsent {
+  id             Bytes    @id @db.Binary(16)
+  numberHash     String   @map("number_hash") @db.Char(64)
+  numberMasked   String   @map("number_masked") @db.VarChar(40)
+  /// granted | opted_out_optional | withdrawn
+  event          String   @db.VarChar(20)
+  version        String?  @db.VarChar(40)
+  /// Comma-separated purpose categories of the granted copy.
+  purposes       String?  @db.VarChar(255)
+  /// Who made it: the business and person acting (a record of the actor, not tenant ownership — the history is
+  /// read by number, across businesses, by the send policy).
+  actorCompanyId Bytes?   @map("actor_company_id") @db.Binary(16)
+  actorUserId    Bytes?   @map("actor_user_id") @db.Binary(16)
+  /// owner_registration | phone_verification | account
+  source         String   @db.VarChar(30)
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  @@index([numberHash, createdAt], map: "ix_whatsapp_consents_number")
+  @@index([actorUserId], map: "ix_whatsapp_consents_actor")
+  @@map("whatsapp_consents")
 }
