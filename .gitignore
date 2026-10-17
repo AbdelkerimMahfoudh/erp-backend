@@ -61,3 +61,8 @@ staging-server.cjs
 
 # Local-disk storage (receipts, photos). User data: never committed.
 /uploads/
+
+# The staging stack's host settings and any env file beside it (deploy/staging; docs/99). Only examples are committed.
+deploy/staging/*.env
+!deploy/staging/*.env.example
+deploy/staging/secrets/

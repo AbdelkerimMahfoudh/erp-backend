@@ -1,0 +1,132 @@
+# The staging stack for one small Linux host (docs/99): https://staging-api.tsxmr.com.
+#
+# Four running services and two one-off ones:
+#   db       MySQL 8.4, strict sql_mode, UTC, binary-log trigger setting; on the internal network only, no port published.
+#   api      the runtime image (Dockerfile, target runtime): non-root, restarted on failure, receipts on a volume.
+#   edge     Caddy: the only published ports (80, 443), automatic HTTPS for STAGING_API_HOST, the client address
+#            forwarded as exactly one hop (API_INGRESS=network trusts one).
+#   migrate  (profile tools) `prisma migrate deploy` + `migrate status` as phonestore_migrator. Never part of `up`.
+#   tools    (profile tools) operator commands as the app identity: preflight, catalogue check, staging code lookup.
+#
+# Nothing secret is in this file or in an image. Every secret is a file under STAGING_SECRETS_DIR (mode 600, outside
+# the checkout) or a line of the API's env file; deploy/staging/setup-database.sh generates the database passwords.
+# Run everything through deploy/staging/*.sh, which pass `--env-file deploy/staging/stack.env`.
+name: erp-staging
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '5'
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # MySQL 8's own strict default, the mode CI migrates under (deploy/ci-database-gates.sh).
+      - --sql-mode=ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+      # The binary log is on; without this the migrator cannot create the append-only triggers (ERROR 1419).
+      - --log-bin-trust-function-creators=1
+      - --default-time-zone=+00:00
+      - --skip-name-resolve
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /secrets/mysql_root.pw
+    volumes:
+      - db-data:/var/lib/mysql
+      - ${STAGING_SECRETS_DIR:?set STAGING_SECRETS_DIR in stack.env}:/secrets:ro
+      - ${STAGING_BACKUP_DIR:?set STAGING_BACKUP_DIR in stack.env}:/backups
+      - ./:/deploy:ro
+    networks: [internal]
+    healthcheck:
+      # 0 whenever the server answers, credentials or not (mysqladmin's documented behaviour): no password needed.
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '--silent']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging: *logging
+
+  api:
+    image: ${API_IMAGE:-erp-api:staging}
+    build:
+      context: ..
+      target: runtime
+      args:
+        APP_COMMIT: ${APP_COMMIT:-unknown}
+        APP_BUILT_AT: ${APP_BUILT_AT:-}
+    restart: unless-stopped
+    env_file:
+      - ${STAGING_API_ENV_FILE:?set STAGING_API_ENV_FILE in stack.env}
+      - ${STAGING_SECRETS_DIR}/database.env
+    environment:
+      # The environment's identity and its ingress are the stack's, not the env file's to change.
+      APP_ENV: staging
+      NODE_ENV: production
+      PORT: '3010'
+      API_INGRESS: network
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - uploads:/app/uploads
+    expose: ['3010']
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal, edge]
+    logging: *logging
+
+  edge:
+    image: caddy:2.8
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      STAGING_API_HOST: ${STAGING_API_HOST:?set STAGING_API_HOST in stack.env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in stack.env}
+    volumes:
+      - ./staging/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [api]
+    networks: [edge]
+    logging: *logging
+
+  migrate:
+    image: ${TOOLS_IMAGE:-erp-api-tools:staging}
+    build:
+      context: ..
+      target: tools
+    profiles: [tools]
+    env_file:
+      - ${STAGING_SECRETS_DIR}/migrator.env
+    command: ['sh', '-c', 'npx prisma migrate deploy && npx prisma migrate status']
+    networks: [internal]
+    logging: *logging
+
+  tools:
+    image: ${TOOLS_IMAGE:-erp-api-tools:staging}
+    profiles: [tools]
+    env_file:
+      - ${STAGING_API_ENV_FILE}
+      - ${STAGING_SECRETS_DIR}/database.env
+    environment:
+      APP_ENV: staging
+      NODE_ENV: production
+      API_INGRESS: network
+    networks: [internal]
+    logging: *logging
+
+networks:
+  # The database's network has no route out: nothing on it can reach the internet, and nothing outside can reach it.
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  db-data:
+  uploads:
+  caddy-data:
+  caddy-config:

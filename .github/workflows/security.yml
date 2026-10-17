@@ -90,3 +90,38 @@ jobs:
           MYSQL_HOST: 127.0.0.1
           MYSQL_PORT: '3306'
         run: bash deploy/ci-database-gates.sh
+  staging-image:
+    name: staging image and stack files
+    # The Dockerfile and the staging stack (docs/99) as a host would use them: both targets build from the lockfile,
+    # the runtime image is non-root and carries no environment file, the compose file resolves, every script parses,
+    # and the preflight refuses the committed template (it holds no secret, so it must not pass as a configuration).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build the runtime and tools targets
+        run: |
+          docker build --target runtime --build-arg APP_COMMIT=${{ github.sha }} -t erp-api:ci .
+          docker build --target tools -t erp-api-tools:ci .
+      - name: runtime image — non-root, stamped, no environment file, Prisma engine loads
+        run: |
+          test "$(docker inspect -f '{{.Config.User}}' erp-api:ci)" = node
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' erp-api:ci | grep -qx "APP_COMMIT=${{ github.sha }}"
+          docker inspect -f '{{.Config.Healthcheck.Test}}' erp-api:ci | grep -q '/api/health/ready'
+          if docker run --rm erp-api:ci find /app -maxdepth 2 -name '.env*' | grep .; then echo "an env file is in the image"; exit 1; fi
+          docker run --rm erp-api:ci node -e "new (require('@prisma/client').PrismaClient)(); console.log('client ok')"
+          docker run --rm erp-api-tools:ci npx prisma --version
+      - name: stack files resolve and parse
+        run: |
+          for f in deploy/staging/*.sh; do bash -n "$f"; done
+          for f in deploy/staging/*.mjs; do node --check "$f"; done
+          printf 'STAGING_API_HOST=staging-api.example.test\nACME_EMAIL=ops@example.test\nSTAGING_SECRETS_DIR=/tmp/s\nSTAGING_BACKUP_DIR=/tmp/b\nSTAGING_API_ENV_FILE=/tmp/api.env\n' > /tmp/stack.env
+          mkdir -p /tmp/s && touch /tmp/s/database.env /tmp/s/migrator.env /tmp/api.env
+          docker compose --env-file /tmp/stack.env -f deploy/docker-compose.staging.yml --profile tools config --quiet
+          # Only the edge publishes ports; the database never does.
+          docker compose --env-file /tmp/stack.env -f deploy/docker-compose.staging.yml --profile tools config --format json \
+            | node -e "const c=JSON.parse(require('fs').readFileSync(0,'utf8')); const p=Object.entries(c.services).filter(([,s])=>s.ports?.length).map(([n])=>n); if (p.join()!=='edge') { console.error('ports published by', p); process.exit(1); }"
+      - name: the preflight refuses the committed template
+        run: |
+          if docker run --rm --env-file .env.staging.example erp-api-tools:ci node deploy/staging/preflight.mjs; then
+            echo "the preflight passed a template with no secrets"; exit 1
+          fi

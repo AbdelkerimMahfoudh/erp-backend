@@ -1,9 +1,20 @@
 node_modules
 dist
 uploads
+coverage
+.git
+.github
+*.log
+# Environment files and anything that could hold a credential never enter an image.
 .env
 .env.*
 !.env.example
 !.env.staging.example
-*.log
-.git
+deploy/staging/secrets
+deploy/staging/*.env
+!deploy/staging/*.env.example
+*.pem
+*.key
+*.pw
+*.sql.gz
+*.sql.gz.enc
