@@ -99,7 +99,8 @@ check('rate limiting is active (rate-limit headers present)', anyRateHeader);
 // ── CORS: an unknown origin gets no grant; an allowed one (if named) gets exactly itself ─────────────────────────────
 const pre = (o) => get('/api/v1/auth/login', { method: 'OPTIONS', headers: { Origin: o, 'Access-Control-Request-Method': 'POST' } });
 const evil = await pre('https://not-allowed.example');
-check('CORS grants nothing to an unknown origin', !evil.headers.get('access-control-allow-origin'), `${evil.headers.get('access-control-allow-origin') ?? 'none'}`);
+// An unreachable API grants nothing too: the check needs an answer before the missing header means anything.
+check('CORS grants nothing to an unknown origin', evil.status > 0 && !evil.headers.get('access-control-allow-origin'), `${evil.status} ${evil.headers.get('access-control-allow-origin') ?? 'none'}`);
 if (allowedOrigin) {
   const good = await pre(allowedOrigin);
   check(`CORS grants exactly ${allowedOrigin}`, good.headers.get('access-control-allow-origin') === allowedOrigin && good.headers.get('access-control-allow-origin') !== '*');
