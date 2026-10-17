@@ -70,7 +70,7 @@ async function main(): Promise<void> {
     const to = normalisePhone(arg('--to') ?? '');
     if (!to) throw new Error('Give the operator’s own WhatsApp number: --to +2223XXXXXXX');
     if (!isCloudChannel(config.whatsappChannel) || channel.name !== 'cloud-api') {
-      throw new Error(`Nothing to prove: WHATSAPP_CHANNEL is "${config.whatsappChannel}". Configure cloud first (docs/64, docs/97).`);
+      throw new Error(`Nothing to prove: WHATSAPP_CHANNEL is "${config.whatsappChannel}". Configure cloud first (docs/64, docs/98).`);
     }
     const controls = sendControlsFrom(config);
     if (controls.mode !== 'test') {

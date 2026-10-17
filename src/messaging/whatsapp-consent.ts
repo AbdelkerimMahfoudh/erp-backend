@@ -3,7 +3,7 @@ import type { MessageLanguage } from './whatsapp-channel';
 
 /**
  * WhatsApp consent: the copy a person agrees to, its version and purposes, the opt-out keywords, and what stops
- * working when the mandatory channel is withdrawn (D181 §3, §5; docs/97).
+ * working when the mandatory channel is withdrawn (D181 §3, §5; docs/98).
  *
  * The copy is served by the API so the screen that shows it and the record that stores the agreement can never
  * disagree: a client sends back the `version` it displayed, and a stale version is refused. Changing a word here

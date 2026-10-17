@@ -87,7 +87,7 @@ export function policyRefusal(
 /**
  * Outbound pacing, in this process: a token bucket for the sending number (the provider's throughput) and a minimum
  * gap per recipient (its pair rate limit, 131056). A retry of the same message is not a new message and skips the
- * per-recipient gap. One API instance is the supported deployment (docs/97); a second would pace separately.
+ * per-recipient gap. One API instance is the supported deployment (docs/98); a second would pace separately.
  */
 export class SendPacer {
   private tokens: number;

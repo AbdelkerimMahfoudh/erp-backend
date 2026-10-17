@@ -5727,7 +5727,7 @@ model TrialSetupMessage {
   @@map("trial_setup_messages")
 }
 
-/// One email handed to a provider (0098; docs/97, D181): metadata only. Never a body, a code, a one-time link or
+/// One email handed to a provider (0098; docs/98, D181): metadata only. Never a body, a code, a one-time link or
 /// token, nor a complete address — the recipient is a keyed HMAC (MESSAGING_HASH_KEY) and a masked form. One row per
 /// logical message: a retry of the same message (same idempotency key, same code) adds an attempt to the same row.
 /// Deleted after MESSAGE_LOG_RETENTION_DAYS.
@@ -5761,7 +5761,7 @@ model EmailMessage {
   @@map("email_messages")
 }
 
-/// One WhatsApp template send (0098; docs/97, D181): metadata and the provider's status, never the variables (a code,
+/// One WhatsApp template send (0098; docs/98, D181): metadata and the provider's status, never the variables (a code,
 /// a token) nor the complete number. Statuses move forward only (accepted → sent → delivered → read; failed only
 /// before delivered). Deleted after MESSAGE_LOG_RETENTION_DAYS.
 model WhatsAppMessage {

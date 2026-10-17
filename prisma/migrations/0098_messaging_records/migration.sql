@@ -1,5 +1,5 @@
 -- ===========================================================================
--- 0098 — Messaging records for Brevo SMTP and the WhatsApp Cloud API (D181; docs/97).
+-- 0098 — Messaging records for Brevo SMTP and the WhatsApp Cloud API (D181; docs/98).
 --
 -- Why: the brief of 2026-10-17 asks for delivery logs, an internal daily safety limit and per-recipient limits, an
 -- asynchronous and idempotent webhook, forward-only message statuses, versioned WhatsApp consent and opt-out. None of
@@ -20,7 +20,7 @@
 --   configured number; no deployment has any today (WhatsApp has never been enabled).
 --
 -- Purely additive: no existing column changes and no data moves. Rollback: drop the five tables, the index and the
--- column (docs/97 §6); nothing else depends on them.
+-- column (docs/98 §6); nothing else depends on them.
 -- ===========================================================================
 
 -- AlterTable
