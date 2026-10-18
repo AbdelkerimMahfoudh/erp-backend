@@ -587,3 +587,53 @@ describe('SMTP email in production (D181 §1)', () => {
     expect(example).toMatch(/^WHATSAPP_API_VERSION=v26\.0$/m);
   });
 });
+
+describe('the production environment proper (APP_ENV=production, D200)', () => {
+  const PRODUCTION_SMTP = {
+    ...SAFE,
+    APP_ENV: 'production',
+    API_INGRESS: 'network',
+    API_BIND: undefined,
+    CORS_ORIGINS: '',
+    EMAIL_CHANNEL: 'smtp',
+    SMTP_HOST: 'smtp-relay.brevo.com',
+    SMTP_PORT: '587',
+    SMTP_USERNAME: 'login@smtp-brevo.com',
+    SMTP_PASSWORD: 'loaded-from-the-file-by-secret-files',
+    SMTP_PASSWORD_FILE: '/run/secrets/smtp_password',
+    EMAIL_FROM: 'Dukan ERP <no-reply@tsxmr.com>',
+    EMAIL_FROM_VERIFICATION: 'Dukan ERP <verification@tsxmr.com>',
+    EMAIL_FROM_NOTIFICATIONS: 'Dukan ERP <notifications@tsxmr.com>',
+    EMAIL_REPLY_TO: 'support@tsxmr.com',
+    OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
+    MESSAGING_HASH_KEY: 'a-messaging-hash-key-of-at-least-32-characters',
+  };
+
+  it('accepts SMTP whose key arrived as a file', () => {
+    expect(productionConfigProblems(PRODUCTION_SMTP)).toEqual([]);
+  });
+
+  it('refuses an SMTP key given as a plain variable: it would show in docker inspect', () => {
+    const { SMTP_PASSWORD_FILE: _file, ...plain } = PRODUCTION_SMTP;
+    expect(productionConfigProblems(plain).join('\n')).toMatch(/APP_ENV=production reads the SMTP key from a file: set SMTP_PASSWORD_FILE/);
+  });
+
+  it('keeps staging and the other production-like environments as they were (the file rule is production only)', () => {
+    const { SMTP_PASSWORD_FILE: _file, ...plain } = PRODUCTION_SMTP;
+    expect(productionConfigProblems({ ...plain, APP_ENV: 'staging' })).toEqual([]);
+    expect(productionConfigProblems({ ...plain, APP_ENV: undefined })).toEqual([]);
+  });
+
+  it.each(['enabled', 'disabled'])('refuses the staging outbox flag in production, whatever its value (%s)', (value) => {
+    expect(productionConfigProblems({ ...PRODUCTION_SMTP, STAGING_CONTACT_OUTBOX: value }).join('\n')).toMatch(/STAGING_CONTACT_OUTBOX is set in production/);
+    expect(productionConfigProblems({ ...PRODUCTION_SMTP, APP_ENV: 'staging', STAGING_CONTACT_OUTBOX: value })).toEqual([]);
+  });
+
+  it.each(['*', 'https://*.tsxmr.com', 'https://tsxmr.com,*'])('refuses a CORS wildcard (%s)', (origins) => {
+    expect(productionConfigProblems({ ...SAFE, CORS_ORIGINS: origins }).join('\n')).toMatch(/CORS_ORIGINS contains a wildcard/);
+  });
+
+  it.each(['net', 'tls,net', 'http'])('refuses Node debug tracing (NODE_DEBUG=%s): it bypasses the log redaction', (value) => {
+    expect(productionConfigProblems({ ...SAFE, NODE_DEBUG: value }).join('\n')).toMatch(/NODE_DEBUG is set/);
+  });
+});

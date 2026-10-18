@@ -76,6 +76,9 @@ export interface ProductionGuardEnv {
   PLATFORM_MFA_KEY?: string;
   SEED_DEMO?: string;
   PUBLIC_SITE_ORIGIN?: string;
+  SMTP_PASSWORD_FILE?: string;
+  STAGING_CONTACT_OUTBOX?: string;
+  NODE_DEBUG?: string;
 }
 
 /** A sender address that is real: an address (optionally "Name <address>") on no example or test domain. */
@@ -211,6 +214,14 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
       `CORS_ORIGINS names non-HTTPS origins in production: ${plainOrigins.join(', ')}. ` +
         'Every browser origin must be https://.',
     );
+  }
+  // A wildcard is never an origin: every browser origin is named exactly, or none is (D200).
+  if ((env.CORS_ORIGINS ?? '').includes('*')) {
+    problems.push('CORS_ORIGINS contains a wildcard. Name each https:// origin exactly, or leave it empty.');
+  }
+  // Node's own debug tracing (net, tls, http…) writes connection internals to the log, outside every redaction.
+  if (env.NODE_DEBUG?.trim()) {
+    problems.push('NODE_DEBUG is set. Production never traces Node internals: they bypass the log redaction.');
   }
   const channel = (env.WHATSAPP_CHANNEL ?? 'disabled').trim().toLowerCase();
   if (channel === 'development-log') {
@@ -357,6 +368,23 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
    */
   if (!parseMfaKey(env.PLATFORM_MFA_KEY)) {
     problems.push('PLATFORM_MFA_KEY is missing or malformed. Production needs a 32-byte key (base64, or 64 hex characters) to seal administrator TOTP secrets.');
+  }
+
+  /*
+   * The production environment proper (APP_ENV=production, docs/100): stricter than staging, which runs the same code
+   * paths with NODE_ENV=production on purpose. Two copied-from-staging mistakes are refused by name (D200):
+   *  - the SMTP key must arrive as a file (SMTP_PASSWORD_FILE, `secret-files.ts`), so it is in no environment
+   *    `docker inspect` can show;
+   *  - the staging code outbox flag must not exist at all. The code already ignores it in production
+   *    (`contact-delivery.ts`); a flag that is set is a staging file deployed as production.
+   */
+  if ((env.APP_ENV ?? '').trim().toLowerCase() === 'production') {
+    if (email === 'smtp' && !env.SMTP_PASSWORD_FILE?.trim()) {
+      problems.push('APP_ENV=production reads the SMTP key from a file: set SMTP_PASSWORD_FILE (a read-only secret), not SMTP_PASSWORD.');
+    }
+    if (env.STAGING_CONTACT_OUTBOX?.trim()) {
+      problems.push('STAGING_CONTACT_OUTBOX is set in production. It is a staging setting: remove it (production never holds codes).');
+    }
   }
 
   // Demo data is opt-in everywhere and refused here regardless (docs/48 risk R7).

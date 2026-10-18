@@ -1,4 +1,6 @@
 import 'reflect-metadata';
+// Secrets given as files (NAME_FILE) must be in place before the configuration is imported and validated (D200).
+import './common/config/load-secret-files';
 import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
