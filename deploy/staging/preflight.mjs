@@ -87,10 +87,11 @@ for (const origin of val('CORS_ORIGINS').split(',').map((o) => o.trim()).filter(
   check(ok && !origin.includes('*'), `CORS origin "${origin}" must be an exact https:// origin: no wildcard, path or trailing slash.`);
 }
 try {
-  const u = new URL(val('PUBLIC_SITE_ORIGIN'));
-  check(u.protocol === 'https:' && u.origin === val('PUBLIC_SITE_ORIGIN'), 'PUBLIC_SITE_ORIGIN must be an exact https:// origin.');
+  const u = new URL(val('PORTAL_ORIGIN'));
+  check(u.protocol === 'https:' && u.origin === val('PORTAL_ORIGIN'), 'PORTAL_ORIGIN must be an exact https:// origin.');
+  check(val('PORTAL_ORIGIN') !== 'https://dukan.tsxmr.com', 'PORTAL_ORIGIN must not be the production portal: staging messages would send Owners there.');
 } catch {
-  check(false, 'PUBLIC_SITE_ORIGIN must be set to an https:// origin (the free trial builds its setup links from it).');
+  check(false, 'PORTAL_ORIGIN must be set to an https:// origin (the portal instructions and subscription messages point to it).');
 }
 for (const name of ['THROTTLE_TTL_SECONDS', 'THROTTLE_LIMIT', 'AUTH_THROTTLE_LIMIT', 'ACCOUNT_THROTTLE_LIMIT']) {
   check(/^\d+$/.test(val(name)), `${name} must be stated as a whole number (rate limits are part of the staging contract).`);

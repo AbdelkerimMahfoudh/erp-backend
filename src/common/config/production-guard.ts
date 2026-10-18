@@ -49,7 +49,14 @@ export interface ProductionGuardEnv {
   WHATSAPP_TEMPLATE_ACCOUNT_DELETION?: string;
   WHATSAPP_TEMPLATE_ACCOUNT_DELETED?: string;
   WHATSAPP_TEMPLATE_DELIVERY_CHECK?: string;
-  WHATSAPP_TEMPLATE_TRIAL_SETUP?: string;
+  WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS?: string;
+  WHATSAPP_TEMPLATE_TRIAL_REMINDER?: string;
+  WHATSAPP_TEMPLATE_TRIAL_EXPIRED?: string;
+  WHATSAPP_TEMPLATE_PAID_REMINDER?: string;
+  WHATSAPP_TEMPLATE_GRACE_STARTED?: string;
+  WHATSAPP_TEMPLATE_NO_GRACE?: string;
+  WHATSAPP_TEMPLATE_GRACE_REMINDER?: string;
+  WHATSAPP_TEMPLATE_GRACE_ENDED?: string;
   EMAIL_CHANNEL?: string;
   EMAIL_FROM?: string;
   RESEND_API_KEY?: string;
@@ -75,7 +82,7 @@ export interface ProductionGuardEnv {
   PLATFORM_ADMIN_KEY?: string;
   PLATFORM_MFA_KEY?: string;
   SEED_DEMO?: string;
-  PUBLIC_SITE_ORIGIN?: string;
+  PORTAL_ORIGIN?: string;
   SMTP_PASSWORD_FILE?: string;
   STAGING_CONTACT_OUTBOX?: string;
   NODE_DEBUG?: string;
@@ -263,8 +270,9 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
           'delivery proof) and WHATSAPP_TEMPLATE_ACCOUNT_DELETED (the deletion completion notice).',
       );
     }
-    // WHATSAPP_TEMPLATE_TRIAL_SETUP is deliberately NOT required: without it the free trial's setup instructions do
-    // not go by WhatsApp, the Owner's status says so honestly, and the Owner can still start the trial on the website.
+    // The portal and subscription templates (WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS and the seven lifecycle ones) are
+    // deliberately NOT required: without one, WhatsApp cannot carry that message, the recorded email fallback is tried
+    // (a verified email only), the status says so honestly, and the Owner can still start the trial on the portal.
 
     /*
      * Test and live sending are separate (D181 §4). Test mode reaches only an exact allowlist, so it needs one, and
@@ -393,16 +401,19 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
   }
 
   /*
-   * The free trial's setup links (0095; docs/76) are built from the website's origin: one per message, carrying the
-   * Owner's one-time token. A plain-http origin would send that token across the network in clear text, and a path
-   * or a trailing slash builds a link to a page that does not exist — so production takes an https:// origin and
-   * nothing after it. It builds links and nothing else: no request is ever compared with it.
+   * The portal instructions and every subscription message carry one address: <PORTAL_ORIGIN>/subscription (0099).
+   * A plain-http origin would send the Owner to a page that can be read or changed on the way, and a path or a
+   * trailing slash writes an address that does not exist — so production takes an https:// origin and nothing after
+   * it, and the production environment proper only the owner's portal. It writes an address and nothing else: no
+   * request is ever compared with it.
    */
-  if (!isHttpsOrigin(env.PUBLIC_SITE_ORIGIN)) {
+  if (!isHttpsOrigin(env.PORTAL_ORIGIN)) {
     problems.push(
-      "PUBLIC_SITE_ORIGIN must be the Dukan ERP website's https:// origin with no path, e.g. https://dukan.tsx-mr.com: " +
-        "the free trial's setup links are built from it.",
+      "PORTAL_ORIGIN must be the Dukan ERP portal's https:// origin with no path, e.g. https://dukan.tsxmr.com: " +
+        'the portal instructions and the subscription messages carry <PORTAL_ORIGIN>/subscription.',
     );
+  } else if ((env.APP_ENV ?? '').trim().toLowerCase() === 'production' && env.PORTAL_ORIGIN !== 'https://dukan.tsxmr.com') {
+    problems.push('APP_ENV=production writes https://dukan.tsxmr.com/subscription into its messages: set PORTAL_ORIGIN=https://dukan.tsxmr.com exactly.');
   }
 
   /*

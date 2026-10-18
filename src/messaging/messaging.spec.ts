@@ -11,7 +11,7 @@ import {
   ACCOUNT_DELETION_TEMPLATE,
   ALL_TEMPLATES,
   AUTH_OTP_TEMPLATE,
-  TRIAL_SETUP_TEMPLATE,
+  SUBSCRIPTION_TEMPLATES,
   assertLanguageSupported,
   getTemplate,
   validateTemplateVariables,
@@ -200,26 +200,33 @@ describe('template registry', () => {
   });
 });
 
-describe('the free trial’s setup template (0095)', () => {
-  it('is a utility message in every product language, whose token is its URL button and never body text', () => {
-    expect(TRIAL_SETUP_TEMPLATE).toMatchObject({
-      key: 'trial.setup',
-      category: 'account',
-      providerKind: 'utility',
-      configKey: 'WHATSAPP_TEMPLATE_TRIAL_SETUP',
-      variables: ['business', 'token'],
-      urlButton: 'token',
-    });
-    expect([...TRIAL_SETUP_TEMPLATE.languages].sort()).toEqual(['ar', 'en', 'fr']);
-    expect(getTemplate('trial.setup')).toBe(TRIAL_SETUP_TEMPLATE);
-    expect(validateTemplateVariables(TRIAL_SETUP_TEMPLATE, { business: 'Boutique Aicha', token: 't'.repeat(43) })).toBeTruthy();
-    expect(() => validateTemplateVariables(TRIAL_SETUP_TEMPLATE, { business: 'Boutique Aicha', token: 't', link: 'x' })).toThrow(/does not accept: link/);
+describe('the portal instructions and the subscription messages (0099)', () => {
+  it('are optional utility messages in every product language, each named by its own configuration key', () => {
+    expect(SUBSCRIPTION_TEMPLATES.map((t) => [t.key, t.configKey, t.variables])).toEqual([
+      ['portal.instructions', 'WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS', ['business']],
+      ['subscription.trial_reminder', 'WHATSAPP_TEMPLATE_TRIAL_REMINDER', ['business', 'remaining', 'ends']],
+      ['subscription.trial_expired', 'WHATSAPP_TEMPLATE_TRIAL_EXPIRED', ['business', 'ended']],
+      ['subscription.paid_reminder', 'WHATSAPP_TEMPLATE_PAID_REMINDER', ['business', 'remaining', 'ends']],
+      ['subscription.grace_started', 'WHATSAPP_TEMPLATE_GRACE_STARTED', ['business', 'ended', 'graceEnds', 'usesLeft']],
+      ['subscription.no_grace', 'WHATSAPP_TEMPLATE_NO_GRACE', ['business', 'ended']],
+      ['subscription.grace_reminder', 'WHATSAPP_TEMPLATE_GRACE_REMINDER', ['business', 'remaining', 'graceEnds']],
+      ['subscription.grace_ended', 'WHATSAPP_TEMPLATE_GRACE_ENDED', ['business', 'ended']],
+    ]);
+    for (const t of SUBSCRIPTION_TEMPLATES) {
+      expect(t).toMatchObject({ category: 'account', providerKind: 'utility', use: 'optional' });
+      expect([...t.languages].sort()).toEqual(['ar', 'en', 'fr']);
+      expect(getTemplate(t.key)).toBe(t);
+    }
   });
 
-  it('is the only template with a URL button, and its button variable is one of its own', () => {
-    // An authentication template's copy button is the provider's own shape, not a declared URL button.
-    expect(ALL_TEMPLATES.filter((t) => t.urlButton).map((t) => t.key)).toEqual(['trial.setup']);
-    for (const t of ALL_TEMPLATES.filter((x) => x.urlButton)) expect(t.variables).toContain(t.urlButton);
+  it('take no link, token or identifier: the portal’s one address is part of the approved text', () => {
+    for (const t of SUBSCRIPTION_TEMPLATES) {
+      expect({ key: t.key, bad: t.variables.filter((v) => /link|url|token|id$|code/i.test(v)) }).toEqual({ key: t.key, bad: [] });
+      expect(() => validateTemplateVariables(t, { ...Object.fromEntries(t.variables.map((v) => [v, 'x'])), link: 'https://x' })).toThrow(/does not accept: link/);
+    }
+    // Every template's keys are unique across the registry.
+    expect(new Set(ALL_TEMPLATES.map((t) => t.key)).size).toBe(ALL_TEMPLATES.length);
+    expect(new Set(ALL_TEMPLATES.map((t) => t.configKey)).size).toBe(ALL_TEMPLATES.length);
   });
 });
 

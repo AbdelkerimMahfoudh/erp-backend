@@ -7,7 +7,8 @@ import { IS_PUBLIC_KEY } from '../../common/decorators/public.decorator';
 import { TenantContext } from '../../common/tenant/tenant-context.service';
 import { PlatformAdminGuard } from '../platform-admin.guard';
 import { codeOf, routeTable } from '../__testing__/route-table';
-import { NOW, TestEmailChannel, makeTrialWorld, type Business, type TrialWorld } from '../__testing__/trial-world';
+import { TestWhatsAppChannel } from '../../messaging/channels';
+import { NOW, makeTrialWorld, type Business, type TrialWorld } from '../__testing__/trial-world';
 import type { TrialPrincipal } from './trial-facts';
 import { TrialController } from './trial.controller';
 import { TrialService } from './trial.service';
@@ -15,12 +16,12 @@ import { TrialSetupController } from './trial-setup.controller';
 import { TrialSetupService } from './trial-setup.service';
 
 /**
- * The free trial in the app: display only (0095; docs/76; the owner's correction of 2026-10-13).
+ * The free trial in the app: display only (0095, 0099; docs/76, docs/101 §5; the owner's brief of 2026-10-18).
  *
  * The app may show that the business is eligible, that its trial has not started, how long it lasts, whether the
- * setup instructions reached the Owner's verified contacts and when none can be reached — and nothing it could act
- * on. These specs pin that from the outside: the app's one trial route is a read, no route under `account/` or
- * `auth/` sends, claims or checks a link, the answer carries no action data, and the resend is the website's — it
+ * portal instructions reached the Owner — by which channel, to which masked destination — and why not when they did
+ * not; nothing it could act on. These specs pin that from the outside: the app's one trial route is a read, no route
+ * under `account/` or `auth/` sends or claims, the answer carries no action data, and the resend is the portal's — it
  * reads nothing from the request, so no body can name where the instructions go.
  */
 
@@ -56,11 +57,10 @@ describe('the app’s one trial route', () => {
     expect(appSide.filter((r) => /resend/i.test(r))).toEqual(['POST account/deletion/resend']);
   });
 
-  it('every trial action lives under platform/my-subscription — the website’s, which the app never calls', () => {
+  it('every trial action lives under platform/my-subscription — the portal’s, which the app never calls', () => {
     const actions = routeTable().filter((r) => /^(POST|PUT|PATCH|DELETE) /.test(r) && /trial/i.test(r));
     expect(actions.sort()).toEqual([
       'POST platform/my-subscription/trial/claim',
-      'POST platform/my-subscription/trial/link',
       'POST platform/my-subscription/trial/setup/resend',
     ]);
   });
@@ -92,6 +92,7 @@ describe('through the real Nest pipeline', () => {
     await app.init();
     shop = w.business();
     await w.setup.onContactsVerified(shop.companyId, shop.ownerId);
+    await w.notices.deliverNow();
   });
   afterEach(async () => {
     await app.close();
@@ -101,19 +102,22 @@ describe('through the real Nest pipeline', () => {
     caller = shop.owner;
     const res = await request(app.getHttpServer()).get('/api/v1/account/trial-setup');
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ state: 'trial_available', eligible: true, durationDays: 7, delivery: 'sent', sentTo: ['email'] });
+    expect(res.body).toMatchObject({ state: 'trial_available', eligible: true, durationDays: 7, delivery: 'sent', channel: 'whatsapp', destination: '+222***01' });
     expect(Object.keys(res.body).sort()).toEqual(
       [
+        'channel',
         'delivery',
+        'destination',
         'destinations',
         'durationDays',
         'durationHours',
         'eligible',
+        'failureReason',
+        'fallbackReason',
         'lastAttemptAt',
         'lastSentAt',
         'missingContacts',
         'requiredContacts',
-        'sentTo',
         'state',
         'timeZone',
       ].sort(),
@@ -130,15 +134,14 @@ describe('through the real Nest pipeline', () => {
     for (const path of ['/api/v1/account/trial-setup', '/api/v1/account/trial-setup/resend', '/api/v1/account/trial-setup/send']) {
       expect((await request(app.getHttpServer()).post(path).send({})).status).toBe(404);
     }
-    const token = (w.email as TestEmailChannel).sent[0].variables.link.split('#t=')[1];
-    const read = await request(app.getHttpServer()).get(`/api/v1/account/trial-setup?resend=1&t=${token}`);
+    const read = await request(app.getHttpServer()).get('/api/v1/account/trial-setup?resend=1&send=true');
     expect(read.status).toBe(200);
-    expect((w.email as TestEmailChannel).sent).toHaveLength(1);
-    expect(w.messages(shop)).toHaveLength(1);
-    expect(w.link(token).consumedAt).toBeNull();
+    await w.notices.deliverNow();
+    expect((w.whatsapp as TestWhatsAppChannel).messages).toHaveLength(1);
+    expect(w.noticesOf(shop)).toHaveLength(1);
   });
 
-  it('the website’s resend reads nothing from the request: a body naming a destination is ignored, a forged Origin too', async () => {
+  it('the portal’s resend reads nothing from the request: a body naming a destination is ignored, a forged Origin too', async () => {
     caller = shop.owner;
     w.clock.set(new Date(NOW.getTime() + 60_000));
     const res = await request(app.getHttpServer())
@@ -147,9 +150,9 @@ describe('through the real Nest pipeline', () => {
       .send({ to: 'attacker@example.com', channel: 'email', phone: '+22299999999' });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ delivery: 'sent', canResendNow: false, history: [expect.objectContaining({ trigger: 'resend' }), expect.anything()] });
-    const sent = (w.email as TestEmailChannel).sent;
-    expect(sent.map((m) => m.to)).toEqual([shop.email, shop.email]);
-    expect(JSON.stringify(sent)).not.toContain('attacker');
+    const sent = (w.whatsapp as TestWhatsAppChannel).messages;
+    expect(sent.map((m) => m.to)).toEqual([shop.phone, shop.phone]);
+    expect(JSON.stringify(sent)).not.toMatch(/attacker|22299999999/);
   });
 
   it('too soon is 429 with when; a Manager is 403 — whatever the headers say', async () => {

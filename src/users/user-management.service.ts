@@ -21,7 +21,6 @@ import { normalisePhone, normaliseEmail } from '../auth/identifier';
 import { HashingService } from '../common/security/hashing.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { SEAT_LIMIT_REACHED } from '../entitlement/entitlement-rules';
-import { revokeUsableLinks } from '../platform/trial/trial-link';
 
 /**
  * The one permission this API can delegate, as a server-side constant.
@@ -337,11 +336,6 @@ export class UserManagementService {
             data: { revokedAt: new Date() },
           }),
         );
-      }
-      // The free trial's setup links sent to this person (0095) went to the contact that just changed: none of them
-      // works any more, in the same transaction.
-      if (contactChanged) {
-        ops.push(this.db.trialSetupLink.updateMany(revokeUsableLinks({ userId: id }, 'contact_changed', new Date())));
       }
       const results = await this.db.$transaction(ops);
       if (revoking) sessionsRevoked = (results[1] as { count: number }).count;

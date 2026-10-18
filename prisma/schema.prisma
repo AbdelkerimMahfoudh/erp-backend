@@ -5982,21 +5982,22 @@ model SubscriptionNotice {
   kind              SubscriptionNoticeKind
   /// h72 | h48 | h24 | end — or, for the portal instructions, auto | resend:<uuid>.
   threshold         String                  @db.VarChar(48)
-  /// trial:<claim id> | paid:<period end, epoch ms> | grace:<episode id> | eligibility:<eligibility id>.
+  /// trial:<claim id> | paid:<period end, epoch ms> | grace:<period end, epoch ms> | eligibility:<eligibility id>.
   periodKey         String                  @map("period_key") @db.VarChar(80)
   /// paid_expired: grace_started | no_grace.
   variant           String?                 @db.VarChar(20)
   dueAt             DateTime                @map("due_at") @db.DateTime(6)
   state             SubscriptionNoticeState @default(pending)
   channel           NoticeChannel?
-  /// accepted | failed | failed_async | unavailable | refused | skipped — what WhatsApp did with it.
+  /// accepted | delivered | temporary | failed | failed_async | unavailable | refused — what WhatsApp did with it.
   whatsappOutcome   String?                 @map("whatsapp_outcome") @db.VarChar(20)
-  /// accepted | failed | unavailable | not_applicable — what email did, when it was the fallback.
+  /// accepted | temporary | failed | unavailable | not_applicable — what email did, when it was the fallback.
   emailOutcome      String?                 @map("email_outcome") @db.VarChar(20)
   /// Why email carried it (docs/101 §6): whatsapp_disabled, template_unavailable, number_unverified,
   /// number_undeliverable, provider_refused, retries_exhausted, async_failed.
   fallbackReason    String?                 @map("fallback_reason") @db.VarChar(30)
-  /// Why nothing carried it, when it failed.
+  /// Why nothing carried it, when it failed: opted_out, no_consent, no_email, email_unavailable, email_failed,
+  /// no_recipient, internal_error.
   failureReason     String?                 @map("failure_reason") @db.VarChar(30)
   destinationMasked String?                 @map("destination_masked") @db.VarChar(80)
   /// Keyed HMAC (MESSAGING_HASH_KEY) of where it went: "sent" holds only while the Owner's contact is still this one.
@@ -6004,6 +6005,7 @@ model SubscriptionNotice {
   language          String                  @db.VarChar(5)
   /// The Owner who asked, for a resend from the portal.
   requestedByUserId Bytes?                  @map("requested_by_user_id") @db.Binary(16)
+  /// Attempts on the channel being tried: WhatsApp's, then — set back to 0 when email takes over — email's.
   attempts          Int                     @default(0) @db.UnsignedInt
   nextAttemptAt     DateTime                @map("next_attempt_at") @db.DateTime(6)
   claimToken        Bytes?                  @map("claim_token") @db.Binary(16)

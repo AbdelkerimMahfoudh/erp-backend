@@ -2,7 +2,7 @@ import { HttpException, HttpStatus } from '@nestjs/common';
 import type { TrialContact, TrialView } from './trial-rules';
 
 /**
- * Every refusal of the free trial's routes, with its status and its plain words (0095; docs/76). The website says
+ * Every refusal of the free trial's routes, with its status and its plain words (0095, 0099; docs/76). The portal says
  * each in its own words from the code; nothing here is a reason to parse English.
  */
 const REFUSALS = {
@@ -15,16 +15,11 @@ const REFUSALS = {
   trial_not_available: { status: HttpStatus.CONFLICT, message: 'This business cannot start a free trial.' },
   terms_changed: { status: HttpStatus.CONFLICT, message: 'The free trial terms have changed. Read them again before starting.' },
   contact_unverified: { status: HttpStatus.CONFLICT, message: 'Verify your contact details before starting the free trial.' },
-  link_invalid: { status: HttpStatus.BAD_REQUEST, message: 'This link is not valid.' },
-  link_expired: { status: HttpStatus.GONE, message: 'This link has expired.' },
-  link_used: { status: HttpStatus.CONFLICT, message: 'This link has already been used.' },
-  link_revoked: { status: HttpStatus.CONFLICT, message: 'This link no longer works.' },
-  link_other_account: { status: HttpStatus.FORBIDDEN, message: 'This link belongs to another business account.' },
-  // The website's resend of the setup instructions: asked again too soon, or no channel can carry them now.
-  too_many_requests: { status: HttpStatus.TOO_MANY_REQUESTS, message: 'The setup instructions were sent a moment ago. You can ask again later.' },
+  // The portal's resend of the instructions (0099): asked again too soon, or nothing can carry them now.
+  too_many_requests: { status: HttpStatus.TOO_MANY_REQUESTS, message: 'The instructions were sent a moment ago. You can ask again later.' },
   setup_delivery_unavailable: {
     status: HttpStatus.SERVICE_UNAVAILABLE,
-    message: 'The setup instructions cannot be sent right now. Your free trial is not affected.',
+    message: 'The instructions cannot be sent right now. Your free trial is not affected.',
   },
 } as const;
 
@@ -35,7 +30,7 @@ interface RefusalDetails {
   missingContacts?: TrialContact[];
   termsVersion?: string;
   trial?: TrialView | null;
-  /** When the website may ask for the setup instructions again (UTC ISO). */
+  /** When the portal may ask for the instructions again (UTC ISO). */
   resendAvailableAt?: string;
 }
 

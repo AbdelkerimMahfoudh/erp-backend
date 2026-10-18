@@ -4,10 +4,10 @@ import { isValidTimezone } from '../../common/business-day';
 import type { EntitlementState, SubscriptionStatus } from '../../entitlement/entitlement-rules';
 
 /**
- * The website-only seven-day free trial — its pure rules (0095; docs/76).
+ * The portal-only seven-day free trial — its pure rules (0095, 0099; docs/76, docs/101 §5).
  *
  * A business that registered itself may use Dukan ERP for exactly 168 hours, once, from the instant its Owner
- * confirms it on the Dukan ERP website. Everything here is a fact the server computes and every client renders:
+ * confirms it on the Dukan ERP portal (dukan.tsxmr.com). Everything here is a fact the server computes and every client renders:
  * no client divides hours into days, adds a duration to a date, or decides which contact is missing — a client that
  * computes its own trial is a client that can be made to compute a longer one.
  *
@@ -20,14 +20,16 @@ export const TRIAL_DURATION_HOURS = 168;
 export const TRIAL_DURATION_MS = TRIAL_DURATION_HOURS * 60 * 60 * 1000;
 /** Sent beside the hours, so no client ever divides them. */
 export const TRIAL_DURATION_DAYS = 7;
-/** The terms the website shows. A claim made against any other version is refused and shown the current one. */
-export const TRIAL_TERMS_VERSION = '2026-10-13';
-/** How long a setup link works after it is sent. */
-export const TRIAL_SETUP_LINK_TTL_HOURS = 24;
+/**
+ * The terms the portal shows. A claim made against any other version is refused and shown the current one. 2026-10-18
+ * (0099): the confirmation states that the trial starts immediately, lasts exactly 7 days (168 hours), and cannot be
+ * paused or restarted.
+ */
+export const TRIAL_TERMS_VERSION = '2026-10-18';
 
 /*
- * The website resend throttle: at least a minute between sends, three in fifteen minutes, ten a day — counted from
- * every attempt the company has, whatever triggered it, so the automatic send uses up a place like any other.
+ * The portal resend throttle: at least a minute between requests, three in fifteen minutes, ten a day — counted from
+ * every request the company has, whatever made it, so the automatic one uses up a place like any other.
  */
 export const RESEND_MIN_INTERVAL_MS = 60_000;
 export const RESEND_WINDOW_MS = 15 * 60_000;
@@ -243,9 +245,13 @@ export function displayTimeZone(stored: string | null | undefined, onInvalid?: (
   return 'UTC';
 }
 
-/** The contacts the Owner must have verified before claiming: the ones given at registration — both, if both. */
+/**
+ * The contact the Owner must have verified before claiming (0099; the owner's brief of 2026-10-18): the WhatsApp number,
+ * mandatory at registration — an email address given beside it is optional and never required. A business that
+ * registered with an email address only, before the number was mandatory, keeps its rule: that address.
+ */
 export function requiredContacts(method: TrialRegistrationMethod): TrialContact[] {
-  return method === 'both' ? ['email', 'phone'] : [method];
+  return method === 'email' ? ['email'] : ['phone'];
 }
 
 /** The Owner's contacts as the account holds them. A contact counts only while it is set AND verified. */
@@ -267,16 +273,16 @@ export function missingContacts(method: TrialRegistrationMethod, owner: OwnerCon
 export type TrialOfferReason = 'contact_unverified' | 'business_suspended';
 
 /**
- * The website's offer: what a claim made now would record, shown before the Owner confirms
+ * The portal's offer: what a claim made now would record, shown before the Owner confirms
  * (GET platform/my-subscription/trial). The start and end are the server's — the instant asked, and exactly 168 hours
- * later — so the end a website shows is the end a claim at that moment would get; it refreshes them, never computes
+ * later — so the end the portal shows is the end a claim at that moment would get; it refreshes them, never computes
  * them.
  */
 export interface TrialOffer {
   available: boolean;
   /** Null when available. */
   reason: TrialOfferReason | null;
-  /** The terms the website must show, and send back with the claim. */
+  /** The terms the portal must show, and send back with the claim. */
   termsVersion: string;
   durationHours: typeof TRIAL_DURATION_HOURS;
   wouldStartAt: string;
@@ -345,17 +351,12 @@ export function maskForOwner(contact: TrialContact, value: string): string {
   return `${value.slice(0, 4)}••••${digits.slice(-4)}`;
 }
 
-/** SHA-256 hex of a setup token: the only form of it ever stored (`trial_setup_links.token_hash`). */
-export function setupTokenHash(token: string): string {
-  return createHash('sha256').update(token, 'utf8').digest('hex');
-}
-
 /**
- * The claim's canonical request, hashed (`trial_claims.request_hash`): the terms version shown and the link's hash
- * — never the token — in this order. The same idempotency key with the same request replays the claim; with
- * another request it is refused.
+ * The claim's canonical request, hashed (`trial_claims.request_hash`): the terms version shown. The same idempotency key
+ * with the same request replays the claim; with another request it is refused. The canonical form keeps the field the
+ * retired setup links filled (0095–0098), always null now, so a claim recorded before 0099 is still replayed.
  */
-export function claimRequestHash(termsVersion: string, token?: string | null): string {
-  const canonical = JSON.stringify({ termsVersion, linkTokenHash: token ? setupTokenHash(token) : null });
+export function claimRequestHash(termsVersion: string): string {
+  const canonical = JSON.stringify({ termsVersion, linkTokenHash: null });
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }

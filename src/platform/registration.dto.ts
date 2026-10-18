@@ -20,8 +20,14 @@ export class RegisterDto {
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
 
   @IsOptional() @IsString() @MaxLength(120) city?: string;
+  /** Optional (0099): verified later, from the account, if the Owner wants email as a second channel. */
   @IsOptional() @IsString() @MaxLength(160) email?: string;
-  @IsOptional() @IsString() @MaxLength(24) phone?: string;
+  /**
+   * The Owner's WhatsApp number — mandatory (0099; the owner's brief of 2026-10-18): it is the contact the
+   * registration verifies, the one the portal instructions and every subscription message go to first, and what the
+   * free trial waits for.
+   */
+  @IsString() @MinLength(6) @MaxLength(24) phone: string;
 
   @IsString() @MinLength(8) @MaxLength(200) password: string;
   @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';

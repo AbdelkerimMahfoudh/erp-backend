@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { Prisma, type SubscriptionStatus, type TrialEligibilityClosedReason } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin, uuidToBin, binToUuid, isUuid } from '../common/utils/uuid.util';
@@ -6,6 +6,8 @@ import { PlatformAuditService } from './platform-audit.service';
 import { BillingService, periodRunning } from '../billing/billing.service';
 import { SubscriptionRenewal, lockSubscription, type RenewalOutcome } from '../billing/renewal';
 import { CLOCK, type Clock } from '../entitlement/clock';
+import { recordDueGraceTx } from '../billing/grace-roll';
+import { NoticeService } from '../notices/notice.service';
 import { runningTrialEnd } from './trial/trial-rules';
 import { TrialEndRoll } from './trial/trial-end-roll';
 import type { PlatformAdminIdentity } from './platform-admin.service';
@@ -39,6 +41,13 @@ import type { PlatformAdminIdentity } from './platform-admin.service';
  * subscription lock, and paid access given while the trial runs starts when
  * it ends — see {@link SubscriptionLifecycleService.fenced}. Suspension and
  * reinstatement close nothing. No action here writes a claim.
+ *
+ * **Limited grace** (0099): the same transaction writes down the grace decision of a paid period end that has passed
+ * and is not recorded yet, before anything can move that end — so the history every later decision is counted from is
+ * complete, and an edited expiry can never skip one. Renewing while the grace runs extends from the original paid
+ * expiry; after the grace, from the moment of the decision. After every decision, the business's subscription messages
+ * are brought up to date (`notices/notice.service.ts`): a renewal, a suspension or a cancellation retires the reminders
+ * it made obsolete.
  */
 
 export type LifecycleAction =
@@ -112,6 +121,8 @@ export class SubscriptionLifecycleService {
     private readonly audit: PlatformAuditService,
     private readonly billing: BillingService,
     @Inject(CLOCK) private readonly clock: Clock,
+    /** The subscription messages; absent only where a test builds the lifecycle by hand without them. */
+    @Optional() private readonly notices?: NoticeService,
   ) {
     this.renewal = new SubscriptionRenewal(prisma, billing, clock);
     this.trialEnd = new TrialEndRoll(prisma, clock);
@@ -218,6 +229,9 @@ export class SubscriptionLifecycleService {
    *
    * `decide` runs in the same transaction — the trial-dependent checks, then the version-guarded transition — so a
    * refusal (a stale `expectedVersion`, a period that would end inside the trial) leaves the eligibility untouched.
+   *
+   * Before `decide`, a paid period end that has passed with no grace decision gets it (0099): written here, under the
+   * same lock, before anything can move that end. A refusal rolls it back with the rest; the sweeper writes it then.
    */
   private async fenced<R>(
     companyId: Buffer,
@@ -232,6 +246,7 @@ export class SubscriptionLifecycleService {
         data: { closedAt: now, closedReason: reason },
       });
       const claim = await tx.trialClaim.findUnique({ where: { companyId }, select: { endsAt: true } });
+      await recordDueGraceTx(tx, companyId, now, 'lifecycle');
       return decide(tx, { now, trialEndsAt: runningTrialEnd(claim, now) });
     });
   }
@@ -354,6 +369,8 @@ export class SubscriptionLifecycleService {
     // What was paid for during an ended trial joins the grant's period now (D176); during the trial, nothing is due.
     await this.trialEnd.applyIfDue(id);
 
+    // The reminders this decision made obsolete are retired; the message it calls for is queued.
+    await this.notices?.refresh(id);
     return { subscription: after, applied: true };
   }
 
@@ -470,6 +487,8 @@ export class SubscriptionLifecycleService {
     // What was paid for during an ended trial joins the first period now (D176); during the trial, nothing is due.
     await this.trialEnd.applyIfDue(id);
 
+    // The reminders this decision made obsolete are retired; the message it calls for is queued.
+    await this.notices?.refresh(id);
     return { subscription: after, applied: true };
   }
 
@@ -529,6 +548,8 @@ export class SubscriptionLifecycleService {
       ip: ctx.ip ?? null,
     });
 
+    // The reminders this decision made obsolete are retired; the message it calls for is queued.
+    await this.notices?.refresh(id);
     return { subscription: after, applied: true };
   }
 
@@ -540,9 +561,10 @@ export class SubscriptionLifecycleService {
    * settlement needs. Shortening a period takes money-worth of access away
    * from a shop, so it needs a reason; lengthening does not.
    *
-   * Grace is not set here and cannot be: it is always the seventy-two hours
-   * after this date, derived and never stored, so a corrected period carries
-   * its grace with it.
+   * Grace is not set here and cannot be (0099): the decision for the end being
+   * replaced, if it passed, is recorded first, under the same lock; the new end
+   * gets its own decision when it passes, counted against every activation
+   * already recorded — moving an end back into the past earns nothing.
    *
    * While a free trial still runs (0095) — a business suspended during it and
    * reinstated keeps its clock — the end must lie beyond the trial's, and a
@@ -626,6 +648,8 @@ export class SubscriptionLifecycleService {
     // A new period may now be in force for what was paid for during an ended trial (D176).
     await this.trialEnd.applyIfDue(id);
 
+    // The reminders this decision made obsolete are retired; the message it calls for is queued.
+    await this.notices?.refresh(id);
     return { subscription: after, applied: true };
   }
 
@@ -636,7 +660,10 @@ export class SubscriptionLifecycleService {
    * business whose period has ended, at the old end for one still running —
    * the Owner who pays November on the 20th of October keeps October's
    * activities until the 31st, and the roll is applied then (billing/renewal.ts).
-   * During a free trial (0095), "at once" is the trial's end.
+   * During a free trial (0095), "at once" is the trial's end. During the 72
+   * hours of grace (0099), the new period follows the original paid expiry —
+   * the grace was a courtesy, never a gap the Owner pays for twice — and its
+   * billing period opens there; after the grace ended, it starts now.
    */
   async extend(
     companyId: string,
@@ -651,15 +678,20 @@ export class SubscriptionLifecycleService {
     const before = await this.loadOrThrow(id);
 
     // Fenced (0095): an extension makes the business paid, so no trial can start after it.
-    const { after, end, accessFrom, trialEndsAt } = await this.fenced(id, 'paid_period', async (tx, { now, trialEndsAt }) => {
-      const accessFrom = trialEndsAt ?? now;
+    const { after, end, from, accessFrom, trialEndsAt, inGrace } = await this.fenced(id, 'paid_period', async (tx, { now, trialEndsAt }) => {
+      const current = before.currentPeriodEnd;
+      // The decision for an end that passed was recorded by the fence a moment ago, under this lock.
+      const grace =
+        current && current.getTime() <= now.getTime()
+          ? await tx.graceEpisode.findFirst({ where: { companyId: id, periodEnd: current }, select: { decision: true, endsAt: true } })
+          : null;
+      const inGrace = grace?.decision === 'granted' && now.getTime() < grace.endsAt.getTime();
       // From the later of the current end and the moment access may start, so
       // extending a lapsed subscription does not silently backdate the new
-      // period into the past — nor start one inside a running free trial.
-      const from =
-        before.currentPeriodEnd && before.currentPeriodEnd.getTime() > accessFrom.getTime()
-          ? before.currentPeriodEnd
-          : accessFrom;
+      // period into the past — nor start one inside a running free trial. While
+      // the grace runs, from the paid end it follows.
+      const accessFrom = inGrace ? current! : trialEndsAt ?? now;
+      const from = current && current.getTime() > accessFrom.getTime() ? current : accessFrom;
       const end = monthsFrom(from, input.months);
       const after = await this.transition(
         id,
@@ -667,7 +699,7 @@ export class SubscriptionLifecycleService {
         { status: 'activated' as SubscriptionStatus, currentPeriodEnd: end },
         tx,
       );
-      return { after, end, accessFrom, trialEndsAt };
+      return { after, end, from, accessFrom, trialEndsAt, inGrace };
     });
 
     await this.prisma.subscriptionEvent.create({
@@ -702,12 +734,16 @@ export class SubscriptionLifecycleService {
         renewal,
         renewalDueAt: renewal ? null : before.currentPeriodEnd?.toISOString() ?? null,
         trialEndsAt: trialEndsAt?.toISOString() ?? null,
+        extendedFrom: from.toISOString(),
+        duringGrace: inGrace,
       },
       ip: ctx.ip ?? null,
     });
     // A new period may now be in force for what was paid for during an ended trial (D176).
     await this.trialEnd.applyIfDue(id);
 
+    // The reminders this decision made obsolete are retired; the message it calls for is queued.
+    await this.notices?.refresh(id);
     return { subscription: after, applied: true };
   }
 
@@ -757,6 +793,8 @@ export class SubscriptionLifecycleService {
       ip: ctx.ip ?? null,
     });
 
+    // The reminders this decision made obsolete are retired; the message it calls for is queued.
+    await this.notices?.refresh(id);
     return { subscription: after, applied: true };
   }
 
@@ -809,6 +847,8 @@ export class SubscriptionLifecycleService {
     // Anything still due from an ended trial is brought up to date (D176); what was due while suspended already ran.
     await this.trialEnd.applyIfDue(id);
 
+    // The reminders this decision made obsolete are retired; the message it calls for is queued.
+    await this.notices?.refresh(id);
     return { subscription: after, applied: true };
   }
 
@@ -855,6 +895,8 @@ export class SubscriptionLifecycleService {
       ip: ctx.ip ?? null,
     });
 
+    // The reminders this decision made obsolete are retired; the message it calls for is queued.
+    await this.notices?.refresh(id);
     return { subscription: after, applied: true };
   }
 

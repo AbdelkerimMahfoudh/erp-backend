@@ -11,13 +11,13 @@ import { TrialRefusal } from './trial-refusal';
 import type { ClaimInput } from './trial.service';
 
 /**
- * The free trial on the website: the Owner's card, the setup link, and the claim (0095; docs/76; the owner's
- * decisions, correction and clarification of 2026-10-13).
+ * The free trial on the portal: the Owner's card and the claim (0095, 0099; docs/76, docs/101 §5; the owner's
+ * decisions of 2026-10-13 and brief of 2026-10-18).
  *
  * Every case runs the real service over a world that locks, rolls back and refuses duplicates the way the database
- * does (`__testing__/trial-world.ts`). The rules it proves: only the Owner, only with the contacts they proved, only
- * a business that may — once, ever — exactly 168 hours from the server's instant taken under the lock; the setup
- * link is a convenience and never a key; and a claim is a fact, never a payment.
+ * does (`__testing__/trial-world.ts`). The rules it proves: only the Owner, only with the contact they proved, only
+ * a business that may — once, ever — exactly 168 hours from the server's instant taken under the lock; no token of
+ * any kind; and a claim is a fact, never a payment.
  */
 
 const HOUR = 3600_000;
@@ -43,7 +43,7 @@ function actorOf(who: { userId: Buffer }): string {
   return `user:${binToUuid(who.userId)}`;
 }
 
-describe('the Owner starts the free trial on the website', () => {
+describe('the Owner starts the free trial on the portal', () => {
   let w: TrialWorld;
   let shop: Business;
   beforeEach(() => {
@@ -81,9 +81,8 @@ describe('the Owner starts the free trial on the website', () => {
       endsAt: new Date(NOW.getTime() + TRIAL_MS),
       termsVersion: TRIAL_TERMS_VERSION,
       idempotencyKey: 'k-1',
-      requestHash: claimRequestHash(TRIAL_TERMS_VERSION, null),
+      requestHash: claimRequestHash(TRIAL_TERMS_VERSION),
       subscriptionVersionAfter: versionBefore + 1,
-      setupLinkId: null,
       createdAt: NOW,
     });
     expect(claim.claimantUserId.equals(shop.ownerId)).toBe(true);
@@ -139,7 +138,7 @@ describe('the Owner starts the free trial on the website', () => {
       expect.objectContaining({
         kind: 'trial_claimed',
         // No instant in the note (C7): the start and the end are the claim's data, shown in the business's zone.
-        note: 'Free trial claimed on the website by the Owner: 7 days from the claim. Nothing was charged.',
+        note: 'Free trial claimed on the Dukan ERP portal by the Owner: 7 days from the claim. Nothing was charged.',
         actor: actorOf(shop.owner),
         createdAt: NOW,
       }),
@@ -159,19 +158,10 @@ describe('the Owner starts the free trial on the website', () => {
         endsAt: end,
         termsVersion: TRIAL_TERMS_VERSION,
         subscriptionVersion: 5,
-        viaLink: false,
       },
     });
     expect(w.t.audits.indexOf(audits[0])).toBe(w.t.audits.length - 1);
     expect(JSON.stringify(audits)).not.toMatch(/@shop\.test|\+2223|argon2/);
-  });
-
-  it('retires a setup link it did not use: no link may still read as valid once the trial started', async () => {
-    const unused = w.issueLink(shop);
-    await w.service.claim(shop.owner, claimOf('k-1'));
-
-    expect(w.link(unused)).toMatchObject({ consumedAt: null, revokedAt: NOW, revokedReason: 'claimed' });
-    expect((await w.service.checkLink(shop.owner, unused)).link).toBe('revoked');
   });
 
   it('a stale version prepared before the claim is refused to the Super Admin (409)', async () => {
@@ -200,7 +190,6 @@ describe('only the Owner — checked first, whatever the trial’s state', () =>
       const who = w.staff(shop, role);
       expect(await refusal(w.service.claim(who, claimOf(`k-${role}`)))).toMatchObject({ code: 'owner_only', status: 403 });
       expect(await refusal(w.service.status(who))).toMatchObject({ code: 'owner_only', status: 403 });
-      expect(await refusal(w.service.checkLink(who, 'x'.repeat(43)))).toMatchObject({ code: 'owner_only', status: 403 });
     }
     expect(w.claims(shop)).toHaveLength(0);
     expect(w.subscription(shop).version).toBe(4);
@@ -239,13 +228,12 @@ describe('only the Owner — checked first, whatever the trial’s state', () =>
   });
 });
 
-describe('the contacts given at registration must be verified — each named when it is not', () => {
+describe('the WhatsApp number must be verified — an email given beside it never is required (0099)', () => {
   const cases: [string, Parameters<TrialWorld['business']>[0], string[]][] = [
-    ['email given, not verified', { contacts: 'email', verified: [] }, ['email']],
+    ['an email-only registration from before the number was mandatory, not verified', { contacts: 'email', verified: [] }, ['email']],
     ['number given, not verified', { contacts: 'phone', verified: [] }, ['phone']],
-    ['both given, neither verified', { contacts: 'both', verified: [] }, ['email', 'phone']],
+    ['both given, neither verified', { contacts: 'both', verified: [] }, ['phone']],
     ['both given, only the email verified', { contacts: 'both', verified: ['email'] }, ['phone']],
-    ['both given, only the number verified', { contacts: 'both', verified: ['phone'] }, ['email']],
   ];
   it.each(cases)('%s → contact_unverified %j', async (_name, opts, missing) => {
     const w = makeTrialWorld();
@@ -258,6 +246,12 @@ describe('the contacts given at registration must be verified — each named whe
       expect.objectContaining({ action: 'trial.claim_refused', afterJson: { reason: 'contact_unverified', missingContacts: missing } }),
     ]);
     expect(JSON.stringify(w.audits(shop))).not.toMatch(/@shop\.test|\+2223/);
+  });
+
+  it('both given, only the number verified: the claim goes through — the email is optional', async () => {
+    const w = makeTrialWorld();
+    const shop = w.business({ contacts: 'both', verified: ['phone'] });
+    await expect(w.service.claim(shop.owner, claimOf('k-1'))).resolves.toMatchObject({ state: 'trial_active' });
   });
 
   it('a verified number that was since removed counts as missing', async () => {
@@ -293,9 +287,6 @@ describe('one trial per business, ever', () => {
     expect(await refusal(w.service.claim(shop.owner, claimOf('k-1', { termsVersion: 'other' })))).toMatchObject({
       code: 'idempotency_conflict',
       status: 409,
-    });
-    expect(await refusal(w.service.claim(shop.owner, claimOf('k-1', { token: 'y'.repeat(43) })))).toMatchObject({
-      code: 'idempotency_conflict',
     });
   });
 
@@ -379,7 +370,7 @@ describe('what stops a claim, each with its own code — in the claim’s own or
     expect(await w.service.claim(shop.owner, claimOf('k-1'))).toMatchObject({ state: 'trial_active' });
   });
 
-  it('terms the website did not show are refused, with the terms in force', async () => {
+  it('terms the portal did not show are refused, with the terms in force', async () => {
     const w = makeTrialWorld();
     const shop = w.business();
     expect(await refusal(w.service.claim(shop.owner, claimOf('k-1', { termsVersion: '2026-01-01' })))).toMatchObject({
@@ -396,136 +387,7 @@ describe('what stops a claim, each with its own code — in the claim’s own or
   });
 });
 
-describe('the setup link: a convenience, never a key (the owner’s clarification)', () => {
-  let w: TrialWorld;
-  let shop: Business;
-  beforeEach(() => {
-    w = makeTrialWorld();
-    shop = w.business();
-  });
-
-  it('valid: checking it consumes nothing; the explicit claim consumes it, once', async () => {
-    const token = w.issueLink(shop);
-    expect(await w.service.checkLink(shop.owner, token)).toMatchObject({ link: 'valid', state: 'trial_available', offer: { available: true } });
-    expect(await w.service.checkLink(shop.owner, token)).toMatchObject({ link: 'valid' });
-    expect(w.link(token).consumedAt).toBeNull();
-
-    const answer = await w.service.claim(shop.owner, claimOf('k-1', { token }));
-    expect(answer.replayed).toBe(false);
-    expect(w.link(token)).toMatchObject({ consumedAt: NOW, revokedAt: null });
-    expect(w.claims(shop)[0].setupLinkId.equals(w.link(token).id)).toBe(true);
-    expect(w.audits(shop).find((a) => a.action === 'trial.claim')!.afterJson).toMatchObject({ viaLink: true });
-    expect((await w.service.checkLink(shop.owner, token)).link).toBe('used');
-  });
-
-  it('the claim consumes its own link and retires every other one', async () => {
-    const older = w.issueLink(shop);
-    const token = w.issueLink(shop);
-    await w.service.claim(shop.owner, claimOf('k-1', { token }));
-    expect(w.link(token)).toMatchObject({ consumedAt: NOW, revokedReason: null });
-    expect(w.link(older)).toMatchObject({ consumedAt: null, revokedAt: NOW, revokedReason: 'claimed' });
-  });
-
-  it('forged: invalid — refused with link_invalid; nothing changes, and the claim without it then succeeds', async () => {
-    expect((await w.service.checkLink(shop.owner, 'x'.repeat(43))).link).toBe('invalid');
-    expect(await refusal(w.service.claim(shop.owner, claimOf('k-1', { token: 'x'.repeat(43) })))).toMatchObject({
-      code: 'link_invalid',
-      status: 400,
-    });
-    expect(w.claims(shop)).toHaveLength(0);
-    expect(w.eligibility(shop)!.closedAt).toBeNull();
-    expect((await w.service.status(shop.owner)).offer).toMatchObject({ available: true });
-    await expect(w.service.claim(shop.owner, claimOf('k-2'))).resolves.toMatchObject({ state: 'trial_active' });
-  });
-
-  it('expired after 24 hours: link_expired (410), the eligibility untouched, and a fresh claim without it succeeds', async () => {
-    const token = w.issueLink(shop);
-    w.clock.advance(24 * HOUR);
-    expect((await w.service.checkLink(shop.owner, token)).link).toBe('expired');
-    expect(await refusal(w.service.claim(shop.owner, claimOf('k-1', { token })))).toMatchObject({ code: 'link_expired', status: 410 });
-    expect(w.link(token).consumedAt).toBeNull();
-    const answer = await w.service.claim(shop.owner, claimOf('k-2'));
-    expect(Date.parse(answer.trial.startedAt!)).toBe(NOW.getTime() + 24 * HOUR);
-    // A minute before its end it still worked.
-    const fresh = makeTrialWorld();
-    const other = fresh.business();
-    const live = fresh.issueLink(other);
-    fresh.clock.advance(24 * HOUR - 1);
-    expect((await fresh.service.checkLink(other.owner, live)).link).toBe('valid');
-  });
-
-  it('used or revoked: link_used / link_revoked (409)', async () => {
-    const used = w.issueLink(shop);
-    w.link(used).consumedAt = NOW;
-    const revoked = w.issueLink(shop);
-    Object.assign(w.link(revoked), { revokedAt: NOW, revokedReason: 'reissued' });
-
-    expect((await w.service.checkLink(shop.owner, used)).link).toBe('used');
-    expect((await w.service.checkLink(shop.owner, revoked)).link).toBe('revoked');
-    expect(await refusal(w.service.claim(shop.owner, claimOf('k-1', { token: used })))).toMatchObject({ code: 'link_used', status: 409 });
-    expect(await refusal(w.service.claim(shop.owner, claimOf('k-2', { token: revoked })))).toMatchObject({ code: 'link_revoked', status: 409 });
-    expect(w.claims(shop)).toHaveLength(0);
-  });
-
-  it.each([
-    ['the password changed', (o: Record<string, any>) => (o.passwordHash = '$argon2id$another')],
-    ['the email changed', (o: Record<string, any>) => (o.email = 'new@shop.test')],
-    ['the number was verified since', (o: Record<string, any>) => (o.phoneVerifiedAt = NOW)],
-    ['the email’s verification changed', (o: Record<string, any>) => (o.emailVerifiedAt = new Date(REGISTERED_AT.getTime() + 1))],
-  ])('stale binding — %s: revoked, and a claim with it is refused', async (_name, change) => {
-    const token = w.issueLink(shop);
-    change(w.owner(shop));
-    expect((await w.service.checkLink(shop.owner, token)).link).toBe('revoked');
-    expect(await refusal(w.service.claim(shop.owner, claimOf('k-1', { token })))).toMatchObject({ code: 'link_revoked' });
-  });
-
-  it('another business’s link: other_account — and a claim with it is refused, both businesses untouched', async () => {
-    const other = w.business();
-    const theirs = w.issueLink(other);
-    expect((await w.service.checkLink(shop.owner, theirs)).link).toBe('other_account');
-    expect(await refusal(w.service.claim(shop.owner, claimOf('k-1', { token: theirs })))).toMatchObject({
-      code: 'link_other_account',
-      status: 403,
-    });
-    expect(w.claims(shop)).toHaveLength(0);
-    expect(w.claims(other)).toHaveLength(0);
-    expect(w.link(theirs)).toMatchObject({ consumedAt: null, revokedAt: null });
-    // The other Owner's own link still works for them.
-    expect((await w.service.checkLink(other.owner, theirs)).link).toBe('valid');
-  });
-
-  it('a claim refused for another reason consumes nothing, even with a valid link', async () => {
-    const token = w.issueLink(shop);
-    await w.service.claim(shop.owner, claimOf('k-1', { token, termsVersion: 'old' })).catch(() => undefined);
-    expect(w.link(token)).toMatchObject({ consumedAt: null, revokedAt: null });
-  });
-
-  it('only a refused outcome is audited — the outcome, never the token', async () => {
-    const token = w.issueLink(shop);
-    await w.service.checkLink(shop.owner, token);
-    expect(w.audits(shop)).toHaveLength(0);
-    await w.service.checkLink(shop.owner, 'z'.repeat(43));
-    expect(w.audits(shop)).toEqual([
-      expect.objectContaining({ action: 'trial.link_refused', actor: actorOf(shop.owner), afterJson: { outcome: 'invalid' } }),
-    ]);
-    expect(JSON.stringify(w.t.audits)).not.toContain(token);
-    expect(JSON.stringify(w.t.audits)).not.toContain('z'.repeat(43));
-  });
-
-  it('with no key to bind with (production without a pepper), no link is ever valid', async () => {
-    const token = w.issueLink(shop);
-    w.config.otpPepper = null;
-    const env = { ...process.env };
-    process.env.NODE_ENV = 'production';
-    try {
-      expect((await w.service.checkLink(shop.owner, token)).link).toBe('revoked');
-    } finally {
-      process.env.NODE_ENV = env.NODE_ENV;
-    }
-  });
-});
-
-describe('the offer the website shows', () => {
+describe('the offer the portal shows', () => {
   it('available: the terms, 168 hours from now, the business’s own zone, and the contacts', async () => {
     const w = makeTrialWorld();
     const shop = w.business({ contacts: 'both', timezone: 'Asia/Dubai' });
@@ -549,18 +411,22 @@ describe('the offer the website shows', () => {
         wouldStartAt: NOW.toISOString(),
         wouldEndAt: new Date(NOW.getTime() + TRIAL_MS).toISOString(),
         timeZone: 'Asia/Dubai',
-        requiredContacts: ['email', 'phone'],
+        requiredContacts: ['phone'],
         missingContacts: [],
       },
-      // Where the setup instructions stand — shown beside the offer, never a condition of it.
+      // Where the portal instructions stand — shown beside the offer, never a condition of it.
       setup: {
         delivery: 'not_sent',
-        sentTo: [],
-        destinations: [
-          { channel: 'email', masked: 'o•••@shop.test' },
-          { channel: 'whatsapp', masked: '+222••••0001' },
-        ],
+        channel: null,
+        destination: null,
+        fallbackReason: null,
+        failureReason: null,
         lastAttemptAt: null,
+        lastSentAt: null,
+        destinations: [
+          { channel: 'whatsapp', masked: '+222••••0001' },
+          { channel: 'email', masked: 'o•••@shop.test' },
+        ],
         canResendNow: true,
         resendBlockedBy: null,
         resendAvailableAt: null,
@@ -616,18 +482,20 @@ describe('the offer the website shows', () => {
     }
   });
 
-  it('never depends on delivery or on any link: lost, expired, used, revoked or none — the same offer', async () => {
+  it('never depends on delivery: instructions failed, sent or never asked for — the same offer', async () => {
     const w = makeTrialWorld();
     const none = w.business();
-    const withLinks = w.business();
-    const expired = w.issueLink(withLinks, { issuedAt: new Date(NOW.getTime() - 25 * HOUR) });
-    const revoked = w.issueLink(withLinks);
-    Object.assign(w.link(revoked), { revokedAt: NOW, revokedReason: 'reissued' });
-    void expired;
-    const a = (await w.service.status(none.owner)).offer;
-    const b = (await w.service.status(withLinks.owner)).offer;
-    expect(b).toEqual(a);
-    expect(a).toMatchObject({ available: true });
+    const failed = w.business();
+    const sent = w.business();
+    await w.setup.onContactsVerified(failed.companyId, failed.ownerId);
+    w.noticesOf(failed)[0].state = 'failed';
+    await w.setup.onContactsVerified(sent.companyId, sent.ownerId);
+    await w.notices.deliverNow();
+    expect(w.noticesOf(sent)[0]).toMatchObject({ state: 'accepted' });
+    const offers = await Promise.all([none, failed, sent].map(async (b) => (await w.service.status(b.owner)).offer));
+    expect(offers[1]).toEqual(offers[0]);
+    expect(offers[2]).toEqual(offers[0]);
+    expect(offers[0]).toMatchObject({ available: true });
   });
 
   it('a setup status that cannot be read leaves the card standing: the offer, the trial and the state, setup null (C3)', async () => {
@@ -637,13 +505,13 @@ describe('the offer the website shows', () => {
       const shop = w.business();
       const before = await w.service.status(shop.owner);
       w.setup.websiteSetup = async () => {
-        throw new Error('trial_setup_messages could not be read');
+        throw new Error('subscription_notices could not be read');
       };
       const card = await w.service.status(shop.owner);
       expect(card).toEqual({ ...before, setup: null });
       expect(card.offer).toMatchObject({ available: true, reason: null });
       expect(warn.mock.calls.map(([m]) => String(m))).toEqual([
-        `Free trial setup status not read for company ${binToUuid(shop.companyId)}: trial_setup_messages could not be read`,
+        `Free trial setup status not read for company ${binToUuid(shop.companyId)}: subscription_notices could not be read`,
       ]);
       // And the Owner claims from it.
       await expect(w.service.claim(shop.owner, claimOf('k-1'))).resolves.toMatchObject({ state: 'trial_active' });

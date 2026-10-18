@@ -8,7 +8,6 @@ import {
   TRIAL_DURATION_DAYS,
   TRIAL_DURATION_HOURS,
   TRIAL_DURATION_MS,
-  TRIAL_SETUP_LINK_TTL_HOURS,
   TRIAL_TERMS_VERSION,
   claimRequestHash,
   displayTimeZone,
@@ -16,7 +15,6 @@ import {
   missingContacts,
   requiredContacts,
   runningTrialEnd,
-  setupTokenHash,
   trialEndFor,
   trialFactsOf,
   trialOfferOf,
@@ -54,9 +52,9 @@ describe('the constants are the offer, and clients never compute them', () => {
     expect(TRIAL_DURATION_DAYS * 24).toBe(TRIAL_DURATION_HOURS);
   });
 
-  it('pins the terms version, the link lifetime and the website resend throttle', () => {
-    expect(TRIAL_TERMS_VERSION).toBe('2026-10-13');
-    expect(TRIAL_SETUP_LINK_TTL_HOURS).toBe(24);
+  it('pins the terms version and the portal resend throttle', () => {
+    // 2026-10-18 (0099): the confirmation says the trial starts at once, lasts exactly 168 hours, and cannot be paused or restarted.
+    expect(TRIAL_TERMS_VERSION).toBe('2026-10-18');
     expect([RESEND_MIN_INTERVAL_MS, RESEND_WINDOW_MS, RESEND_WINDOW_MAX, RESEND_DAY_MS, RESEND_DAY_MAX]).toEqual([
       60_000,
       15 * 60_000,
@@ -230,17 +228,18 @@ describe('the contacts the claim requires', () => {
   const none = { email: null, emailVerifiedAt: null, phone: null, phoneVerifiedAt: null };
   const both = { email: 'a@example.com', emailVerifiedAt: START, phone: '+22212341234', phoneVerifiedAt: START };
 
-  it('are the ones given at registration — both, if both', () => {
+  it('is the WhatsApp number — an email given beside it is optional; an email-only registration keeps its address (0099)', () => {
     expect(requiredContacts('email')).toEqual(['email']);
     expect(requiredContacts('phone')).toEqual(['phone']);
-    expect(requiredContacts('both')).toEqual(['email', 'phone']);
+    expect(requiredContacts('both')).toEqual(['phone']);
   });
 
   it('a contact counts only while it is set and verified', () => {
     expect(missingContacts('both', both)).toEqual([]);
-    expect(missingContacts('both', none)).toEqual(['email', 'phone']);
+    expect(missingContacts('both', none)).toEqual(['phone']);
     expect(missingContacts('both', { ...both, phoneVerifiedAt: null })).toEqual(['phone']);
-    expect(missingContacts('both', { ...both, emailVerifiedAt: null })).toEqual(['email']);
+    // The email may stay unverified: it is never what the trial waits for.
+    expect(missingContacts('both', { ...both, emailVerifiedAt: null })).toEqual([]);
     // A verification left behind by a contact since removed proves nothing.
     expect(missingContacts('email', { ...both, email: null })).toEqual(['email']);
     expect(missingContacts('phone', { ...both, phone: null })).toEqual(['phone']);
@@ -270,22 +269,14 @@ describe('a verified contact as its Owner sees it', () => {
 describe('the claim’s canonical request', () => {
   const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 
-  it('stores a token only as its SHA-256', () => {
-    expect(setupTokenHash('abc')).toBe(sha('abc'));
-    expect(setupTokenHash('abc')).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  it('is the terms version and the link’s hash, in that order — never the token', () => {
+  it('is the terms version, in the canonical form a claim recorded before 0099 was hashed with — so it still replays', () => {
     expect(claimRequestHash('2026-10-13')).toBe(sha(JSON.stringify({ termsVersion: '2026-10-13', linkTokenHash: null })));
-    expect(claimRequestHash('2026-10-13', 'tok')).toBe(sha(JSON.stringify({ termsVersion: '2026-10-13', linkTokenHash: sha('tok') })));
-    expect(claimRequestHash('2026-10-13', null)).toBe(claimRequestHash('2026-10-13'));
-    expect(claimRequestHash('2026-10-13', '')).toBe(claimRequestHash('2026-10-13'));
+    expect(claimRequestHash('2026-10-18')).toBe(sha(JSON.stringify({ termsVersion: '2026-10-18', linkTokenHash: null })));
   });
 
   it('a different request under the same key hashes differently; the same one, the same', () => {
-    expect(claimRequestHash('2026-10-13', 'tok')).toBe(claimRequestHash('2026-10-13', 'tok'));
-    expect(claimRequestHash('2026-10-13', 'tok')).not.toBe(claimRequestHash('2026-10-13', 'other'));
-    expect(claimRequestHash('2026-10-13')).not.toBe(claimRequestHash('2026-10-14'));
+    expect(claimRequestHash('2026-10-18')).toBe(claimRequestHash('2026-10-18'));
+    expect(claimRequestHash('2026-10-13')).not.toBe(claimRequestHash('2026-10-18'));
   });
 });
 
@@ -325,7 +316,7 @@ describe('the offer the Owner is shown before confirming', () => {
     expect(trialOfferOf(both, NOW, 'UTC')).toMatchObject({
       available: false,
       reason: 'contact_unverified',
-      requiredContacts: ['email', 'phone'],
+      requiredContacts: ['phone'],
       missingContacts: ['phone'],
     });
   });

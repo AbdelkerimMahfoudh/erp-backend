@@ -3,7 +3,7 @@ import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { TenantContext } from '../../common/tenant/tenant-context.service';
-import { ClaimTrialDto, TrialLinkDto } from './trial.dto';
+import { ClaimTrialDto } from './trial.dto';
 import type { TrialPrincipal } from './trial-facts';
 import { TrialService } from './trial.service';
 import { TrialSetupService } from './trial-setup.service';
@@ -16,22 +16,18 @@ const ACCOUNT_THROTTLE_LIMIT = Number(process.env.ACCOUNT_THROTTLE_LIMIT) || 5;
 const SENSITIVE_THROTTLE = { default: { limit: ACCOUNT_THROTTLE_LIMIT, ttl: 60_000 } };
 
 /**
- * The free trial on the Dukan ERP website (0095; docs/76): the Owner's card, the setup link check, the claim, and
- * sending the setup instructions again.
+ * The free trial on the Dukan ERP portal (0095, 0099; docs/76, docs/101 §5): the Owner's card, the claim, and sending
+ * the portal instructions again.
  *
  * Tenant routes — the shop's own session, never `@Public` — answering only about the caller's own company, from the
  * session, and only to its Owner. Every handler takes the body at most, and nothing else from the request: no header,
  * no IP, no `Origin` or `Referer`. Those say where a request claims to come from, a client sets them at will, and
- * "website only" is a product boundary — only the website shows this — never a check a client could pass by lying
- * (the owner's correction of 2026-10-13).
+ * "portal only" is a product boundary — only the portal shows this — never a check a client could pass by lying
+ * (the owner's correction of 2026-10-13). No token exists: the instructions carry the portal's one address.
  *
- * None of them takes a token from a URL, and the one GET carries none: a link preview or a mail scanner opening the
- * setup link loads the website's static page and reaches nothing here. A token travels only in a POST body after
- * sign-in, and only the claim — the Owner's explicit confirmation — consumes it.
- *
- * All four stay reachable while the business is closed (`route-classification.ts`): a business that has not started
+ * All three stay reachable while the business is closed (`route-classification.ts`): a business that has not started
  * is exactly the one that needs them. The app reaches none of them: it reads a display-only status under `account/`
- * (`trial-setup.controller.ts`) and has no trial action of any kind (the owner's correction of 2026-10-13).
+ * (`trial-setup.controller.ts`) and has no trial action of any kind (the owner's brief of 2026-10-18).
  */
 @ApiExcludeController()
 @Controller({ path: 'platform', version: '1' })
@@ -53,14 +49,6 @@ export class TrialController {
     return this.trial.status(this.principal());
   }
 
-  /** What a setup link is worth to the signed-in Owner. Never consumes it. */
-  @Post('my-subscription/trial/link')
-  @HttpCode(HttpStatus.OK)
-  @Throttle(SENSITIVE_THROTTLE)
-  checkLink(@Body() dto: TrialLinkDto) {
-    return this.trial.checkLink(this.principal(), dto.token);
-  }
-
   /** Start the free trial: 201 the first time; 200 when the same attempt is retried, which changes nothing. */
   @Post('my-subscription/trial/claim')
   @HttpCode(HttpStatus.CREATED)
@@ -72,10 +60,10 @@ export class TrialController {
   }
 
   /**
-   * Send the setup instructions again — the website's own action, for the signed-in Owner, and the only way to ask
-   * for them besides support: never from the app. It reads nothing from the request, not even a body: the
-   * instructions go to the Owner's verified contacts and nowhere a request could name. Throttled by the attempts the
-   * business already has; starting the trial never depends on it.
+   * Send the portal instructions again — the portal's own action, for the signed-in Owner, and the only way to ask for
+   * them besides support: never from the app. It reads nothing from the request, not even a body: the instructions go
+   * to the Owner's verified contacts and nowhere a request could name. Throttled by the requests the business already
+   * has, and audited; starting the trial never depends on it.
    */
   @Post('my-subscription/trial/setup/resend')
   @HttpCode(HttpStatus.OK)

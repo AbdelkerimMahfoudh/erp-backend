@@ -30,6 +30,7 @@ import { Public } from '../common/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { binToUuid, uuidToBin, isUuid } from '../common/utils/uuid.util';
 import { buildEntitlement, type EntitlementState, type SubscriptionStatus } from '../entitlement/entitlement-rules';
+import { graceEpisodesOf, graceFactsFrom, type GraceEpisodeRow } from '../entitlement/grace-facts';
 import {
   ADMIN_SESSION_COOKIE,
   PlatformAdminGuard,
@@ -373,17 +374,19 @@ export class PlatformController {
    * judged by, its free trial's facts included — and its trial cut to a row: the status, the end once claimed, and the
    * business's own zone, normalised as the trial's view normalises it (an unknown zone reads UTC and is reported once).
    * One reading for the pending queue and the businesses list, so the two never disagree about a business. No
-   * subscription row reads as the entitlement reads it: expired, with no trial.
+   * subscription row reads as the entitlement reads it: expired, with no trial. Its recorded grace decisions (0099)
+   * decide its grace as they decide the business's own.
    */
-  private listed(business: ListedBusiness, now: Date, activeBranchCount = 0) {
+  private listed(business: ListedBusiness, now: Date, episodes: readonly GraceEpisodeRow[], activeBranchCount = 0) {
     const sub = business.subscription;
-    if (!sub) return { state: 'expired' as EntitlementState, trial: null, complimentary: null };
+    if (!sub) return { state: 'expired' as EntitlementState, trial: null, complimentary: null, grace: null };
     const trial = trialFactsOf(business.trialEligibility, business.trialClaim);
     // As the evaluation does: a business with trial rows has its zone checked.
     const timeZone =
       business.trialEligibility || business.trialClaim ? this.entitlement.trialZone(business.id, business.timezone) : undefined;
-    const ent = buildEntitlement({ ...sub, trial, timeZone }, { seatsUsed: 0, activeBranchCount }, now);
-    return { state: ent.state, trial: trialSummaryOf(ent.trial), complimentary: ent.complimentary };
+    const grace = graceFactsFrom(episodes, sub.currentPeriodEnd);
+    const ent = buildEntitlement({ ...sub, trial, timeZone, grace }, { seatsUsed: 0, activeBranchCount }, now);
+    return { state: ent.state, trial: trialSummaryOf(ent.trial), complimentary: ent.complimentary, grace: ent.grace };
   }
 
   // ── Dashboard ────────────────────────────────────────────────────────────
@@ -401,17 +404,25 @@ export class PlatformController {
         complimentaryUntil: true,
         subscribedBranchCount: true,
         additionalSeats: true,
+        companyId: true,
         company: { select: TRIAL_FACTS },
       },
     });
+    const episodes = await graceEpisodesOf(this.prisma, subs.map((x) => x.companyId));
 
     // Counted from the SAME rules the app enforces, never a second
     // interpretation of the dates — the free trial's facts included (0095), so
-    // a business in its trial is counted as one, not as pending or expired.
+    // a business in its trial is counted as one, not as pending or expired —
+    // and its recorded grace decisions (0099), so a refused grace is not counted as grace.
     const tally: Record<string, number> = {};
-    for (const { company, ...s } of subs) {
+    for (const { company, companyId, ...s } of subs) {
       const e = buildEntitlement(
-        { ...s, status: s.status, trial: trialFactsOf(company.trialEligibility, company.trialClaim) },
+        {
+          ...s,
+          status: s.status,
+          trial: trialFactsOf(company.trialEligibility, company.trialClaim),
+          grace: graceFactsFrom(episodes.get(companyId.toString('hex')) ?? [], s.currentPeriodEnd),
+        },
         { seatsUsed: 0, activeBranchCount: 0 },
         now,
       );
@@ -511,11 +522,12 @@ export class PlatformController {
     ]);
 
     const now = new Date();
+    const episodes = await graceEpisodesOf(this.prisma, rows.map((c) => c.id));
     const mapped = rows.map((c) => {
       const sub = c.subscription;
       // The free trial's facts with the row (0095): the state the shop itself is judged by, never a second reading —
       // read as the pending queue reads it (C18).
-      const listed = this.listed(c, now, c._count.branches);
+      const listed = this.listed(c, now, episodes.get(c.id.toString('hex')) ?? [], c._count.branches);
       return {
         id: binToUuid(c.id),
         name: c.name,
@@ -531,6 +543,8 @@ export class PlatformController {
         complimentary: listed.complimentary,
         // The trial with its end and the business's zone (C18): a row with a trial shows its dates in that zone.
         trial: listed.trial,
+        // The grace after its paid end (0099): running, ended, or none because the allowance was used.
+        grace: listed.grace,
         version: sub?.version ?? 0,
       };
     });
@@ -684,6 +698,7 @@ export class PlatformController {
       select: { id: true, timezone: true, subscription: { select: SUBSCRIPTION_FACTS }, ...TRIAL_FACTS },
     });
     const byCompany = new Map(businesses.map((c) => [c.id.toString('hex'), c]));
+    const episodes = await graceEpisodesOf(this.prisma, ids);
 
     const now = new Date();
     return rows.map((r) => {
@@ -693,7 +708,7 @@ export class PlatformController {
        * a plain pending application (review finding R4-13) — and the trial with its end and its zone. Both null for
        * an application that left no business.
        */
-      const listed = business ? this.listed(business, now) : null;
+      const listed = business ? this.listed(business, now, episodes.get(business.id.toString('hex')) ?? []) : null;
       return {
         id: binToUuid(r.id),
         companyId: r.companyId ? binToUuid(r.companyId) : null,

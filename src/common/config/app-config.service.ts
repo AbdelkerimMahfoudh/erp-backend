@@ -177,12 +177,18 @@ export class AppConfigService {
   }
 
   /**
-   * The Dukan ERP website's origin, for building the free trial's setup links (0095) — and for nothing else: no
-   * request is ever compared with it. Empty when unset, and then no link can be built. Production refuses anything
-   * but an https:// origin with no path (`production-guard.ts`); elsewhere a trailing slash is forgiven.
+   * The Dukan ERP portal's origin (0099), for the one address the portal instructions and the subscription messages
+   * carry — and for nothing else: no request is ever compared with it. Empty when unset, and then no such message can
+   * be sent. Production refuses anything but an https:// origin with no path, and APP_ENV=production anything but
+   * https://dukan.tsxmr.com (`production-guard.ts`); elsewhere a trailing slash is forgiven.
    */
-  get publicSiteOrigin(): string {
-    return (this.config.get<string>('PUBLIC_SITE_ORIGIN') ?? '').trim().replace(/\/+$/, '');
+  get portalOrigin(): string {
+    return (this.config.get<string>('PORTAL_ORIGIN') ?? '').trim().replace(/\/+$/, '');
+  }
+
+  /** `<portal>/subscription` — generic: no token, no identifier, nothing about who it is for. Empty with no portal. */
+  get portalSubscriptionUrl(): string {
+    return this.portalOrigin ? `${this.portalOrigin}/subscription` : '';
   }
 
   get whatsappApiBaseUrl(): string {

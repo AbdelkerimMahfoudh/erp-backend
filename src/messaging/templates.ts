@@ -50,8 +50,9 @@ export type ProviderKind = 'authentication' | 'utility';
  *  - `essential` — a message the person asked for, or that secures their own account: sign-in and contact
  *    verification codes, employee invitation codes, account-deletion codes and the deletion confirmation. Sent after
  *    an opt-out of optional notifications; never after the person withdrew the WhatsApp channel itself.
- *  - `optional` — an operational notice the person did not ask for at that moment (closing notices, the trial's
- *    setup instructions). Never sent after any opt-out; in live mode, only to a number with a recorded consent.
+ *  - `optional` — an operational notice the person did not ask for at that moment (closing notices, the portal
+ *    instructions, the subscription reminders). Never sent after any opt-out; in live mode, only to a number with a
+ *    recorded consent.
  *  - `operator` — the operator's own delivery proof (docs/64): test mode only, to an allowlisted number only.
  */
 export type TemplateUse = 'essential' | 'optional' | 'operator';
@@ -67,12 +68,6 @@ export interface TemplateDefinition {
   readonly use: TemplateUse;
   /** The environment variable holding the provider's approved template name. */
   readonly configKey: string;
-  /**
-   * The variable that is the dynamic suffix of the template's URL button, when it has one (0095). The approved
-   * button already holds the address; only this suffix is sent, as the button's own parameter — never in the body,
-   * where it would be shown as text.
-   */
-  readonly urlButton?: string;
 }
 
 /**
@@ -177,24 +172,55 @@ export const DELIVERY_CHECK_TEMPLATE: TemplateDefinition = {
   configKey: 'WHATSAPP_TEMPLATE_DELIVERY_CHECK',
 };
 
-/**
- * The free trial's setup instructions (0095; docs/76): the business is eligible for a 7-day free trial that has not
- * started, and the button leads to the Dukan ERP website, where the Owner signs in and confirms it. A utility
- * template: the body carries the business's name and nothing else; the one-time setup token is the URL button's
- * dynamic suffix (the approved button URL is `<website>/account/trial?t={{1}}`), so it is never shown as text. No
- * price, no amount, no payment instruction. Optional in production — without its approved name WhatsApp simply
- * cannot carry these instructions. The proposed approved copy, in EN/FR/AR, is in docs/76.
+/*
+ * The portal instructions and the subscription lifecycle messages (0099; the owner's brief of 2026-10-18; docs/101 §7).
+ *
+ * Utility templates, transactional and short. Each approved text carries the portal's one address in its own body —
+ * https://dukan.tsxmr.com/subscription, written into the template at approval, never a variable — so no token, no
+ * identifier and no link built per person ever goes out. The variables are the business's display name, the time left
+ * in words and exact instants in the business's zone (`notices/notice-copy.ts`), and, after a paid expiry, the grace
+ * uses left: never an internal id, a price, an amount or a payment instruction. Optional in production: without an
+ * approved name, WhatsApp cannot carry that message, the recorded email fallback is tried, and the status says so.
+ * The proposed approved copy, in EN/FR/AR with its variables in order, is in docs/101 §7.
  */
-export const TRIAL_SETUP_TEMPLATE: TemplateDefinition = {
-  key: 'trial.setup',
+const subscriptionTemplate = (key: string, variables: readonly string[], configKey: string): TemplateDefinition => ({
+  key,
   category: 'account',
-  variables: ['business', 'token'],
+  variables,
   languages: ['en', 'ar', 'fr'],
   providerKind: 'utility',
   use: 'optional',
-  configKey: 'WHATSAPP_TEMPLATE_TRIAL_SETUP',
-  urlButton: 'token',
-};
+  configKey,
+});
+
+/** After the mandatory WhatsApp number is verified: the business may start one 7-day trial, on the portal. */
+export const PORTAL_INSTRUCTIONS_TEMPLATE = subscriptionTemplate('portal.instructions', ['business'], 'WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS');
+/** 72, 48 and 24 hours before a free trial ends — which has no grace. */
+export const TRIAL_REMINDER_TEMPLATE = subscriptionTemplate('subscription.trial_reminder', ['business', 'remaining', 'ends'], 'WHATSAPP_TEMPLATE_TRIAL_REMINDER');
+/** The free trial ended: read-only, no grace. */
+export const TRIAL_EXPIRED_TEMPLATE = subscriptionTemplate('subscription.trial_expired', ['business', 'ended'], 'WHATSAPP_TEMPLATE_TRIAL_EXPIRED');
+/** 72, 48 and 24 hours before a paid period ends. */
+export const PAID_REMINDER_TEMPLATE = subscriptionTemplate('subscription.paid_reminder', ['business', 'remaining', 'ends'], 'WHATSAPP_TEMPLATE_PAID_REMINDER');
+/** A paid period ended and one of the three grace periods in 12 months started: its exact end, the uses left. */
+export const GRACE_STARTED_TEMPLATE = subscriptionTemplate('subscription.grace_started', ['business', 'ended', 'graceEnds', 'usesLeft'], 'WHATSAPP_TEMPLATE_GRACE_STARTED');
+/** A paid period ended with the three grace periods of 12 months already used: no grace. */
+export const NO_GRACE_TEMPLATE = subscriptionTemplate('subscription.no_grace', ['business', 'ended'], 'WHATSAPP_TEMPLATE_NO_GRACE');
+/** 48 and 24 hours of grace left. */
+export const GRACE_REMINDER_TEMPLATE = subscriptionTemplate('subscription.grace_reminder', ['business', 'remaining', 'graceEnds'], 'WHATSAPP_TEMPLATE_GRACE_REMINDER');
+/** The grace ended: read-only. */
+export const GRACE_ENDED_TEMPLATE = subscriptionTemplate('subscription.grace_ended', ['business', 'ended'], 'WHATSAPP_TEMPLATE_GRACE_ENDED');
+
+/** Every subscription message's template, in one list (the notices, the configuration, the documentation). */
+export const SUBSCRIPTION_TEMPLATES: readonly TemplateDefinition[] = [
+  PORTAL_INSTRUCTIONS_TEMPLATE,
+  TRIAL_REMINDER_TEMPLATE,
+  TRIAL_EXPIRED_TEMPLATE,
+  PAID_REMINDER_TEMPLATE,
+  GRACE_STARTED_TEMPLATE,
+  NO_GRACE_TEMPLATE,
+  GRACE_REMINDER_TEMPLATE,
+  GRACE_ENDED_TEMPLATE,
+];
 
 const REGISTRY: Record<string, TemplateDefinition> = {
   [AUTH_OTP_TEMPLATE.key]: AUTH_OTP_TEMPLATE,
@@ -204,7 +230,7 @@ const REGISTRY: Record<string, TemplateDefinition> = {
   [CLOSING_SALE_TEMPLATE.key]: CLOSING_SALE_TEMPLATE,
   [CLOSING_RECLOSED_TEMPLATE.key]: CLOSING_RECLOSED_TEMPLATE,
   [DELIVERY_CHECK_TEMPLATE.key]: DELIVERY_CHECK_TEMPLATE,
-  [TRIAL_SETUP_TEMPLATE.key]: TRIAL_SETUP_TEMPLATE,
+  ...Object.fromEntries(SUBSCRIPTION_TEMPLATES.map((t) => [t.key, t])),
 };
 
 export type TemplateKey = keyof typeof REGISTRY & string;

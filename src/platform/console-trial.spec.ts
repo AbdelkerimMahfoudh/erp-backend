@@ -49,17 +49,20 @@ describe('the console sees each business’s trial by the shop’s own rules', (
   const zones = new EntitlementService({} as never, {} as never, { now: () => new Date(now) });
   afterEach(() => jest.restoreAllMocks());
   const SUBS = [
-    { ...base, company: facts({ closedAt: null }, null) },
-    { ...base, company: facts({ closedAt: null }, running) },
-    { ...base, company: facts({ closedAt: null }, ended) },
-    { ...base, company: facts(null, null) },
-    { ...base, status: 'activated', currentPeriodEnd: new Date(now + 30 * 24 * HOUR), company: facts({ closedAt: new Date(now - HOUR) }, null) },
+    { ...base, companyId: newUuidV7Bin(), company: facts({ closedAt: null }, null) },
+    { ...base, companyId: newUuidV7Bin(), company: facts({ closedAt: null }, running) },
+    { ...base, companyId: newUuidV7Bin(), company: facts({ closedAt: null }, ended) },
+    { ...base, companyId: newUuidV7Bin(), company: facts(null, null) },
+    { ...base, companyId: newUuidV7Bin(), status: 'activated', currentPeriodEnd: new Date(now + 30 * 24 * HOUR), company: facts({ closedAt: new Date(now - HOUR) }, null) },
   ];
+  /** The recorded grace decisions (0099): none — these businesses never had a paid period end. */
+  const graceEpisode = { findMany: async () => [] };
 
   it('the dashboard counts the three trial states, never as pending or expired', async () => {
     const counts = { company: 5, branch: 5, user: 9, seatAllocation: 0 };
     const prisma = {
       subscription: { findMany: async () => SUBS },
+      graceEpisode,
       company: { count: async () => counts.company },
       branch: { count: async () => counts.branch },
       user: { count: async () => counts.user },
@@ -81,7 +84,7 @@ describe('the console sees each business’s trial by the shop’s own rules', (
       ...company,
       _count: { branches: 1, users: 1 },
     }));
-    const prisma = { company: { findMany: async () => rows, count: async () => rows.length } };
+    const prisma = { graceEpisode, company: { findMany: async () => rows, count: async () => rows.length } };
     const platform = platformWith({ prisma, entitlement: zones });
     const all = await platform.businesses();
     expect(all.rows.map((r) => r.state)).toEqual(['trial_available', 'trial_active', 'trial_expired', 'pending', 'active']);
@@ -105,7 +108,7 @@ describe('the console sees each business’s trial by the shop’s own rules', (
     }));
     // The last row's trial is in its zone nobody knows: shown in UTC, as its own trial view shows it.
     rows[4] = { ...rows[4], trialEligibility: { closedAt: null }, trialClaim: running };
-    const prisma = { company: { findMany: async () => rows, count: async () => rows.length } };
+    const prisma = { graceEpisode, company: { findMany: async () => rows, count: async () => rows.length } };
     const list = await platformWith({ prisma, entitlement: zones }).businesses();
     expect(list.rows.map((r) => r.trial)).toEqual([
       { status: 'available', endsAt: null, timeZone: 'Asia/Dubai' },
@@ -151,6 +154,7 @@ describe('the console sees each business’s trial by the shop’s own rules', (
       const attempts = [...all.map((b, i) => attempt(i + 1, b.id)), attempt(9, null)];
       const asked: unknown[] = [];
       const prisma = {
+        graceEpisode,
         registrationAttempt: { findMany: async () => attempts },
         company: {
           findMany: async (args: { where: { id: { in: Buffer[] } } }) => {

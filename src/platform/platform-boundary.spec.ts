@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { readFileSync } from 'node:fs';
-import { RequestMethod, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, RequestMethod, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { PlatformController } from './platform.controller';
 import { RegistrationFlowService } from './registration-flow.service';
@@ -300,7 +300,7 @@ describe('the controller, from the platform’s side', () => {
       expect(reached).toEqual([]);
     });
 
-    it('asks about every contact given — each must be verified, so each must be able to receive its code (C10)', async () => {
+    it('asks about the WhatsApp number only — the contact verified now; an email beside it is verified later, if at all (0099)', async () => {
       const asked: string[] = [];
       const controller = controllerWith({ register: async () => { throw new Error('must not be reached'); } }, {
         canDeliver: (channel: string) => { asked.push(channel); return false; },
@@ -308,11 +308,21 @@ describe('the controller, from the platform’s side', () => {
       await controller.register(attempt as never).catch(() => undefined);
       await controller.register({ ...attempt, email: undefined } as never).catch(() => undefined);
       await controller.register({ ...attempt, email: '   ' } as never).catch(() => undefined);
-      await controller.register({ ...attempt, phone: undefined } as never).catch(() => undefined);
-      expect(asked).toEqual(['email', 'phone', 'phone', 'phone', 'email']);
+      expect(asked).toEqual(['phone', 'phone', 'phone']);
     });
 
-    it('and proceeds exactly as before once a code can go to every contact given', async () => {
+    it('refuses a registration without a WhatsApp number before anything is asked or created (0099)', async () => {
+      const asked: string[] = [];
+      const reached: string[] = [];
+      const controller = controllerWith({ register: async () => { reached.push('register'); throw new Error('must not be reached'); } }, {
+        canDeliver: (channel: string) => { asked.push(channel); return true; },
+      });
+      const refusal = await controller.register({ ...attempt, phone: undefined } as never).catch((e: unknown) => e);
+      expect(refusal).toBeInstanceOf(BadRequestException);
+      expect([asked, reached]).toEqual([[], []]);
+    });
+
+    it('and proceeds exactly as before once a code can go to the number — the email needs no code now', async () => {
       const seen: string[] = [];
       const registration = {
         register: async (input: { email?: string; phone?: string }) => {
@@ -323,9 +333,9 @@ describe('the controller, from the platform’s side', () => {
       };
       const both = controllerWith(registration, { canDeliver: () => true });
       await expect(both.register(attempt as never)).resolves.toMatchObject({ created: true, next: 'sign_in', continuation: null, trialEligible: true });
-      const emailOnly = controllerWith(registration, { canDeliver: (channel: string) => channel === 'email' });
-      await expect(emailOnly.register({ ...attempt, phone: undefined } as never)).resolves.toMatchObject({ created: true });
-      expect(seen).toEqual(['aicha@example.test|+22243210987', 'aicha@example.test|']);
+      const numberOnly = controllerWith(registration, { canDeliver: (channel: string) => channel === 'phone' });
+      await expect(numberOnly.register(attempt as never)).resolves.toMatchObject({ created: true });
+      expect(seen).toEqual(['aicha@example.test|+22243210987', 'aicha@example.test|+22243210987']);
     });
   });
 });
@@ -434,9 +444,8 @@ describe('a closed business stays closed on the server', () => {
     // to be allowed (docs/21, 2026-10-05); nothing is granted by asking. Asking for another
     // activity for a branch (D154, 2026-10-08) is the same kind of request: an upgrade waits for
     // its payment, a downgrade waits for the renewal, and nothing changes by asking.
-    // The free trial (0095): a business that has not started must be able to read its card, check a setup link,
-    // claim and ask for its setup instructions again — only the Owner, and a claim writes the trial itself, nothing
-    // paid or billed.
+    // The free trial (0095, 0099): a business that has not started must be able to read its card, claim and ask for
+    // its portal instructions again — only the Owner, and a claim writes the trial itself, nothing paid or billed.
     expect(allowedWrites).toEqual([
       'platform/my-subscription/seat-requests',
       'platform/my-subscription/store-requests',
@@ -444,7 +453,6 @@ describe('a closed business stays closed on the server', () => {
       'platform/my-subscription/activity-requests',
       'platform/portal-handoff',
       'platform/my-subscription/trial/claim',
-      'platform/my-subscription/trial/link',
       'platform/my-subscription/trial/setup/resend',
     ]);
     expect(allowedReads).toEqual(['platform/my-subscription', 'platform/payment-instructions', 'platform/my-subscription/trial']);

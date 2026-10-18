@@ -6,7 +6,6 @@ import { SessionsService } from '../auth/sessions.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { PlatformAuditService } from './platform-audit.service';
 import type { PlatformAdminIdentity } from './platform-admin.service';
-import { revokeUsableLinks } from './trial/trial-link';
 
 /**
  * How a business's Owner gets their first password (0075).
@@ -180,10 +179,8 @@ export class OwnerInvitationService {
 
     await this.prisma.user.update({ where: { id: invitation.userId }, data: { passwordHash } });
     // A password nobody knew is now a password one person knows. Anything
-    // signed in before this moment was not that person — and no free trial
-    // setup link sent before it works either (0095).
+    // signed in before this moment was not that person.
     await this.sessions.revokeAll(invitation.userId);
-    await this.prisma.trialSetupLink.updateMany(revokeUsableLinks({ userId: invitation.userId }, 'password_changed', now));
 
     await this.audit.record({
       admin: null,

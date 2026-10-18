@@ -34,7 +34,7 @@ const handlers = Object.getOwnPropertyNames(proto).filter(
 );
 
 describe('the trial routes, as Nest sees them', () => {
-  it('are exactly the card, the link check, the claim and the resend — under platform/my-subscription, never account/ or auth/', () => {
+  it('are exactly the card, the claim and the resend — under platform/my-subscription, never account/ or auth/', () => {
     const routes = handlers
       .map((name) => {
         const method = RequestMethod[Reflect.getMetadata(METHOD_METADATA, proto[name]) as RequestMethod];
@@ -44,7 +44,6 @@ describe('the trial routes, as Nest sees them', () => {
     expect(routes).toEqual([
       'GET platform/my-subscription/trial',
       'POST platform/my-subscription/trial/claim',
-      'POST platform/my-subscription/trial/link',
       'POST platform/my-subscription/trial/setup/resend',
     ]);
   });
@@ -58,8 +57,8 @@ describe('the trial routes, as Nest sees them', () => {
     expect(Reflect.getMetadata(IS_PUBLIC_KEY, TrialController)).toBeUndefined();
   });
 
-  it('the claim, the link check and the resend are throttled like the account’s sensitive routes', () => {
-    for (const name of ['claim', 'checkLink', 'resendSetup']) {
+  it('the claim and the resend are throttled like the account’s sensitive routes', () => {
+    for (const name of ['claim', 'resendSetup']) {
       expect(Reflect.getMetadata('THROTTLER:LIMITdefault', proto[name])).toBe(Number(process.env.ACCOUNT_THROTTLE_LIMIT) || 5);
       expect(Reflect.getMetadata('THROTTLER:TTLdefault', proto[name])).toBe(60_000);
     }
@@ -89,12 +88,11 @@ describe('no trial action under account/ or auth/, and no route that takes a tok
     expect(routes).toEqual(expect.arrayContaining(['POST auth/login', 'GET account', 'POST platform/my-subscription/trial/claim']));
   });
 
-  it('the trial is acted on only under platform/my-subscription, on the website; account/ may only ever show a status', () => {
+  it('the trial is acted on only under platform/my-subscription, on the portal; account/ may only ever show a status', () => {
     const trial = routeTable().filter((r) => /trial/i.test(r));
-    // The read-only app status (`GET account/trial-setup`) and the website resend are the setup instructions' (docs/76 §5).
+    // The read-only app status (`GET account/trial-setup`) and the portal resend are the instructions' (docs/101 §5).
     const allowed = [
       'GET platform/my-subscription/trial',
-      'POST platform/my-subscription/trial/link',
       'POST platform/my-subscription/trial/claim',
       'POST platform/my-subscription/trial/setup/resend',
       'GET account/trial-setup',
@@ -188,19 +186,14 @@ describe('Origin and Referer change nothing — through the real Nest pipeline',
     expect(w.claims(shop)).toHaveLength(0);
   });
 
-  it('the card and the link check answer the same with or without an Origin', async () => {
+  it('the card answers the same with or without an Origin', async () => {
     const shop = w.business();
     caller = shop.owner;
-    const token = w.issueLink(shop);
     const cards = await Promise.all(
       [WEBSITE, FORGED, {}].map((h) => request(app.getHttpServer()).get('/api/v1/platform/my-subscription/trial').set(h)),
     );
     expect(cards.map((r) => r.status)).toEqual([200, 200, 200]);
     expect(new Set(cards.map((r) => JSON.stringify(r.body))).size).toBe(1);
-    const links = await Promise.all(
-      [WEBSITE, FORGED, {}].map((h) => request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/link').set(h).send({ token })),
-    );
-    expect(links.map((r) => [r.status, r.body.link])).toEqual([[200, 'valid'], [200, 'valid'], [200, 'valid']]);
   });
 
   it('nothing rides in the body either: an unknown field is refused, and the claim takes only what the server decides', async () => {
@@ -226,18 +219,18 @@ describe('Origin and Referer change nothing — through the real Nest pipeline',
     expect([first.status, retry.status, retry.body.replayed]).toEqual([201, 200, true]);
   });
 
-  it('a link preview opening the trial’s GET with the token in the URL consumes and starts nothing', async () => {
+  it('a token in a body or a URL is no part of anything: refused as an unknown field, and no link route exists (0099)', async () => {
     const shop = w.business();
     caller = shop.owner;
-    const token = w.issueLink(shop);
-    const res = await request(app.getHttpServer()).get(`/api/v1/platform/my-subscription/trial?t=${token}`);
+    const withToken = await request(app.getHttpServer())
+      .post('/api/v1/platform/my-subscription/trial/claim')
+      .send({ ...claimBody('k-1'), token: 'x'.repeat(43) });
+    expect(withToken.status).toBe(400);
+    const res = await request(app.getHttpServer()).get(`/api/v1/platform/my-subscription/trial?t=${'x'.repeat(43)}`);
     expect(res.status).toBe(200);
-    expect(w.link(token)).toMatchObject({ consumedAt: null, revokedAt: null });
     expect(w.claims(shop)).toHaveLength(0);
-    // No GET route exists for the link or the claim at all.
-    for (const path of ['link', 'claim']) {
-      const get = await request(app.getHttpServer()).get(`/api/v1/platform/my-subscription/trial/${path}?t=${token}`);
-      expect(get.status).toBe(404);
-    }
+    // No route exists for a link, and none answers a GET for the claim.
+    expect((await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/link').send({ token: 'x'.repeat(43) })).status).toBe(404);
+    expect((await request(app.getHttpServer()).get('/api/v1/platform/my-subscription/trial/claim')).status).toBe(404);
   });
 });

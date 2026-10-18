@@ -656,7 +656,6 @@ describe('route classification fails closed', () => {
       // the trial itself and nothing paid or billed, and only the Owner may make it. The resend sends the Owner's own
       // setup instructions to the Owner's own verified contacts, from the website only.
       'POST platform/my-subscription/trial/claim',
-      'POST platform/my-subscription/trial/link',
       'POST platform/my-subscription/trial/setup/resend',
       'POST platform/portal-handoff',
     ]);
@@ -717,7 +716,6 @@ describe('route classification fails closed', () => {
       // 0095: claiming the free trial, checking a setup link and asking for the setup instructions again — nothing
       // paid, nothing granted beyond the trial.
       'platform/my-subscription/trial/claim',
-      'platform/my-subscription/trial/link',
       'platform/my-subscription/trial/setup/resend',
     ]);
     // Minting a ticket is not spending one, and neither moves money.

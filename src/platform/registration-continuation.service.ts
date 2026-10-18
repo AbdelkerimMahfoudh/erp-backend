@@ -137,9 +137,10 @@ export class RegistrationContinuationService {
      * The destination comes from the OWNER RECORD, never from the request. A
      * caller holding a continuation must not be able to redirect the code to an
      * address of their choosing — that would turn a stolen continuation into a
-     * way to take over the account.
+     * way to take over the account. The WhatsApp number first (0099); an
+     * email-only Owner registered before it was mandatory uses the address.
      */
-    const destination = user.email ?? user.phone;
+    const destination = user.phone ?? user.email;
     if (!destination) return { ok: false, reason: 'user_unavailable' };
 
     const started = await this.verification.start(destination, language);
@@ -181,12 +182,13 @@ export class RegistrationContinuationService {
 
     const user = await this.prisma.user.findUnique({
       where: { id: resolution.userId },
-      select: { id: true, companyId: true, email: true, isActive: true, deletedAt: true },
+      select: { id: true, companyId: true, phone: true, isActive: true, deletedAt: true },
     });
     if (!user || !user.isActive || user.deletedAt) return { ok: false, reason: 'user_unavailable' };
     if (!user.companyId.equals(resolution.companyId)) return { ok: false, reason: 'mismatch' };
 
-    const channel: 'email' | 'phone' = user.email ? 'email' : 'phone';
+    // The contact `start` sent the code to: the number when there is one (0099).
+    const channel: 'email' | 'phone' = user.phone ? 'phone' : 'email';
 
     const checked = await this.verification.confirmChallenge(resolution.challengeId, code);
     if (checked === 'wrong') return { ok: false, reason: 'wrong_code' };

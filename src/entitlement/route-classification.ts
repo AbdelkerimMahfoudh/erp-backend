@@ -100,24 +100,23 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
   allow('POST', 'account/whatsapp/consent', 'Agreeing to the WhatsApp consent for the caller own number (D181); a consent record, no business record'),
   allow('POST', 'account/whatsapp/opt-out', 'Stopping WhatsApp notices or withdrawing the channel is the person right in any subscription state (D181); a consent record only'),
   /*
-   * The free trial on the website (0095). A business that may claim it is, by
-   * definition, one that has not started — closed like a pending one — so
+   * The free trial on the portal (0095, 0099). A business that may claim it is,
+   * by definition, one that has not started — closed like a pending one — so
    * refusing these would make the trial unreachable for the only businesses
-   * it exists for. None writes business truth: checking a link changes
-   * nothing, a claim writes one immutable trial row with nothing paid,
-   * billed or granted besides — only by the Owner, with verified contacts —
-   * and a resend sends the Owner's own instructions to the Owner again.
+   * it exists for. Neither writes business truth: a claim writes one immutable
+   * trial row with nothing paid, billed or granted besides — only by the
+   * Owner, with verified contacts — and a resend sends the Owner's own
+   * instructions to the Owner again.
    */
   allow(
     'POST',
     'platform/my-subscription/trial/claim',
     'Starting the free trial is done by a business that has not started yet; the claim writes the trial itself and nothing paid or billed, by the Owner alone',
   ),
-  allow('POST', 'platform/my-subscription/trial/link', 'Checking a setup link changes nothing; a business waiting to start its trial is exactly who holds one'),
   allow(
     'POST',
     'platform/my-subscription/trial/setup/resend',
-    'Sending the setup instructions again, from the website, to the Owner’s own verified contacts writes no business truth; a business waiting to start its trial is exactly who asks',
+    'Sending the portal instructions again, from the portal, to the Owner’s own verified contacts writes no business truth; a business waiting to start its trial is exactly who asks',
   ),
 ] as const;
 

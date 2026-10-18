@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { CloudApiConfig, CloudApiWhatsAppChannel, classifyGraphFailure } from './cloud-api-channel';
-import { ACCOUNT_DELETION_TEMPLATE, AUTH_OTP_TEMPLATE, TRIAL_SETUP_TEMPLATE } from './templates';
+import { ACCOUNT_DELETION_TEMPLATE, AUTH_OTP_TEMPLATE, GRACE_STARTED_TEMPLATE, PORTAL_INSTRUCTIONS_TEMPLATE } from './templates';
 
 /**
  * The Cloud API adapter (docs/64 §3).
@@ -40,7 +40,8 @@ function config(overrides: Partial<CloudApiConfig> = {}): CloudApiConfig {
     templateNames: {
       [AUTH_OTP_TEMPLATE.key]: 'erp_auth_code',
       [ACCOUNT_DELETION_TEMPLATE.key]: 'erp_delete_code',
-      [TRIAL_SETUP_TEMPLATE.key]: 'erp_trial_setup',
+      [PORTAL_INSTRUCTIONS_TEMPLATE.key]: 'erp_portal_instructions',
+      [GRACE_STARTED_TEMPLATE.key]: 'erp_grace_started',
     },
     languageCodes: { en: 'en', fr: 'fr', ar: 'ar' },
     ...overrides,
@@ -110,39 +111,43 @@ describe('the request the provider receives', () => {
     ]);
   });
 
-  it('fills a URL-button template: the body without the button variable, the button with it alone (0095)', async () => {
+  it('fills a subscription template with its body parameters in the registry’s order, and nothing else (0099)', async () => {
     const { calls, fetchImpl } = fakeFetch(() => json(200, { messages: [{ id: 'wamid.5' }] }));
-    const token = 'Zp3k9QeR7xVb2LmN8sTq4WyH6jUc1AfD0gKoEiPrS5v';
-    const result = await new CloudApiWhatsAppChannel(config({ fetchImpl })).send({
-      ...otp,
-      template: TRIAL_SETUP_TEMPLATE.key,
-      language: 'ar',
-      variables: { business: 'Boutique Aicha', token },
-    });
+    const variables = {
+      business: 'Boutique Aicha',
+      ended: '21 October 2026, 14:00 (Greenwich Mean Time)',
+      graceEnds: '24 October 2026, 14:00 (Greenwich Mean Time)',
+      usesLeft: '2',
+    };
+    const result = await new CloudApiWhatsAppChannel(config({ fetchImpl })).send({ ...otp, template: GRACE_STARTED_TEMPLATE.key, language: 'ar', variables });
 
     expect(result).toEqual({ status: 'accepted', providerMessageId: 'wamid.5', provider: 'cloud-api' });
     const body = JSON.parse(String(calls[0].init.body));
-    expect(body.template.name).toBe('erp_trial_setup');
+    expect(body.template.name).toBe('erp_grace_started');
     expect(body.template.language).toEqual({ code: 'ar' });
+    // The portal's address is in the approved text itself: no button parameter, no URL, no token is ever sent.
     expect(body.template.components).toEqual([
-      { type: 'body', parameters: [{ type: 'text', text: 'Boutique Aicha' }] },
-      { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: token }] },
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: 'Boutique Aicha' },
+          { type: 'text', text: variables.ended },
+          { type: 'text', text: variables.graceEnds },
+          { type: 'text', text: '2' },
+        ],
+      },
     ]);
-    // The token is the button's suffix and nothing else: never a body parameter, never in the address.
-    expect(JSON.stringify(body.template.components[0])).not.toContain(token);
-    expect(JSON.stringify(body).split(token)).toHaveLength(2);
-    expect(calls[0].url).not.toContain(token);
+    expect(JSON.stringify(body)).not.toMatch(/https?:|button/);
   });
 
-  it('refuses a URL-button template sent without its button variable, without a network call', async () => {
+  it('refuses a subscription template sent without one of its variables, or with one more, without a network call', async () => {
     const { calls, fetchImpl } = fakeFetch(() => json(200, {}));
-    const result = await new CloudApiWhatsAppChannel(config({ fetchImpl })).send({
-      ...otp,
-      template: TRIAL_SETUP_TEMPLATE.key,
-      variables: { business: 'Boutique Aicha' },
-    });
+    const channel = new CloudApiWhatsAppChannel(config({ fetchImpl }));
+    const missing = await channel.send({ ...otp, template: PORTAL_INSTRUCTIONS_TEMPLATE.key, variables: {} });
+    const extra = await channel.send({ ...otp, template: PORTAL_INSTRUCTIONS_TEMPLATE.key, variables: { business: 'Boutique Aicha', link: 'https://x' } });
     expect(calls).toHaveLength(0);
-    expect(result).toMatchObject({ status: 'failed', reason: 'rejected' });
+    expect(missing).toMatchObject({ status: 'failed', reason: 'rejected' });
+    expect(extra).toMatchObject({ status: 'failed', reason: 'rejected' });
   });
 
   it('carries the token as a bearer header and nowhere else', async () => {
@@ -289,21 +294,21 @@ describe('what reaches the log', () => {
     warn.mockRestore();
   });
 
-  it('never the setup token of a refused setup message', async () => {
+  it('never a variable of a refused subscription message, even when the provider echoes it', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
-    const token = 'Zp3k9QeR7xVb2LmN8sTq4WyH6jUc1AfD0gKoEiPrS5v';
-    const { fetchImpl } = fakeFetch(() => json(400, { error: { message: `bad parameter ${token}`, code: 132000 } }));
+    const business = 'Boutique Zp3k9QeR7xVb';
+    const { fetchImpl } = fakeFetch(() => json(400, { error: { message: `bad parameter ${business}`, code: 132000 } }));
 
     const result = await new CloudApiWhatsAppChannel(config({ fetchImpl })).send({
       ...otp,
-      template: TRIAL_SETUP_TEMPLATE.key,
-      variables: { business: 'Boutique Aicha', token },
+      template: PORTAL_INSTRUCTIONS_TEMPLATE.key,
+      variables: { business },
     });
 
     const logged = warn.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(logged).not.toContain(token);
+    expect(logged).not.toContain(business);
     expect(result.status).toBe('failed');
-    if (result.status === 'failed') expect(result.detail).not.toContain(token);
+    if (result.status === 'failed') expect(result.detail).not.toContain(business);
     warn.mockRestore();
   });
 

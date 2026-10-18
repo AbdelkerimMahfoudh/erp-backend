@@ -16,7 +16,6 @@ import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { generatePersonalId } from '../auth/identifier';
 import { STORAGE_PROVIDER, type StorageProvider } from '../storage/storage.types';
 import { lockSubscription } from '../billing/renewal';
-import { revokeUsableLinks } from '../platform/trial/trial-link';
 import {
   DELETED_USER_NAME,
   UNUSABLE_PASSWORD_HASH,
@@ -480,8 +479,12 @@ export class AccountDeletionService {
     const people = await tx.user.findMany({ where: { id: userId, companyId }, select: { id: true, email: true, phone: true } });
     const forgotten = await this.forgetPeople(tx, companyId, people, now, userId);
     await tx.notification.deleteMany({ where: { companyId, targetUserId: userId } });
-    // An Owner who leaves a business another Owner keeps: no free trial setup link sent to them works any more (0095).
-    await tx.trialSetupLink.updateMany(revokeUsableLinks({ companyId, userId }, 'deleted', now));
+    // The portal instructions this person asked for (0099): nothing more goes out for them, and no destination is kept.
+    await tx.subscriptionNotice.updateMany({
+      where: { companyId, requestedByUserId: userId, state: { in: ['pending', 'sending'] } },
+      data: { state: 'cancelled', cancelReason: 'deleted', claimToken: null, claimedUntil: null, completedAt: now },
+    });
+    await tx.subscriptionNotice.updateMany({ where: { companyId, requestedByUserId: userId }, data: { destinationMasked: null, destinationHash: null } });
 
     const [ledgerEntries, auditRows] = await Promise.all([
       tx.employeeDebtEntry.count({ where: { companyId, userId } }),
@@ -567,16 +570,19 @@ export class AccountDeletionService {
         },
       });
     }
-    // The free trial (0095): a closed business can never start one, and no setup link it was sent works any more.
-    // The claim, if there was one, is kept as it is: a fact, like the rest of the subscription's history.
+    // The free trial (0095): a closed business can never start one. The claim, if there was one, is kept as it is:
+    // a fact, like the rest of the subscription's history.
     await tx.trialEligibility.updateMany({
       where: { companyId, closedAt: null },
       data: { closedAt: now, closedReason: 'cancelled' },
     });
-    await tx.trialSetupLink.updateMany({
-      where: { companyId, consumedAt: null, revokedAt: null },
-      data: { revokedAt: now, revokedReason: 'closed' },
+    // The subscription messages (0099): nothing more goes to a closed business, and no destination of one is kept. The
+    // rows stay, as the rest of its subscription's history does.
+    await tx.subscriptionNotice.updateMany({
+      where: { companyId, state: { in: ['pending', 'sending'] } },
+      data: { state: 'cancelled', cancelReason: 'closed', claimToken: null, claimedUntil: null, completedAt: now },
     });
+    await tx.subscriptionNotice.updateMany({ where: { companyId }, data: { destinationMasked: null, destinationHash: null } });
 
     await tx.company.update({
       where: { id: companyId },

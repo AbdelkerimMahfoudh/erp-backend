@@ -98,7 +98,6 @@ const MODELS = [
   'branchReplacement',
   'trialClaim',
   'trialEligibility',
-  'trialSetupLink',
   'subscriptionEvent',
   'platformAuditEvent',
   'graceEpisode',
@@ -158,8 +157,6 @@ function defaultsOf(model: Model, now: Date): Row {
       return { expiryRecordedAt: null, setupLinkId: null, createdAt: now };
     case 'trialEligibility':
       return { closedAt: null, closedReason: null, basis: 'self_registration', createdAt: now };
-    case 'trialSetupLink':
-      return { consumedAt: null, revokedAt: null, revokedReason: null, createdAt: now };
     default:
       return { createdAt: now };
   }
@@ -675,7 +672,7 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
   const entitlement = new EntitlementService(db as never, {} as never, clock);
   const trialEnd = new TrialEndRoll(db as never, clock);
   const sweeper = new TrialEndSweeper(db as never, clock);
-  const trial = new TrialService(db as never, entitlement, audit, { otpPepper: 'test-pepper-at-least-32-characters-long!!' } as never, {} as never, clock);
+  const trial = new TrialService(db as never, entitlement, audit, {} as never, clock);
 
   // ── the fixtures ──────────────────────────────────────────────────────────
   let counter = 0;

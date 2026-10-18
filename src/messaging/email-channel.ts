@@ -22,7 +22,24 @@ import { SmtpEmailChannel, type SmtpConfig } from './smtp-email-channel';
  * `resend` stays dormant (D181 §2). The credentials of either provider live in server-side configuration only.
  */
 
-export type EmailTemplateKey = 'contact.verification' | 'staff.invitation' | 'password.recovery' | 'security.alert' | 'trial.setup' | 'delivery.check';
+export type EmailTemplateKey =
+  | 'contact.verification'
+  | 'staff.invitation'
+  | 'password.recovery'
+  | 'security.alert'
+  | SubscriptionEmailKey
+  | 'delivery.check';
+
+/** The portal instructions and the subscription lifecycle messages (0099; docs/101 §7): the WhatsApp templates' keys. */
+export type SubscriptionEmailKey =
+  | 'portal.instructions'
+  | 'subscription.trial_reminder'
+  | 'subscription.trial_expired'
+  | 'subscription.paid_reminder'
+  | 'subscription.grace_started'
+  | 'subscription.no_grace'
+  | 'subscription.grace_reminder'
+  | 'subscription.grace_ended';
 
 export interface EmailMessage {
   /** Normalised, lowercased address. */
@@ -77,6 +94,153 @@ interface EmailTemplate {
   body: Record<MessageLanguage, string>;
 }
 
+const HELP: Record<MessageLanguage, string> = {
+  en: '\n\nNeed help? Contact Dukan ERP support.\n\nDukan ERP is developed and operated by TSX-MR.',
+  fr: '\n\nBesoin d’aide ? Contactez l’assistance Dukan ERP.\n\nDukan ERP est développé et exploité par TSX-MR.',
+  ar: '\n\nهل تحتاج إلى مساعدة؟ تواصل مع دعم Dukan ERP.\n\nتطوّر TSX-MR منصة Dukan ERP وتشغّلها.',
+};
+
+/** What read-only means, said the same way in every message that announces it. */
+const READ_ONLY: Record<MessageLanguage, string> = {
+  en: 'The app is now read-only: your records stay readable, but new sales and changes are paused until the subscription is renewed.',
+  fr: 'L’application est désormais en lecture seule : vos données restent consultables, mais les nouvelles ventes et modifications sont suspendues jusqu’au renouvellement de l’abonnement.',
+  ar: 'أصبح التطبيق الآن للقراءة فقط: تبقى سجلاتك متاحة للاطلاع، لكن المبيعات الجديدة والتعديلات متوقفة إلى أن يُجدَّد الاشتراك.',
+};
+
+const RENEW: Record<MessageLanguage, string> = {
+  en: 'To renew, sign in at {link}.',
+  fr: 'Pour renouveler, connectez-vous sur {link}.',
+  ar: 'للتجديد، سجّل الدخول على {link}.',
+};
+
+const withHelp = (body: Record<MessageLanguage, string>): Record<MessageLanguage, string> => ({
+  en: body.en + HELP.en,
+  fr: body.fr + HELP.fr,
+  ar: body.ar + HELP.ar,
+});
+
+const subscriptionEmail = (
+  variables: readonly string[],
+  subject: Record<MessageLanguage, string>,
+  body: Record<MessageLanguage, string>,
+): EmailTemplate => ({ sender: 'notifications', essential: false, variables: [...variables, 'link'], wired: true, subject, body: withHelp(body) });
+
+/*
+ * The portal instructions and the subscription lifecycle messages (0099; the owner's brief of 2026-10-18; docs/101 §7)
+ * — the email each WhatsApp template falls back to, under the recorded conditions only (`notices/notice-rules.ts`).
+ *
+ * The same facts as the WhatsApp copy, with `{link}`: always the portal's one address, https://dukan.tsxmr.com/
+ * subscription — never a token, a customer identifier or anything built per person. No price, no amount, no payment
+ * instruction. A free trial's messages never mention grace except to say there is none; a paid expiry says which it
+ * is: grace started, with its exact end and the uses left, or none, because the three of the last 12 months are used.
+ */
+const SUBSCRIPTION_EMAILS: Record<SubscriptionEmailKey, EmailTemplate> = {
+  'portal.instructions': subscriptionEmail(
+    ['business'],
+    {
+      en: 'Start your Dukan ERP free trial',
+      fr: 'Démarrez votre essai gratuit Dukan ERP',
+      ar: 'ابدأ فترتك التجريبية المجانية في Dukan ERP',
+    },
+    {
+      en: '{business} can start one 7-day free trial of Dukan ERP. It has not started yet.\n\nTo start it, go to {link}, sign in with the same details you use in the Dukan ERP app, and confirm.\n\nThe trial starts as soon as you confirm and lasts exactly 7 days (168 hours). It cannot be paused or restarted. No payment is required. If you did not create this account, ignore this email.',
+      fr: '{business} peut démarrer un essai gratuit de 7 jours de Dukan ERP. Il n’a pas encore commencé.\n\nPour le démarrer, rendez-vous sur {link}, connectez-vous avec les mêmes identifiants que dans l’application Dukan ERP, puis confirmez.\n\nL’essai commence dès votre confirmation et dure exactement 7 jours (168 heures). Il ne peut être ni mis en pause ni redémarré. Aucun paiement n’est demandé. Si vous n’avez pas créé ce compte, ignorez cet e-mail.',
+      ar: '{business} مؤهل لفترة تجريبية مجانية واحدة من Dukan ERP مدتها 7 أيام، ولم تبدأ بعد.\n\nلبدئها، انتقل إلى {link} وسجّل الدخول بالبيانات نفسها التي تستخدمها في تطبيق Dukan ERP، ثم أكّد.\n\nتبدأ الفترة التجريبية فور تأكيدك وتستمر 7 أيام بالضبط (168 ساعة)، ولا يمكن إيقافها مؤقتًا أو إعادة بدئها. لا يلزم أي دفع. إن لم تُنشئ هذا الحساب، فتجاهل هذه الرسالة.',
+    },
+  ),
+  'subscription.trial_reminder': subscriptionEmail(
+    ['business', 'remaining', 'ends'],
+    {
+      en: 'Your Dukan ERP free trial ends in {remaining}',
+      fr: 'Votre essai gratuit Dukan ERP se termine dans {remaining}',
+      ar: 'تنتهي فترتك التجريبية المجانية في Dukan ERP خلال {remaining}',
+    },
+    {
+      en: 'The free trial of {business} on Dukan ERP ends in {remaining}, on {ends}.\n\nFree trials have no grace period: when the trial ends, the app becomes read-only. Your records stay readable, but new sales and changes stop until a subscription starts.\n\nTo choose a subscription, sign in at {link}.',
+      fr: 'L’essai gratuit de {business} sur Dukan ERP se termine dans {remaining}, le {ends}.\n\nLes essais gratuits n’ont pas de période de grâce : à la fin de l’essai, l’application passe en lecture seule. Vos données restent consultables, mais les nouvelles ventes et modifications s’arrêtent jusqu’au début d’un abonnement.\n\nPour choisir un abonnement, connectez-vous sur {link}.',
+      ar: 'تنتهي الفترة التجريبية المجانية لـ{business} في Dukan ERP خلال {remaining}، في {ends}.\n\nلا توجد فترة سماح للفترات التجريبية المجانية: عند انتهاء الفترة التجريبية يصبح التطبيق للقراءة فقط. تبقى سجلاتك متاحة للاطلاع، لكن المبيعات الجديدة والتعديلات تتوقف إلى أن يبدأ اشتراك.\n\nلاختيار اشتراك، سجّل الدخول على {link}.',
+    },
+  ),
+  'subscription.trial_expired': subscriptionEmail(
+    ['business', 'ended'],
+    {
+      en: 'Your Dukan ERP free trial has ended',
+      fr: 'Votre essai gratuit Dukan ERP est terminé',
+      ar: 'انتهت فترتك التجريبية المجانية في Dukan ERP',
+    },
+    {
+      en: 'The free trial of {business} on Dukan ERP ended on {ended}.\n\nThe app is now read-only: your records stay readable, but new sales and changes are paused until a subscription starts. Free trials have no grace period.\n\nTo start a subscription, sign in at {link}.',
+      fr: 'L’essai gratuit de {business} sur Dukan ERP s’est terminé le {ended}.\n\nL’application est désormais en lecture seule : vos données restent consultables, mais les nouvelles ventes et modifications sont suspendues jusqu’au début d’un abonnement. Les essais gratuits n’ont pas de période de grâce.\n\nPour démarrer un abonnement, connectez-vous sur {link}.',
+      ar: 'انتهت الفترة التجريبية المجانية لـ{business} في Dukan ERP في {ended}.\n\nأصبح التطبيق الآن للقراءة فقط: تبقى سجلاتك متاحة للاطلاع، لكن المبيعات الجديدة والتعديلات متوقفة إلى أن يبدأ اشتراك. لا توجد فترة سماح للفترات التجريبية المجانية.\n\nلبدء اشتراك، سجّل الدخول على {link}.',
+    },
+  ),
+  'subscription.paid_reminder': subscriptionEmail(
+    ['business', 'remaining', 'ends'],
+    {
+      en: 'Your Dukan ERP subscription ends in {remaining}',
+      fr: 'Votre abonnement Dukan ERP se termine dans {remaining}',
+      ar: 'ينتهي اشتراكك في Dukan ERP خلال {remaining}',
+    },
+    {
+      en: `The Dukan ERP subscription of {business} ends in {remaining}, on {ends}.\n\n${RENEW.en}`,
+      fr: `L’abonnement Dukan ERP de {business} se termine dans {remaining}, le {ends}.\n\n${RENEW.fr}`,
+      ar: `ينتهي اشتراك {business} في Dukan ERP خلال {remaining}، في {ends}.\n\n${RENEW.ar}`,
+    },
+  ),
+  'subscription.grace_started': subscriptionEmail(
+    ['business', 'ended', 'graceEnds', 'usesLeft'],
+    {
+      en: 'Your Dukan ERP subscription has ended: 72 hours of grace',
+      fr: 'Votre abonnement Dukan ERP est terminé : 72 heures de grâce',
+      ar: 'انتهى اشتراكك في Dukan ERP: فترة سماح مدتها 72 ساعة',
+    },
+    {
+      en: `The Dukan ERP subscription of {business} ended on {ended}.\n\nA 72-hour grace period has started: the app keeps working until {graceEnds}. After that it becomes read-only until the subscription is renewed.\n\nA business can receive 3 grace periods in any 12 months. Grace periods left after this one: {usesLeft}.\n\n${RENEW.en}`,
+      fr: `L’abonnement Dukan ERP de {business} s’est terminé le {ended}.\n\nUne période de grâce de 72 heures a commencé : l’application continue de fonctionner jusqu’au {graceEnds}. Ensuite, elle passera en lecture seule jusqu’au renouvellement de l’abonnement.\n\nUn commerce peut bénéficier de 3 périodes de grâce sur 12 mois glissants. Périodes de grâce restantes après celle-ci : {usesLeft}.\n\n${RENEW.fr}`,
+      ar: `انتهى اشتراك {business} في Dukan ERP في {ended}.\n\nبدأت فترة سماح مدتها 72 ساعة: يستمر التطبيق في العمل حتى {graceEnds}، ثم يصبح للقراءة فقط إلى أن يُجدَّد الاشتراك.\n\nيحق لكل متجر 3 فترات سماح خلال أي 12 شهرًا. فترات السماح المتبقية بعد هذه الفترة: {usesLeft}.\n\n${RENEW.ar}`,
+    },
+  ),
+  'subscription.no_grace': subscriptionEmail(
+    ['business', 'ended'],
+    {
+      en: 'Your Dukan ERP subscription has ended',
+      fr: 'Votre abonnement Dukan ERP est terminé',
+      ar: 'انتهى اشتراكك في Dukan ERP',
+    },
+    {
+      en: `The Dukan ERP subscription of {business} ended on {ended}.\n\nThere is no grace period this time: this business has already used its 3 grace periods of the last 12 months. ${READ_ONLY.en}\n\n${RENEW.en}`,
+      fr: `L’abonnement Dukan ERP de {business} s’est terminé le {ended}.\n\nIl n’y a pas de période de grâce cette fois : ce commerce a déjà utilisé ses 3 périodes de grâce des 12 derniers mois. ${READ_ONLY.fr}\n\n${RENEW.fr}`,
+      ar: `انتهى اشتراك {business} في Dukan ERP في {ended}.\n\nلا توجد فترة سماح هذه المرة: استخدم هذا المتجر فترات السماح الثلاث المتاحة له خلال آخر 12 شهرًا. ${READ_ONLY.ar}\n\n${RENEW.ar}`,
+    },
+  ),
+  'subscription.grace_reminder': subscriptionEmail(
+    ['business', 'remaining', 'graceEnds'],
+    {
+      en: 'Your Dukan ERP grace period ends in {remaining}',
+      fr: 'Votre période de grâce Dukan ERP se termine dans {remaining}',
+      ar: 'تنتهي فترة السماح في Dukan ERP خلال {remaining}',
+    },
+    {
+      en: `The grace period of {business} on Dukan ERP ends in {remaining}, on {graceEnds}. After that the app becomes read-only until the subscription is renewed.\n\n${RENEW.en}`,
+      fr: `La période de grâce de {business} sur Dukan ERP se termine dans {remaining}, le {graceEnds}. Ensuite, l’application passera en lecture seule jusqu’au renouvellement de l’abonnement.\n\n${RENEW.fr}`,
+      ar: `تنتهي فترة السماح لـ{business} في Dukan ERP خلال {remaining}، في {graceEnds}، ثم يصبح التطبيق للقراءة فقط إلى أن يُجدَّد الاشتراك.\n\n${RENEW.ar}`,
+    },
+  ),
+  'subscription.grace_ended': subscriptionEmail(
+    ['business', 'ended'],
+    {
+      en: 'Your Dukan ERP grace period has ended',
+      fr: 'Votre période de grâce Dukan ERP est terminée',
+      ar: 'انتهت فترة السماح في Dukan ERP',
+    },
+    {
+      en: `The grace period of {business} on Dukan ERP ended on {ended}.\n\n${READ_ONLY.en}\n\n${RENEW.en}`,
+      fr: `La période de grâce de {business} sur Dukan ERP s’est terminée le {ended}.\n\n${READ_ONLY.fr}\n\n${RENEW.fr}`,
+      ar: `انتهت فترة السماح لـ{business} في Dukan ERP في {ended}.\n\n${READ_ONLY.ar}\n\n${RENEW.ar}`,
+    },
+  ),
+};
+
 /** Text a person reviewed. `{name}` placeholders only; nothing else is interpolated. */
 export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
   'contact.verification': {
@@ -128,29 +292,7 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
       ar: '{what} على حسابك في Dukan ERP بتاريخ {when}. إن لم تكن أنت، فغيّر كلمة مرورك وتواصل مع مالك متجرك.',
     },
   },
-  /*
-   * The free trial's setup instructions (0095; docs/76): sent once the Owner's required contacts are verified, and
-   * again only when the Owner, signed in on the website, asks. `{link}` is the website's page with the one-time setup
-   * token in its fragment: it opens a page and starts nothing — the trial starts only on the Owner's explicit
-   * confirmation there, and an Owner who signs in without the link sees the same offer. No price, no amount, no
-   * payment instruction: the one sentence about money says that none is required.
-   */
-  'trial.setup': {
-    sender: 'notifications',
-    essential: false,
-    variables: ['business', 'link'],
-    wired: true,
-    subject: {
-      en: 'Your Dukan ERP free trial is ready to start',
-      fr: 'Votre essai gratuit Dukan ERP est prêt à démarrer',
-      ar: 'فترتك التجريبية المجانية في Dukan ERP جاهزة للبدء',
-    },
-    body: {
-      en: '{business} is eligible for a 7-day free trial of Dukan ERP. Your trial has not started.\n\nTo start it, open this link, sign in, and confirm "Start my 7-day free trial" on the Dukan ERP website:\n{link}\n\nThe trial lasts 7 days from the moment you confirm it. No payment is required. The link expires in 24 hours and works for your account only; after it expires, sign in on the Dukan ERP website to start your trial or to get a new link. If you did not create this account, ignore this email.\n\nNeed help? Contact Dukan ERP support.\n\nDukan ERP is developed and operated by TSX-MR.',
-      fr: '{business} peut bénéficier d’un essai gratuit de 7 jours de Dukan ERP. Votre essai n’a pas commencé.\n\nPour le démarrer, ouvrez ce lien, connectez-vous et confirmez « Démarrer mon essai gratuit de 7 jours » sur le site Dukan ERP :\n{link}\n\nL’essai dure 7 jours à partir de votre confirmation. Aucun paiement n’est demandé. Le lien expire dans 24 heures et ne fonctionne que pour votre compte ; ensuite, connectez-vous sur le site Dukan ERP pour démarrer votre essai ou recevoir un nouveau lien. Si vous n’avez pas créé ce compte, ignorez cet e-mail.\n\nBesoin d’aide ? Contactez l’assistance Dukan ERP.\n\nDukan ERP est développé et exploité par TSX-MR.',
-      ar: '{business} مؤهل لفترة تجريبية مجانية من Dukan ERP مدتها 7 أيام. لم تبدأ فترتك التجريبية بعد.\n\nلبدئها، افتح هذا الرابط وسجّل الدخول ثم أكّد «ابدأ فترتي التجريبية المجانية لمدة 7 أيام» على موقع Dukan ERP:\n{link}\n\nتستمر الفترة التجريبية 7 أيام من لحظة تأكيدك. لا يلزم أي دفع. تنتهي صلاحية الرابط خلال 24 ساعة ويعمل لحسابك فقط، وبعد ذلك سجّل الدخول على موقع Dukan ERP لبدء فترتك التجريبية أو للحصول على رابط جديد. إن لم تُنشئ هذا الحساب، فتجاهل هذه الرسالة.\n\nهل تحتاج إلى مساعدة؟ تواصل مع دعم Dukan ERP.\n\nتطوّر TSX-MR منصة Dukan ERP وتشغّلها.',
-    },
-  },
+  ...SUBSCRIPTION_EMAILS,
   /*
    * The operator's delivery proof (D200, docs/100 §7): sent by `scripts/email-prove.ts` only, one message per run, to
    * the one test address the operator holds. It carries nothing a person could act on or misuse: no code, no link, no

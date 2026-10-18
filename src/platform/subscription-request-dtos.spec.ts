@@ -73,6 +73,7 @@ describe('registering, by the shop or by the platform', () => {
     businessName: 'Boutique Aicha',
     branchName: 'Main',
     email: 'aicha@example.test',
+    phone: '+22236000001',
     password: 'password-1',
     language: 'en',
   };

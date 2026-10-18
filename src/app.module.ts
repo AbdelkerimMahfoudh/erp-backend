@@ -35,6 +35,7 @@ import { CatalogModule } from './catalog/catalog.module';
 import { CategoriesModule } from './categories/categories.module';
 import { SettingsModule } from './settings/settings.module';
 import { MessagingModule } from './messaging/messaging.module';
+import { NoticesModule } from './notices/notices.module';
 import { ScannerModule } from './scanner/scanner.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { CorrectionsModule } from './corrections/corrections.module';
@@ -148,6 +149,8 @@ import { AgentModule } from './agent/agent.module';
     LoansModule,
     SettingsModule,
     MessagingModule,
+    // The subscription messages and the grace decisions' clock (0099).
+    NoticesModule,
     AccountModule,
   ],
   providers: [

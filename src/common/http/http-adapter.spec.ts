@@ -42,7 +42,7 @@ describe('routes match their letter case exactly (C13)', () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [TrialController, TrialSetupController, AppRegistrationController, NeutralController],
       providers: [
-        { provide: TrialService, useValue: { status: record('status'), checkLink: record('link'), claim: record('claim') } },
+        { provide: TrialService, useValue: { status: record('status'), claim: record('claim') } },
         { provide: TrialSetupService, useValue: { resend: record('resend'), appStatus: record('app-status') } },
         { provide: RegistrationFlowService, useValue: { register: record('register') } },
         { provide: TenantContext, useValue: { companyId: () => Buffer.alloc(16, 1), requireUserId: () => Buffer.alloc(16, 2) } },
@@ -74,13 +74,13 @@ describe('routes match their letter case exactly (C13)', () => {
     businessName: 'Boutique Aicha',
     branchName: 'Main',
     email: 'aicha@example.test',
+    phone: '+22236000001',
     password: 'password-1',
     language: 'en',
   };
 
   it.each([
     ['the claim', 'post', '/api/v1/platform/my-subscription/trial/claim', claim, 'claim'],
-    ['the link check', 'post', '/api/v1/platform/my-subscription/trial/link', { token: 'x'.repeat(43) }, 'link'],
     ['the resend', 'post', '/api/v1/platform/my-subscription/trial/setup/resend', {}, 'resend'],
     ['the website’s trial card', 'get', '/api/v1/platform/my-subscription/trial', undefined, 'status'],
     ['the app’s status', 'get', '/api/v1/account/trial-setup', undefined, 'app-status'],

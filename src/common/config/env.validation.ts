@@ -95,7 +95,14 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_TEMPLATE_DELIVERY_CHECK: Joi.string().allow('').default(''),
   // The free trial's setup instructions (0095; docs/76): a utility template with a URL button. Optional — production
   // does not require it; while it is empty WhatsApp simply cannot carry these instructions, and says so.
-  WHATSAPP_TEMPLATE_TRIAL_SETUP: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_TRIAL_REMINDER: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_TRIAL_EXPIRED: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_PAID_REMINDER: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_GRACE_STARTED: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_NO_GRACE: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_GRACE_REMINDER: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_GRACE_ENDED: Joi.string().allow('').default(''),
 
   // ── Email (correction phase, 2026-10-12; messaging/email-channel.ts) ─────
   // "disabled" is the default. "development-log" is refused in production. "resend" needs a key and a sender on a
@@ -132,12 +139,13 @@ export const envValidationSchema = Joi.object({
   RESEND_API_BASE_URL: Joi.string().uri({ scheme: ['https', 'http'] }).default('https://api.resend.com'),
   EMAIL_SEND_TIMEOUT_MS: Joi.number().integer().min(1000).max(60_000).default(10_000),
 
-  // ── The free trial's setup links (0095; docs/76) ──────────────────────────
-  // The Dukan ERP website's origin (e.g. https://dukan.tsx-mr.com), used ONLY to build the links the setup
-  // instructions carry. Never compared with a request: an Origin or Referer header is whatever a client says, and no
-  // check rests on one. Empty: no link can be built. Production refuses anything but an https:// origin with no path
-  // (production-guard.ts).
-  PUBLIC_SITE_ORIGIN: Joi.string().allow('').default(''),
+  // ── The Dukan ERP portal (0099; docs/101) ──────────────────────────────────
+  // The authenticated portal's origin (https://dukan.tsxmr.com in production), used ONLY to write the one address the
+  // portal instructions and the subscription messages carry: <origin>/subscription — generic, with no token and no
+  // identifier in it. Never compared with a request: an Origin or Referer header is whatever a client says, and no
+  // check rests on one. Empty: no portal message can be sent, and the status says so. Production refuses anything but
+  // an https:// origin with no path, and APP_ENV=production anything but https://dukan.tsxmr.com (production-guard.ts).
+  PORTAL_ORIGIN: Joi.string().allow('').default(''),
 
   // File upload foundation.
   UPLOAD_MAX_BYTES: Joi.number().integer().min(1).default(10 * 1024 * 1024),

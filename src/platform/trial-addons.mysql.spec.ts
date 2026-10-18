@@ -74,7 +74,7 @@ function servicesAt(clock: TestClock, client: PrismaClient = app) {
   const entitlement = new EntitlementService(db, {} as never, clock);
   const trialEnd = new TrialEndRoll(db, clock);
   const sweeper = new TrialEndSweeper(db, clock);
-  const trial = new TrialService(db, entitlement, audit, { otpPepper: 'mysql-spec-pepper-at-least-32-characters' } as never, {} as never, clock);
+  const trial = new TrialService(db, entitlement, audit, {} as never, clock);
   const renewal = new SubscriptionRenewal(db, billing, clock);
   return { audit, billing, seats, lifecycle, activation, entitlement, trialEnd, sweeper, trial, renewal, clock };
 }

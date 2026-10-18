@@ -75,7 +75,7 @@ describe('C7: a whole free trial, and not one instant in its notes', () => {
     );
     expectNoInstant(notes);
     const said = (kind: string) => notes.filter((n) => n.kind === kind).map((n) => n.note);
-    expect(said('trial_claimed')).toEqual(['Free trial claimed on the website by the Owner: 7 days from the claim. Nothing was charged.']);
+    expect(said('trial_claimed')).toEqual(['Free trial claimed on the Dukan ERP portal by the Owner: 7 days from the claim. Nothing was charged.']);
     expect(said('approved')).toEqual(['Paid by transfer Paid access starts when the free trial ends.']);
     expect(said('renewed')).toEqual(["First billing period opens when the free trial ends, at today's size and the prices in force then."]);
     expect(said('seat_paid')).toEqual([

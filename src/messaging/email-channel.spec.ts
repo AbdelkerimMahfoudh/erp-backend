@@ -1,4 +1,5 @@
-import { composeEmail, createEmailChannel, maskEmail, ResendEmailChannel, type ResendConfig } from './email-channel';
+import { composeEmail, createEmailChannel, maskEmail, ResendEmailChannel, type ResendConfig, type SubscriptionEmailKey } from './email-channel';
+import { SUBSCRIPTION_TEMPLATES } from './templates';
 
 /**
  * The email boundary (correction phase, 2026-10-12): approved text only, every failure classified, nothing
@@ -76,61 +77,99 @@ describe('choosing the channel', () => {
   });
 });
 
-describe('the free trial’s setup instructions (0095; docs/76)', () => {
-  const link = 'https://dukan.example.com/account/trial#t=Zp3k9QeR7xVb2LmN8sTq4WyH6jUc1AfD0gKoEiPrS5v';
-  const setup = (language: 'en' | 'fr' | 'ar') => {
-    // The text alternative; the HTML one is proven in smtp-email.spec.ts.
-    const { subject, text } = composeEmail({ template: 'trial.setup', language, variables: { business: 'Boutique Aicha', link } });
-    return { subject, text };
+describe('the portal instructions and the subscription messages (0099; docs/101 §7)', () => {
+  const link = 'https://dukan.tsxmr.com/subscription';
+  const LANGUAGES = ['en', 'fr', 'ar'] as const;
+  const sample: Record<string, string> = {
+    business: 'Boutique Aicha',
+    remaining: '3 days',
+    ends: '21 October 2026, 14:00 (Greenwich Mean Time)',
+    ended: '21 October 2026, 14:00 (Greenwich Mean Time)',
+    graceEnds: '24 October 2026, 14:00 (Greenwich Mean Time)',
+    usesLeft: '2',
+  };
+  const keys = SUBSCRIPTION_TEMPLATES.map((t) => t.key as SubscriptionEmailKey);
+  const compose = (template: SubscriptionEmailKey, language: (typeof LANGUAGES)[number]) => {
+    const t = SUBSCRIPTION_TEMPLATES.find((x) => x.key === template)!;
+    return composeEmail({ template, language, variables: { ...Object.fromEntries(t.variables.map((v) => [v, sample[v]])), link } });
   };
 
-  it('composes the approved text in each language: eligible, not started, the link, 24 hours, 7 days from confirming', () => {
-    expect(setup('en')).toEqual({
-      subject: 'Your Dukan ERP free trial is ready to start',
+  it('exists for every WhatsApp template, takes its variables and the portal’s address, and says who runs Dukan ERP', () => {
+    expect(keys).toHaveLength(8);
+    for (const key of keys) {
+      for (const language of LANGUAGES) {
+        const { subject, text, html } = compose(key, language);
+        expect({ key, language, links: text.split(link).length - 1, business: text.includes('Boutique Aicha') }).toEqual({ key, language, links: 1, business: true });
+        expect(subject).not.toContain('{');
+        expect(text).not.toMatch(/\{\w+\}/);
+        expect(text).toMatch(/TSX-MR/);
+        expect(html).toContain(`href="${link}"`);
+      }
+    }
+  });
+
+  it('pins the approved English instructions: eligible, not started, sign in on the portal, starts on confirming, exactly 7 days, no pause, no restart', () => {
+    expect(compose('portal.instructions', 'en')).toMatchObject({
+      subject: 'Start your Dukan ERP free trial',
       text:
-        'Boutique Aicha is eligible for a 7-day free trial of Dukan ERP. Your trial has not started.\n\n' +
-        'To start it, open this link, sign in, and confirm "Start my 7-day free trial" on the Dukan ERP website:\n' +
-        `${link}\n\n` +
-        'The trial lasts 7 days from the moment you confirm it. No payment is required. The link expires in 24 hours and ' +
-        'works for your account only; after it expires, sign in on the Dukan ERP website to start your trial or to get a ' +
-        'new link. If you did not create this account, ignore this email.\n\n' +
+        'Boutique Aicha can start one 7-day free trial of Dukan ERP. It has not started yet.\n\n' +
+        `To start it, go to ${link}, sign in with the same details you use in the Dukan ERP app, and confirm.\n\n` +
+        'The trial starts as soon as you confirm and lasts exactly 7 days (168 hours). It cannot be paused or restarted. ' +
+        'No payment is required. If you did not create this account, ignore this email.\n\n' +
         'Need help? Contact Dukan ERP support.\n\n' +
         'Dukan ERP is developed and operated by TSX-MR.',
     });
-    expect(setup('fr').subject).toBe('Votre essai gratuit Dukan ERP est prêt à démarrer');
-    expect(setup('fr').text).toContain('« Démarrer mon essai gratuit de 7 jours »');
-    expect(setup('fr').text).toContain('connectez-vous sur le site Dukan ERP pour démarrer votre essai ou recevoir un nouveau lien');
-    expect(setup('ar').subject).toBe('فترتك التجريبية المجانية في Dukan ERP جاهزة للبدء');
-    expect(setup('ar').text).toContain('«ابدأ فترتي التجريبية المجانية لمدة 7 أيام»');
-    for (const language of ['en', 'fr', 'ar'] as const) {
-      const { text } = setup(language);
-      expect(text.startsWith('Boutique Aicha ')).toBe(true);
-      // The link once, on a line of its own, exactly as given.
-      expect(text.split(link)).toHaveLength(2);
-      expect(text).toContain(`\n${link}\n`);
-      expect(text).toMatch(/TSX-MR/);
-    }
+    expect(compose('portal.instructions', 'fr').text).toContain('dure exactement 7 jours (168 heures). Il ne peut être ni mis en pause ni redémarré.');
+    expect(compose('portal.instructions', 'ar').text).toContain('تستمر 7 أيام بالضبط (168 ساعة)، ولا يمكن إيقافها مؤقتًا أو إعادة بدئها');
   });
 
-  it('names no price, no amount and no way to pay: the one sentence about money says none is required', () => {
+  it('names no price, no amount and no way to pay — the instructions’ one sentence about money says none is required', () => {
     const negation = { en: 'No payment is required.', fr: 'Aucun paiement n’est demandé.', ar: 'لا يلزم أي دفع.' };
-    for (const language of ['en', 'fr', 'ar'] as const) {
-      const { subject, text } = setup(language);
-      const words = `${subject}\n${text.replace(link, '')}`;
-      expect({ language, negation: words.includes(negation[language]) }).toEqual({ language, negation: true });
-      const rest = words.replace(negation[language], '');
-      expect({ language, money: rest.match(/pay|paie|payer|دفع|سداد|price|prix|tarif|سعر|MRU|\bUM\b|ouguiya|أوقية|bankily|masrivi|sedad|virement|transfer|تحويل/gi) }).toEqual({
-        language,
-        money: null,
-      });
-      // The only numbers are the trial's 7 days and the link's 24 hours — no amount.
-      expect({ language, numbers: [...new Set(rest.match(/\d+/g))].sort() }).toEqual({ language, numbers: ['24', '7'] });
+    for (const key of keys) {
+      for (const language of LANGUAGES) {
+        // Placeholder-like values, so the words left are the template's own.
+        const t = SUBSCRIPTION_TEMPLATES.find((x) => x.key === key)!;
+        const { subject, text } = composeEmail({ template: key, language, variables: { ...Object.fromEntries(t.variables.map((v) => [v, `<${v}>`])), link } });
+        let words = `${subject}\n${text}`.replace(link, '');
+        for (const v of t.variables) words = words.split(`<${v}>`).join('');
+        if (key === 'portal.instructions') {
+          expect(words.includes(negation[language])).toBe(true);
+          words = words.replace(negation[language], '');
+        }
+        expect({ key, language, money: words.match(/\bpay|paie|payer|دفع|سداد|price|prix|tarif|سعر|MRU|\bUM\b|ouguiya|أوقية|bankily|masrivi|sedad|virement|transfer|تحويل/gi) }).toEqual({ key, language, money: null });
+        // The only numbers are the rules' own: 7 days, 168 hours, 72 hours, 3 grace periods in 12 months.
+        expect({ key, language, other: [...new Set(words.match(/\d+/g) ?? [])].filter((n) => !['7', '168', '72', '3', '12'].includes(n)) }).toEqual({ key, language, other: [] });
+      }
     }
   });
 
-  it('is wired, and refuses anything but its business and its link', () => {
-    expect(() => composeEmail({ template: 'trial.setup', language: 'en', variables: { business: 'B' } })).toThrow(/needs exactly: business, link/);
-    expect(() => composeEmail({ template: 'trial.setup', language: 'en', variables: { business: 'B', link, token: 't' } })).toThrow(/needs exactly/);
-    expect(() => composeEmail({ template: 'trial.setup', language: 'en', variables: { business: 'B', link: ' ' } })).toThrow(/needs exactly/);
+  it('never suggests grace for a free trial: its messages mention grace only to say there is none', () => {
+    const none = { en: 'Free trials have no grace period', fr: 'Les essais gratuits n’ont pas de période de grâce', ar: 'لا توجد فترة سماح للفترات التجريبية المجانية' };
+    for (const key of ['portal.instructions', 'subscription.trial_reminder', 'subscription.trial_expired'] as const) {
+      for (const language of LANGUAGES) {
+        const { subject, text } = compose(key, language);
+        if (key !== 'portal.instructions') expect(text).toContain(none[language]);
+        expect({ key, language, grace: `${subject}\n${text}`.replace(none[language], '').match(/grace|grâce|سماح/gi) }).toEqual({ key, language, grace: null });
+      }
+    }
+  });
+
+  it('tells a paid expiry with grace from one without: the exact end and the uses left, or the allowance used', () => {
+    for (const language of LANGUAGES) {
+      const started = compose('subscription.grace_started', language).text;
+      expect(started).toContain(sample.graceEnds);
+      expect(started).toMatch(/: 2\./);
+      expect(started).toContain('72');
+      const none = compose('subscription.no_grace', language).text;
+      expect(none).not.toContain(sample.graceEnds);
+      expect(none).toMatch(/12/);
+    }
+    expect(compose('subscription.no_grace', 'en').text).toContain('There is no grace period this time: this business has already used its 3 grace periods of the last 12 months.');
+  });
+
+  it('refuses anything but the template’s own variables and the link', () => {
+    expect(() => composeEmail({ template: 'portal.instructions', language: 'en', variables: { business: 'B' } })).toThrow(/needs exactly: business, link/);
+    expect(() => composeEmail({ template: 'portal.instructions', language: 'en', variables: { business: 'B', link, token: 't' } })).toThrow(/needs exactly/);
+    expect(() => composeEmail({ template: 'subscription.no_grace', language: 'en', variables: { business: 'B', ended: ' ', link } })).toThrow(/needs exactly/);
   });
 });

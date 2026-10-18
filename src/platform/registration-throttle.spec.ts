@@ -32,6 +32,7 @@ const BODY = {
     businessName: 'Boutique Aicha',
     branchName: 'Main',
     email: `aicha${i}@example.test`,
+    phone: `+222360000${String(i).padStart(2, '0')}`,
     password: 'password-1',
     language: 'en',
   }),

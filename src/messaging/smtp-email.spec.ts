@@ -47,11 +47,11 @@ const smtpError = (code: string, responseCode?: number) =>
   Object.assign(new Error(`Invalid login: 535 Authentication failed for ${cfg.username} with ${PASSWORD}`), { code, responseCode });
 
 const verification: EmailMessage = { to: 'owner@shop.mr', template: 'contact.verification', language: 'en', variables: { code: '482913', ttlMinutes: '10' }, idempotencyKey: 'key-1' };
-const trial: EmailMessage = {
+const instructions: EmailMessage = {
   to: 'owner@shop.mr',
-  template: 'trial.setup',
+  template: 'portal.instructions',
   language: 'ar',
-  variables: { business: 'Boutique <Aicha> & "Fils"', link: 'https://dukan.tsxmr.com/account/trial#t=Zp3k9QeR7xVb' },
+  variables: { business: 'Boutique <Aicha> & "Fils"', link: 'https://dukan.tsxmr.com/subscription' },
   idempotencyKey: 'key-2',
 };
 
@@ -86,8 +86,8 @@ describe('the sender', () => {
   it('follows the message class, and falls back to EMAIL_FROM', () => {
     expect(senderFor('contact.verification', senders)).toBe('Dukan ERP <verification@tsxmr.com>');
     expect(senderFor('password.recovery', senders)).toBe('Dukan ERP <verification@tsxmr.com>');
-    expect(senderFor('trial.setup', senders)).toBe('Dukan ERP <notifications@tsxmr.com>');
-    expect(senderFor('trial.setup', { ...senders, notifications: '' })).toBe('Dukan ERP <no-reply@tsxmr.com>');
+    expect(senderFor('portal.instructions', senders)).toBe('Dukan ERP <notifications@tsxmr.com>');
+    expect(senderFor('subscription.grace_started', { ...senders, notifications: '' })).toBe('Dukan ERP <no-reply@tsxmr.com>');
   });
 });
 
@@ -145,15 +145,15 @@ describe('sending', () => {
 
 describe('the HTML alternative', () => {
   it('escapes every variable, lays Arabic out right to left, and carries no image, script, pixel or remote resource', () => {
-    const { html, text } = composeEmail(trial);
+    const { html, text } = composeEmail(instructions);
     expect(html).toMatch(/^<!doctype html><html lang="ar" dir="rtl">/);
     expect(html).toContain('text-align:right');
     expect(html).toContain('Boutique &lt;Aicha&gt; &amp; &quot;Fils&quot;');
     expect(html).not.toContain('<Aicha>');
     expect(html).not.toMatch(/<img|<script|<link|<iframe|url\(|src=/i);
-    // The only link is the setup link itself, shown as it is followed.
+    // The only link is the portal's address itself, shown as it is followed.
     expect(html.match(/<a /g)).toHaveLength(1);
-    expect(html).toContain('href="https://dukan.tsxmr.com/account/trial#t=Zp3k9QeR7xVb"');
+    expect(html).toContain('href="https://dukan.tsxmr.com/subscription"');
     expect(text).toContain('Boutique <Aicha> & "Fils"');
   });
 
@@ -199,10 +199,10 @@ describe('the email record', () => {
   it('records one row per message: class, sender, outcome — never the body, the code, the link or the address', async () => {
     const { db, channel } = logged();
     await channel.send(verification);
-    await channel.send(trial);
+    await channel.send(instructions);
     expect(db.emailMessage.rows).toEqual([
       expect.objectContaining({ template: 'contact.verification', category: 'verification', essential: true, sender: senders.verification, status: 'accepted', attempts: 1, recipientMasked: 'o***@shop.mr', recipientHash: recipientHash('owner@shop.mr', KEY) }),
-      expect.objectContaining({ template: 'trial.setup', category: 'notifications', essential: false, sender: senders.notifications, status: 'accepted' }),
+      expect.objectContaining({ template: 'portal.instructions', category: 'notifications', essential: false, sender: senders.notifications, status: 'accepted' }),
     ]);
     const stored = JSON.stringify(db.emailMessage.rows);
     expect(stored).not.toMatch(/482913|owner@shop\.mr|Zp3k9QeR7xVb|Aicha/);
@@ -210,9 +210,9 @@ describe('the email record', () => {
 
   it('refuses honestly once the internal limit is reached, keeping the reserve for codes', async () => {
     const { db, mails, channel } = logged({ dailyLimit: 2, dailyReserve: 1, recipientDailyLimit: 20 });
-    expect((await channel.send(trial)).status).toBe('accepted');
+    expect((await channel.send(instructions)).status).toBe('accepted');
     // One sent; the second non-essential message would eat the reserve.
-    expect(await channel.send({ ...trial, idempotencyKey: 'key-3' })).toMatchObject({ status: 'failed', reason: 'rejected', detail: expect.stringMatching(/kept for codes/) });
+    expect(await channel.send({ ...instructions, idempotencyKey: 'key-3' })).toMatchObject({ status: 'failed', reason: 'rejected', detail: expect.stringMatching(/kept for codes/) });
     expect((await channel.send(verification)).status).toBe('accepted');
     expect(await channel.send({ ...verification, idempotencyKey: 'key-4' })).toMatchObject({ status: 'failed', detail: 'Internal daily safety limit reached' });
     expect(mails).toHaveLength(2);

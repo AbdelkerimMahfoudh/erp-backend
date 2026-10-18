@@ -125,8 +125,6 @@ function makeService(opts: {
           .map((c: any) => ({ id: c.id, name: `Shop ${c.publicStoreId}` })),
       ),
     },
-    // The free trial's setup links (0095): retired by signing out everywhere.
-    trialSetupLink: { updateMany: jest.fn(async () => ({ count: 1 })) },
 
   };
 
@@ -402,18 +400,4 @@ describe('repeated invalid device claims cannot grow the device table', () => {
   });
 });
 
-describe('signing out everywhere (0095)', () => {
-  it('retires every free trial setup link still usable — before the sessions, so a failure leaves them to retry', async () => {
-    const { service, prisma, sessions } = makeService({});
-    const userId = newUuidV7Bin();
-    const order: string[] = [];
-    prisma.trialSetupLink.updateMany.mockImplementation(async () => (order.push('links'), { count: 1 }));
-    sessions.revokeAll.mockImplementation(async () => (order.push('sessions'), 2));
 
-    await expect(service.logoutAll(userId)).resolves.toEqual({ revoked: 2 });
-    expect(order).toEqual(['links', 'sessions']);
-    const [args] = prisma.trialSetupLink.updateMany.mock.calls[0] as unknown as [{ where: any; data: any }];
-    expect(args.where).toEqual({ userId, consumedAt: null, revokedAt: null });
-    expect(args.data).toEqual({ revokedAt: expect.any(Date), revokedReason: 'signed_out_everywhere' });
-  });
-});

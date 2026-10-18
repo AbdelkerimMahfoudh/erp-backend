@@ -5,8 +5,7 @@ import {
 } from './registration-continuation.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
 import { hashIntentToken } from '../auth/otp/otp-code.util';
-import { HangingEmailChannel, TIMERS_ONLY, makeTrialWorld } from './__testing__/trial-world';
-import { SETUP_DELIVERY_WAIT_MS } from './trial/trial-setup-rules';
+import { HangingWhatsAppChannel, makeTrialWorld } from './__testing__/trial-world';
 import type { TrialSetupService } from './trial/trial-setup.service';
 
 /**
@@ -233,35 +232,33 @@ describe('a registration is finished by proving THIS attempt, not an address', (
     expect(w.trialSetup.onContactsVerified).toHaveBeenCalledWith(owner.companyId, owner.id);
   });
 
-  it('answers with the Owner’s session within SETUP_DELIVERY_WAIT_MS while the provider hangs — the instructions follow (C14)', async () => {
-    jest.useFakeTimers(TIMERS_ONLY);
-    try {
-      const email = new HangingEmailChannel();
-      const trial = makeTrialWorld({ email });
-      const shop = trial.business({ contacts: 'email' });
-      const w = makeWorld(trial.setup);
-      const owner = w.addOwner({ companyId: shop.companyId, id: shop.ownerId });
-      const { token, code } = await upToCode(w, owner);
+  it('answers with the Owner’s session at once while the provider hangs — the portal instructions follow (C14)', async () => {
+    const whatsapp = new HangingWhatsAppChannel();
+    const trial = makeTrialWorld({ whatsapp });
+    const shop = trial.business();
+    const w = makeWorld(trial.setup);
+    const owner = w.addOwner({ companyId: shop.companyId, id: shop.ownerId, email: null, phone: shop.phone });
+    const { token, code } = await upToCode(w, owner);
 
-      const done = w.service.complete(token, code);
-      let answered = false;
-      void done.then(() => (answered = true));
-      await email.called;
-      await jest.advanceTimersByTimeAsync(SETUP_DELIVERY_WAIT_MS - 1);
-      expect(answered).toBe(false);
-      await jest.advanceTimersByTimeAsync(1);
-      // The session, the very one the transaction created — not "wrong code" after a client's timeout.
-      await expect(done).resolves.toMatchObject({ ok: true, accessToken: 'access.token' });
-      expect(w.sessions).toHaveLength(1);
-      expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
+    // The session, the very one the transaction created — never held for a provider.
+    await expect(w.service.complete(token, code)).resolves.toMatchObject({ ok: true, accessToken: 'access.token' });
+    expect(w.sessions).toHaveLength(1);
+    await whatsapp.called;
+    expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
 
-      email.answer();
-      await trial.setup.idle();
-      expect(trial.messages(shop)).toEqual([expect.objectContaining({ trigger: 'verified', emailOutcome: 'accepted' })]);
-      expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sent' });
-    } finally {
-      jest.useRealTimers();
-    }
+    whatsapp.answer();
+    await trial.notices.deliverNow();
+    expect(trial.noticesOf(shop)).toEqual([expect.objectContaining({ threshold: 'auto', state: 'accepted', channel: 'whatsapp' })]);
+    expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sent' });
+  });
+
+  it('an Owner who gave a number and an email proves the number: the code goes there, and it is what is marked proved (0099)', async () => {
+    const w = makeWorld();
+    const owner = w.addOwner({ email: 'owner@example.invalid', phone: '+22236000001' });
+    const { token, code } = await upToCode(w, owner);
+    expect(w.verification.start).toHaveBeenCalledWith('+22236000001', 'en');
+    expect((await w.service.complete(token, code)).ok).toBe(true);
+    expect(w.users.get(owner.id.toString('hex'))).toMatchObject({ emailVerifiedAt: null, phoneVerifiedAt: expect.any(Date) });
   });
 
   it('marks the contact proved on the Owner, which is what stops a second continuation', async () => {

@@ -389,14 +389,16 @@ export class RegistrationService {
     // Already finished: nothing left to continue.
     if (owner.emailVerifiedAt || owner.phoneVerifiedAt) return null;
 
-    const destination = owner.email ?? owner.phone;
+    // The WhatsApp number first (0099): the registration verifies it. An email-only Owner registered before it was
+    // mandatory still finishes with the address.
+    const destination = owner.phone ?? owner.email;
     if (!destination) return null;
 
     return {
       companyId: owner.companyId,
       userId: owner.id,
       destinationMasked: maskDestination(destination),
-      channel: owner.email ? 'email' : 'phone',
+      channel: owner.phone ? 'phone' : 'email',
     };
   }
 

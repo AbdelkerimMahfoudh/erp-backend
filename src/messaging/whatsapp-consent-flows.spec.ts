@@ -83,10 +83,10 @@ describe('Owner registration', () => {
     expect(registered).toEqual([]);
   });
 
-  it('an email-only registration needs no WhatsApp consent', async () => {
+  it('a registration without a WhatsApp number is refused before any consent is asked about (0099): the number is mandatory', async () => {
     const { flow, registered } = registration();
-    await flow.register({ ...ATTEMPT, phone: undefined, email: 'aicha@shop.mr' } as never);
-    expect(registered).toHaveLength(1);
+    await expect(flow.register({ ...ATTEMPT, phone: undefined, email: 'aicha@shop.mr' } as never)).rejects.toThrow(/WhatsApp number/);
+    expect(registered).toEqual([]);
   });
 });
 

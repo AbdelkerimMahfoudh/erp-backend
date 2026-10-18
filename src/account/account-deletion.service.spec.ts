@@ -7,8 +7,7 @@ import { AccountDeletionService, DeletionPrincipal, NOT_REMOVED, REDACTED_DESTIN
 import { AccountService } from './account.service';
 import { FakePrisma } from './testing/fake-prisma';
 import { DELETED_USER_NAME, UNUSABLE_PASSWORD_HASH } from './deletion-rules';
-import { HangingEmailChannel, TIMERS_ONLY, makeTrialWorld } from '../platform/__testing__/trial-world';
-import { SETUP_DELIVERY_WAIT_MS } from '../platform/trial/trial-setup-rules';
+import { HangingWhatsAppChannel, makeTrialWorld } from '../platform/__testing__/trial-world';
 
 /**
  * Account deletion, end to end against an in-memory database (docs/64).
@@ -455,41 +454,32 @@ describe('a WhatsApp number verified in the app (0095)', () => {
     expect(h.trialSetup.onContactsVerified).toHaveBeenCalledWith(C1, NO_PHONE);
   });
 
-  it('answers within SETUP_DELIVERY_WAIT_MS while the provider hangs — the number verified, the instructions following (C14)', async () => {
-    jest.useFakeTimers(TIMERS_ONLY);
-    try {
-      const email = new HangingEmailChannel();
-      const trial = makeTrialWorld({ email });
-      // An Owner who registered with an email and a number, the email verified: the number completes the contacts.
-      const shop = trial.business({ contacts: 'both', verified: ['email'] });
-      const prisma = {
-        otpChallenge: { findUnique: async () => ({ candidatePhone: '+22236100001' }) },
-        user: { update: async ({ data }: { data: Record<string, unknown> }) => Object.assign(trial.owner(shop), data) },
-        authSession: { updateMany: async () => ({ count: 0 }) },
-        auditLog: { create: async () => ({}) },
-      };
-      const otp = { verify: async () => ({ ok: true, purpose: 'phone_verification' }) };
-      const account = new AccountService(prisma as never, {} as never, otp as never, {} as never, trial.setup);
+  it('answers at once while the provider hangs — the number verified, the portal instructions following (C14)', async () => {
+    const whatsapp = new HangingWhatsAppChannel();
+    const trial = makeTrialWorld({ whatsapp });
+    // An Owner whose number is not verified yet: verifying it completes the contact the trial waits for.
+    const shop = trial.business({ verified: [] });
+    const prisma = {
+      otpChallenge: { findUnique: async () => ({ candidatePhone: shop.phone }) },
+      user: { update: async ({ data }: { data: Record<string, unknown> }) => Object.assign(trial.owner(shop), data) },
+      authSession: { updateMany: async () => ({ count: 0 }) },
+      auditLog: { create: async () => ({}) },
+    };
+    const otp = { verify: async () => ({ ok: true, purpose: 'phone_verification' }) };
+    const account = new AccountService(prisma as never, {} as never, otp as never, {} as never, trial.setup);
 
-      const confirmed = account.confirmPhoneVerification(
+    await expect(
+      account.confirmPhoneVerification(
         { companyId: shop.companyId, userId: shop.ownerId, sessionId: Buffer.alloc(16) },
         { challengeId: '01a133f9-3b4f-7871-aa38-0a8cb0304583', code: '123456' },
-      );
-      let answered = false;
-      void confirmed.then(() => (answered = true));
-      await email.called;
-      await jest.advanceTimersByTimeAsync(SETUP_DELIVERY_WAIT_MS - 1);
-      expect(answered).toBe(false);
-      await jest.advanceTimersByTimeAsync(1);
-      await expect(confirmed).resolves.toMatchObject({ phone: '+22236100001' });
-      expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
+      ),
+    ).resolves.toMatchObject({ phone: shop.phone });
+    await whatsapp.called;
+    expect(await trial.setup.appStatus(shop.owner)).toMatchObject({ delivery: 'sending' });
 
-      email.answer();
-      await trial.setup.idle();
-      expect(trial.messages(shop)).toEqual([expect.objectContaining({ trigger: 'verified', emailOutcome: 'accepted', whatsappOutcome: 'accepted' })]);
-    } finally {
-      jest.useRealTimers();
-    }
+    whatsapp.answer();
+    await trial.notices.deliverNow();
+    expect(trial.noticesOf(shop)).toEqual([expect.objectContaining({ threshold: 'auto', state: 'accepted', channel: 'whatsapp' })]);
   });
 });
 
@@ -745,7 +735,7 @@ describe('closing the business', () => {
     expect(notice.variables.what).toBe('متجرك وجميع حسابات الدخول فيه');
   });
 
-  it('ends the free trial for good: the eligibility closed, every unused setup link revoked, the claim kept as it was (0095)', async () => {
+  it('ends the free trial for good and stops its messages: the eligibility closed, the claim kept, nothing more sent (0095, 0099)', async () => {
     const h = harness();
     const at = new Date('2026-09-28T10:00:00Z');
     const trialRow = (rowId: Buffer, companyId: Buffer, owner: Buffer) => ({
@@ -761,13 +751,20 @@ describe('closing the business', () => {
     h.prisma.seed('trialEligibility', trialRow(id('6201'), C1, OWNER), trialRow(id('6207'), C2, STRANGER));
     const claim = { id: id('6202'), companyId: C1, eligibilityId: id('6201'), claimantUserId: OWNER, claimedAt: at, startedAt: at, endsAt: new Date(at.getTime() + 168 * 3600_000), expiryRecordedAt: null };
     h.prisma.seed('trialClaim', claim);
-    h.prisma.seed(
-      'trialSetupLink',
-      { id: id('6203'), companyId: C1, userId: OWNER, consumedAt: null, revokedAt: null, revokedReason: null },
-      { id: id('6204'), companyId: C1, userId: OWNER, consumedAt: at, revokedAt: null, revokedReason: null },
-      { id: id('6205'), companyId: C1, userId: OWNER, consumedAt: null, revokedAt: at, revokedReason: 'reissued' },
-      { id: id('6206'), companyId: C2, userId: STRANGER, consumedAt: null, revokedAt: null, revokedReason: null },
-    );
+    const notice = (rowId: Buffer, companyId: Buffer, state: string) => ({
+      id: rowId,
+      companyId,
+      kind: 'paid_reminder',
+      state,
+      requestedByUserId: null,
+      destinationMasked: '+222***67',
+      destinationHash: 'h'.repeat(64),
+      cancelReason: null,
+      claimToken: null,
+      claimedUntil: null,
+      completedAt: null,
+    });
+    h.prisma.seed('subscriptionNotice', notice(id('6203'), C1, 'pending'), notice(id('6204'), C1, 'accepted'), notice(id('6206'), C2, 'pending'));
 
     await h.service.start(h.principal(OWNER), { password: 'owner-pw' });
     expect((await h.service.confirm(h.principal(OWNER), h.lastCode()!)).status).toBe('completed');
@@ -775,41 +772,47 @@ describe('closing the business', () => {
     const closedAt = h.row('company', C1).closedAt as Date;
     expect(closedAt).toBeInstanceOf(Date);
     expect(h.row('trialEligibility', id('6201'))).toMatchObject({ closedAt, closedReason: 'cancelled' });
-    expect(h.row('trialSetupLink', id('6203'))).toMatchObject({ revokedAt: closedAt, revokedReason: 'closed' });
-    // A link a claim used, and one already revoked, keep what they say.
-    expect(h.row('trialSetupLink', id('6204'))).toMatchObject({ consumedAt: at, revokedAt: null, revokedReason: null });
-    expect(h.row('trialSetupLink', id('6205'))).toMatchObject({ revokedAt: at, revokedReason: 'reissued' });
+    // A message still waiting is cancelled; one already sent keeps what happened. Neither keeps where it went.
+    expect(h.row('subscriptionNotice', id('6203'))).toMatchObject({ state: 'cancelled', cancelReason: 'closed', completedAt: closedAt, destinationMasked: null, destinationHash: null });
+    expect(h.row('subscriptionNotice', id('6204'))).toMatchObject({ state: 'accepted', destinationMasked: null, destinationHash: null });
     // The claim is history: untouched.
     expect(h.row('trialClaim', id('6202'))).toEqual(claim);
     // Another business: untouched.
     expect(h.row('trialEligibility', id('6207'))).toMatchObject({ closedAt: null, closedReason: null });
-    expect(h.row('trialSetupLink', id('6206'))).toMatchObject({ revokedAt: null });
+    expect(h.row('subscriptionNotice', id('6206'))).toMatchObject({ state: 'pending', destinationMasked: '+222***67' });
     // Under the subscription lock, as every writer of the subscription takes it.
     expect(h.prisma.locks).toEqual(['SELECT id FROM subscriptions WHERE company_id = ? FOR UPDATE']);
   });
 });
 
 
-describe('an Owner who leaves a business another Owner keeps (0095)', () => {
-  it('takes their free trial setup links with them: the usable ones revoked as deleted, nobody else’s touched', async () => {
+describe('an Owner who leaves a business another Owner keeps (0095, 0099)', () => {
+  it('takes the portal instructions they asked for with them: the waiting ones cancelled, no destination kept, nobody else’s touched', async () => {
     const h = harness({ withOtherOwner: true });
-    const at = new Date('2026-09-28T10:00:00Z');
-    h.prisma.seed(
-      'trialSetupLink',
-      { id: id('6301'), companyId: C1, userId: OWNER, consumedAt: null, revokedAt: null, revokedReason: null },
-      { id: id('6302'), companyId: C1, userId: OWNER, consumedAt: at, revokedAt: null, revokedReason: null },
-      { id: id('6303'), companyId: C1, userId: OTHER_OWNER, consumedAt: null, revokedAt: null, revokedReason: null },
-    );
+    const notice = (rowId: Buffer, by: Buffer, state: string) => ({
+      id: rowId,
+      companyId: C1,
+      kind: 'portal_instructions',
+      state,
+      requestedByUserId: by,
+      destinationMasked: '+222***67',
+      destinationHash: 'h'.repeat(64),
+      cancelReason: null,
+      claimToken: null,
+      claimedUntil: null,
+      completedAt: null,
+    });
+    h.prisma.seed('subscriptionNotice', notice(id('6301'), OWNER, 'pending'), notice(id('6302'), OWNER, 'accepted'), notice(id('6303'), OTHER_OWNER, 'pending'));
 
     expect((await h.service.start(h.principal(OWNER), { password: 'owner-pw' })).kind).toBe('personal_login');
     expect((await h.service.confirm(h.principal(OWNER), h.lastCode()!)).status).toBe('completed');
 
     const deletedAt = h.row('user', OWNER).deletedAt as Date;
     expect(deletedAt).toBeInstanceOf(Date);
-    expect(h.row('trialSetupLink', id('6301'))).toMatchObject({ revokedAt: deletedAt, revokedReason: 'deleted' });
-    expect(h.row('trialSetupLink', id('6302'))).toMatchObject({ consumedAt: at, revokedAt: null });
-    expect(h.row('trialSetupLink', id('6303'))).toMatchObject({ revokedAt: null, revokedReason: null });
-    // The business stays open: nothing closed, nothing else revoked.
+    expect(h.row('subscriptionNotice', id('6301'))).toMatchObject({ state: 'cancelled', cancelReason: 'deleted', destinationMasked: null, destinationHash: null });
+    expect(h.row('subscriptionNotice', id('6302'))).toMatchObject({ state: 'accepted', destinationMasked: null });
+    expect(h.row('subscriptionNotice', id('6303'))).toMatchObject({ state: 'pending', destinationMasked: '+222***67' });
+    // The business stays open: nothing closed.
     expect(h.row('company', C1).isActive).toBe(true);
   });
 });

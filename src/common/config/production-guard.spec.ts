@@ -22,7 +22,7 @@ const SAFE = {
   // 32 bytes, base64 (0094) — a test value, not a key anyone uses.
   PLATFORM_MFA_KEY: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=',
   // The website the free trial's setup links point to (0095).
-  PUBLIC_SITE_ORIGIN: 'https://dukan.example.com',
+  PORTAL_ORIGIN: 'https://dukan.example.com',
 };
 
 describe('outside production', () => {
@@ -436,38 +436,47 @@ describe('administrator MFA in production (0094)', () => {
   });
 });
 
-describe("the website's origin, for the free trial's setup links (0095; docs/76)", () => {
+describe("the portal's origin, for the one address the portal and subscription messages carry (0099; docs/101)", () => {
   /*
-   * Every setup message carries a link built from PUBLIC_SITE_ORIGIN with the Owner's one-time token in it. Over
-   * plain http the token crosses the network in clear text; with a path or a trailing slash the link leads to a page
-   * that does not exist. It builds links and nothing else — no request is compared with it, so nothing here is an
-   * Origin check.
+   * Every portal instruction and subscription message carries <PORTAL_ORIGIN>/subscription — generic, no token. Over
+   * plain http the Owner is sent to a page that can be read or changed on the way; with a path or a trailing slash the
+   * address does not exist. It writes an address and nothing else — no request is compared with it, so nothing here is
+   * an Origin check.
    */
   it.each([
     ['unset', undefined],
     ['empty', ''],
     ['plain http', 'http://dukan.example.com'],
-    ['a path', 'https://dukan.example.com/account'],
+    ['a path', 'https://dukan.example.com/subscription'],
     ['a trailing slash', 'https://dukan.example.com/'],
     ['a query', 'https://dukan.example.com?x=1'],
     ['credentials', 'https://user:pass@dukan.example.com'],
     ['no scheme', 'dukan.example.com'],
   ])('refuses %s', (_name, origin) => {
-    const problems = productionConfigProblems({ ...SAFE, PUBLIC_SITE_ORIGIN: origin });
+    const problems = productionConfigProblems({ ...SAFE, PORTAL_ORIGIN: origin });
     expect(problems).toHaveLength(1);
-    expect(problems[0]).toMatch(/PUBLIC_SITE_ORIGIN must be the Dukan ERP website's https:\/\/ origin with no path/);
+    expect(problems[0]).toMatch(/PORTAL_ORIGIN must be the Dukan ERP portal's https:\/\/ origin with no path/);
   });
 
-  it.each(['https://dukan.tsx-mr.com', 'https://staging.dukan.example:8443'])('accepts the bare https origin %p', (origin) => {
-    expect(productionConfigProblems({ ...SAFE, PUBLIC_SITE_ORIGIN: origin })).toEqual([]);
+  it.each(['https://dukan.tsxmr.com', 'https://staging.dukan.example:8443'])('accepts the bare https origin %p', (origin) => {
+    expect(productionConfigProblems({ ...SAFE, PORTAL_ORIGIN: origin })).toEqual([]);
   });
 
-  it('is not required outside production, where an empty value only means no link can be built', () => {
-    expect(productionConfigProblems({ NODE_ENV: 'development', PUBLIC_SITE_ORIGIN: '' })).toEqual([]);
-    expect(productionConfigProblems({ NODE_ENV: 'development', PUBLIC_SITE_ORIGIN: 'http://localhost:5173' })).toEqual([]);
+  it('APP_ENV=production takes the owner\'s portal and nothing else — never the public site, which has no account area', () => {
+    for (const origin of ['https://tsxmr.com', 'https://dukan.example.com']) {
+      const problems = productionConfigProblems({ ...SAFE, APP_ENV: 'production', PORTAL_ORIGIN: origin });
+      expect(problems.some((p) => /set PORTAL_ORIGIN=https:\/\/dukan\.tsxmr\.com exactly/.test(p))).toBe(true);
+    }
+    const ok = productionConfigProblems({ ...SAFE, APP_ENV: 'production', PORTAL_ORIGIN: 'https://dukan.tsxmr.com' });
+    expect(ok.some((p) => /PORTAL_ORIGIN/.test(p))).toBe(false);
   });
 
-  it('never requires the WhatsApp setup template: without it the instructions do not go by WhatsApp, and say so', () => {
+  it('is not required outside production, where an empty value only means no portal message can be sent', () => {
+    expect(productionConfigProblems({ NODE_ENV: 'development', PORTAL_ORIGIN: '' })).toEqual([]);
+    expect(productionConfigProblems({ NODE_ENV: 'development', PORTAL_ORIGIN: 'http://localhost:5173' })).toEqual([]);
+  });
+
+  it('never requires a subscription template: without one WhatsApp cannot carry that message, the fallback is tried, and the status says so', () => {
     const complete = {
       ...SAFE,
       WHATSAPP_CHANNEL: 'cloud-api',
@@ -483,18 +492,22 @@ describe("the website's origin, for the free trial's setup links (0095; docs/76)
       WHATSAPP_TEST_RECIPIENTS: '+22236000000',
       MESSAGING_HASH_KEY: 'a-messaging-hash-key-of-at-least-32-characters',
     };
-    expect(productionConfigProblems({ ...complete, WHATSAPP_TEMPLATE_TRIAL_SETUP: '' })).toEqual([]);
-    expect(productionConfigProblems({ ...complete, WHATSAPP_TEMPLATE_TRIAL_SETUP: 'erp_trial_setup' })).toEqual([]);
+    expect(productionConfigProblems({ ...complete, WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS: '' })).toEqual([]);
+    expect(productionConfigProblems({ ...complete, WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS: 'erp_portal_instructions' })).toEqual([]);
   });
 
-  it('is declared, optional, in the schema and the example files — with no value committed', () => {
+  it('is declared, optional, in the schema and the example files — with no value committed outside the production template', () => {
     const schema = readFileSync('src/common/config/env.validation.ts', 'utf8');
-    expect(schema).toMatch(/PUBLIC_SITE_ORIGIN: Joi\.string\(\)\.allow\(''\)\.default\(''\)/);
-    expect(schema).toMatch(/WHATSAPP_TEMPLATE_TRIAL_SETUP: Joi\.string\(\)\.allow\(''\)\.default\(''\)/);
-    for (const file of ['.env.example', '.env.staging.example']) {
-      expect({ file, line: readFileSync(file, 'utf8').match(/^PUBLIC_SITE_ORIGIN=(.*)$/m)?.[1] }).toEqual({ file, line: '' });
+    expect(schema).toMatch(/PORTAL_ORIGIN: Joi\.string\(\)\.allow\(''\)\.default\(''\)/);
+    expect(schema).not.toMatch(/PUBLIC_SITE_ORIGIN|WHATSAPP_TEMPLATE_TRIAL_SETUP/);
+    for (const key of ['PORTAL_INSTRUCTIONS', 'TRIAL_REMINDER', 'TRIAL_EXPIRED', 'PAID_REMINDER', 'GRACE_STARTED', 'NO_GRACE', 'GRACE_REMINDER', 'GRACE_ENDED']) {
+      expect(schema).toMatch(new RegExp(`WHATSAPP_TEMPLATE_${key}: Joi\\.string\\(\\)\\.allow\\(''\\)\\.default\\(''\\)`));
+      expect(readFileSync('.env.example', 'utf8')).toMatch(new RegExp(`^WHATSAPP_TEMPLATE_${key}=$`, 'm'));
     }
-    expect(readFileSync('.env.example', 'utf8')).toMatch(/^WHATSAPP_TEMPLATE_TRIAL_SETUP=$/m);
+    for (const file of ['.env.example', '.env.staging.example']) {
+      expect({ file, line: readFileSync(file, 'utf8').match(/^PORTAL_ORIGIN=(.*)$/m)?.[1] }).toEqual({ file, line: '' });
+    }
+    expect(readFileSync('.env.production.example', 'utf8')).toMatch(/^PORTAL_ORIGIN=https:\/\/dukan\.tsxmr\.com$/m);
   });
 });
 
@@ -592,6 +605,8 @@ describe('the production environment proper (APP_ENV=production, D200)', () => {
   const PRODUCTION_SMTP = {
     ...SAFE,
     APP_ENV: 'production',
+    // The owner's portal (0099): APP_ENV=production writes https://dukan.tsxmr.com/subscription into its messages.
+    PORTAL_ORIGIN: 'https://dukan.tsxmr.com',
     API_INGRESS: 'network',
     API_BIND: undefined,
     CORS_ORIGINS: '',

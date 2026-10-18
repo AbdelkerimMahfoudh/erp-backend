@@ -38,33 +38,31 @@ export class RegistrationFlowService {
      * meanwhile (`docs/67` RC-02). The same rule the deletion flow follows
      * (`56bddbe`): refused up front, and nothing was saved.
      *
-     * Every contact given, not only the first (C10; review finding R2-3): each
-     * one given must be verified (the owner's rule of 2026-10-15), and the free
-     * trial waits for all of them — so a number whose code cannot leave this
-     * server would leave a business that can never claim. The refusal names
-     * which ones, so the person can drop that contact and continue.
+     * The WhatsApp number is the contact (0099; the owner's brief of
+     * 2026-10-18): mandatory, verified here, and what the free trial waits for.
+     * An email address given beside it is optional, verified later from the
+     * account if the Owner wants it, and asks nothing of this server now — so
+     * only the number can refuse a registration.
      */
-    const given = (['email', 'phone'] as const).filter((channel) => (channel === 'email' ? dto.email : dto.phone)?.trim());
     const phone = dto.phone?.trim() ? normalisePhone(dto.phone) : null;
+    if (!phone) {
+      throw new BadRequestException('Give your WhatsApp number — it is how your account is verified and how Dukan ERP reaches you.');
+    }
     /*
      * The WhatsApp consent (D181 §5), checked before anything is saved: a stale copy is refused, and while WhatsApp
      * runs live a number without the person's agreement is refused too — the number is the account's mandatory
      * verified contact, and the consent says so.
      */
-    const consentVersion = dto.phone?.trim()
-      ? acceptedConsentVersion(
-          dto.whatsappConsentVersion,
-          this.config ? consentRequired(this.config.whatsappChannel, this.config.whatsappMode) : false,
-        )
-      : null;
-    const unavailable: ContactChannel[] = given.filter(
-      (channel) => !this.delivery.canDeliver(channel, channel === 'phone' ? (phone ?? undefined) : undefined),
+    const consentVersion = acceptedConsentVersion(
+      dto.whatsappConsentVersion,
+      this.config ? consentRequired(this.config.whatsappChannel, this.config.whatsappMode) : false,
     );
-    if (unavailable.length > 0) {
+    if (!this.delivery.canDeliver('phone', phone)) {
+      const unavailableContacts: ContactChannel[] = ['phone'];
       throw new ServiceUnavailableException({
         code: 'registration_unavailable',
-        message: 'Registration cannot be completed right now: a verification code cannot be sent to every contact given. Nothing was saved.',
-        unavailableContacts: unavailable,
+        message: 'Registration cannot be completed right now: a verification code cannot be sent to this WhatsApp number. Nothing was saved.',
+        unavailableContacts,
       });
     }
 

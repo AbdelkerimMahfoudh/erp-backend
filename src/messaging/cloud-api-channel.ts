@@ -92,25 +92,13 @@ export function describeGraphCode(code?: number, subcode?: number): string {
 }
 
 /**
- * A utility template's components: its body parameters in the registry's declared order and, when the template has
- * a URL button, the button's dynamic suffix as the button's own parameter (0095) — kept out of the body, so a setup
- * token is never shown as text, and never sent twice.
+ * A utility template's components: its body parameters, in the registry's declared order. A button an approved
+ * utility template carries is static — the portal's one address is written into the template (0099) — so nothing is
+ * sent for it.
  */
 function utilityComponents(template: TemplateDefinition, variables: Record<string, string>): object[] {
-  const body = template.variables.filter((name) => name !== template.urlButton);
-  const components: object[] = [];
-  if (body.length > 0) {
-    components.push({ type: 'body', parameters: body.map((name) => ({ type: 'text', text: variables[name] })) });
-  }
-  if (template.urlButton) {
-    components.push({
-      type: 'button',
-      sub_type: 'url',
-      index: '0',
-      parameters: [{ type: 'text', text: variables[template.urlButton] }],
-    });
-  }
-  return components;
+  if (template.variables.length === 0) return [];
+  return [{ type: 'body', parameters: template.variables.map((name) => ({ type: 'text', text: variables[name] })) }];
 }
 
 export class CloudApiWhatsAppChannel implements WhatsAppChannel {

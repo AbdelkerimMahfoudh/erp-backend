@@ -87,6 +87,9 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
   const starts: (Date | null)[] = [];
   const eligibility = trial.eligibility ? { ...trial.eligibility } : null;
   const claim = trial.claim ? { ...trial.claim } : null;
+  /** The recorded grace decisions (0099), and their audit rows. */
+  const graces: any[] = [];
+  const graceAudits: any[] = [];
   const clock = { now: () => trial.now ?? new Date() };
   const allocations: any[] = [];
   // A running business has a period, ending where its subscription ends; a pending one has nothing yet.
@@ -154,6 +157,23 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
         return claim ? { endsAt: claim.endsAt } : null;
       },
     },
+    // The grace decisions (0099): a passed period end is decided under the fence's lock, once.
+    graceEpisode: {
+      findFirst: async ({ where }: any) => graces.find((g) => g.periodEnd.getTime() === where.periodEnd.getTime()) ?? null,
+      count: async () => graces.filter((g) => g.decision === 'granted').length,
+      create: async ({ data }: any) => {
+        steps.push('grace');
+        graces.push(data);
+        return data;
+      },
+    },
+    // The decision's own audit row, written beside it (`grace-roll.ts`); the lifecycle's audits go through `audit.record`.
+    platformAuditEvent: {
+      create: async ({ data }: any) => {
+        graceAudits.push(data);
+        return data;
+      },
+    },
   };
   // One transaction at a time, all or nothing for the rows the fence decides on: a refusal inside it — a stale
   // version, an end inside the trial — leaves the subscription and the eligibility as they were.
@@ -214,6 +234,8 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
     claim,
     branches,
     allocations,
+    graces,
+    graceAudits,
     latest: () => latest,
   };
 }
@@ -422,9 +444,10 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
     // Downgrades first, then the close, then the new period — so the new period is sized after the change.
     expect(w.order).toEqual(['branch.update:Main', 'close', 'open']);
     expect(w.periods).toEqual([w.sub.currentPeriodEnd]);
-    expect(w.events.map((e) => e.kind)).toEqual(['extended', 'activity_changed', 'renewed']);
-    expect(w.events[1].note).toMatch(/Main.*both → money_agent/);
-    expect(w.events[2].note).toMatch(/Renewed/);
+    // The ended period's grace decision is written first, under the fence's lock (0099): its 72 hours ran out long ago.
+    expect(w.events.map((e) => e.kind)).toEqual(['grace_started', 'extended', 'activity_changed', 'renewed']);
+    expect(w.events[2].note).toMatch(/Main.*both → money_agent/);
+    expect(w.events[3].note).toMatch(/Renewed/);
     expect(w.audits[0]).toMatchObject({
       action: 'subscription.extend',
       after: { renewal: { closedPeriod: true, activityChanges: [{ name: 'Main', from: 'both', to: 'money_agent' }] } },
@@ -435,7 +458,7 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
     const w = makeWorld('activated', { currentPeriodEnd: ago20() }, [{ ...scheduledDowngrade(), activityNext: null }]);
     await w.service.extend(COMPANY, { months: 2 }, CTX);
     expect(w.order).toEqual(['close', 'open']);
-    expect(w.events.map((e) => e.kind)).toEqual(['extended', 'renewed']);
+    expect(w.events.map((e) => e.kind)).toEqual(['grace_started', 'extended', 'renewed']);
     expect(w.audits[0].after.renewal).toMatchObject({ closedPeriod: true, activityChanges: [] });
   });
 
@@ -467,7 +490,7 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
     expect(w.branches[0]).toMatchObject({ activity: 'money_agent', activityNext: null });
     expect(w.order).toEqual(['branch.update:Main', 'close', 'open']);
     expect(w.periods).toEqual([later]);
-    expect(w.events.map((e) => e.kind)).toEqual(['period_corrected', 'activity_changed', 'renewed']);
+    expect(w.events.map((e) => e.kind)).toEqual(['grace_started', 'period_corrected', 'activity_changed', 'renewed']);
   });
 
   it('a grant is a renewal: the running period closes at the grant, the scheduled downgrade applies, the grant period opens — never two overlapping periods', async () => {
@@ -477,6 +500,37 @@ describe('a renewal: the period end moves forward (D154 a)', () => {
     expect(w.closes).toHaveLength(1);
     expect(w.periods).toEqual([w.sub.complimentaryUntil]);
     expect(w.events.map((e) => e.kind)).toEqual(['administrative_grant', 'activity_changed', 'renewed']);
+  });
+
+  it('renewing during the grace extends from the original paid expiry, and the new billing period opens there (0099)', async () => {
+    const expiry = new Date(Date.now() - 10 * 3600_000);
+    const w = makeWorld('activated', { currentPeriodEnd: expiry });
+    await w.service.extend(COMPANY, { months: 1, reason: 'Paid during the grace' }, CTX);
+
+    const expected = new Date(expiry);
+    expected.setMonth(expected.getMonth() + 1);
+    expect(w.sub.currentPeriodEnd).toEqual(expected);
+    // The decision was recorded first — granted, 72 hours from the expiry — and the renewal follows the expiry, not now.
+    expect(w.graces).toEqual([expect.objectContaining({ decision: 'granted', periodEnd: expiry, recordedBy: 'lifecycle' })]);
+    expect(w.starts).toEqual([expiry]);
+    expect(w.audits[0]).toMatchObject({ action: 'subscription.extend', after: { duringGrace: true, extendedFrom: expiry.toISOString() } });
+  });
+
+  it('the fourth paid expiry in 12 months has no grace: renewing then starts from now, never from the old expiry (0099)', async () => {
+    const expiry = new Date(Date.now() - 10 * 3600_000);
+    const w = makeWorld('activated', { currentPeriodEnd: expiry });
+    for (const daysAgo of [300, 200, 100]) {
+      const start = new Date(Date.now() - daysAgo * DAY);
+      w.graces.push({ decision: 'granted', periodEnd: start, startedAt: start, endsAt: new Date(start.getTime() + 72 * 3600_000) });
+    }
+    const before = Date.now();
+    await w.service.extend(COMPANY, { months: 1 }, CTX);
+
+    expect(w.graces.at(-1)).toMatchObject({ decision: 'refused', periodEnd: expiry, usesBefore: 3 });
+    expect(w.events[0]).toMatchObject({ kind: 'grace_unavailable' });
+    const from = Date.parse(w.audits[0].after.extendedFrom);
+    expect(from).toBeGreaterThanOrEqual(before);
+    expect(w.audits[0].after.duringGrace).toBe(false);
   });
 
   it('a lapsed shop that renews opens its new period from now, for the new end', async () => {
@@ -742,8 +796,9 @@ describe('what the lifecycle never does', () => {
     expect(SERVICE).not.toMatch(/new Date\(\)|Date\.now\(|systemClock/);
   });
 
-  it('stores no grace: it is derived from the period end, so a corrected period carries its grace', () => {
-    expect(SERVICE).not.toMatch(/grace(End|Until|Hours)?\s*:/i);
+  it('never writes grace onto the subscription: a passed end’s decision is recorded once, under the fence’s lock (0099)', () => {
+    expect(SERVICE).not.toMatch(/(graceEnd|graceUntil|graceHours|graceEndsAt)\s*:/i);
+    expect(SERVICE).toMatch(/await recordDueGraceTx\(tx, companyId, now, 'lifecycle'\);\n\s*return decide\(/);
   });
 });
 

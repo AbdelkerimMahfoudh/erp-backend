@@ -30,7 +30,7 @@ check(val('NODE_ENV') === 'production', 'NODE_ENV must be "production".');
 check(val('API_INGRESS') === 'network', 'API_INGRESS must be "network" in the container stack (one trusted hop: the edge).');
 check(!val('API_BIND') || val('API_BIND') === '0.0.0.0', 'API_BIND must be unset in a container: a loopback bind is unreachable from the edge.');
 check(val('PUBLIC_API_ORIGIN') === `https://${host}`, `PUBLIC_API_ORIGIN must be exactly https://${host || '<API_HOST>'} (no path, no trailing slash).`);
-check(val('PUBLIC_SITE_ORIGIN') === 'https://tsxmr.com', 'PUBLIC_SITE_ORIGIN must be https://tsxmr.com (the owner\'s decision, docs/100 §3).');
+check(val('PORTAL_ORIGIN') === 'https://dukan.tsxmr.com', 'PORTAL_ORIGIN must be https://dukan.tsxmr.com (the owner\'s topology of 2026-10-18, docs/101 §2).');
 check(!val('NODE_DEBUG'), 'NODE_DEBUG must be unset: Node\'s internal tracing bypasses the log redaction.');
 check(!present('STAGING_CONTACT_OUTBOX'), 'STAGING_CONTACT_OUTBOX must not exist in production (a staging setting: production never holds codes).');
 
