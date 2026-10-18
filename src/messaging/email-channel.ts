@@ -22,7 +22,7 @@ import { SmtpEmailChannel, type SmtpConfig } from './smtp-email-channel';
  * `resend` stays dormant (D181 §2). The credentials of either provider live in server-side configuration only.
  */
 
-export type EmailTemplateKey = 'contact.verification' | 'staff.invitation' | 'password.recovery' | 'security.alert' | 'trial.setup';
+export type EmailTemplateKey = 'contact.verification' | 'staff.invitation' | 'password.recovery' | 'security.alert' | 'trial.setup' | 'delivery.check';
 
 export interface EmailMessage {
   /** Normalised, lowercased address. */
@@ -149,6 +149,23 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
       en: '{business} is eligible for a 7-day free trial of Dukan ERP. Your trial has not started.\n\nTo start it, open this link, sign in, and confirm "Start my 7-day free trial" on the Dukan ERP website:\n{link}\n\nThe trial lasts 7 days from the moment you confirm it. No payment is required. The link expires in 24 hours and works for your account only; after it expires, sign in on the Dukan ERP website to start your trial or to get a new link. If you did not create this account, ignore this email.\n\nNeed help? Contact Dukan ERP support.\n\nDukan ERP is developed and operated by TSX-MR.',
       fr: '{business} peut bénéficier d’un essai gratuit de 7 jours de Dukan ERP. Votre essai n’a pas commencé.\n\nPour le démarrer, ouvrez ce lien, connectez-vous et confirmez « Démarrer mon essai gratuit de 7 jours » sur le site Dukan ERP :\n{link}\n\nL’essai dure 7 jours à partir de votre confirmation. Aucun paiement n’est demandé. Le lien expire dans 24 heures et ne fonctionne que pour votre compte ; ensuite, connectez-vous sur le site Dukan ERP pour démarrer votre essai ou recevoir un nouveau lien. Si vous n’avez pas créé ce compte, ignorez cet e-mail.\n\nBesoin d’aide ? Contactez l’assistance Dukan ERP.\n\nDukan ERP est développé et exploité par TSX-MR.',
       ar: '{business} مؤهل لفترة تجريبية مجانية من Dukan ERP مدتها 7 أيام. لم تبدأ فترتك التجريبية بعد.\n\nلبدئها، افتح هذا الرابط وسجّل الدخول ثم أكّد «ابدأ فترتي التجريبية المجانية لمدة 7 أيام» على موقع Dukan ERP:\n{link}\n\nتستمر الفترة التجريبية 7 أيام من لحظة تأكيدك. لا يلزم أي دفع. تنتهي صلاحية الرابط خلال 24 ساعة ويعمل لحسابك فقط، وبعد ذلك سجّل الدخول على موقع Dukan ERP لبدء فترتك التجريبية أو للحصول على رابط جديد. إن لم تُنشئ هذا الحساب، فتجاهل هذه الرسالة.\n\nهل تحتاج إلى مساعدة؟ تواصل مع دعم Dukan ERP.\n\nتطوّر TSX-MR منصة Dukan ERP وتشغّلها.',
+    },
+  },
+  /*
+   * The operator's delivery proof (D200, docs/100 §7): sent by `scripts/email-prove.ts` only, one message per run, to
+   * the one test address the operator holds. It carries nothing a person could act on or misuse: no code, no link, no
+   * customer or business data, no variable at all — it says what it is and that nothing is required.
+   */
+  'delivery.check': {
+    sender: 'verification',
+    essential: false,
+    variables: [],
+    wired: true,
+    subject: { en: 'Dukan ERP delivery test', fr: 'Test de distribution Dukan ERP', ar: 'اختبار إيصال من Dukan ERP' },
+    body: {
+      en: 'This is a Dukan ERP delivery test. No action is required.\n\nThe Dukan ERP operator sent it once, to check that email from Dukan ERP is delivered. It contains no code and no link.\n\nDukan ERP is developed and operated by TSX-MR.',
+      fr: 'Ceci est un test de distribution de Dukan ERP. Aucune action n’est requise.\n\nL’opérateur de Dukan ERP l’a envoyé une seule fois, pour vérifier que les e-mails de Dukan ERP sont bien distribués. Il ne contient ni code ni lien.\n\nDukan ERP est développé et exploité par TSX-MR.',
+      ar: 'هذه رسالة اختبار إيصال من Dukan ERP. لا يلزم القيام بأي إجراء.\n\nأرسلها مشغّل Dukan ERP مرة واحدة للتحقق من وصول رسائل البريد الإلكتروني الصادرة عن Dukan ERP. لا تحتوي على أي رمز أو رابط.\n\nتطوّر TSX-MR منصة Dukan ERP وتشغّلها.',
     },
   },
 };
