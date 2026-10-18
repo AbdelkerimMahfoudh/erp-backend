@@ -75,7 +75,7 @@ describe('sent automatically, once, when the Owner’s WhatsApp number is verifi
         channel: 'whatsapp',
         whatsappOutcome: 'accepted',
         fallbackReason: null,
-        destinationMasked: '+222***01',
+        destinationMasked: '+222••••0001',
         requestedByUserId: null,
         language: 'ar',
         acceptedAt: NOW,
@@ -188,7 +188,7 @@ describe('WhatsApp first; email only for a recorded reason, to a verified addres
       whatsappOutcome: 'unavailable',
       fallbackReason: 'template_unavailable',
       emailOutcome: 'accepted',
-      destinationMasked: 'o***@shop.test',
+      destinationMasked: 'o•••@shop.test',
     });
   });
 
@@ -247,7 +247,7 @@ describe('WhatsApp first; email only for a recorded reason, to a verified addres
     const noPortal = makeTrialWorld({ templates: {}, portalUrl: '' });
     const shop = noPortal.business({ contacts: 'both' });
     await sendAutomatic(noPortal, shop);
-    expect(noPortal.noticesOf(shop)[0]).toMatchObject({ state: 'failed', failureReason: 'email_unavailable', destinationMasked: 'o***@shop.test' });
+    expect(noPortal.noticesOf(shop)[0]).toMatchObject({ state: 'failed', failureReason: 'email_unavailable', destinationMasked: 'o•••@shop.test' });
     expect(sentEmail(noPortal)).toEqual([]);
   });
 
@@ -289,7 +289,7 @@ describe('the portal’s resend — after the Owner signs in, never from the app
     w.clock.advance(MINUTE);
     const setup = await w.setup.resend(shop.owner);
 
-    expect(setup).toMatchObject({ delivery: 'sent', channel: 'whatsapp', destination: '+222***01', canResendNow: false, resendBlockedBy: 'throttle' });
+    expect(setup).toMatchObject({ delivery: 'sent', channel: 'whatsapp', destination: '+222••••0001', canResendNow: false, resendBlockedBy: 'throttle' });
     expect(setup.history.map((h) => [h.trigger, h.delivery])).toEqual([
       ['resend', 'sent'],
       ['automatic', 'sent'],
@@ -362,7 +362,7 @@ describe('what the Owner is told', () => {
       destinations: [{ channel: 'whatsapp', masked: '+222••••0001' }],
       delivery: 'sent',
       channel: 'whatsapp',
-      destination: '+222***01',
+      destination: '+222••••0001',
       fallbackReason: null,
       failureReason: null,
       lastAttemptAt: NOW.toISOString(),
@@ -378,7 +378,7 @@ describe('what the Owner is told', () => {
     const optedOut = w.business();
     w.contact(optedOut.phone!, { optOutScope: 'optional' });
     await sendAutomatic(w, optedOut);
-    expect(await w.setup.appStatus(optedOut.owner)).toMatchObject({ delivery: 'failed', failureReason: 'opted_out', destination: '+222***02', lastSentAt: null });
+    expect(await w.setup.appStatus(optedOut.owner)).toMatchObject({ delivery: 'failed', failureReason: 'opted_out', destination: '+222••••0002', lastSentAt: null });
     const claimed = w.business();
     await w.service.claim(claimed.owner, { idempotencyKey: 'k-1', termsVersion: TRIAL_TERMS_VERSION });
     expect(await w.setup.appStatus(claimed.owner)).toEqual({ state: 'trial_active', eligible: false });

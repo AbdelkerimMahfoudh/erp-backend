@@ -230,7 +230,7 @@ describe('the timeline as the portal and the console read it', () => {
       threshold: 'h72',
       state: 'accepted',
       channel: 'whatsapp',
-      destination: '+222***01',
+      destination: '+222••••0001',
       at: NOW.toISOString(),
     });
   });

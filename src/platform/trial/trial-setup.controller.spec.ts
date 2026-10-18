@@ -105,7 +105,7 @@ describe('through the real Nest pipeline', () => {
     caller = shop.owner;
     const res = await request(app.getHttpServer()).get('/api/v1/account/trial-setup');
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ state: 'trial_available', eligible: true, durationDays: 7, delivery: 'sent', channel: 'whatsapp', destination: '+222***01' });
+    expect(res.body).toMatchObject({ state: 'trial_available', eligible: true, durationDays: 7, delivery: 'sent', channel: 'whatsapp', destination: '+222••••0001' });
     expect(Object.keys(res.body).sort()).toEqual(
       [
         'channel',

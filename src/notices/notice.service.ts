@@ -7,8 +7,7 @@ import { CLOCK, type Clock } from '../entitlement/clock';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { GRACE_ALLOWANCE, GRACE_MS } from '../entitlement/grace-rules';
 import { WHATSAPP_CHANNEL, type DeliveryResult, type WhatsAppChannel } from '../messaging/whatsapp-channel';
-import { EMAIL_CHANNEL, maskEmail, type EmailChannel } from '../messaging/email-channel';
-import { maskDestination } from '../messaging/channels';
+import { EMAIL_CHANNEL, type EmailChannel } from '../messaging/email-channel';
 import { RecipientHasher } from '../messaging/recipient-hash';
 import { WhatsAppRecords } from '../messaging/whatsapp-records';
 import {
@@ -26,6 +25,7 @@ import {
 import type { SubscriptionEmailKey } from '../messaging/email-channel';
 import { isRealChannel, outboxAllowed } from '../platform/contact-delivery';
 import { mayClaimNow, readFacts } from '../platform/trial/trial-facts';
+import { maskForOwner } from '../platform/trial/trial-rules';
 import { daysLeftText, formatNoticeInstant, graceHoursLeftText, type ReminderThreshold } from './notice-copy';
 import {
   ASYNC_FAILURE_WATCH_MS,
@@ -405,7 +405,8 @@ export class NoticeService {
       consentRequired: real && this.config.whatsappMode === 'live',
       consented: contact?.consented ?? false,
     });
-    const destination = phone ? { destinationMasked: maskDestination(phone), destinationHash: this.hasher.hash(phone) } : {};
+    // Masked as its Owner is shown it everywhere — the portal, the app's list of verified contacts — so one number reads the same.
+    const destination = phone ? { destinationMasked: maskForOwner('phone', phone), destinationHash: this.hasher.hash(phone) } : {};
     if (plan.action === 'stop') {
       return { done: true, transition: { state: 'failed', whatsappOutcome: 'refused', failureReason: plan.reason, ...destination, completedAt: now } };
     }
@@ -452,7 +453,7 @@ export class NoticeService {
     const base: Transition = { fallbackReason: reason, whatsappOutcome };
     const address = to.email && to.emailVerifiedAt ? to.email : null;
     if (!address) return { ...base, state: 'failed', emailOutcome: 'not_applicable', failureReason: 'no_email', completedAt: now };
-    const destination = { destinationMasked: maskEmail(address), destinationHash: this.hasher.hash(address) };
+    const destination = { destinationMasked: maskForOwner('email', address), destinationHash: this.hasher.hash(address) };
     const link = this.config.portalSubscriptionUrl;
     if (!this.emailOpen() || !link) {
       return { ...base, ...destination, state: 'failed', emailOutcome: 'unavailable', failureReason: 'email_unavailable', completedAt: now };
