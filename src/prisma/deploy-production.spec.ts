@@ -298,6 +298,22 @@ describe('the production package', () => {
     }
   });
 
+  it('commits every script the operator runs as executable (found by the rehearsal: a script written on Windows was not)', () => {
+    // The mode Git stores is what a checkout on the host gets; the working tree's mode means nothing on Windows.
+    const listing = spawnSync('git', ['ls-files', '-s', '--', 'deploy/production'], { cwd: ROOT, encoding: 'utf8' });
+    expect(listing.status).toBe(0);
+    const modes = Object.fromEntries(
+      listing.stdout
+        .trim()
+        .split('\n')
+        .map((line) => line.split(/\s+/))
+        .map(([mode, , , path]) => [path.replace(/^deploy\/production\//, ''), mode]),
+    );
+    for (const name of scripts) {
+      expect({ name, mode: modes[name] }).toEqual({ name, mode: name === 'lib.sh' ? '100644' : '100755' });
+    }
+  });
+
   it('asks for --confirm <host> on every command that changes the stack', () => {
     for (const name of ['deploy.sh', 'migrate.sh', 'rollback.sh', 'teardown-rehearsal.sh']) {
       expect({ name, confirm: /^require_confirm "\$@"$/m.test(script(name)) }).toEqual({ name, confirm: true });
