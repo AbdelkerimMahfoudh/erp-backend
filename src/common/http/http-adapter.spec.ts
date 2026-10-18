@@ -87,7 +87,8 @@ describe('routes match their letter case exactly (C13)', () => {
     ['the app’s registration', 'post', '/api/v1/auth/register', registration, 'register'],
   ] as const)('%s: the canonical path reaches it; capitals and mixed case answer 404 and reach nothing', async (_name, method, path, body, handler) => {
     const send = (url: string) => {
-      const req = method === 'post' ? request(app.getHttpServer()).post(url) : request(app.getHttpServer()).get(url);
+      // The portal's session, which the claim and the resend require (D211); the other routes ignore it.
+      const req = (method === 'post' ? request(app.getHttpServer()).post(url) : request(app.getHttpServer()).get(url)).set('Cookie', 'erp_portal_session=x.y.z');
       return body === undefined ? req : req.send(body);
     };
     const canonical = await send(path);
@@ -117,7 +118,7 @@ describe('routes match their letter case exactly (C13)', () => {
     const { ExpressAdapter } = await import('@nestjs/platform-express');
     const plain = await boot(new ExpressAdapter());
     try {
-      await request(plain.getHttpServer()).post('/API/V1/PLATFORM/MY-SUBSCRIPTION/TRIAL/CLAIM').send(claim).expect(201);
+      await request(plain.getHttpServer()).post('/API/V1/PLATFORM/MY-SUBSCRIPTION/TRIAL/CLAIM').set('Cookie', 'erp_portal_session=x.y.z').send(claim).expect(201);
       expect(reached).toEqual(['claim']);
     } finally {
       await plain.close();

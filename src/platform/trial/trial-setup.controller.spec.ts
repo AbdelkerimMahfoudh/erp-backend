@@ -25,6 +25,9 @@ import { TrialSetupService } from './trial-setup.service';
  * reads nothing from the request, so no body can name where the instructions go.
  */
 
+/** The portal's session, as the JWT strategy has already authenticated it in production: the resend requires it (D211). */
+const PORTAL = { Cookie: 'erp_portal_session=x.y.z' };
+
 const proto = TrialSetupController.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
 const handlers = Object.getOwnPropertyNames(proto).filter(
   (name) => name !== 'constructor' && Reflect.hasMetadata(PATH_METADATA, proto[name]),
@@ -146,7 +149,7 @@ describe('through the real Nest pipeline', () => {
     w.clock.set(new Date(NOW.getTime() + 60_000));
     const res = await request(app.getHttpServer())
       .post('/api/v1/platform/my-subscription/trial/setup/resend')
-      .set({ Origin: 'https://forged.example', Referer: 'https://forged.example/' })
+      .set({ Origin: 'https://forged.example', Referer: 'https://forged.example/', ...PORTAL })
       .send({ to: 'attacker@example.com', channel: 'email', phone: '+22299999999' });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ delivery: 'sent', canResendNow: false, history: [expect.objectContaining({ trigger: 'resend' }), expect.anything()] });
@@ -157,13 +160,22 @@ describe('through the real Nest pipeline', () => {
 
   it('too soon is 429 with when; a Manager is 403 — whatever the headers say', async () => {
     caller = shop.owner;
-    const soon = await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/setup/resend').set({ Origin: 'https://dukan.tsx-mr.com' });
+    const soon = await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/setup/resend').set({ Origin: 'https://dukan.tsx-mr.com', ...PORTAL });
     expect(soon.status).toBe(429);
     expect(soon.body).toMatchObject({ code: 'too_many_requests', resendAvailableAt: new Date(NOW.getTime() + 60_000).toISOString() });
 
     caller = w.staff(shop, 'store_manager');
-    const manager = await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/setup/resend').set({ Origin: 'https://dukan.tsx-mr.com' });
+    const manager = await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/setup/resend').set({ Origin: 'https://dukan.tsx-mr.com', ...PORTAL });
     expect(manager.status).toBe(403);
     expect(manager.body).toMatchObject({ code: 'owner_only' });
+  });
+
+  it('the app’s session cannot ask for them: a bearer token is refused portal_session_required, and nothing is sent (D211)', async () => {
+    caller = shop.owner;
+    w.clock.set(new Date(NOW.getTime() + 60_000));
+    const res = await request(app.getHttpServer()).post('/api/v1/platform/my-subscription/trial/setup/resend').set({ Authorization: 'Bearer a.b.c', ...PORTAL });
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ code: 'portal_session_required' });
+    expect((w.whatsapp as TestWhatsAppChannel).messages).toHaveLength(1);
   });
 });

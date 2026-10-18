@@ -1,8 +1,9 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Res, UseGuards } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { TenantContext } from '../../common/tenant/tenant-context.service';
+import { PortalSessionOnlyGuard } from '../portal/portal-session-only.guard';
 import { ClaimTrialDto } from './trial.dto';
 import type { TrialPrincipal } from './trial-facts';
 import { TrialService } from './trial.service';
@@ -21,9 +22,10 @@ const SENSITIVE_THROTTLE = { default: { limit: ACCOUNT_THROTTLE_LIMIT, ttl: 60_0
  *
  * Tenant routes — the shop's own session, never `@Public` — answering only about the caller's own company, from the
  * session, and only to its Owner. Every handler takes the body at most, and nothing else from the request: no header,
- * no IP, no `Origin` or `Referer`. Those say where a request claims to come from, a client sets them at will, and
- * "portal only" is a product boundary — only the portal shows this — never a check a client could pass by lying
- * (the owner's correction of 2026-10-13). No token exists: the instructions carry the portal's one address.
+ * no IP, no `Origin` or `Referer`. Those say where a request claims to come from, a client sets them at will, and no
+ * decision rests on them (the owner's correction of 2026-10-13). The claim and the resend require the portal's own
+ * session (`PortalSessionOnlyGuard`, D211): the credential the server issued at the portal's sign-in, never a bearer
+ * token, which is the app's. No token exists in any message: the instructions carry the portal's one address.
  *
  * All three stay reachable while the business is closed (`route-classification.ts`): a business that has not started
  * is exactly the one that needs them. The app reaches none of them: it reads a display-only status under `account/`
@@ -53,6 +55,7 @@ export class TrialController {
   @Post('my-subscription/trial/claim')
   @HttpCode(HttpStatus.CREATED)
   @Throttle(SENSITIVE_THROTTLE)
+  @UseGuards(PortalSessionOnlyGuard)
   async claim(@Body() dto: ClaimTrialDto, @Res({ passthrough: true }) res: Response) {
     const answer = await this.trial.claim(this.principal(), dto);
     if (answer.replayed) res.status(HttpStatus.OK);
@@ -68,6 +71,7 @@ export class TrialController {
   @Post('my-subscription/trial/setup/resend')
   @HttpCode(HttpStatus.OK)
   @Throttle(SENSITIVE_THROTTLE)
+  @UseGuards(PortalSessionOnlyGuard)
   resendSetup() {
     return this.setup.resend(this.principal());
   }
