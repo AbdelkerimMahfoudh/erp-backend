@@ -93,6 +93,9 @@ describe('emailProofConfig', () => {
     const result = await channel.send({ to: 'someone@example.com', template: 'delivery.check', language: 'en', variables: {}, idempotencyKey: 'proof-1' });
     expect(result).toMatchObject({ status: 'accepted' });
     expect(sent).toEqual([expect.objectContaining({ from: EMAIL_PROOF_SENDER, to: 'someone@example.com', replyTo: 'support@tsxmr.com' })]);
+    // Plain text only: no HTML part a relay could add an open-tracking pixel to (the owner's decision, D200).
+    expect(sent[0]).toHaveProperty('text');
+    expect(sent[0]).not.toHaveProperty('html');
     const failing: SmtpTransport = { sendMail: async () => Promise.reject(Object.assign(new Error('535 5.7.8 login@smtp-brevo.com bad credentials'), { code: 'EAUTH', responseCode: 535 })) };
     const refused = await new SmtpEmailChannel(emailProofConfig(ENV), failing).send({ to: 'someone@example.com', template: 'delivery.check', language: 'en', variables: {}, idempotencyKey: 'proof-2' });
     expect(refused).toMatchObject({ status: 'failed', reason: 'not_authorized' });

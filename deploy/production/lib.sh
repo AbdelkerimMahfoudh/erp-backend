@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared by the production scripts (docs/100). Sourced, never run. Loads deploy/production/stack.env, enforces the
 # profile's rules, refuses to run beside any other stack, and gives `compose` with the profile's own project name.
 # Prints no secret.

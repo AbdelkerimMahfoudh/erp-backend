@@ -340,9 +340,9 @@ describe('the production package', () => {
     }
   });
 
-  it('keeps the email proof to one recipient file and the tracking confirmation', () => {
+  it('keeps the email proof to one recipient file and the owner decision: plain text only', () => {
     const proof = script('email-proof.sh');
-    expect(proof).toContain('--brevo-tracking-off-confirmed');
+    expect(proof).toContain('--plain-text-approved');
     expect(proof).toContain('--recipient-file /run/proof/recipient');
     expect(compose).toMatch(/email-proof:[\s\S]*?networks: \[edge\]/);
   });

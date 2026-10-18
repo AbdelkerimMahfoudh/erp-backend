@@ -9,6 +9,10 @@ import type { SmtpConfig } from './smtp-email-channel';
  * Reply-To are the approved TSX-MR addresses, the port is 587 (STARTTLS required, `smtp-email-channel.ts`), and the
  * recipient is read from a private file — never an argument, so it is in no shell history and no process list. The
  * proof never logs the address, only its masked form, and identifies the provider's message by a one-way reference.
+ *
+ * It is sent as plain text only (`textOnly`): Brevo's transactional open and click tracking cannot be turned off on the
+ * account's plan, a tracking pixel can only be added to an HTML part, and the message has no link to rewrite. The owner
+ * checks the received message's source for anything added (the owner's decision of 2026-10-18, D200).
  */
 export const EMAIL_PROOF_SENDER = 'Dukan ERP <verification@tsxmr.com>';
 export const EMAIL_PROOF_REPLY_TO = 'support@tsxmr.com';
@@ -49,5 +53,8 @@ export function emailProofConfig(env: NodeJS.ProcessEnv): SmtpConfig {
     senders: { verification: EMAIL_PROOF_SENDER, notifications: '', reports: '', receipts: '', fallback: '' },
     replyTo: EMAIL_PROOF_REPLY_TO,
     timeouts: { connectionMs: 15000, greetingMs: 15000, socketMs: 30000 },
+    // Plain text only: Brevo's transactional tracking cannot be turned off on the account's plan, and a pixel needs an
+    // HTML part to live in (the owner's decision of 2026-10-18, D200).
+    textOnly: true,
   };
 }

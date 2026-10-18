@@ -26,6 +26,13 @@ export interface SmtpConfig {
   /** support@… — every email's Reply-To. */
   replyTo: string;
   timeouts: { connectionMs: number; greetingMs: number; socketMs: number };
+  /**
+   * Hand over the plain-text part only. A relay that adds an open-tracking pixel can only add it to an HTML part, and a
+   * message with no link gives click tracking nothing to rewrite. The operator's delivery proof sets it: Brevo's
+   * transactional tracking cannot be turned off on the account's plan (the owner's decision of 2026-10-18, D200).
+   * Unset, every email carries both parts, as before.
+   */
+  textOnly?: boolean;
 }
 
 /** The part of a nodemailer transport this channel uses; a fake in tests. */
@@ -116,7 +123,7 @@ export class SmtpEmailChannel implements EmailChannel {
         ...(this.cfg.replyTo ? { replyTo: this.cfg.replyTo } : {}),
         subject: composed.subject,
         text: composed.text,
-        html: composed.html,
+        ...(this.cfg.textOnly ? {} : { html: composed.html }),
         messageId,
         headers: { 'Auto-Submitted': 'auto-generated', 'X-Auto-Response-Suppress': 'All' },
         disableFileAccess: true,
