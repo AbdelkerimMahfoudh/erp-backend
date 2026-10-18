@@ -11,9 +11,10 @@ import { NoticeService } from './notice.service';
  * (`trial-end.sweeper.ts`): a pass at start-up, then on unref'd timers, one pass at a time per process.
  *
  * **Every minute:**
- *  1. the grace decisions due and not yet written — a paid period end of the last eleven days that passed with no
- *     decision — are written (NOWAIT; a business found busy is left to the next minute or its first evaluation). An
- *     older end is decided when it is first needed (the evaluation, the lifecycle) and never announced;
+ *  1. the grace decisions due and not yet written — a paid period end of about the last ten days (its 72 hours, the
+ *     7-day announcement window and an hour: `PAID_LOOKBACK_MS`) that passed with no decision — are written (NOWAIT; a
+ *     business found busy is left to the next minute or its first evaluation). An older end is decided when it is
+ *     first needed (the evaluation, the lifecycle) and never announced;
  *  2. the timeline of every business that may have a message now — a trial or a paid period ending in the next 72
  *     hours or in the announcement window, or a message still waiting — is brought up to date (`NoticeService.refresh`);
  *  3. the messages WhatsApp accepted are checked for a terminal failure (`watchAccepted`).
