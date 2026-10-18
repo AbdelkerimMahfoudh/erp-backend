@@ -11,6 +11,7 @@
 #
 # --offsite names where the file came back from. A PASSED drill then writes BACKUP_DIR/offsite-restore-proof, which
 # the preflight requires (kind=storage-box) before any messaging channel opens sign-ups (docs/100 §5).
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 [ -n "${IN_DEPLOY:-}" ] || take_lock
 IDENTITY="" OFFSITE="" FILE=""
@@ -25,7 +26,7 @@ command -v age > /dev/null || die "age is not installed on this host."
 [ -n "$IDENTITY" ] && [ -s "$IDENTITY" ] || die "--identity <file>: the backup's private key, brought in for the drill (docs/100 §5)."
 case "$IDENTITY" in /dev/shm/*) ;; *) die "the identity is read from /dev/shm only (memory, never the disk)." ;; esac
 case "$OFFSITE" in ""|storage-box|laptop) ;; *) die "--offsite is storage-box or laptop." ;; esac
-FILE=${FILE:-$(ls -1t "$BACKUP_DIR"/phonestore-*.sql.gz.age 2>/dev/null | head -n 1)}
+FILE=${FILE:-$( { ls -1t "$BACKUP_DIR"/phonestore-*.sql.gz.age 2>/dev/null || true; } | head -n 1)}
 [ -n "$FILE" ] && [ -s "$FILE" ] || die "no backup to restore."
 DIR=$(cd "$(dirname "$FILE")" && pwd); NAME=$(basename "$FILE")
 [ -s "$DIR/$NAME.sha256" ] || die "missing $NAME.sha256 beside the backup."

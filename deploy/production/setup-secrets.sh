@@ -14,6 +14,7 @@
 # Every value comes from openssl's generator straight into its file: never printed, never on a command line, never in
 # an environment a person can read. Nothing here is a backup: the database passwords are recreated with the server,
 # and the backups' decryption key never lives on it (docs/100 §5).
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 
 umask 077

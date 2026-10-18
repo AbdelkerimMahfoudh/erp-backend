@@ -12,6 +12,7 @@
 #   6. the audit hash chain of every company (nothing to walk on an empty schema).
 # It does not start or restart the API: deploy.sh does that after this succeeds. On a failure here the running API
 # keeps serving the schema it had; a half-applied migration (P3018) is docs/79 §C2, never "run it again and see".
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 require_confirm "$@"
 [ -n "${IN_DEPLOY:-}" ] || take_lock

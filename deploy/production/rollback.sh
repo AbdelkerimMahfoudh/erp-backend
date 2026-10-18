@@ -7,6 +7,7 @@
 # additive — the project's rule — and NOT safe across the floors docs/79 §C1 names (never below 0092 once money-agent
 # exchanges exist; never below 0097 while a seat allocation is "scheduled"). Rolling the schema back is a restore into
 # a NEW schema (restore-drill.sh with KEEP_DRILL=1, then point the API at it), never a drop: docs/100 §11.
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 target=${1:-}
 case "$target" in erp-api:*) ;; *) die "usage: deploy/production/rollback.sh erp-api:<commit> --confirm $API_HOST (deployments.log names the previous one)." ;; esac

@@ -156,7 +156,11 @@ jobs:
       - name: scripts — shellcheck, syntax
         run: |
           shellcheck --version | head -n 2
-          shellcheck -x -S warning -e SC1091 deploy/production/*.sh
+          # Findings become annotations (readable without a sign-in), then fail the step.
+          if ! shellcheck -x -S warning -f gcc deploy/production/*.sh > /tmp/shellcheck.txt; then
+            sed -E 's/^([^:]+):([0-9]+):([0-9]+): [a-z]+: (.*)$/::error file=\1,line=\2,col=\3::\4/' /tmp/shellcheck.txt
+            exit 1
+          fi
           for f in deploy/production/*.sh deploy/restore-drill.sh; do bash -n "$f"; done
           for f in deploy/production/*.mjs deploy/staging/smoke.mjs; do node --check "$f"; done
       - name: the resolved configurations meet the stack contract (production and rehearsal)

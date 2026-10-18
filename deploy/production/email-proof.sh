@@ -9,6 +9,7 @@
 #   recipient                      the owner's test address, one line
 # The container gets them read-only, has an outbound network only (no database), and prints the recipient masked and
 # the provider's message id as a one-way reference. Each run sends one message; the log line is appended here.
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 : "${TOOLS_IMAGE:?no tools image recorded in current-images.env}"
 CONFIRMED=0 LANGUAGE=en

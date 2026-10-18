@@ -11,6 +11,7 @@
 # with it. The plaintext never touches the disk. Output: phonestore-<UTC>.sql.gz.age and its .sha256 (for transfer
 # checks), mode 600, the newest 14 kept. Copy them off the host (docs/100 §5): a backup on the machine it protects is
 # not a backup.
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 [ -n "${IN_DEPLOY:-}" ] || take_lock
 command -v age > /dev/null || die "age is not installed on this host (sudo apt-get install age)."
@@ -44,4 +45,4 @@ chmod 600 "$OUT"
 echo "backup ok: $NAME ($(du -h "$OUT" | cut -f1)) — age-encrypted to $(grep -c '^age1' "$RECIPIENTS") off-host key(s); this server cannot decrypt it."
 
 KEEP=${KEEP:-14}
-ls -1t "$BACKUP_DIR"/phonestore-*.sql.gz.age 2>/dev/null | tail -n +$((KEEP + 1)) | while read -r old; do rm -f "$old" "$old.sha256"; done
+{ ls -1t "$BACKUP_DIR"/phonestore-*.sql.gz.age 2>/dev/null || true; } | tail -n +$((KEEP + 1)) | while read -r old; do rm -f "$old" "$old.sha256"; done

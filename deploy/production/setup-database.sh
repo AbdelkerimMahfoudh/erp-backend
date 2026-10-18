@@ -7,6 +7,7 @@
 # (deploy/mysql-identities.sql) unchanged: phonestore_migrator (DDL), phonestore_app (DML only; the audit triggers
 # check this exact name), phonestore_backup (read-only, local socket only), phonestore_admin (operator, local only).
 # Nothing is migrated here: that is migrate.sh. The passwords travel on standard input, never on a command line.
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 for name in mysql_root migrator app backup admin; do
   [ -s "$SECRETS_DIR/db/$name.pw" ] || die "missing $SECRETS_DIR/db/$name.pw — run setup-secrets.sh first."

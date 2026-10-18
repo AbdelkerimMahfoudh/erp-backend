@@ -3,6 +3,7 @@
 #   deploy/production/smoke.sh --commit <sha>
 # Production: against https://api.tsxmr.com, the certificate checked. Rehearsal: against the local edge on 127.0.0.1,
 # whose certificate is Caddy's own local authority (--insecure-local: the TLS and redirect checks are skipped there).
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 : "${TOOLS_IMAGE:?no tools image recorded in current-images.env}"
 if [ "$DEPLOY_PROFILE" = rehearsal ]; then

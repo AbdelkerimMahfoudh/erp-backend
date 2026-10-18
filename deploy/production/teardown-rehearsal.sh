@@ -8,6 +8,7 @@
 # material and backups. Production's directory and anything outside /srv/erp-rehearsal are never touched.
 # Note: deleting a file on an SSD or a copy-on-write filesystem is not a guaranteed erasure of its blocks; what is
 # guaranteed is that nothing reachable on the host still holds it (docs/100 §9.3).
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 [ "$DEPLOY_PROFILE" = rehearsal ] && [ "$PROJECT" = erp-rehearsal ] && [ "$BASE" = /srv/erp-rehearsal ] \
   || die "teardown-rehearsal.sh removes the rehearsal only."
@@ -20,7 +21,7 @@ docker builder prune -af > /dev/null
 docker image prune -f > /dev/null
 
 echo "== the rehearsal directory"
-cd /
+cd / || exit 1
 rm -rf /srv/erp-rehearsal
 
 echo "== what remains"

@@ -12,8 +12,17 @@ set -a
 # shellcheck disable=SC1090
 . "$STACK_ENV"
 set +a
-: "${DEPLOY_PROFILE:?}" "${API_HOST:?}" "${ACME_EMAIL:?}" "${EDGE_HTTP_BIND:?}" "${EDGE_HTTPS_BIND:?}"
-: "${SECRETS_DIR:?}" "${BACKUP_DIR:?}" "${API_ENV_FILE:?}"
+# Every setting stack.env must give, assigned here by name (so a missing one stops here, and every script that
+# sources this file — and shellcheck — sees where each comes from).
+DEPLOY_PROFILE=${DEPLOY_PROFILE:?set DEPLOY_PROFILE in stack.env}
+API_HOST=${API_HOST:?set API_HOST in stack.env}
+ACME_EMAIL=${ACME_EMAIL:?set ACME_EMAIL in stack.env}
+EDGE_HTTP_BIND=${EDGE_HTTP_BIND:?set EDGE_HTTP_BIND in stack.env}
+EDGE_HTTPS_BIND=${EDGE_HTTPS_BIND:?set EDGE_HTTPS_BIND in stack.env}
+SECRETS_DIR=${SECRETS_DIR:?set SECRETS_DIR in stack.env}
+BACKUP_DIR=${BACKUP_DIR:?set BACKUP_DIR in stack.env}
+API_ENV_FILE=${API_ENV_FILE:?set API_ENV_FILE in stack.env}
+export ACME_EMAIL EDGE_HTTP_BIND EDGE_HTTPS_BIND
 
 # ── The profile's rules: a rehearsal can never be mistaken for production, nor production for a rehearsal ─────────────
 case "$DEPLOY_PROFILE" in
@@ -40,7 +49,8 @@ other_stacks() {
   { docker ps -a --format '{{.Label "com.docker.compose.project"}}'
     docker volume ls --format '{{.Label "com.docker.compose.project"}}'
     docker network ls --format '{{.Label "com.docker.compose.project"}}'; } 2>/dev/null | sort -u | while read -r p; do
-    for other in $OTHERS; do [ "$p" = "$other" ] && echo "$p"; done
+    # `case` answers 0 whether or not it matches: under pipefail a "no match" must not read as a failure.
+    case " $OTHERS " in *" $p "*) [ -n "$p" ] && echo "$p" ;; esac
   done
 }
 found=$(other_stacks | sort -u | tr '\n' ' ')
@@ -55,6 +65,8 @@ if [ -z "${API_IMAGE:-}" ] && [ -f "$CURRENT_IMAGES" ]; then
   . "$CURRENT_IMAGES"
   set +a
 fi
+API_IMAGE=${API_IMAGE:-} TOOLS_IMAGE=${TOOLS_IMAGE:-}
+export API_IMAGE TOOLS_IMAGE
 record_images() { printf 'API_IMAGE=%s\nTOOLS_IMAGE=%s\n' "$API_IMAGE" "$TOOLS_IMAGE" > "$CURRENT_IMAGES"; }
 
 compose() { docker compose -p "$PROJECT" --env-file "$STACK_ENV" -f "$DEPLOY_DIR/docker-compose.production.yml" "$@"; }

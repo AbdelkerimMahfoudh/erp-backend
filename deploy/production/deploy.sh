@@ -17,6 +17,7 @@
 # is idempotent (secrets, identities, `migrate deploy`); a migration that failed half-way is docs/79 §C2.
 # SKIP_BUILD=1 with API_IMAGE/TOOLS_IMAGE set deploys images built elsewhere instead.
 REQUESTED_API_IMAGE=${API_IMAGE:-} REQUESTED_TOOLS_IMAGE=${TOOLS_IMAGE:-}
+# shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
 # The ERR trap below must see failures inside functions too (wait_healthy, step).
 set -E
@@ -36,8 +37,9 @@ fi
 [ -s "$API_ENV_FILE" ] || die "missing $API_ENV_FILE — copy .env.production.example there (mode 600) and fill it in."
 
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
-export APP_COMMIT=$COMMIT
-export APP_BUILT_AT=${APP_BUILT_AT:-$(date -u +%FT%TZ)}
+APP_COMMIT=$COMMIT
+APP_BUILT_AT=${APP_BUILT_AT:-$(date -u +%FT%TZ)}
+export APP_COMMIT APP_BUILT_AT
 if [ "${SKIP_BUILD:-0}" = 1 ]; then
   [ -n "$REQUESTED_API_IMAGE" ] && [ -n "$REQUESTED_TOOLS_IMAGE" ] || die "SKIP_BUILD=1 needs API_IMAGE and TOOLS_IMAGE."
   export API_IMAGE=$REQUESTED_API_IMAGE TOOLS_IMAGE=$REQUESTED_TOOLS_IMAGE
