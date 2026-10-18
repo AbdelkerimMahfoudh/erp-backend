@@ -118,6 +118,12 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
     'platform/my-subscription/trial/setup/resend',
     'Sending the portal instructions again, from the portal, to the Owner’s own verified contacts writes no business truth; a business waiting to start its trial is exactly who asks',
   ),
+  /*
+   * The Owner's optional email address, verified from the portal (0099): a contact record, no business record — and
+   * the address a message may fall back to when WhatsApp cannot carry it, needed most by a business that is closed.
+   */
+  allow('POST', 'platform/my-subscription/contacts/email/verify/start', 'Sending a code to the Owner’s own email address writes no business truth'),
+  allow('POST', 'platform/my-subscription/contacts/email/verify/confirm', 'Verifying the Owner’s own email address is a contact record, not business truth'),
 ] as const;
 
 const key = (method: string, path: string): string =>
@@ -205,6 +211,12 @@ export const ALWAYS_READABLE: readonly ReadRule[] = [
    * started is exactly who reads it. The trial, the offer, nothing operational.
    */
   readable('platform/my-subscription/trial', 'The Owner’s free trial card: read by a business that has not started yet, and holding no operational data'),
+  /*
+   * The Dukan ERP portal (0099): who is signed in, and what the business can do and its Owner may do now — read in
+   * exactly the states that close everything else, holding no operational data.
+   */
+  readable('platform/portal/session', 'Who is signed in to the portal: needed to show any portal page, including the one that explains a closed business'),
+  readable('platform/my-subscription/status', 'The portal’s server-calculated status — access, period, grace, messages, permitted actions — read by a closed business above all'),
   /*
    * The same business in the app (0095): whether it may claim its trial on the website and whether the setup
    * instructions reached the Owner — display data only, no action, nothing operational.

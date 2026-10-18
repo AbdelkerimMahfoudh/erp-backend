@@ -649,12 +649,15 @@ describe('route classification fails closed', () => {
       // D154 (2026-10-08): asking for another activity for a branch is asking to pay (an
       // upgrade) or to pay less from the renewal (a downgrade); nothing changes by asking.
       'POST platform/my-subscription/activity-requests',
+      // 0099: the Owner's own email address verified from the portal — a contact record, the message fallback's address.
+      'POST platform/my-subscription/contacts/email/verify/confirm',
+      'POST platform/my-subscription/contacts/email/verify/start',
       'POST platform/my-subscription/seat-requests',
       'POST platform/my-subscription/seat-requests/:rid/withdraw',
       'POST platform/my-subscription/store-requests',
-      // 0095: the free trial — a business that has not started claims it and checks its setup link; the claim writes
-      // the trial itself and nothing paid or billed, and only the Owner may make it. The resend sends the Owner's own
-      // setup instructions to the Owner's own verified contacts, from the website only.
+      // 0095, 0099: the free trial — a business that has not started claims it; the claim writes the trial itself and
+      // nothing paid or billed, and only the Owner may make it. The resend sends the Owner's own portal instructions to
+      // the Owner's own verified contacts, from the portal only.
       'POST platform/my-subscription/trial/claim',
       'POST platform/my-subscription/trial/setup/resend',
       'POST platform/portal-handoff',
@@ -713,10 +716,13 @@ describe('route classification fails closed', () => {
       'platform/my-subscription/seat-requests/:rid/withdraw',
       'platform/my-subscription/activity-requests',
       'platform/portal-handoff',
-      // 0095: claiming the free trial, checking a setup link and asking for the setup instructions again — nothing
-      // paid, nothing granted beyond the trial.
+      // 0095, 0099: claiming the free trial and asking for the portal instructions again — nothing paid, nothing
+      // granted beyond the trial.
       'platform/my-subscription/trial/claim',
       'platform/my-subscription/trial/setup/resend',
+      // 0099: the Owner's own email address, verified from the portal.
+      'platform/my-subscription/contacts/email/verify/start',
+      'platform/my-subscription/contacts/email/verify/confirm',
     ]);
     // Minting a ticket is not spending one, and neither moves money.
     for (const r of platform) expect(r.method).toBe('POST');
@@ -751,9 +757,13 @@ describe('what a pending or suspended shop may still read', () => {
       'entitlement',
       'health',
       'platform/my-subscription',
+      // 0099: the portal's server-calculated status.
+      'platform/my-subscription/status',
       // 0095: the Owner's free trial card, read by a business that has not started yet.
       'platform/my-subscription/trial',
       'platform/payment-instructions',
+      // 0099: who is signed in to the portal.
+      'platform/portal/session',
     ]);
   });
 
@@ -800,7 +810,7 @@ describe('what a pending or suspended shop may still read', () => {
   it('names only account routes, and the one money-record lookup — never another business read', () => {
     // The lookup is the single argued exception (D161, 2026-10-10): one record, under the phone's own key, masked.
     // D181: the person's own WhatsApp consent is an account route too.
-    const accountish = /^(entitlement|health|auth\/|account(\/deletion|\/trial-setup|\/whatsapp\/consent)?$|platform\/(my-subscription|payment-instructions))/;
+    const accountish = /^(entitlement|health|auth\/|account(\/deletion|\/trial-setup|\/whatsapp\/consent)?$|platform\/(my-subscription|payment-instructions|portal\/session$))/;
     for (const { path } of ALWAYS_READABLE.filter((r) => r.path !== 'agent/transactions/client/:clientUuid')) {
       expect([path, accountish.test(path)]).toEqual([path, true]);
     }

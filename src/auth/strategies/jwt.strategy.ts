@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ClsService } from 'nestjs-cls';
@@ -8,6 +8,17 @@ import { AccessTokenPayload, AuthUser } from '../../common/types/auth-user';
 import { uuidToBin } from '../../common/utils/uuid.util';
 import { SessionsService } from '../sessions.service';
 import { readCookie, PORTAL_SESSION_COOKIE } from '../../common/http/cookies';
+import { CSRF_HEADER, isUnsafeMethod, portalCookieRouteAllowed, portalCsrfMatches } from '../../common/http/portal-csrf';
+
+/** The parts of a request the strategy reads. */
+interface StrategyRequest {
+  method?: string;
+  originalUrl?: string;
+  url?: string;
+  headers?: { cookie?: string; authorization?: string; [name: string]: string | string[] | undefined };
+}
+
+const bearerOf = ExtractJwt.fromAuthHeaderAsBearerToken();
 
 /**
  * Validates the access token and establishes request context: it puts `userId`
@@ -23,6 +34,8 @@ import { readCookie, PORTAL_SESSION_COOKIE } from '../../common/http/cookies';
  */
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
+  private readonly csrfSecret: string;
+
   constructor(
     config: AppConfigService,
     private readonly cls: ClsService<AppClsStore>,
@@ -32,26 +45,29 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       /*
        * The Authorization header first, and the PORTAL COOKIE second.
        *
-       * The app sends a bearer token. The website customer portal has no
-       * bearer to send — it is opened from the app through a one-time handoff
-       * and left holding an HttpOnly cookie, which no script on the page can
-       * read. Both carry the SAME kind of access token, so nothing about
-       * validation below changes and no guard is loosened: an invalid token is
-       * still invalid, and a revoked session still cuts the request off.
+       * The app sends a bearer token. The Dukan ERP portal has no bearer to
+       * send — its sign-in leaves it holding an HttpOnly cookie, which no
+       * script on the page can read. Both carry the SAME kind of access token,
+       * so nothing about validation below changes and no guard is loosened: an
+       * invalid token is still invalid, and a revoked session still cuts the
+       * request off.
        *
-       * The cookie is , so a cross-site POST does not carry it.
+       * A cookie authenticates the portal's routes only, and an unsafe request
+       * it authenticates must carry the session's CSRF token (0099;
+       * `portal-csrf.ts`): checked in `validate`, below.
        */
       jwtFromRequest: ExtractJwt.fromExtractors([
-        ExtractJwt.fromAuthHeaderAsBearerToken(),
-        (req: { headers?: { cookie?: string } }) =>
-          readCookie(req?.headers?.cookie, PORTAL_SESSION_COOKIE) ?? null,
+        bearerOf,
+        (req: StrategyRequest) => readCookie(req?.headers?.cookie, PORTAL_SESSION_COOKIE) ?? null,
       ]),
       ignoreExpiration: false,
       secretOrKey: config.jwtAccessSecret,
+      passReqToCallback: true,
     });
+    this.csrfSecret = config.jwtAccessSecret;
   }
 
-  async validate(payload: AccessTokenPayload): Promise<AuthUser> {
+  async validate(req: StrategyRequest, payload: AccessTokenPayload): Promise<AuthUser> {
     if (payload.type !== 'access' || typeof payload.sid !== 'string') {
       throw new UnauthorizedException();
     }
@@ -61,6 +77,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       sessionId = uuidToBin(payload.sid);
     } catch {
       throw new UnauthorizedException();
+    }
+
+    // Authenticated by the portal cookie, not a bearer: the portal's routes only, and the session's CSRF token on
+    // every unsafe request.
+    if (!bearerOf(req as never)) {
+      if (!portalCookieRouteAllowed(req.originalUrl ?? req.url)) throw new UnauthorizedException();
+      if (isUnsafeMethod(req.method) && !portalCsrfMatches(this.csrfSecret, payload.sid, req.headers?.[CSRF_HEADER])) {
+        throw new ForbiddenException({ code: 'csrf_failed', message: 'This request could not be verified. Reload the page and try again.' });
+      }
     }
 
     if (!(await this.sessions.isAccessValid(sessionId, payload.sub))) {

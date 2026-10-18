@@ -40,6 +40,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
     // Global JWT guard — every route requires a valid token unless @Public().
     { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],
-  exports: [TokensService, SessionsService, VerificationIntentService, OtpService, DevicesService],
+  // AuthService for the Dukan ERP portal's own sign-in (0099): the same identity, the same checks, its own cookies.
+  exports: [AuthService, TokensService, SessionsService, VerificationIntentService, OtpService, DevicesService],
 })
 export class AuthModule {}

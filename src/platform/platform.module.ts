@@ -26,6 +26,10 @@ import { TrialController } from './trial/trial.controller';
 import { TrialSetupService } from './trial/trial-setup.service';
 import { TrialSetupController } from './trial/trial-setup.controller';
 import { TrialEndSweeper } from './trial/trial-end.sweeper';
+import { PortalSessionController } from './portal/portal-session.controller';
+import { PortalSessionService } from './portal/portal-session.service';
+import { PortalAccountController } from './portal/portal-account.controller';
+import { OwnerContactsService } from './portal/owner-contacts.service';
 import {
   ContactDeliveryProvider,
   outboxAllowed,
@@ -92,6 +96,9 @@ export function selectContactDelivery(
     AppRegistrationController,
     TrialController,
     TrialSetupController,
+    // The Dukan ERP portal (0099): its own sign-in on the app's identity, and the Owner's routes beside the subscription.
+    PortalSessionController,
+    PortalAccountController,
   ],
   providers: [
     HashingService,
@@ -109,6 +116,8 @@ export function selectContactDelivery(
     OwnerInvitationService,
     TrialService,
     TrialSetupService,
+    PortalSessionService,
+    OwnerContactsService,
     // Mandatory (D176): what was paid for during a free trial is put in force when it ends, looked at or not.
     TrialEndSweeper,
     SeatAllocationService,

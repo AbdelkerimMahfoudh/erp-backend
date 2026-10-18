@@ -1027,7 +1027,10 @@ export class PlatformController {
    *
    * It returns no operational data. Identity, subscription, price, history.
    */
+  // The Owner's alone (0099; D132's deferred rule): what the shop is charged, what it owes and how its trial and grace
+  // stand. `settings.manage` is the company-wide administration permission the Owner alone holds, as the handoff reads it.
   @Get('my-subscription')
+  @RequirePermissions('settings.manage')
   async mySubscription() {
     const companyId = this.tenant.companyId();
 
@@ -1216,6 +1219,7 @@ export class PlatformController {
    * no provider and no code (2026-10-05); the mobile app never reads it.
    */
   @Get('payment-instructions')
+  @RequirePermissions('settings.manage')
   async paymentInstructions() {
     const companyId = this.tenant.companyId();
     const pricing = await this.billing.pricingFor(companyId);

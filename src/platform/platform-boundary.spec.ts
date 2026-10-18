@@ -454,8 +454,16 @@ describe('a closed business stays closed on the server', () => {
       'platform/portal-handoff',
       'platform/my-subscription/trial/claim',
       'platform/my-subscription/trial/setup/resend',
+      'platform/my-subscription/contacts/email/verify/start',
+      'platform/my-subscription/contacts/email/verify/confirm',
     ]);
-    expect(allowedReads).toEqual(['platform/my-subscription', 'platform/payment-instructions', 'platform/my-subscription/trial']);
+    expect(allowedReads).toEqual([
+      'platform/my-subscription',
+      'platform/payment-instructions',
+      'platform/my-subscription/trial',
+      'platform/portal/session',
+      'platform/my-subscription/status',
+    ]);
   });
 });
 

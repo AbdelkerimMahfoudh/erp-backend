@@ -13,11 +13,18 @@
 export const ADMIN_SESSION_COOKIE = 'erp_platform_session';
 
 /**
- * The Owner's customer-portal session, established by the one-time handoff from
- * the mobile app. `HttpOnly`, so no script on the page can read it, and
- * `SameSite=Lax`, so a cross-site POST does not carry it.
+ * The Owner's Dukan ERP portal session (dukan.tsxmr.com; 0099): the access token, set by the portal's own sign-in.
+ * `HttpOnly`, so no script on the page can read it; `SameSite=Strict`, so no request another site starts carries it;
+ * and accepted only on the portal's routes, with the session-bound CSRF token on every unsafe request
+ * (`portal-csrf.ts`) — the subdomains of tsxmr.com are one site, so SameSite alone is not the boundary.
  */
 export const PORTAL_SESSION_COOKIE = 'erp_portal_session';
+
+/** The portal session's refresh token: `HttpOnly`, `SameSite=Strict`, sent only to the portal's session routes. */
+export const PORTAL_REFRESH_COOKIE = 'erp_portal_refresh';
+
+/** The one path the refresh cookie is sent to. */
+export const PORTAL_REFRESH_PATH = '/api/v1/platform/portal';
 
 /**
  * Pull one cookie out of a raw `Cookie` header.
