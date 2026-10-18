@@ -125,3 +125,80 @@ jobs:
           if docker run --rm --env-file .env.staging.example erp-api-tools:ci node deploy/staging/preflight.mjs; then
             echo "the preflight passed a template with no secrets"; exit 1
           fi
+  production-stack:
+    name: production stack (images, contract, preflight, backups)
+    # The production package (docs/100) as the host will use it: both targets build from the lockfile, the compiled API
+    # reads its secrets from files and refuses a missing one, the scripts pass shellcheck, the resolved production and
+    # rehearsal configurations meet the stack contract, the preflight refuses the committed template, the Caddyfile
+    # validates under the pinned Caddy, and an age backup decrypts — and refuses to once a byte is changed.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: build the runtime and tools targets
+        run: |
+          docker build --target runtime --build-arg APP_COMMIT=${{ github.sha }} -t erp-api:ci .
+          docker build --target tools -t erp-api-tools:ci .
+      - name: images — sizes, contents, and the secret files wired into the compiled API
+        run: |
+          docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep -E '^erp-api(-tools)?:ci '
+          docker run --rm erp-api:ci test -f dist/src/common/config/load-secret-files.js
+          if docker run --rm erp-api:ci sh -c 'ls /app/deploy 2>/dev/null; find /app -maxdepth 2 \( -name "*.age" -o -name "*.pw" -o -name ".env*" \)' | grep .; then
+            echo "the runtime image carries deployment files or secrets"; exit 1
+          fi
+          docker run --rm erp-api-tools:ci sh -c 'ls deploy/production/deploy.sh deploy/production/preflight.mjs scripts/email-prove.ts' > /dev/null
+          # A secret file that is missing stops the API before anything is built, with the setting named — never a value.
+          set +e
+          out=$(docker run --rm -e NODE_ENV=production -e JWT_ACCESS_SECRET_FILE=/run/secrets/missing erp-api:ci 2>&1); code=$?
+          set -e
+          echo "$out" | tail -n 3
+          test "$code" -ne 0
+          echo "$out" | grep -q 'JWT_ACCESS_SECRET_FILE names a file that cannot be read'
+      - name: scripts — shellcheck, syntax
+        run: |
+          shellcheck --version | head -n 2
+          shellcheck -x -S warning -e SC1091 deploy/production/*.sh
+          for f in deploy/production/*.sh deploy/restore-drill.sh; do bash -n "$f"; done
+          for f in deploy/production/*.mjs deploy/staging/smoke.mjs; do node --check "$f"; done
+      - name: the resolved configurations meet the stack contract (production and rehearsal)
+        run: |
+          for profile in production rehearsal; do
+            base=/srv/erp-$profile
+            if [ $profile = production ]; then host=api.tsxmr.com; http=80; https=443; else host=api.rehearsal.localhost; http=127.0.0.1:8080; https=127.0.0.1:8443; fi
+            sudo mkdir -p $base/secrets/api $base/secrets/db $base/backups && sudo chown -R "$USER" $base
+            touch $base/api.env $base/secrets/database.env $base/secrets/migrator.env
+            printf 'DEPLOY_PROFILE=%s\nAPI_HOST=%s\nACME_EMAIL=developer@tsxmr.com\nEDGE_HTTP_BIND=%s\nEDGE_HTTPS_BIND=%s\nSECRETS_DIR=%s/secrets\nBACKUP_DIR=%s/backups\nAPI_ENV_FILE=%s/api.env\n' \
+              $profile $host $http $https $base $base $base > /tmp/stack-$profile.env
+            API_IMAGE=erp-api:ci TOOLS_IMAGE=erp-api-tools:ci docker compose -p erp-$profile --env-file /tmp/stack-$profile.env \
+              -f deploy/docker-compose.production.yml --profile tools --profile proof config --format json \
+              | docker run --rm -i --network none erp-api-tools:ci node deploy/production/check-stack.mjs --profile $profile
+          done
+      - name: the preflight refuses the committed template
+        run: |
+          if docker run --rm --env-file .env.production.example -e DEPLOY_PROFILE=production -e EXPECTED_API_HOST=api.tsxmr.com \
+               erp-api-tools:ci node deploy/production/preflight.mjs; then
+            echo "the preflight passed a template with no secrets"; exit 1
+          fi
+      - name: the Caddyfile validates under the pinned Caddy
+        run: |
+          image=$(sed -n 's/^    image: \(caddy:.*\)$/\1/p' deploy/docker-compose.production.yml)
+          for host in api.tsxmr.com api.rehearsal.localhost; do
+            docker run --rm -e API_HOST=$host -e ACME_EMAIL=developer@tsxmr.com \
+              -v "$PWD/deploy/production/Caddyfile:/etc/caddy/Caddyfile:ro" "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          done
+      - name: age backups — round trip, wrong key and a changed byte refused
+        run: |
+          sudo apt-get install -y --no-install-recommends age > /dev/null
+          age --version
+          d=$(mktemp -d); cd "$d"
+          age-keygen -o id.txt 2> /dev/null; age-keygen -y id.txt > recipients
+          age-keygen -o other.txt 2> /dev/null
+          printf -- '-- MySQL dump\nINSERT INTO t VALUES (1);\n-- Dump completed on 2026-10-18\n' | gzip -9 | age --encrypt -R recipients -o b.sql.gz.age
+          age --decrypt -i id.txt b.sql.gz.age | gunzip | grep -q 'Dump completed on'
+          if age --decrypt -i other.txt b.sql.gz.age > /dev/null 2>&1; then echo "decrypted with the wrong key"; exit 1; fi
+          # Change one byte near the end, to a value it did not have: authenticated encryption must notice.
+          pos=$(( $(stat -c %s b.sql.gz.age) - 20 ))
+          old=$(dd if=b.sql.gz.age bs=1 skip=$pos count=1 2> /dev/null | od -An -tu1 | tr -d ' ')
+          printf "\\$(printf %03o $(( (old + 1) % 256 )))" | dd of=b.sql.gz.age bs=1 seek=$pos conv=notrunc 2> /dev/null
+          test "$(dd if=b.sql.gz.age bs=1 skip=$pos count=1 2> /dev/null | od -An -tu1 | tr -d ' ')" != "$old"
+          if age --decrypt -i id.txt b.sql.gz.age > /dev/null 2>&1; then echo "a changed byte was not detected"; exit 1; fi
+          echo "age: round trip ok; wrong key refused; changed byte refused"
