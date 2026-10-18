@@ -55,6 +55,15 @@ else
   echo "SKIP subscription-event trigger probes: no subscription event in $DB"
 fi
 
+# A grace decision is final (0099): the triggers refuse the application account's UPDATE and DELETE by name.
+GRACE_HEX=$(MYSQL_PWD="$APP_PW" mysql "${CONN[@]}" -u phonestore_app -N -B "$DB" -e "SELECT HEX(id) FROM grace_episodes LIMIT 1" 2>/dev/null)
+if [ -n "$GRACE_HEX" ]; then
+  must_fail "app cannot rewrite a grace decision (trigger)" phonestore_app "$APP_PW" "UPDATE grace_episodes SET recorded_by='evaluation' WHERE id=UNHEX('$GRACE_HEX')" "immutable"
+  must_fail "app cannot delete a grace decision (trigger)" phonestore_app "$APP_PW" "DELETE FROM grace_episodes WHERE id=UNHEX('$GRACE_HEX')" "immutable"
+else
+  echo "SKIP grace-decision trigger probes: no grace decision in $DB"
+fi
+
 # --- the backup account: read everything, change nothing ----------------------
 if [ -n "${BACKUP_PW:-}" ]; then
   must_pass "backup can read"                  phonestore_backup "$BACKUP_PW" "SELECT COUNT(*) FROM audit_logs"

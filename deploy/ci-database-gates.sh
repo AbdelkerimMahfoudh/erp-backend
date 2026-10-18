@@ -14,7 +14,8 @@
 #      `prisma migrate status` then reports nothing pending;
 #   3. the permission catalogue and the role grants match the code (the deploy-time gate);
 #   4. each identity is refused what it must not do, the audit triggers included (deploy/verify-mysql-identities.sh);
-#   5. the env-gated real-MySQL spec (InnoDB locks, NOWAIT, CHECKs, concurrency) runs on its own `addon_ci` schema.
+#   5. the env-gated real-MySQL spec (InnoDB locks, NOWAIT, CHECKs, concurrency) runs on its own `addon_ci` schema;
+#   6. the 0099 real-MySQL spec (grace decisions, the notice outbox, the portal claim) runs on its own `grace_ci` schema.
 # Any failure exits non-zero.
 set -euo pipefail
 
@@ -28,9 +29,9 @@ PORT=${MYSQL_PORT:-3306}
 if [ -n "${MYSQL_SOCKET:-}" ]; then CONN=(--socket "$MYSQL_SOCKET"); else CONN=(-h "$HOST" -P "$PORT" --protocol=TCP); fi
 root() { MYSQL_PWD="${ROOT_PW:-}" mysql "${CONN[@]}" -u root -N -B "$@"; }
 
-existing=$(root -e "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name IN ('phonestore', 'addon_ci')")
+existing=$(root -e "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name IN ('phonestore', 'addon_ci', 'grace_ci')")
 if [ "$existing" != "0" ]; then
-  echo "Refusing: this server already has a phonestore or addon_ci schema." >&2
+  echo "Refusing: this server already has a phonestore, addon_ci or grace_ci schema." >&2
   exit 2
 fi
 
@@ -65,7 +66,10 @@ echo "== 4. what each identity cannot do"
 root phonestore -e "SET @c = UNHEX(REPLACE(UUID(), '-', '')), @s = UNHEX(REPLACE(UUID(), '-', ''));
   INSERT INTO companies (id, name, settings, updated_at, public_store_id) VALUES (@c, 'CI identity probe', JSON_OBJECT(), NOW(6), 'CIPROBE0001');
   INSERT INTO subscriptions (id, company_id) VALUES (@s, @c);
-  INSERT INTO subscription_events (id, company_id, subscription_id, kind, note) VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @s, 'created', 'CI identity probe')"
+  INSERT INTO subscription_events (id, company_id, subscription_id, kind, note) VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @s, 'created', 'CI identity probe');
+  SET @p = NOW(6) - INTERVAL 1 DAY;
+  INSERT INTO grace_episodes (id, company_id, subscription_id, period_end, decision, started_at, ends_at, uses_before, window_start, recorded_at, recorded_by)
+    VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @s, @p, 'granted', @p, @p + INTERVAL 72 HOUR, 0, @p - INTERVAL 12 MONTH, @p + INTERVAL 1 SECOND, 'sweeper')"
 DB=phonestore APP_PW="$APP_PW" BACKUP_PW="$BACKUP_PW" MIGRATOR_PW="$MIGRATOR_PW" bash deploy/verify-mysql-identities.sh
 
 echo "== 5. the real-MySQL spec, on its own schema"
@@ -73,3 +77,9 @@ root -e "CREATE DATABASE addon_ci CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_
 DATABASE_URL=$(url root "${ROOT_PW:-}" addon_ci) npx prisma migrate deploy
 ADDON_ROOT_URL=$(url root "${ROOT_PW:-}" addon_ci) ADDON_APP_URL=$(url phonestore_app "$APP_PW" addon_ci) \
   npx jest --ci src/platform/trial-addons.mysql.spec.ts
+
+echo "== 6. the 0099 real-MySQL spec (grace, the notice outbox, the portal claim), on its own schema"
+root -e "CREATE DATABASE grace_ci CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON grace_ci.* TO 'phonestore_app'@'%'"
+DATABASE_URL=$(url root "${ROOT_PW:-}" grace_ci) npx prisma migrate deploy
+GRACE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) GRACE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/notices/lifecycle.mysql.spec.ts
