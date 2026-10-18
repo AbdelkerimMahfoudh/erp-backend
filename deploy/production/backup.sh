@@ -23,22 +23,26 @@ mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 NAME=phonestore-$STAMP.sql.gz.age
 OUT=$BACKUP_DIR/$NAME
-TAIL=$(mktemp -p /dev/shm erp-backup-tail.XXXXXX)
-trap 'rm -f "$TAIL" "$OUT.part"' EXIT
+trap 'rm -f "$OUT.part"' EXIT
 
 # --single-transaction: a consistent InnoDB snapshot without locking the shop out.
 # --routines --triggers --events: the append-only triggers are part of the schema.
 # --hex-blob: BINARY(16) keys survive as hex, not as bytes a locale can mangle (docs/22 §2).
+# mysqldump writes its completion line only when it finished: a truncated dump is the failure nobody notices until the
+# restore. The awk stage passes the plaintext through unchanged and fails unless that line went past — checked as it
+# streams, before encryption, because the server cannot decrypt afterwards. Every stage's status is then checked.
+set +e
 compose exec -T db sh -c 'MYSQL_PWD="$(cat /secrets/backup.pw)" exec mysqldump --socket=/var/run/mysqld/mysqld.sock \
     -u phonestore_backup --single-transaction --routines --triggers --events --no-tablespaces --hex-blob \
     --set-gtid-purged=OFF phonestore' \
-  | tee >(tail -c 200 > "$TAIL") \
+  | awk '{ print } /^-- Dump completed on / { done = 1 } END { exit done ? 0 : 3 }' \
   | gzip -9 \
   | age --encrypt -R "$RECIPIENTS" -o "$OUT.part"
-wait $!  # the tail of the plaintext, written by the process substitution above
-# mysqldump writes its completion line only when it finished: a truncated dump is the failure nobody notices until
-# the restore. Checked on the plaintext as it streamed, before encryption — the server cannot decrypt afterwards.
-grep -q 'Dump completed on' "$TAIL" || { echo "backup FAILED: no completion marker (truncated dump?)" >&2; exit 1; }
+status=("${PIPESTATUS[@]}")
+set -e
+[ "${status[0]}" = 0 ] || die "backup FAILED: mysqldump exited ${status[0]}."
+[ "${status[1]}" = 0 ] || die "backup FAILED: no completion marker (a truncated dump)."
+[ "${status[2]}" = 0 ] && [ "${status[3]}" = 0 ] || die "backup FAILED: compression or encryption exited ${status[2]}/${status[3]}."
 mv -f "$OUT.part" "$OUT"
 chmod 600 "$OUT"
 (cd "$BACKUP_DIR" && sha256sum "$NAME" > "$NAME.sha256" && chmod 600 "$NAME.sha256")

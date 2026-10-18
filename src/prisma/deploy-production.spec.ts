@@ -335,6 +335,19 @@ describe('the production package', () => {
     expect(backup).not.toMatch(/openssl enc/);
     expect(backup).toContain('Dump completed on');
     expect(backup).toMatch(/must hold age public keys only/);
+    // Found by the rehearsal: `wait $!` after a process substitution aborted under set -u (bash leaves $! unset there).
+    expect(backup).not.toMatch(/wait \$!|>\(tail/);
+    expect(backup).toMatch(/status=\("\$\{PIPESTATUS\[@\]\}"\)/);
+  });
+
+  const awk = spawnSync('awk', ['BEGIN { exit 0 }']);
+  (awk.error ? it.skip : it)('passes a complete dump through unchanged and fails a truncated one (the backup’s awk stage)', () => {
+    const program = /\| awk '([^']+)'/.exec(script('backup.sh'))?.[1];
+    expect(program).toBeDefined();
+    const complete = '-- MySQL dump 10.13\nINSERT INTO `t` VALUES (0x01A0);\n-- Dump completed on 2026-10-18  7:30:00\n';
+    const run = (input: string) => spawnSync('awk', [program as string], { input, encoding: 'utf8' });
+    expect(run(complete)).toMatchObject({ status: 0, stdout: complete });
+    expect(run('-- MySQL dump 10.13\nINSERT INTO `t` VALUES (0x01').status).toBe(3);
   });
 
   it('decrypts only with an identity held in memory for the drill, and records an off-site proof only on a pass', () => {
