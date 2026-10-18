@@ -1,4 +1,5 @@
 import { Prisma, type SubscriptionStatus, type TrialEligibilityClosedReason } from '@prisma/client';
+import type { GraceDecision } from './grace-rules';
 
 /**
  * What one entitlement evaluation reads about a company (review finding R1-F4): its subscription, its name and its
@@ -23,6 +24,14 @@ export interface EvaluationFacts {
     timezone: string;
     trialEligibility: { closedAt: Date | null; closedReason: TrialEligibilityClosedReason | null } | null;
     trialClaim: { id: Buffer; claimedAt: Date; startedAt: Date; endsAt: Date; expiryRecordedAt: Date | null } | null;
+  };
+  /**
+   * The grace decision recorded for the current period end (0099), and the granted activations counted against it —
+   * so an end not recorded yet is decided as it will be (grace-rules.ts).
+   */
+  grace: {
+    recorded: { decision: GraceDecision; startedAt: Date; endsAt: Date } | null;
+    usesBefore: number;
   };
 }
 
@@ -49,12 +58,21 @@ export interface EvaluationColumns {
   claim_started_at: Date | null;
   claim_ends_at: Date | null;
   claim_expiry_recorded_at: Date | null;
+  /** Present exactly when a decision is recorded for the current period end (0099). */
+  grace_decision: string | null;
+  grace_started_at: Date | null;
+  grace_ends_at: Date | null;
+  /** `COUNT(*)`: a bigint, or a number. */
+  grace_uses_before: number | bigint;
 }
 
 /**
  * The one statement: the subscription, joined to its company, LEFT JOINed to its eligibility and its claim — each on
- * `company_id`, each unique per company, so a company yields at most one row. No subscription row, no row: the
- * evaluation then reads the company as never subscribed, as before.
+ * `company_id`, each unique per company — and to the grace decision of its current period end (unique per company and
+ * period end, 0099), so a company yields at most one row. The activations counted against that period end are one
+ * scalar count on the episodes' (company, decision, start) index, with the window MySQL computes as the migration's
+ * CHECK does: the period end minus 12 calendar months, exclusive, later activations included (grace-rules.ts). No
+ * subscription row, no row: the evaluation then reads the company as never subscribed, as before.
  */
 export function evaluationRead(companyId: Buffer): Prisma.Sql {
   return Prisma.sql`
@@ -63,11 +81,17 @@ export function evaluationRead(companyId: Buffer): Prisma.Sql {
            c.name AS company_name, c.timezone AS company_timezone,
            e.id AS eligibility_id, e.closed_at AS eligibility_closed_at, e.closed_reason AS eligibility_closed_reason,
            t.id AS claim_id, t.claimed_at AS claim_claimed_at, t.started_at AS claim_started_at,
-           t.ends_at AS claim_ends_at, t.expiry_recorded_at AS claim_expiry_recorded_at
+           t.ends_at AS claim_ends_at, t.expiry_recorded_at AS claim_expiry_recorded_at,
+           g.decision AS grace_decision, g.started_at AS grace_started_at, g.ends_at AS grace_ends_at,
+           (SELECT COUNT(*) FROM grace_episodes x
+             WHERE x.company_id = s.company_id AND x.decision = 'granted'
+               AND x.started_at > s.current_period_end - INTERVAL 12 MONTH
+               AND x.period_end <> s.current_period_end) AS grace_uses_before
       FROM subscriptions s
       JOIN companies c ON c.id = s.company_id
       LEFT JOIN trial_eligibilities e ON e.company_id = s.company_id
       LEFT JOIN trial_claims t ON t.company_id = s.company_id
+      LEFT JOIN grace_episodes g ON g.company_id = s.company_id AND g.period_end = s.current_period_end
      WHERE s.company_id = ${companyId}
      LIMIT 1`;
 }
@@ -103,6 +127,13 @@ export function evaluationFactsOf(row: EvaluationColumns): EvaluationFacts {
         ? { closedAt: row.eligibility_closed_at, closedReason: row.eligibility_closed_reason as TrialEligibilityClosedReason | null }
         : null,
       trialClaim: claim,
+    },
+    grace: {
+      recorded:
+        row.grace_decision && row.grace_started_at && row.grace_ends_at
+          ? { decision: row.grace_decision as GraceDecision, startedAt: row.grace_started_at, endsAt: row.grace_ends_at }
+          : null,
+      usesBefore: Number(row.grace_uses_before ?? 0),
     },
   };
 }

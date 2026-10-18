@@ -8,7 +8,9 @@ import { BillingService } from '../billing/billing.service';
 import { SubscriptionRenewal } from '../billing/renewal';
 import { displayTimeZone, trialFactsOf } from '../platform/trial/trial-rules';
 import { TrialEndRoll } from '../platform/trial/trial-end-roll';
+import { GraceRoll } from '../billing/grace-roll';
 import { evaluationFactsOf, evaluationRead, type EvaluationColumns, type EvaluationFacts } from './evaluation-facts';
+import { graceDue, graceWindowStart, type GraceFacts } from './grace-rules';
 import {
   buildEntitlement,
   canWrite,
@@ -65,6 +67,11 @@ export class EntitlementService {
    * evaluation after it, never waiting on the subscription row (trial-end-roll.ts).
    */
   private readonly trialEnd: TrialEndRoll;
+  /**
+   * A paid period end's grace decision (0099): written by the first evaluation after the end when nothing wrote it yet,
+   * never waiting on the subscription row (billing/grace-roll.ts).
+   */
+  private readonly graceRoll: GraceRoll;
   /** company → when it was last checked: at most one cheap query a minute per company. */
   private readonly rollCheckedAt = new Map<string, number>();
   /** Companies whose stored time zone was refused — said once per process, not on every request. */
@@ -77,6 +84,7 @@ export class EntitlementService {
   ) {
     this.renewal = new SubscriptionRenewal(prisma, new BillingService(prisma, clock), clock);
     this.trialEnd = new TrialEndRoll(prisma, clock);
+    this.graceRoll = new GraceRoll(prisma, clock);
   }
 
   /**
@@ -144,6 +152,11 @@ export class EntitlementService {
     if (row?.company.trialClaim && (await this.trialEnd.onEvaluation(companyId, row.id, row.company.name, row.company.trialClaim))) {
       row = (await this.readRecord(companyId)) ?? row;
     }
+    // After a paid period's end with no grace decision written yet: write it now (0099) — never waiting for the row. The
+    // state below is the same either way; the record is what every later decision is counted from.
+    if (row && !row.grace.recorded && graceDue(row, this.clock.now()) && (await this.graceRoll.onEvaluation(companyId))) {
+      row = (await this.readRecord(companyId)) ?? row;
+    }
     if (!row) {
       return {
         subscribedBranchCount: 0,
@@ -158,6 +171,10 @@ export class EntitlementService {
       };
     }
     const { timezone, trialEligibility, trialClaim } = row.company;
+    const grace: GraceFacts = {
+      recorded: row.grace.recorded && row.currentPeriodEnd ? { periodEnd: row.currentPeriodEnd, ...row.grace.recorded } : null,
+      usesBefore: row.grace.usesBefore,
+    };
     return {
       subscribedBranchCount: row.subscribedBranchCount,
       additionalSeats: row.additionalSeats,
@@ -169,9 +186,23 @@ export class EntitlementService {
       // which no test caught because the field is optional by design.
       status: row.status,
       trial: trialFactsOf(trialEligibility, trialClaim),
-      // Only the trial's view shows a date in the business's zone, so only a business with a trial has it checked.
-      timeZone: trialEligibility || trialClaim ? this.trialZone(companyId, timezone) : undefined,
+      // Every client shows this business's instants in its own zone (0099: the paid period's and the grace's too).
+      timeZone: this.trialZone(companyId, timezone),
+      grace,
     };
+  }
+
+  /**
+   * The company's granted activations of the last 12 months and later, oldest first (0099): what the full evaluation
+   * shows — uses in the window, when one returns. Never read by the write gate.
+   */
+  private async recentGraceStarts(companyId: Buffer): Promise<Date[]> {
+    const rows = await this.prisma.graceEpisode.findMany({
+      where: { companyId, decision: 'granted', startedAt: { gt: graceWindowStart(this.clock.now()) } },
+      orderBy: { startedAt: 'asc' },
+      select: { startedAt: true },
+    });
+    return rows.map((r) => r.startedAt);
   }
 
   /**
@@ -203,8 +234,8 @@ export class EntitlementService {
     // One after the other (D176): the record may put in force what was paid for during the free trial, and the census
     // must count it.
     const record = await this.recordFor(companyId);
-    const usage = await this.seatUsage(companyId);
-    return buildEntitlement(record, usage, this.clock.now());
+    const [usage, recentStarts] = await Promise.all([this.seatUsage(companyId), this.recentGraceStarts(companyId)]);
+    return buildEntitlement({ ...record, grace: record.grace ? { ...record.grace, recentStarts } : record.grace }, usage, this.clock.now());
   }
 
   async current(): Promise<Entitlement> {

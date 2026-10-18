@@ -281,6 +281,8 @@ export function makeTrialWorld(options: WorldOptions = {}) {
         return pick(s, select);
       },
     },
+    // The company's grace history (0099): none — a trial never has any.
+    graceEpisode: { findMany: async () => [], findFirst: async () => null, count: async () => 0 },
     trialClaim: {
       create: async ({ data }: Row) => {
         if (t.claims.some((x) => same(x.companyId, data.companyId))) throw duplicate('ux_trial_claim_company');

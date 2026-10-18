@@ -83,6 +83,8 @@ function makeWorld(now: { t: Date }, opts: WorldOptions = {}): {
     // Never billed: no renewal is due, no paid period is in force, and the census finds nobody.
     billingPeriod: { findFirst: async () => null },
     branch: { findMany: async () => [] },
+    // The company's grace history (0099): none — a trial never has any.
+    graceEpisode: { findMany: async () => [] },
     company: { findUnique: async () => ({ name: 'Shop', closedAt: null }) },
     subscriptionPayment: {},
     // A request paid for during the trial, when the world has one: due since the trial's end, waiting for paid access.
@@ -401,12 +403,16 @@ describe('the trial as the entitlement tells it', () => {
     expect(zoneWarnings).toEqual([[expect.stringContaining('unknown time zone "Mars/Olympus_Mons"; its dates are shown in UTC')]]);
   });
 
-  it('a business with no trial shows none, and its zone is not even checked', async () => {
+  it('a business with no trial shows none — and its zone is still checked, because its paid and grace dates are shown in it (0099)', async () => {
     const w = makeWorld({ t: START }, { trial: false, timezone: 'Mars/Olympus_Mons' });
     const e = await w.service.current();
     expect(e.state).toBe('pending');
     expect(e.trial).toBeNull();
-    expect(warn).not.toHaveBeenCalled();
+    // Never a guessed zone: UTC, said once per company.
+    expect(e.timeZone).toBe('UTC');
+    await w.service.current();
+    const zoneWarnings = warn.mock.calls.filter(([m]) => /unknown time zone/.test(String(m)));
+    expect(zoneWarnings).toEqual([[expect.stringContaining('unknown time zone "Mars/Olympus_Mons"; its dates are shown in UTC')]]);
   });
 
   it('a company with no subscription row has no trial, and reads as before', async () => {

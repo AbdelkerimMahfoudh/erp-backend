@@ -93,6 +93,10 @@ enum SubscriptionEventKind {
   trial_claimed
   /// 0095: the free trial ended; recorded once, by the first evaluation after its end.
   trial_expired
+  /// 0099: a paid period ended and one of the company's three 72-hour grace periods in 12 months started.
+  grace_started
+  /// 0099: a paid period ended with the company's three grace periods in 12 months already used: no grace.
+  grace_unavailable
 }
 
 /// Where a subscription sits in its lifecycle (0056).
@@ -446,6 +450,8 @@ model Company {
   trialClaim                     TrialClaim?
   trialSetupLinks                TrialSetupLink[]
   trialSetupMessages             TrialSetupMessage[]
+  graceEpisodes                  GraceEpisode[]
+  subscriptionNotices            SubscriptionNotice[]
 
   @@map("companies")
 }
@@ -680,6 +686,7 @@ model User {
   trialClaims                  TrialClaim[]
   trialSetupLinks              TrialSetupLink[]
   trialSetupMessages           TrialSetupMessage[]
+  requestedNotices             SubscriptionNotice[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -4361,8 +4368,8 @@ model Subscription {
   /// Bought beyond the included pool. Not prorated.
   additionalSeats       Int @default(0) @map("additional_seats") @db.UnsignedInt
 
-  /// When the paid period ends. Grace is derived as +72h and never stored, so
-  /// it cannot drift away from the period it belongs to.
+  /// When the paid period ends. Whether 72 hours of grace follow it is decided once, when it passes, and recorded
+  /// in `grace_episodes` (0099): at most three per company in any rolling 12 months.
   currentPeriodEnd DateTime? @map("current_period_end") @db.DateTime(6)
 
   /// Granted by the platform, never by a tenant.
@@ -4379,7 +4386,11 @@ model Subscription {
   payments        SubscriptionPayment[]
   periods         BillingPeriod[]
   seatAllocations SeatAllocation[]
+  graceEpisodes   GraceEpisode[]
+  notices         SubscriptionNotice[]
 
+  /// 0099: the sweepers look for periods ending or ended.
+  @@index([currentPeriodEnd], map: "ix_subscriptions_period_end")
   @@map("subscriptions")
 }
 
@@ -5873,4 +5884,142 @@ model WhatsAppConsent {
   @@index([numberHash, createdAt], map: "ix_whatsapp_consents_number")
   @@index([actorUserId], map: "ix_whatsapp_consents_actor")
   @@map("whatsapp_consents")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Limited grace and the subscription notice outbox (0099; docs/101)
+//
+// A paid period's end is decided once — 72 hours of grace, or none — and the decision is never changed: the
+// company's allowance is three granted activations in any rolling 12 months, and an allowance used stays used. The
+// customer-facing subscription messages are one row each, with the channel that carried them and why.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// 0099: what a paid period's end received.
+enum GraceDecision {
+  /// 72 hours of grace, from the period end.
+  granted
+  /// None: three granted activations already started in the 12 months before the period end.
+  refused
+}
+
+/// 0099: which path wrote the decision — the first evaluation after the end, the minute sweeper, or a lifecycle
+/// decision made after it. The decision is the same whichever writes it.
+enum GraceRecordedBy {
+  evaluation
+  sweeper
+  lifecycle
+}
+
+/// 0099: one paid period end's grace decision, per company, ever (UNIQUE company + period end), immutable (triggers).
+/// `startedAt` is the period end; a granted episode ends exactly 72 hours later (CHECK), a refused one at its start.
+/// `usesBefore` counts the granted activations that started after `windowStart` (the period end minus 12 calendar
+/// months, by MySQL's arithmetic: CHECK) and before it.
+model GraceEpisode {
+  id             Bytes           @id @db.Binary(16)
+  companyId      Bytes           @map("company_id") @db.Binary(16)
+  subscriptionId Bytes           @map("subscription_id") @db.Binary(16)
+  periodEnd      DateTime        @map("period_end") @db.DateTime(6)
+  decision       GraceDecision
+  startedAt      DateTime        @map("started_at") @db.DateTime(6)
+  endsAt         DateTime        @map("ends_at") @db.DateTime(6)
+  usesBefore     Int             @map("uses_before") @db.UnsignedTinyInt
+  windowStart    DateTime        @map("window_start") @db.DateTime(6)
+  recordedAt     DateTime        @map("recorded_at") @db.DateTime(6)
+  recordedBy     GraceRecordedBy @map("recorded_by")
+  createdAt      DateTime        @default(now()) @map("created_at") @db.DateTime(6)
+
+  company      Company      @relation(fields: [companyId], references: [id], map: "fk_grace_episodes_company")
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], map: "fk_grace_episodes_subscription")
+
+  @@unique([companyId, periodEnd], map: "ux_grace_episode_company_period")
+  @@index([companyId, decision, startedAt], map: "ix_grace_episodes_window")
+  @@map("grace_episodes")
+}
+
+/// 0099: what a subscription notice is about.
+enum SubscriptionNoticeKind {
+  /// After the mandatory WhatsApp number is verified: where to start the trial (automatic once; resends throttled).
+  portal_instructions
+  /// 72, 48 and 24 hours before a free trial ends.
+  trial_reminder
+  /// The free trial ended — never with any grace.
+  trial_expired
+  /// 72, 48 and 24 hours before a paid period ends.
+  paid_reminder
+  /// A paid period ended: grace started (with its end and the uses left), or none was available.
+  paid_expired
+  /// 48 and 24 hours of grace left.
+  grace_reminder
+  /// The grace ended.
+  grace_ended
+}
+
+/// 0099: where one notice stands. `accepted` by WhatsApp is still watched for a terminal failure (one email
+/// fallback); by email it is final. `cancelled`: obsolete before it went (renewal, suspension, cancellation, a
+/// changed period). `superseded`: a later threshold of the same period became current first (no backlog burst).
+enum SubscriptionNoticeState {
+  pending
+  sending
+  accepted
+  delivered
+  failed
+  cancelled
+  superseded
+}
+
+/// 0099: the channel that carried a notice: WhatsApp first and exclusive when available; email only as the fallback.
+enum NoticeChannel {
+  whatsapp
+  email
+}
+
+/// 0099: one customer-facing subscription message, once (UNIQUE company + period + kind + threshold). Metadata only:
+/// a masked destination and a keyed hash of it, never a number, an address, a body, a code or a token.
+model SubscriptionNotice {
+  id                Bytes                   @id @db.Binary(16)
+  companyId         Bytes                   @map("company_id") @db.Binary(16)
+  subscriptionId    Bytes                   @map("subscription_id") @db.Binary(16)
+  kind              SubscriptionNoticeKind
+  /// h72 | h48 | h24 | end — or, for the portal instructions, auto | resend:<uuid>.
+  threshold         String                  @db.VarChar(48)
+  /// trial:<claim id> | paid:<period end, epoch ms> | grace:<episode id> | eligibility:<eligibility id>.
+  periodKey         String                  @map("period_key") @db.VarChar(80)
+  /// paid_expired: grace_started | no_grace.
+  variant           String?                 @db.VarChar(20)
+  dueAt             DateTime                @map("due_at") @db.DateTime(6)
+  state             SubscriptionNoticeState @default(pending)
+  channel           NoticeChannel?
+  /// accepted | failed | failed_async | unavailable | refused | skipped — what WhatsApp did with it.
+  whatsappOutcome   String?                 @map("whatsapp_outcome") @db.VarChar(20)
+  /// accepted | failed | unavailable | not_applicable — what email did, when it was the fallback.
+  emailOutcome      String?                 @map("email_outcome") @db.VarChar(20)
+  /// Why email carried it (docs/101 §6): whatsapp_disabled, template_unavailable, number_unverified,
+  /// number_undeliverable, provider_refused, retries_exhausted, async_failed.
+  fallbackReason    String?                 @map("fallback_reason") @db.VarChar(30)
+  /// Why nothing carried it, when it failed.
+  failureReason     String?                 @map("failure_reason") @db.VarChar(30)
+  destinationMasked String?                 @map("destination_masked") @db.VarChar(80)
+  /// Keyed HMAC (MESSAGING_HASH_KEY) of where it went: "sent" holds only while the Owner's contact is still this one.
+  destinationHash   String?                 @map("destination_hash") @db.Char(64)
+  language          String                  @db.VarChar(5)
+  /// The Owner who asked, for a resend from the portal.
+  requestedByUserId Bytes?                  @map("requested_by_user_id") @db.Binary(16)
+  attempts          Int                     @default(0) @db.UnsignedInt
+  nextAttemptAt     DateTime                @map("next_attempt_at") @db.DateTime(6)
+  claimToken        Bytes?                  @map("claim_token") @db.Binary(16)
+  claimedUntil      DateTime?               @map("claimed_until") @db.DateTime(6)
+  acceptedAt        DateTime?               @map("accepted_at") @db.DateTime(6)
+  completedAt       DateTime?               @map("completed_at") @db.DateTime(6)
+  cancelReason      String?                 @map("cancel_reason") @db.VarChar(40)
+  createdAt         DateTime                @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt         DateTime                @default(now()) @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company      Company      @relation(fields: [companyId], references: [id], map: "fk_subscription_notices_company")
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], map: "fk_subscription_notices_subscription")
+  requestedBy  User?        @relation(fields: [requestedByUserId], references: [id], onDelete: Restrict, map: "fk_subscription_notices_requested_by")
+
+  @@unique([companyId, periodKey, kind, threshold], map: "ux_subscription_notice_identity")
+  @@index([state, nextAttemptAt], map: "ix_subscription_notices_queue")
+  @@index([companyId, createdAt], map: "ix_subscription_notices_company")
+  @@map("subscription_notices")
 }

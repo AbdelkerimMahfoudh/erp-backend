@@ -36,6 +36,8 @@ function makeWorld(now: { t: Date }, opts: { failRead?: boolean } = {}) {
     planVersion: { findMany: async () => [{ id: Buffer.alloc(16, 3), planKey: 'standard', version: 3, branchMonthly: 500, agentMonthly: 300, bothMonthly: 700, includedStaffPerBranch: 1, extraStaffMonthly: 100, effectiveFrom: new Date('2026-01-01T00:00:00Z'), reason: 'v3' }] },
     branch: { findMany: async () => [] },
     subscriptionEvent: { create: async () => undefined },
+    // The company's grace history (0099): none.
+    graceEpisode: { findMany: async () => [] },
     // The evaluation's one statement (R1-F4); the census's two raw queries and the subscription lock find nothing.
     $queryRaw: async (q: { strings?: readonly string[] }) => (isEvaluationRead(q.strings) ? [evaluationColumnsOf(sub, company, null, null)] : []),
   };

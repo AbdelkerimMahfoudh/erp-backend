@@ -182,6 +182,8 @@ export async function makeBillingWorld(opts: WorldOptions) {
     company: { findUnique: async () => ({ name: sub.company.name }) },
     // Never a free trial in this world (D176): a confirmation takes effect at once, as it always did.
     trialClaim: { findUnique: async () => null },
+    // The company's grace history (0099): none in this world.
+    graceEpisode: { findMany: async () => [], findFirst: async () => null, count: async () => 0 },
     trialEligibility: { findUnique: async () => null },
     branch: {
       findFirst: async ({ where }: AnyRow) => {

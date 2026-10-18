@@ -1,5 +1,6 @@
 import type { Activity } from './activity';
 import { trialViewOf, type TrialFacts, type TrialView } from '../platform/trial/trial-rules';
+import { GRACE_HOURS, GRACE_MS, graceRunning, graceViewOf, periodGraceOf, type GraceFacts, type GraceView } from './grace-rules';
 
 /**
  * What a shop is entitled to (Milestone K).
@@ -50,9 +51,11 @@ export type EntitlementState =
   /** 0095: the free trial ended and nothing paid followed. Read-only, and no grace. */
   | 'trial_expired';
 
-/** Exactly 72 hours. Derived from the period, never stored beside it. */
-export const GRACE_HOURS = 72;
-export const GRACE_MS = GRACE_HOURS * 60 * 60 * 1000;
+/**
+ * Exactly 72 hours after a paid period's end — and since 0099 not after every one: at most three activations per
+ * company in any rolling 12 months, each decided once and recorded (`grace-rules.ts`, docs/101).
+ */
+export { GRACE_HOURS, GRACE_MS };
 
 /**
  * Included staff seats per store (docs/21, 2026-10-05). One, and it belongs to
@@ -78,8 +81,17 @@ export interface SubscriptionRecord {
    * record without them — the console's tallies, every caller written before the trial — has no trial at all.
    */
   trial?: TrialFacts | null;
-  /** The business's configured IANA time zone, already validated. Only the trial's view carries it; absent is UTC. */
+  /**
+   * The business's configured IANA time zone, already validated: the zone every client shows this business's instants
+   * in (its trial's, its paid period's and its grace's), with the zone's name. Absent is UTC.
+   */
   timeZone?: string;
+  /**
+   * The grace decision for the current paid period end, and the activations counted against it (0099). Optional for
+   * the same reason as `trial`: absent reads as an activation still available, as every paid expiry was before the
+   * limit — the evaluation that enforces access always reads it.
+   */
+  grace?: GraceFacts | null;
 }
 
 /** One store's seats: who works there, and what the shop holds for it. */
@@ -203,8 +215,12 @@ export function stateOf(sub: SubscriptionRecord, now: Date): EntitlementState {
   }
 
   if (now.getTime() < end) return 'active';
-  if (now.getTime() < end + GRACE_MS) return 'grace';
-  return 'expired';
+  /*
+   * After the paid period: 72 hours of grace only if the company still had one of its three activations in 12 months
+   * when the period ended (0099) — the decision recorded for this period end, or, until it is written, the decision the
+   * rules make from the same history. Refused, or run out: read-only, as before.
+   */
+  return graceRunning(periodGraceOf(sub, sub.grace), now) ? 'grace' : 'expired';
 }
 
 /**
@@ -255,8 +271,13 @@ export function canRead(state: EntitlementState = 'active'): boolean {
   );
 }
 
+/**
+ * When the grace that follows the current paid period ends — or null when none follows it (the company's three
+ * activations in 12 months were used when it ended, or will have been, or a grant covers it, or there is no period).
+ */
 export function graceEndsAt(sub: SubscriptionRecord): Date | null {
-  return sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd.getTime() + GRACE_MS) : null;
+  const grace = periodGraceOf(sub, sub.grace);
+  return grace && grace.decision === 'granted' ? grace.endsAt : null;
 }
 
 /** Whole days remaining, floored. Negative once the period has passed. */
@@ -481,6 +502,10 @@ export interface Entitlement {
   trial: TrialView | null;
   /** The lifecycle position an administrator put this in. */
   status: SubscriptionStatus;
+  /** The company's grace: the current period's, and the allowance of three in 12 months (0099). */
+  grace: GraceView;
+  /** The business's configured IANA time zone, validated (an unknown one reads UTC): every date here is shown in it. */
+  timeZone: string;
   /** When the server computed this, so a cached copy can be shown as stale. */
   calculatedAt: string;
 }
@@ -521,6 +546,8 @@ export function buildEntitlement(
     // What follows the trial is read from the same row: its grant and its paid period (C6).
     trial: trialViewOf(sub.trial, state, now, sub.timeZone ?? 'UTC', sub),
     status: sub.status ?? 'activated',
+    grace: graceViewOf(sub, sub.grace, now, state === 'active'),
+    timeZone: sub.timeZone ?? 'UTC',
     calculatedAt: now.toISOString(),
   };
 }

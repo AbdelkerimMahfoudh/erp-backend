@@ -101,6 +101,7 @@ const MODELS = [
   'trialSetupLink',
   'subscriptionEvent',
   'platformAuditEvent',
+  'graceEpisode',
 ] as const;
 type Model = (typeof MODELS)[number];
 type Tables = Record<Model, Row[]>;

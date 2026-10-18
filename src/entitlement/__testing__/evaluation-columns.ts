@@ -8,7 +8,7 @@ import type { EvaluationColumns } from '../evaluation-facts';
 /** The joined read, recognised by its text whatever its whitespace. */
 export function isEvaluationRead(strings: readonly string[] | undefined): boolean {
   const text = (strings ?? []).join('?').replace(/\s+/g, ' ');
-  return /FROM subscriptions s JOIN companies c ON c\.id = s\.company_id LEFT JOIN trial_eligibilities e ON e\.company_id = s\.company_id LEFT JOIN trial_claims t ON t\.company_id = s\.company_id WHERE s\.company_id = \? LIMIT 1/.test(
+  return /FROM subscriptions s JOIN companies c ON c\.id = s\.company_id LEFT JOIN trial_eligibilities e ON e\.company_id = s\.company_id LEFT JOIN trial_claims t ON t\.company_id = s\.company_id LEFT JOIN grace_episodes g ON g\.company_id = s\.company_id AND g\.period_end = s\.current_period_end WHERE s\.company_id = \? LIMIT 1/.test(
     text,
   );
 }
@@ -33,6 +33,8 @@ export function evaluationColumnsOf(
   company: { name: string; timezone: string },
   eligibility: { id?: Buffer; closedAt: Date | null; closedReason?: string | null } | null,
   claim: { id: Buffer; claimedAt: Date; startedAt: Date; endsAt: Date; expiryRecordedAt: Date | null } | null,
+  grace: { decision: string; startedAt: Date; endsAt: Date } | null = null,
+  graceUsesBefore = 0,
 ): EvaluationColumns {
   return {
     id: sub.id ?? Buffer.alloc(16, 0x51),
@@ -52,5 +54,9 @@ export function evaluationColumnsOf(
     claim_started_at: claim?.startedAt ?? null,
     claim_ends_at: claim?.endsAt ?? null,
     claim_expiry_recorded_at: claim?.expiryRecordedAt ?? null,
+    grace_decision: grace?.decision ?? null,
+    grace_started_at: grace?.startedAt ?? null,
+    grace_ends_at: grace?.endsAt ?? null,
+    grace_uses_before: BigInt(graceUsesBefore),
   };
 }

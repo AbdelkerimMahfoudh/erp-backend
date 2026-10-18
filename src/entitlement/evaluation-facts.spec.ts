@@ -31,17 +31,26 @@ const columns = (over: Partial<EvaluationColumns> = {}): EvaluationColumns => ({
   claim_started_at: null,
   claim_ends_at: null,
   claim_expiry_recorded_at: null,
+  grace_decision: null,
+  grace_started_at: null,
+  grace_ends_at: null,
+  grace_uses_before: 0n,
   ...over,
 });
 
 describe('the statement', () => {
-  it('is one SELECT: the subscription by its company, its company, and the two trial rows LEFT JOINed on company_id', () => {
+  it('is one statement: the subscription by its company, its company, the two trial rows and the grace decision LEFT JOINed', () => {
     const sql = evaluationRead(COMPANY);
     const text = sql.strings.join('?').replace(/\s+/g, ' ').trim();
-    expect(text.match(/\bSELECT\b/g)).toHaveLength(1);
+    // One round trip: the outer SELECT and one scalar count of the activations held against the period end (0099).
+    expect(text.match(/\bSELECT\b/g)).toHaveLength(2);
     expect(text).toContain('FROM subscriptions s JOIN companies c ON c.id = s.company_id');
     expect(text).toContain('LEFT JOIN trial_eligibilities e ON e.company_id = s.company_id');
     expect(text).toContain('LEFT JOIN trial_claims t ON t.company_id = s.company_id');
+    expect(text).toContain('LEFT JOIN grace_episodes g ON g.company_id = s.company_id AND g.period_end = s.current_period_end');
+    // The window is MySQL's own arithmetic, as the migration's CHECK computes it; the current end itself is not counted.
+    expect(text).toContain("x.decision = 'granted' AND x.started_at > s.current_period_end - INTERVAL 12 MONTH");
+    expect(text).toContain('x.period_end <> s.current_period_end');
     expect(text).toMatch(/WHERE s\.company_id = \? LIMIT 1$/);
     // The company is a bound parameter, never text in the statement.
     expect(sql.values).toEqual([COMPANY]);
@@ -57,6 +66,17 @@ describe('the row, in the shape the evaluation always read', () => {
     expect(evaluationFactsOf(columns({ is_complimentary: true, subscribed_branch_count: 3 })).isComplimentary).toBe(true);
     expect(evaluationFactsOf(columns({ is_complimentary: 0n })).isComplimentary).toBe(false);
     expect(evaluationFactsOf(columns({ is_complimentary: false })).isComplimentary).toBe(false);
+  });
+
+  it('the grace decision of the current period end, when recorded, and the activations counted against it (0099)', () => {
+    const none = evaluationFactsOf(columns());
+    expect(none.grace).toEqual({ recorded: null, usesBefore: 0 });
+    const end = new Date(NOW.getTime() - 5 * HOUR);
+    const granted = evaluationFactsOf(
+      columns({ grace_decision: 'granted', grace_started_at: end, grace_ends_at: new Date(end.getTime() + 72 * HOUR), grace_uses_before: 2n }),
+    );
+    expect(granted.grace).toEqual({ recorded: { decision: 'granted', startedAt: end, endsAt: new Date(end.getTime() + 72 * HOUR) }, usesBefore: 2 });
+    expect(evaluationFactsOf(columns({ grace_uses_before: 3 })).grace.usesBefore).toBe(3);
   });
 
   it('no trial rows: neither an eligibility nor a claim', () => {
