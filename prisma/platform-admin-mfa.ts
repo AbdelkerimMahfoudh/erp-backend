@@ -17,6 +17,9 @@
 // Needs PLATFORM_MFA_KEY in the environment, as the API does.
 // ===========================================================================
 
+// Secrets given as files (NAME_FILE, the production tools container) must be in place before the configuration is
+// imported and validated (D200).
+import '../src/common/config/load-secret-files';
 import { config as loadEnv } from 'dotenv';
 
 loadEnv();

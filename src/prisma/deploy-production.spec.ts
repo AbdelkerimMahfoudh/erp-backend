@@ -356,6 +356,14 @@ describe('the production package', () => {
     }
   });
 
+  it('creates fictitious businesses in the rehearsal only, through the product’s own provisioning', () => {
+    const fixture = read('scripts', 'rehearsal-fixture.ts');
+    expect(fixture).toMatch(/process\.env\.DEPLOY_PROFILE !== 'rehearsal' \|\| !\/\\\.localhost\$\/\.test\(process\.env\.EXPECTED_API_HOST/);
+    expect(fixture).toContain('registration.register(');
+    expect(fixture).toMatch(/@rehearsal\.example/);
+    expect(fixture).not.toMatch(/trialEligible: true/);
+  });
+
   it('keeps the email proof to one recipient file and the owner decision: plain text only', () => {
     const proof = script('email-proof.sh');
     expect(proof).toContain('--plain-text-approved');

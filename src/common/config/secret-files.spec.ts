@@ -84,6 +84,16 @@ describe('loadSecretFiles', () => {
     }
   });
 
+  it('is loaded first by every operator script that reads secrets in the production tools container', () => {
+    const root = join(__dirname, '..', '..', '..');
+    for (const file of ['prisma/platform-admin-mfa.ts', 'scripts/whatsapp-prove.ts', 'scripts/email-prove.ts', 'scripts/rehearsal-fixture.ts']) {
+      const source = readFileSync(join(root, file), 'utf8');
+      const loader = Math.max(source.indexOf("import '../src/common/config/load-secret-files';"), source.indexOf('loadSecretFiles(process.env);'));
+      const firstOther = source.search(/^import (?!\{ loadSecretFiles \}|'\.\.\/src\/common\/config\/load-secret-files')/m);
+      expect({ file, loadsFirst: loader > -1 && (firstOther === -1 || loader < firstOther) }).toEqual({ file, loadsFirst: true });
+    }
+  });
+
   it('runs before the application module is imported, so configuration validation sees the loaded values', () => {
     const main = readFileSync(join(__dirname, '..', '..', 'main.ts'), 'utf8');
     const loader = main.indexOf("import './common/config/load-secret-files';");

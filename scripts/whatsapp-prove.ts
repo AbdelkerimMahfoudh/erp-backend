@@ -22,6 +22,9 @@
 // Reads the environment the API reads (`.env`, or the deployment's own).
 // ===========================================================================
 
+// Secrets given as files (NAME_FILE, the production tools container) must be in place before the configuration is
+// imported and validated (D200).
+import '../src/common/config/load-secret-files';
 import { config as loadEnv } from 'dotenv';
 
 loadEnv({ override: false });
