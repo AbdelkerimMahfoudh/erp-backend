@@ -133,6 +133,9 @@ services:
     profiles: [tools]
     env_file:
       - ${SECRETS_DIR}/migrator.env
+    environment:
+      # npx checks the registry for a newer npm on every run: a one-off container has no reason to call out.
+      NPM_CONFIG_UPDATE_NOTIFIER: 'false'
     command: ['sh', '-c', 'npx prisma migrate deploy && npx prisma migrate status']
     networks: [internal]
     mem_limit: 1g
@@ -156,6 +159,7 @@ services:
       PLATFORM_MFA_KEY_FILE: /run/secrets/platform_mfa_key
       # What the preflight checks the environment against (lib.sh).
       DEPLOY_PROFILE: ${DEPLOY_PROFILE:?set DEPLOY_PROFILE in stack.env}
+      NPM_CONFIG_UPDATE_NOTIFIER: 'false'
       EXPECTED_API_HOST: ${API_HOST}
     volumes:
       - ${SECRETS_DIR}/api:/run/secrets:ro
@@ -173,6 +177,7 @@ services:
       SMTP_PORT: '587'
       SMTP_USERNAME_FILE: /run/proof/smtp_username
       SMTP_PASSWORD_FILE: /run/proof/smtp_password
+      NPM_CONFIG_UPDATE_NOTIFIER: 'false'
     volumes:
       - ${SECRETS_DIR}/proof:/run/proof:ro
     # Outbound only (the relay): no database, no internal network.

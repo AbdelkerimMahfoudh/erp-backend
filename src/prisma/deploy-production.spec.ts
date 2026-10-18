@@ -314,6 +314,14 @@ describe('the production package', () => {
     }
   });
 
+  it('removes the rehearsal directory itself with rmdir only, never a privileged recursive delete (found by the rehearsal)', () => {
+    const teardown = script('teardown-rehearsal.sh');
+    expect(teardown).toContain('find /srv/erp-rehearsal -mindepth 1 -delete');
+    expect(teardown).toContain('sudo rmdir /srv/erp-rehearsal');
+    expect(teardown).not.toMatch(/sudo rm\b/);
+    expect(teardown).toMatch(/\[ "\$DEPLOY_PROFILE" = rehearsal \] && \[ "\$PROJECT" = erp-rehearsal \] && \[ "\$BASE" = \/srv\/erp-rehearsal \]/);
+  });
+
   it('asks for --confirm <host> on every command that changes the stack', () => {
     for (const name of ['deploy.sh', 'migrate.sh', 'rollback.sh', 'teardown-rehearsal.sh']) {
       expect({ name, confirm: /^require_confirm "\$@"$/m.test(script(name)) }).toEqual({ name, confirm: true });

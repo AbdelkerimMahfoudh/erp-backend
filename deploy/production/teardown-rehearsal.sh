@@ -22,7 +22,10 @@ docker image prune -f > /dev/null
 
 echo "== the rehearsal directory"
 cd / || exit 1
-rm -rf /srv/erp-rehearsal
+# Its contents belong to the deployment account; the directory itself is an entry of root's /srv, removed once empty
+# (rmdir removes nothing else — found by the rehearsal, where a plain rm stopped at that last entry).
+find /srv/erp-rehearsal -mindepth 1 -delete
+sudo rmdir /srv/erp-rehearsal
 
 echo "== what remains"
 left=0
