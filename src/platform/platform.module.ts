@@ -30,6 +30,8 @@ import { PortalSessionController } from './portal/portal-session.controller';
 import { PortalSessionService } from './portal/portal-session.service';
 import { PortalAccountController } from './portal/portal-account.controller';
 import { OwnerContactsService } from './portal/owner-contacts.service';
+import { PlatformOversightController } from './oversight/oversight.controller';
+import { PlatformOversightService } from './oversight/oversight.service';
 import {
   ContactDeliveryProvider,
   outboxAllowed,
@@ -99,6 +101,8 @@ export function selectContactDelivery(
     // The Dukan ERP portal (0099): its own sign-in on the app's identity, and the Owner's routes beside the subscription.
     PortalSessionController,
     PortalAccountController,
+    // The console's oversight of the lifecycle (0099): messages, grace decisions, trial claims — reads only.
+    PlatformOversightController,
   ],
   providers: [
     HashingService,
@@ -118,6 +122,7 @@ export function selectContactDelivery(
     TrialSetupService,
     PortalSessionService,
     OwnerContactsService,
+    PlatformOversightService,
     // Mandatory (D176): what was paid for during a free trial is put in force when it ends, looked at or not.
     TrialEndSweeper,
     SeatAllocationService,

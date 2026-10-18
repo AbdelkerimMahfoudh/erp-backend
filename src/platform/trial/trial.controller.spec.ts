@@ -90,12 +90,14 @@ describe('no trial action under account/ or auth/, and no route that takes a tok
 
   it('the trial is acted on only under platform/my-subscription, on the portal; account/ may only ever show a status', () => {
     const trial = routeTable().filter((r) => /trial/i.test(r));
-    // The read-only app status (`GET account/trial-setup`) and the portal resend are the instructions' (docs/101 §5).
+    // The read-only app status (`GET account/trial-setup`) and the portal resend are the instructions' (docs/101 §5);
+    // `GET platform/trial-claims` is the console's read of the claims, behind the platform guard (docs/101 §7).
     const allowed = [
       'GET platform/my-subscription/trial',
       'POST platform/my-subscription/trial/claim',
       'POST platform/my-subscription/trial/setup/resend',
       'GET account/trial-setup',
+      'GET platform/trial-claims',
     ];
     for (const route of trial) expect({ route, allowed: allowed.includes(route) }).toEqual({ route, allowed: true });
     for (const route of trial) {
