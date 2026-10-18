@@ -356,6 +356,16 @@ describe('the production package', () => {
     }
   });
 
+  it('reads the HSTS max-age as a number (found by the rehearsal: a lost backslash made the check fail a valid header)', () => {
+    const smoke = read('deploy', 'staging', 'smoke.mjs');
+    const line = smoke.split(/\r?\n/).find((l) => l.includes('const maxAge')) ?? '';
+    expect(line).toContain(String.raw`/max-age=(\d+)/`);
+    // The same expression, applied to what the API sends (helmet's default) and to a header that is too short.
+    const maxAge = (hsts: string) => Number((/max-age=(\d+)/.exec(hsts) ?? [])[1] ?? 0);
+    expect(maxAge('max-age=15552000; includeSubDomains')).toBeGreaterThanOrEqual(15552000);
+    expect(maxAge('max-age=86400')).toBeLessThan(15552000);
+  });
+
   it('creates fictitious businesses in the rehearsal only, through the product’s own provisioning', () => {
     const fixture = read('scripts', 'rehearsal-fixture.ts');
     expect(fixture).toMatch(/process\.env\.DEPLOY_PROFILE !== 'rehearsal' \|\| !\/\\\.localhost\$\/\.test\(process\.env\.EXPECTED_API_HOST/);

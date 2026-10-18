@@ -100,7 +100,7 @@ const h = live.headers;
 check('security headers: nosniff, frame denial, no X-Powered-By', h.get('x-content-type-options') === 'nosniff' && !!h.get('x-frame-options') && !h.get('x-powered-by'));
 if (expectHsts) {
   const hsts = h.get('strict-transport-security') ?? '';
-  const maxAge = Number((/max-age=(d+)/.exec(hsts) ?? [])[1] ?? 0);
+  const maxAge = Number((/max-age=(\d+)/.exec(hsts) ?? [])[1] ?? 0);
   check('HSTS is sent, for at least 180 days', maxAge >= 15552000, hsts || 'none');
 }
 const anyRateHeader = [...me.headers.keys(), ...live.headers.keys()].some((k) => k.startsWith('x-ratelimit') || k === 'retry-after');
