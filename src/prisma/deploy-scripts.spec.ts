@@ -115,6 +115,24 @@ describe('deploy/restore-drill.sh', () => {
     expect(drill).toContain("PASS every table's CHECKSUM matches");
   });
 
+  it('never leaves an incomplete or failed copy behind (found by the production rehearsal)', () => {
+    // From the moment the copy exists, an exit before the verdict drops it, KEEP_DRILL or not.
+    const text = drill.replace(/\r\n/g, '\n');
+    const created = text.indexOf('q "CREATE DATABASE \\`$DRILL\\`');
+    const trap = text.indexOf("trap '[ \"$DRILL_DONE\" = 1 ] || { q \"DROP DATABASE IF EXISTS");
+    const restore = text.indexOf('decrypted \\\n  | gunzip');
+    expect(created).toBeGreaterThan(-1);
+    expect(trap).toBeGreaterThan(created);
+    expect(trap).toBeLessThan(restore);
+    // And a copy that failed a comparison is dropped even when it was asked to be kept.
+    expect(drill).toContain('if [ "${KEEP_DRILL:-0}" = "1" ] && [ "$fails" -eq 0 ]; then echo "kept $DRILL"; else');
+  });
+
+  it('reads a decrypted stream on stdin (BACKUP=-) for the production age backups, with the same restore after it', () => {
+    expect(drill).toContain('[ "$BACKUP" = "-" ] || : "${BACKUP_PASSPHRASE_FILE:?}"');
+    expect(drill).toMatch(/decrypted\(\) \{ if \[ "\$BACKUP" = "-" \]; then cat; else openssl enc -d/);
+  });
+
   it('passes the append-only probe only when the trigger refused it, never for want of a grant', () => {
     expect(drill).toMatch(/elif grep -q "append-only" <<<"\$out"; then\s*\n\s*echo "PASS append-only trigger restored/);
     expect(drill).toMatch(/elif grep -q "ERROR 1142" <<<"\$out"; then\s*\n\s*echo "SKIP append-only probe/);

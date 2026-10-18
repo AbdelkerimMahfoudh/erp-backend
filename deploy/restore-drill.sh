@@ -48,6 +48,11 @@ read -r SRC_CHARSET SRC_COLLATION <<<"$(q "SELECT DEFAULT_CHARACTER_SET_NAME, DE
 [ -n "${SRC_COLLATION:-}" ] || { echo "cannot read the character set of $SOURCE_DB — is SOURCE_DB right, and can $MYSQL_USER see it?"; exit 1; }
 q "CREATE DATABASE \`$DRILL\` CHARACTER SET $SRC_CHARSET COLLATE $SRC_COLLATION"
 echo "created $DRILL ($SRC_CHARSET / $SRC_COLLATION, as $SOURCE_DB)"
+# A drill that stops before its verdict leaves no copy behind, KEEP_DRILL or not: an incomplete copy must never be
+# taken for a restore. (Found by the production rehearsal: an authenticated decryption streams the chunks it has
+# verified, so a backup damaged near its end had already half-filled the copy when it was refused.)
+DRILL_DONE=0
+trap '[ "$DRILL_DONE" = 1 ] || { q "DROP DATABASE IF EXISTS \`$DRILL\`" > /dev/null 2>&1; echo "dropped the incomplete $DRILL"; }' EXIT
 # DEFINER clauses name the original creator; on a server where that account is
 # absent the restore would fail (docs/22 §3.1). Strip them so the objects are
 # created by the restoring account — on schema lines only: mysqldump writes
@@ -104,6 +109,8 @@ if [ -n "${APP_PW:-}" ]; then
   fi
 fi
 
-if [ "${KEEP_DRILL:-0}" != "1" ]; then q "DROP DATABASE \`$DRILL\`"; echo "dropped $DRILL"; else echo "kept $DRILL"; fi
+DRILL_DONE=1
+# Kept only when asked AND every comparison passed: a copy that differs from its source is never left to be used.
+if [ "${KEEP_DRILL:-0}" = "1" ] && [ "$fails" -eq 0 ]; then echo "kept $DRILL"; else q "DROP DATABASE \`$DRILL\`"; echo "dropped $DRILL"; fi
 echo "=== drill $([ $fails -eq 0 ] && echo PASSED || echo "FAILED ($fails)")"
 [ "$fails" -eq 0 ]
