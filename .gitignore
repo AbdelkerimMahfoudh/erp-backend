@@ -66,3 +66,12 @@ staging-server.cjs
 deploy/staging/*.env
 !deploy/staging/*.env.example
 deploy/staging/secrets/
+
+# The production stack's host settings and any env file beside it (deploy/production; docs/100). Only examples are committed.
+# Backups (age) and backup identities never belong in a repository, wherever they land.
+deploy/production/*.env
+!deploy/production/*.env.example
+deploy/production/secrets/
+*.sql.gz.age
+*.age.sha256
+*identity*.txt

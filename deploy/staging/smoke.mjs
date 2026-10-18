@@ -1,6 +1,7 @@
 // Post-deployment smoke test for the staging API (docs/99 §9). Read-only, unauthenticated, dependency-free (Node 22):
 //
 //   node deploy/staging/smoke.mjs https://staging-api.tsxmr.com [--commit <sha>] [--allowed-origin https://…]
+//   node deploy/staging/smoke.mjs https://api.tsxmr.com --environment production --expect-hsts      (production, docs/100)
 //   deploy/staging/smoke.sh                 (from the host, with the stack's own values)
 //
 // It never signs in, writes nothing and needs no secret. It proves what a deployment must prove before anyone tests on
@@ -19,6 +20,10 @@ const opt = (name) => {
 const expectCommit = opt('--commit');
 const allowedOrigin = opt('--allowed-origin');
 const insecure = args.includes('--insecure-local'); // the local rehearsal's self-signed edge only; never against a real host
+// The environment the deployment must report (staging unless said), and whether the API must send HSTS (production does;
+// staging deliberately does not, main.ts).
+const environment = opt('--environment') ?? 'staging';
+const expectHsts = args.includes('--expect-hsts');
 if (!/^https:\/\/[^/]+$/.test(origin)) {
   console.error('Usage: node deploy/staging/smoke.mjs https://<staging API host> [--commit <sha>] [--allowed-origin <https origin>]');
   process.exit(2);
@@ -77,7 +82,7 @@ check(
   ready.json?.ready === true && ready.json?.pendingMigrations === 0 && ready.json?.migrationsMissing === 0,
   `applied ${ready.json?.migrationsApplied} of ${ready.json?.migrationsInBuild} carried`,
 );
-check('readiness reports the staging environment', ready.json?.environment === 'staging', `${ready.json?.environment}`);
+check(`readiness reports the ${environment} environment`, ready.json?.environment === environment, `${ready.json?.environment}`);
 const version = await get('/api/health/version');
 check(
   expectCommit ? `the deployed commit is ${expectCommit.slice(0, 12)}` : 'the deployed commit is stamped',
@@ -93,6 +98,11 @@ const missing = await get('/api/v1/no-such-route-smoke');
 check('an error carries no stack trace', missing.status === 404 && !/at .+\(.+:\d+:\d+\)|"stack"/.test(missing.text), `${missing.status}`);
 const h = live.headers;
 check('security headers: nosniff, frame denial, no X-Powered-By', h.get('x-content-type-options') === 'nosniff' && !!h.get('x-frame-options') && !h.get('x-powered-by'));
+if (expectHsts) {
+  const hsts = h.get('strict-transport-security') ?? '';
+  const maxAge = Number((/max-age=(d+)/.exec(hsts) ?? [])[1] ?? 0);
+  check('HSTS is sent, for at least 180 days', maxAge >= 15552000, hsts || 'none');
+}
 const anyRateHeader = [...me.headers.keys(), ...live.headers.keys()].some((k) => k.startsWith('x-ratelimit') || k === 'retry-after');
 check('rate limiting is active (rate-limit headers present)', anyRateHeader);
 

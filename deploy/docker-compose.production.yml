@@ -1,0 +1,193 @@
+# The PRODUCTION stack for tsxmr-app-01 (docs/100): https://api.tsxmr.com — and, run as the project `erp-rehearsal`
+# with its own stack.env, paths, volumes and secrets, the disposable rehearsal of exactly this file (docs/100 §9).
+# Never run directly: deploy/production/*.sh pass the project name, the stack.env and every guard (lib.sh).
+#
+#   db       MySQL 8.4 LTS, pinned by digest; strict sql_mode, UTC, the trigger setting; internal network only, no port;
+#            root reachable from inside the container only (MYSQL_ROOT_HOST=localhost); tuned for a CX23 (2 vCPU, 4 GB).
+#   api      the runtime image (Dockerfile, target runtime): non-root, no capability, no published port. Every secret is a
+#            read-only file under /run/secrets named by NAME_FILE (src/common/config/secret-files.ts), so `docker
+#            inspect` shows no secret. APP_ENV=production is forced here, whatever the env file says.
+#   edge     Caddy, pinned by digest: the ONLY published ports. 80 and 443 on every address in production; 127.0.0.1
+#            only in the rehearsal (lib.sh refuses anything else). Automatic HTTPS for API_HOST.
+#   migrate  (profile tools) `prisma migrate deploy` + `migrate status` as phonestore_migrator. Never part of `up`.
+#   tools    (profile tools) operator commands as the application identity: preflight, catalogue, audit chain.
+#   email-proof (profile proof) the operator's one-message SMTP delivery proof (scripts/email-prove.ts): outbound
+#            network only, no database, the SMTP login, key and test recipient as read-only files.
+#
+# Nothing secret is in this file or in an image. The database passwords and the API's keys are generated on the host
+# by setup-secrets.sh (never printed); the SMTP login and key are the owner's, entered through a hidden prompt.
+name: erp-production
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '5'
+
+services:
+  db:
+    image: mysql:8.4.11@sha256:24989179f58856db763f418010c1169fecc944e3ec1ea7e921572d83eb070f70
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # MySQL 8's own strict default, the mode CI migrates under (deploy/ci-database-gates.sh).
+      - --sql-mode=ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+      # The binary log is on; without this the migrator cannot create the append-only triggers (ERROR 1419).
+      - --log-bin-trust-function-creators=1
+      - --default-time-zone=+00:00
+      - --skip-name-resolve
+      # CX23 sizing (docs/100 §8): the buffer pool is the database's working memory, the rest of the 4 GB is the API's
+      # and the system's. Seven days of binary log are enough between daily backups and cannot fill the 40 GB disk.
+      - --innodb-buffer-pool-size=768M
+      - --max-connections=60
+      - --binlog-expire-logs-seconds=604800
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /secrets/mysql_root.pw
+      # root@localhost only: from inside the container, never from the network.
+      MYSQL_ROOT_HOST: localhost
+    volumes:
+      - db-data:/var/lib/mysql
+      - ${SECRETS_DIR:?set SECRETS_DIR in stack.env}/db:/secrets:ro
+      - ./:/deploy:ro
+    networks: [internal]
+    healthcheck:
+      # 0 whenever the server answers, credentials or not (mysqladmin's documented behaviour): no password needed.
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '--silent']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    mem_limit: 1536m
+    cpus: 1.5
+    logging: *logging
+
+  api:
+    image: ${API_IMAGE:?deploy.sh sets API_IMAGE}
+    build:
+      context: ..
+      target: runtime
+      args:
+        APP_COMMIT: ${APP_COMMIT:-unknown}
+        APP_BUILT_AT: ${APP_BUILT_AT:-}
+    restart: unless-stopped
+    env_file:
+      - ${API_ENV_FILE:?set API_ENV_FILE in stack.env}
+    environment:
+      # The environment's identity and its ingress are the stack's, not the env file's to change.
+      APP_ENV: production
+      NODE_ENV: production
+      PORT: '3010'
+      API_INGRESS: network
+      UPLOAD_DIR: /app/uploads
+      # Room for the heap inside the container's limit, with headroom for buffers and the Prisma engine.
+      NODE_OPTIONS: --max-old-space-size=640
+      # The secrets: files, not values (D200). The SMTP pair is named in the env file only when email is on.
+      APP_DATABASE_URL_FILE: /run/secrets/app_database_url
+      JWT_ACCESS_SECRET_FILE: /run/secrets/jwt_access_secret
+      OTP_PEPPER_FILE: /run/secrets/otp_pepper
+      MESSAGING_HASH_KEY_FILE: /run/secrets/messaging_hash_key
+      PLATFORM_MFA_KEY_FILE: /run/secrets/platform_mfa_key
+    volumes:
+      - uploads:/app/uploads
+      - ${SECRETS_DIR}/api:/run/secrets:ro
+    expose: ['3010']
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal, edge]
+    mem_limit: 1g
+    cpus: 1.5
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+    logging: *logging
+
+  edge:
+    image: caddy:2.11.7@sha256:685ae3d7c34d9b5f8caeddc5d14051db7bbd88ff1f5a2fa0c16bd8ca328fb7af
+    restart: unless-stopped
+    ports:
+      # Production: "80" and "443" (every address). Rehearsal: "127.0.0.1:8080" and "127.0.0.1:8443" (lib.sh).
+      - '${EDGE_HTTP_BIND:?set EDGE_HTTP_BIND in stack.env}:80'
+      - '${EDGE_HTTPS_BIND:?set EDGE_HTTPS_BIND in stack.env}:443'
+    environment:
+      API_HOST: ${API_HOST:?set API_HOST in stack.env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in stack.env}
+    volumes:
+      - ./production/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [api]
+    networks: [edge]
+    mem_limit: 256m
+    cpus: 0.5
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    logging: *logging
+
+  migrate:
+    image: ${TOOLS_IMAGE:?deploy.sh sets TOOLS_IMAGE}
+    build:
+      context: ..
+      target: tools
+    profiles: [tools]
+    env_file:
+      - ${SECRETS_DIR}/migrator.env
+    command: ['sh', '-c', 'npx prisma migrate deploy && npx prisma migrate status']
+    networks: [internal]
+    mem_limit: 1g
+    logging: *logging
+
+  tools:
+    image: ${TOOLS_IMAGE:?deploy.sh sets TOOLS_IMAGE}
+    profiles: [tools]
+    env_file:
+      - ${API_ENV_FILE}
+      - ${SECRETS_DIR}/database.env
+    environment:
+      APP_ENV: production
+      NODE_ENV: production
+      API_INGRESS: network
+      UPLOAD_DIR: /app/uploads
+      APP_DATABASE_URL_FILE: /run/secrets/app_database_url
+      JWT_ACCESS_SECRET_FILE: /run/secrets/jwt_access_secret
+      OTP_PEPPER_FILE: /run/secrets/otp_pepper
+      MESSAGING_HASH_KEY_FILE: /run/secrets/messaging_hash_key
+      PLATFORM_MFA_KEY_FILE: /run/secrets/platform_mfa_key
+      # What the preflight checks the environment against (lib.sh).
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:?set DEPLOY_PROFILE in stack.env}
+      EXPECTED_API_HOST: ${API_HOST}
+    volumes:
+      - ${SECRETS_DIR}/api:/run/secrets:ro
+      - ${BACKUP_DIR:?set BACKUP_DIR in stack.env}:/backups:ro
+    networks: [internal]
+    mem_limit: 1g
+    logging: *logging
+
+  email-proof:
+    image: ${TOOLS_IMAGE:?deploy.sh sets TOOLS_IMAGE}
+    profiles: [proof]
+    environment:
+      NODE_ENV: production
+      SMTP_HOST: smtp-relay.brevo.com
+      SMTP_PORT: '587'
+      SMTP_USERNAME_FILE: /run/proof/smtp_username
+      SMTP_PASSWORD_FILE: /run/proof/smtp_password
+    volumes:
+      - ${SECRETS_DIR}/proof:/run/proof:ro
+    # Outbound only (the relay): no database, no internal network.
+    networks: [edge]
+    mem_limit: 512m
+    logging: *logging
+
+networks:
+  # The database's network has no route out: nothing on it can reach the internet, and nothing outside can reach it.
+  internal:
+    internal: true
+  edge: {}
+
+volumes:
+  db-data:
+  uploads:
+  caddy-data:
+  caddy-config:

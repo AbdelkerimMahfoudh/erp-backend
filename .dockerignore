@@ -10,9 +10,15 @@ coverage
 .env.*
 !.env.example
 !.env.staging.example
+!.env.production.example
 deploy/staging/secrets
 deploy/staging/*.env
 !deploy/staging/*.env.example
+deploy/production/secrets
+deploy/production/*.env
+!deploy/production/*.env.example
+*.age
+*.identity
 *.pem
 *.key
 *.pw

@@ -1,0 +1,31 @@
+# The production edge (docs/100): HTTPS for the one API hostname, then the API on the private network.
+#
+# - Certificates are automatic (ACME). The hostname's DNS record must point straight at this host (Cloudflare
+#   "DNS only", not proxied) so the challenge reaches Caddy and so the client address below is the real one.
+#   In the rehearsal the hostname is a *.localhost name: Caddy then uses its own local authority, and nothing is
+#   requested from Let's Encrypt.
+# - X-Forwarded-For is set to the address that connected here and nothing else: a client cannot inject its own, and
+#   the API trusts exactly this one hop (API_INGRESS=network).
+# - The request body passes through untouched, which the WhatsApp webhook's signature check needs (the raw bytes).
+# - No access log here on purpose: the API logs every request itself with tokens scrubbed from the URL, whereas an edge
+#   log would keep raw query strings (the webhook's verify token arrives in one).
+# - HTTP/1.1 and HTTP/2 only: the cloud firewall admits TCP 80/443 and no UDP, so HTTP/3 is not advertised.
+{
+	email {$ACME_EMAIL}
+	admin off
+	skip_install_trust
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$API_HOST} {
+	request_body {
+		# Above the largest upload the API accepts (an 8 MB receiving file), below anything abusive.
+		max_size 16MB
+	}
+	reverse_proxy api:3010 {
+		header_up X-Forwarded-For {remote_host}
+	}
+	header -Server
+}

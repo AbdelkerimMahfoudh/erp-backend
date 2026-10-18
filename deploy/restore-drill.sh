@@ -15,9 +15,16 @@
 # A server with the binary log on refuses to create the dump's triggers for an
 # account without SUPER unless it sets log_bin_trust_function_creators=1
 # (ERROR 1419; deploy/mysql-identities.sql).
+#
+# BACKUP=- reads the dump, already decrypted but still gzipped, on standard
+# input: the production backups are age-encrypted to a key that never lives
+# on the server, so deploy/production/restore-drill.sh checks the checksum,
+# decrypts on the host with the identity brought in for the drill, and pipes
+# the stream here. Everything after the decryption is the same.
 set -euo pipefail
-: "${BACKUP:?set BACKUP (the .sql.gz.enc to restore)}"
-: "${BACKUP_PASSPHRASE_FILE:?}"; : "${MYSQL_PWD_FILE:?}"
+: "${BACKUP:?set BACKUP (the .sql.gz.enc to restore, or - for a decrypted stream on stdin)}"
+[ "$BACKUP" = "-" ] || : "${BACKUP_PASSPHRASE_FILE:?}"
+: "${MYSQL_PWD_FILE:?}"
 SOURCE_DB=${SOURCE_DB:-phonestore}
 MYSQL_USER=${MYSQL_USER:-phonestore_admin}
 CONN=()
@@ -28,7 +35,12 @@ DRILL="${SOURCE_DB}_drill_${STAMP}"
 q() { mysql "${CONN[@]}" -u "$MYSQL_USER" -N -B -e "$1"; }
 
 echo "=== restore drill $STAMP: $BACKUP → $DRILL"
-sha256sum -c "$BACKUP.sha256" >/dev/null && echo "checksum ok" || { echo "checksum FAILED"; exit 1; }
+if [ "$BACKUP" = "-" ]; then
+  echo "checksum: checked by the caller before decrypting (stdin)"
+else
+  sha256sum -c "$BACKUP.sha256" >/dev/null && echo "checksum ok" || { echo "checksum FAILED"; exit 1; }
+fi
+decrypted() { if [ "$BACKUP" = "-" ]; then cat; else openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$BACKUP_PASSPHRASE_FILE" -in "$BACKUP"; fi; }
 # The copy takes the source's defaults, not fixed ones: a trigger's or a
 # routine's variables take the database's collation, so a copy with other
 # defaults is not the database it claims to be.
@@ -43,7 +55,7 @@ echo "created $DRILL ($SRC_CHARSET / $SRC_COLLATION, as $SOURCE_DB)"
 # product's name, say) is data that a blind substitution would corrupt without
 # a word (docs/22 §3). --comments keeps the comments inside trigger bodies, so
 # the bodies come back byte-identical; the client drops them otherwise.
-openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$BACKUP_PASSPHRASE_FILE" -in "$BACKUP" \
+decrypted \
   | gunzip \
   | LC_ALL=C sed -E '/^(INSERT|REPLACE) INTO /!s/DEFINER=`[^`]+`@`[^`]+`//g' \
   | mysql --comments "${CONN[@]}" -u "$MYSQL_USER" "$DRILL"
@@ -61,6 +73,12 @@ for t in companies users sales sale_items payments units audit_logs subscription
 done
 cmp "binary keys intact (first company id)" "SELECT HEX(id) FROM \`__DB__\`.companies ORDER BY id LIMIT 1"
 cmp "audit_logs last id"                   "SELECT IFNULL(MAX(id),0) FROM \`__DB__\`.audit_logs"
+# Every BINARY(16) key of the tenant roots, as one digest: a key that came back as different bytes fails here.
+for t in companies users; do
+  cmp "binary keys of $t (digest)" "SET SESSION group_concat_max_len = 1000000000; SELECT IFNULL(MD5(GROUP_CONCAT(HEX(id) ORDER BY id SEPARATOR ',')), 'none') FROM \`__DB__\`.\`$t\`"
+done
+cmp "money: sales total"  "SELECT IFNULL(SUM(total),0) FROM \`__DB__\`.sales"
+cmp "money: payments"     "SELECT IFNULL(SUM(amount),0) FROM \`__DB__\`.payments"
 cmp "trigger bodies" "SET SESSION group_concat_max_len = 1000000000; SELECT MD5(GROUP_CONCAT(CONCAT_WS('|', TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT) ORDER BY TRIGGER_NAME SEPARATOR '\\n')) FROM information_schema.triggers WHERE trigger_schema='__DB__'"
 # Every table's content, not only its row count: a restore that changed one
 # value in one row must not pass.
