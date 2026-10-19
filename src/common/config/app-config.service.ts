@@ -233,6 +233,16 @@ export class AppConfigService {
     return (this.config.get<string>('PLATFORM_MFA_KEY') ?? '').trim();
   }
 
+  /**
+   * Secret. Keys the hashes of employee invitation references (0101, D214): a key of their own, never another
+   * secret's, so the hashes are comparable with nothing else. Null when unset or shorter than 32 characters — then no
+   * invitation can be issued or opened, rather than one whose hash a leaked database could reverse. Never logged.
+   */
+  get staffInvitationKey(): string | null {
+    const value = (this.config.get<string>('STAFF_INVITATION_KEY') ?? '').trim();
+    return value.length >= 32 ? value : null;
+  }
+
   get otpPepper(): string | null {
     const value = this.config.get<string>('OTP_PEPPER');
     return value && value.length >= 32 ? value : null;

@@ -21,6 +21,8 @@ const SAFE = {
   APP_DATABASE_URL: 'mysql://app:pw@db.internal:3306/erp',
   // 32 bytes, base64 (0094) — a test value, not a key anyone uses.
   PLATFORM_MFA_KEY: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=',
+  // Keys employee invitation references (0101) — a test value.
+  STAFF_INVITATION_KEY: 'a-staff-invitation-key-of-at-least-32-chars',
   // The website the free trial's setup links point to (0095).
   PORTAL_ORIGIN: 'https://dukan.example.com',
 };
@@ -427,6 +429,13 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
 });
 
 describe('administrator MFA in production (0094)', () => {
+  it('refuses to start without a STAFF_INVITATION_KEY of 32+ characters: no employee could be activated', () => {
+    for (const key of [undefined, '', 'short-key']) {
+      expect(productionConfigProblems({ ...SAFE, STAFF_INVITATION_KEY: key }).join('\n')).toMatch(/STAFF_INVITATION_KEY is missing/);
+    }
+    expect(productionConfigProblems(SAFE)).toEqual([]);
+  });
+
   it('refuses to start without a well-formed PLATFORM_MFA_KEY: the portal would be a password alone', () => {
     for (const key of [undefined, '', 'short', 'z'.repeat(64)]) {
       const problems = productionConfigProblems({ ...SAFE, PLATFORM_MFA_KEY: key });

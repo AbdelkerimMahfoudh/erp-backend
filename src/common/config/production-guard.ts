@@ -81,6 +81,7 @@ export interface ProductionGuardEnv {
   APP_ENV?: string;
   PLATFORM_ADMIN_KEY?: string;
   PLATFORM_MFA_KEY?: string;
+  STAFF_INVITATION_KEY?: string;
   SEED_DEMO?: string;
   PORTAL_ORIGIN?: string;
   SMTP_PASSWORD_FILE?: string;
@@ -376,6 +377,14 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
    */
   if (!parseMfaKey(env.PLATFORM_MFA_KEY)) {
     problems.push('PLATFORM_MFA_KEY is missing or malformed. Production needs a 32-byte key (base64, or 64 hex characters) to seal administrator TOTP secrets.');
+  }
+
+  /*
+   * Employee invitations (0101, D214): every employee activates from one, and its reference is stored only as a hash
+   * under this key. Without it no employee could ever be activated.
+   */
+  if ((env.STAFF_INVITATION_KEY ?? '').trim().length < 32) {
+    problems.push('STAFF_INVITATION_KEY is missing or shorter than 32 characters. Employee invitation references are stored only as hashes under it: without it no employee can be activated.');
   }
 
   /*

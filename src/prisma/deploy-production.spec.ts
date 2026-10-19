@@ -20,6 +20,7 @@ const SECRET_FILES: Record<string, string> = {
   otp_pepper: `${KEY('b')}\n`,
   messaging_hash_key: `${KEY('c')}\n`,
   platform_mfa_key: `${'d'.repeat(64)}\n`,
+  staff_invitation_key: `${KEY('e')}\n`,
   smtp_username: 'login@smtp-brevo.com\n',
   smtp_password: 'xsmtpsib-0123456789abcdef\n',
 };
@@ -36,6 +37,7 @@ const GOOD_ENV: Record<string, string> = {
   OTP_PEPPER_FILE: '/run/secrets/otp_pepper',
   MESSAGING_HASH_KEY_FILE: '/run/secrets/messaging_hash_key',
   PLATFORM_MFA_KEY_FILE: '/run/secrets/platform_mfa_key',
+  STAFF_INVITATION_KEY_FILE: '/run/secrets/staff_invitation_key',
   DATABASE_URL: 'mysql://phonestore_app:example-app-password-0123@db:3306/phonestore',
   COOKIE_SECURE: 'true',
   SWAGGER_ENABLED: 'false',

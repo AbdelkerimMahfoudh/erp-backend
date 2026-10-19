@@ -33,7 +33,9 @@ export type ConsentSource =
   | 'website'
   | 'number_changed'
   | 'inbound_keyword'
-  | 'expiry';
+  | 'expiry'
+  | 'invitation_cancelled'
+  | 'invitation_replaced';
 
 export interface ConsentCopy {
   version: string;

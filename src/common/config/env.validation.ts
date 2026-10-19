@@ -75,6 +75,8 @@ export const envValidationSchema = Joi.object({
   // Seals platform administrators' TOTP secrets (AES-256-GCM) and keys their recovery codes (0094): 32 bytes, as
   // base64 or 64 hex characters. No default, deliberately — without it no administrator session can complete.
   PLATFORM_MFA_KEY: Joi.string().allow('').default(''),
+  // Keys the hashes of employee invitation references (0101, D214); 32+ characters. No default.
+  STAFF_INVITATION_KEY: Joi.string().allow('').default(''),
 
   // Security limits, not Owner-editable settings.
   OTP_TTL_SECONDS: Joi.number().integer().min(60).max(900).default(300),

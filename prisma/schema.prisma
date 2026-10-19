@@ -350,6 +350,7 @@ model Company {
   branches                       Branch[]
   users                          User[]
   ownerInvitations               OwnerInvitation[]
+  staffInvitations               StaffInvitation[]
   roles                          Role[]
   rolePermissions                RolePermission[]
   userBranches                   UserBranch[]
@@ -576,6 +577,7 @@ model User {
   paymentsRecorded         Payment[]                @relation("PaymentRecordedBy")
   consignmentLedgerEntries ConsignmentLedgerEntry[]
   ownerInvitations         OwnerInvitation[]
+  staffInvitations         StaffInvitation[]
   accountDeletionRequests  AccountDeletionRequest[]
 
   /// Loan roles. Named, because who proposed and who decided must stay
@@ -4751,6 +4753,41 @@ model OwnerInvitation {
   @@map("owner_invitations")
 }
 
+/// 0101: an Owner's invitation for one pending employee to activate their own account (D214).
+///
+/// Creating an employee sends nothing — no WhatsApp, no email. The server issues this invitation, shows its reference
+/// to the Owner ONCE, and keeps only a purpose-keyed HMAC of it (`STAFF_INVITATION_KEY`): the reference cannot be read
+/// back, from here or any log. The employee enters it in the app, types their number, accepts the operational WhatsApp
+/// consent and asks for the code themselves. It names one business and one person, never a phone number, and ends
+/// once: used (the number verified), or revoked (the Owner cancelled the account or issued a new invitation). At most
+/// one live invitation per person (a UNIQUE generated column in the migration, not modelled here).
+model StaffInvitation {
+  id        Bytes  @id @db.Binary(16)
+  companyId Bytes  @map("company_id") @db.Binary(16)
+  userId    Bytes  @map("user_id") @db.Binary(16)
+  /// HMAC-SHA256 (hex) of the reference under STAFF_INVITATION_KEY, in the staff-invitation purpose domain.
+  tokenHash String @unique(map: "ux_staff_invitations_token") @map("token_hash") @db.Char(64)
+  /// Which Owner issued it, as an account reference: the row reads after the account is gone.
+  issuedBy  String @map("issued_by") @db.VarChar(160)
+
+  expiresAt        DateTime  @map("expires_at") @db.DateTime(6)
+  /// The employee's own pending WhatsApp consent this invitation's code went out under (`whatsapp_consents.id`);
+  /// replaced when an expired agreement is accepted again within the invitation's life.
+  pendingConsentId Bytes?    @map("pending_consent_id") @db.Binary(16)
+  usedAt           DateTime? @map("used_at") @db.DateTime(6)
+  revokedAt        DateTime? @map("revoked_at") @db.DateTime(6)
+  /// reinvited | cancelled
+  revokedReason    String?   @map("revoked_reason") @db.VarChar(20)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([companyId, createdAt], map: "ix_staff_invitations_company")
+  @@index([userId, createdAt], map: "ix_staff_invitations_user")
+  @@map("staff_invitations")
+}
+
 /// A code sent to prove somebody holds a contact.
 ///
 /// **This is not two-step login verification.** It answers "is this your email
@@ -5870,12 +5907,12 @@ model WhatsAppConsent {
   id             Bytes    @id @db.Binary(16)
   numberHash     String   @map("number_hash") @db.Char(64)
   numberMasked   String   @map("number_masked") @db.VarChar(40)
-  /// pending_unverified | active | withdrawn | superseded | expired (granted | opted_out_optional before D213)
+  /// pending_unverified | active | withdrawn | superseded | expired | cancelled (granted | opted_out_optional before D213)
   event          String   @db.VarChar(20)
   version        String?  @db.VarChar(40)
   /// 0100: the language the copy was shown in (en | fr | ar), for an agreement made from 0100 on.
   locale         String?  @db.VarChar(5)
-  /// 0100: the pending agreement an `active` or `expired` row concludes — once (UNIQUE).
+  /// 0100: the pending agreement an `active`, `expired` or `cancelled` row concludes — once (UNIQUE).
   pendingId      Bytes?   @unique(map: "ux_whatsapp_consents_pending") @map("pending_id") @db.Binary(16)
   /// Comma-separated purpose categories: `operational_whatsapp` from D213 on.
   purposes       String?  @db.VarChar(255)
@@ -5884,7 +5921,8 @@ model WhatsAppConsent {
   actorCompanyId Bytes?   @map("actor_company_id") @db.Binary(16)
   actorUserId    Bytes?   @map("actor_user_id") @db.Binary(16)
   /// mobile_registration | website_registration | employee_activation | account_settings | website | number_changed |
-  /// inbound_keyword | expiry (owner_registration | phone_verification | account before D213)
+  /// inbound_keyword | expiry | invitation_cancelled | invitation_replaced (owner_registration | phone_verification |
+  /// account before D213)
   source         String   @db.VarChar(30)
   createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(6)
 

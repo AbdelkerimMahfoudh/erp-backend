@@ -12,8 +12,9 @@
 --   2. the difference between a box ticked and a number proved. The agreement is recorded when the person ticks it and
 --      asks for a code (`pending_unverified`); it becomes the consent in force (`active`) only when that number is
 --      verified, in the same transaction, as a new row naming the pending row it concludes (`pending_id`). A pending row
---      left unverified for 24 hours is concluded `expired`. UNIQUE (`pending_id`) lets a pending agreement be concluded
---      exactly once — a verification racing a retry, or the expiry sweep, writes one conclusion and the other loses;
+--      left unverified for 24 hours is concluded `expired`; one whose employee invitation the Owner cancels or replaces
+--      is concluded `cancelled` (0101). UNIQUE (`pending_id`) lets a pending agreement be concluded exactly once — a
+--      verification racing a retry, a cancellation or the expiry sweep writes one conclusion and the others lose;
 --   3. the guarantee that the history is a history: no decision is ever edited or deleted by the application, and
 --      re-consent, withdrawal, a replaced number (`superseded`) and expiry are new rows (triggers, like 0099's grace
 --      decisions). The migrator and an operator's maintenance account are not refused, so a counsel-approved erasure
@@ -32,17 +33,18 @@ ALTER TABLE `whatsapp_consents`
   ADD COLUMN `locale` VARCHAR(5) NULL AFTER `version`,
   ADD COLUMN `pending_id` BINARY(16) NULL AFTER `locale`;
 
--- 2. A pending agreement is concluded once: activated or expired, never both, never twice ----
+-- 2. A pending agreement is concluded once: activated, expired or cancelled — one of them, never twice ----
 CREATE UNIQUE INDEX `ux_whatsapp_consents_pending` ON `whatsapp_consents` (`pending_id`);
 
 -- 3. What a row may say -----------------------------------------------------------------------
 ALTER TABLE `whatsapp_consents`
   ADD CONSTRAINT `ck_whatsapp_consent_event`
-    CHECK (`event` IN ('pending_unverified', 'active', 'withdrawn', 'superseded', 'expired', 'granted', 'opted_out_optional')),
+    CHECK (`event` IN ('pending_unverified', 'active', 'withdrawn', 'superseded', 'expired', 'cancelled', 'granted', 'opted_out_optional')),
   ADD CONSTRAINT `ck_whatsapp_consent_grant_version`
     CHECK (`event` NOT IN ('pending_unverified', 'active', 'granted') OR `version` IS NOT NULL),
   ADD CONSTRAINT `ck_whatsapp_consent_conclusion`
-    CHECK ((`event` = 'expired' AND `pending_id` IS NOT NULL) OR `event` = 'active' OR (`event` <> 'expired' AND `pending_id` IS NULL)),
+    CHECK ((`event` IN ('expired', 'cancelled') AND `pending_id` IS NOT NULL) OR `event` = 'active'
+           OR (`event` NOT IN ('expired', 'cancelled') AND `pending_id` IS NULL)),
   ADD CONSTRAINT `ck_whatsapp_consent_locale` CHECK (`locale` IS NULL OR `locale` IN ('en', 'fr', 'ar'));
 
 -- 4. The history is append-only for the application -----------------------------------------

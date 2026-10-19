@@ -79,7 +79,7 @@ describe('loadSecretFiles', () => {
   });
 
   it('covers the API database URL, the SMTP login and key, and the four keys production generates', () => {
-    for (const name of ['APP_DATABASE_URL', 'SMTP_PASSWORD', 'SMTP_USERNAME', 'JWT_ACCESS_SECRET', 'OTP_PEPPER', 'MESSAGING_HASH_KEY', 'PLATFORM_MFA_KEY']) {
+    for (const name of ['APP_DATABASE_URL', 'SMTP_PASSWORD', 'SMTP_USERNAME', 'JWT_ACCESS_SECRET', 'OTP_PEPPER', 'MESSAGING_HASH_KEY', 'PLATFORM_MFA_KEY', 'STAFF_INVITATION_KEY']) {
       expect(SECRET_FILE_SETTINGS).toContain(name);
     }
   });

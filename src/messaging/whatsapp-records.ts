@@ -72,7 +72,7 @@ const DECISIONS = ['active', 'granted', 'withdrawn', 'superseded'];
 
 /** One event of a number's consent history, as its owner is shown it: masked, never the hash. */
 export interface ConsentEvent {
-  event: 'pending_unverified' | 'active' | 'withdrawn' | 'superseded' | 'expired' | 'granted' | 'opted_out_optional';
+  event: 'pending_unverified' | 'active' | 'withdrawn' | 'superseded' | 'expired' | 'cancelled' | 'granted' | 'opted_out_optional';
   version: string | null;
   locale: string | null;
   source: string;
@@ -84,6 +84,23 @@ export type ConsentWrite = 'recorded' | 'unchanged';
 
 /** What verifying a number did to its pending agreement. */
 export type ActivationOutcome = 'activated' | 'unchanged' | 'no_pending';
+
+/** A pending agreement written or found: whether it is new, and its row (what an employee invitation is bound to). */
+export interface PendingWrite {
+  write: ConsentWrite;
+  pendingId: Buffer;
+}
+
+/** The input of a pending agreement. */
+export interface PendingInput {
+  number: E164;
+  version: string;
+  locale: ConsentLocale;
+  companyId: Buffer | null;
+  userId: Buffer | null;
+  source: ConsentSource;
+  ip?: string | null;
+}
 
 type ConsentDb = Pick<Prisma.TransactionClient, 'whatsAppConsent' | 'whatsAppContact' | 'auditLog' | '$queryRaw'>;
 
@@ -325,32 +342,32 @@ export class WhatsAppRecords {
    * code that verifies the number; the number's verification activates it ({@link activatePending}). A replay (this
    * person's pending agreement to this version, still waiting) writes nothing.
    */
-  async recordPending(p: {
-    number: E164;
-    version: string;
-    locale: ConsentLocale;
-    companyId: Buffer | null;
-    userId: Buffer | null;
-    source: ConsentSource;
-    ip?: string | null;
-  }): Promise<ConsentWrite> {
+  async recordPending(p: PendingInput): Promise<ConsentWrite> {
+    return (await this.pending(p)).write;
+  }
+
+  /**
+   * {@link recordPending}, answering with the pending row — written now, or this person's own still waiting — and, given
+   * a transaction, writing in it: an employee invitation is bound to the row in the same commit (0101, D214).
+   */
+  async pending(p: PendingInput, tx?: Prisma.TransactionClient): Promise<PendingWrite> {
     if (!isCurrentConsentVersion(p.version)) throw new Error('Unknown WhatsApp consent version');
     const numberHash = this.hasher.hash(p.number);
     const numberMasked = maskDestination(p.number);
     await this.ensureContact(numberHash, numberMasked);
-    return this.prisma.$transaction(async (tx) => {
-      await this.lock(tx, numberHash);
-      const mine = await tx.whatsAppConsent.findFirst({
+    const run = async (db: ConsentDb): Promise<PendingWrite> => {
+      await this.lock(db, numberHash);
+      const mine = await db.whatsAppConsent.findFirst({
         where: { numberHash, event: 'pending_unverified', actorUserId: p.userId },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         select: { id: true, version: true, createdAt: true },
       });
-      const newest = await this.newestDecision(tx, numberHash);
-      if (mine && mine.version === p.version && (await this.isLive(tx, mine, new Date())) && (!newest || mine.createdAt >= newest.createdAt)) {
-        return 'unchanged';
+      const newest = await this.newestDecision(db, numberHash);
+      if (mine && mine.version === p.version && (await this.isLive(db, mine, new Date())) && (!newest || mine.createdAt >= newest.createdAt)) {
+        return { write: 'unchanged', pendingId: mine.id };
       }
       const id = newUuidV7Bin();
-      await tx.whatsAppConsent.create({
+      await db.whatsAppConsent.create({
         data: {
           id,
           numberHash,
@@ -365,7 +382,7 @@ export class WhatsAppRecords {
         },
       });
       if (p.companyId) {
-        await tx.auditLog.create({
+        await db.auditLog.create({
           data: {
             companyId: p.companyId,
             userId: p.userId,
@@ -378,8 +395,63 @@ export class WhatsAppRecords {
           },
         });
       }
+      return { write: 'recorded', pendingId: id };
+    };
+    return tx ? run(tx) : this.prisma.$transaction((t) => run(t));
+  }
+
+  /** Whether this exact pending agreement still waits: the copy in force, under 24 hours, concluded by nothing. */
+  async pendingIsLive(pendingId: Buffer, now: Date = new Date(), tx?: Prisma.TransactionClient): Promise<boolean> {
+    const db = tx ?? this.prisma;
+    const row = await db.whatsAppConsent.findUnique({ where: { id: pendingId }, select: { id: true, event: true, version: true, createdAt: true } });
+    return row !== null && row.event === 'pending_unverified' && (await this.isLive(db, row, now));
+  }
+
+  /**
+   * An employee invitation ended before its number was verified — the Owner cancelled the account or issued a new
+   * invitation (0101, D214): its pending agreement is concluded `cancelled`, with the Owner as the actor, so nothing it
+   * authorised outlives the invitation. Already concluded (activated, expired, cancelled) writes nothing; UNIQUE
+   * (`pending_id`) and the contact lock keep it to one conclusion.
+   */
+  async cancelPending(
+    p: { pendingId: Buffer; companyId: Buffer; userId: Buffer; source: Extract<ConsentSource, 'invitation_cancelled' | 'invitation_replaced'> },
+    tx?: Prisma.TransactionClient,
+  ): Promise<ConsentWrite> {
+    const run = async (db: ConsentDb): Promise<ConsentWrite> => {
+      const pending = await db.whatsAppConsent.findUnique({ where: { id: p.pendingId } });
+      if (!pending || pending.event !== 'pending_unverified') return 'unchanged';
+      await this.lock(db, pending.numberHash);
+      const concluded = await db.whatsAppConsent.findFirst({ where: { pendingId: pending.id }, select: { id: true } });
+      if (concluded) return 'unchanged';
+      const id = newUuidV7Bin();
+      await db.whatsAppConsent.create({
+        data: {
+          id,
+          numberHash: pending.numberHash,
+          numberMasked: pending.numberMasked,
+          event: 'cancelled',
+          version: pending.version,
+          pendingId: pending.id,
+          purposes: pending.purposes,
+          actorCompanyId: p.companyId,
+          actorUserId: p.userId,
+          source: p.source,
+        },
+      });
+      await db.auditLog.create({
+        data: {
+          companyId: p.companyId,
+          userId: p.userId,
+          entityType: 'WhatsAppConsent',
+          entityId: id,
+          action: 'update',
+          after: { event: 'cancelled', number: pending.numberMasked, source: p.source },
+          reason: 'Pending operational WhatsApp consent ended: its employee invitation was withdrawn',
+        },
+      });
       return 'recorded';
-    });
+    };
+    return tx ? run(tx) : this.prisma.$transaction((t) => run(t));
   }
 
   /**
@@ -387,14 +459,19 @@ export class WhatsAppRecords {
    * `active` row naming the pending row it concludes, with its version, language and source. Pass the transaction that
    * records the verification so both commit together. Idempotent: an agreement already activated answers `unchanged`;
    * UNIQUE (`pending_id`) refuses a second conclusion of one pending row, and the contact row's lock orders the rest.
-   * Nothing pending (never ticked, expired, or an earlier copy) activates nothing: `no_pending`.
+   * Nothing pending (never ticked, expired, cancelled, or an earlier copy) activates nothing: `no_pending`. Given
+   * `pendingId`, only that exact agreement may be activated.
    */
-  async activatePending(p: { number: E164; userId: Buffer; companyId: Buffer; ip?: string | null }, tx?: Prisma.TransactionClient): Promise<ActivationOutcome> {
+  async activatePending(
+    p: { number: E164; userId: Buffer; companyId: Buffer; ip?: string | null; pendingId?: Buffer },
+    tx?: Prisma.TransactionClient,
+  ): Promise<ActivationOutcome> {
     const run = async (db: ConsentDb): Promise<ActivationOutcome> => {
       const numberHash = this.hasher.hash(p.number);
       await this.lock(db, numberHash);
+      // Given a pending row (an employee invitation's), exactly that one — this person's, for this number — or nothing.
       const pending = await db.whatsAppConsent.findFirst({
-        where: { numberHash, event: 'pending_unverified', actorUserId: p.userId },
+        where: { numberHash, event: 'pending_unverified', actorUserId: p.userId, ...(p.pendingId ? { id: p.pendingId } : {}) },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       });
       if (!pending) return 'no_pending';

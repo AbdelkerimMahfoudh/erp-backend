@@ -101,10 +101,10 @@ run('the consent history on real MySQL (0100)', () => {
 
     const raced = await Promise.all([grant(recordsOn(apps[1]), to, c, actor), recordsOn(apps[2]).withdrawConsent({ number: to, companyId: c, userId: actor, source: 'account_settings' })]);
     const after = await recordsOn(root).contactState(to);
-    const newest = await root.whatsAppConsent.findFirst({ where: { numberHash: hasher.hash(to), event: { in: ['granted', 'withdrawn'] } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
+    const newest = await root.whatsAppConsent.findFirst({ where: { numberHash: hasher.hash(to), event: { in: ['active', 'withdrawn'] } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] });
     // Whichever came second decided, and the contact row agrees with it.
-    expect(after.consent).toBe(newest!.event === 'granted' ? 'granted' : 'withdrawn');
-    expect(after.optOutScope).toBe(newest!.event === 'granted' ? 'none' : 'all');
+    expect(after.consent).toBe(newest!.event === 'active' ? 'active' : 'withdrawn');
+    expect(after.optOutScope).toBe(newest!.event === 'active' ? 'none' : 'all');
     expect(raced).toHaveLength(2);
   });
 

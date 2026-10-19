@@ -88,6 +88,7 @@ services:
       OTP_PEPPER_FILE: /run/secrets/otp_pepper
       MESSAGING_HASH_KEY_FILE: /run/secrets/messaging_hash_key
       PLATFORM_MFA_KEY_FILE: /run/secrets/platform_mfa_key
+      STAFF_INVITATION_KEY_FILE: /run/secrets/staff_invitation_key
     volumes:
       - uploads:/app/uploads
       - ${SECRETS_DIR}/api:/run/secrets:ro
@@ -157,6 +158,7 @@ services:
       OTP_PEPPER_FILE: /run/secrets/otp_pepper
       MESSAGING_HASH_KEY_FILE: /run/secrets/messaging_hash_key
       PLATFORM_MFA_KEY_FILE: /run/secrets/platform_mfa_key
+      STAFF_INVITATION_KEY_FILE: /run/secrets/staff_invitation_key
       # What the preflight checks the environment against (lib.sh).
       DEPLOY_PROFILE: ${DEPLOY_PROFILE:?set DEPLOY_PROFILE in stack.env}
       NPM_CONFIG_UPDATE_NOTIFIER: 'false'

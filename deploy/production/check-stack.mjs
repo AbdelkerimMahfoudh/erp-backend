@@ -83,7 +83,7 @@ process.stdin.on('end', () => {
     check(apiEnv[k] === v, `the API runs with ${k}=${v}`);
   }
   check(!('STAGING_CONTACT_OUTBOX' in apiEnv), 'the API environment holds no staging setting');
-  const SECRET_NAMES = ['APP_DATABASE_URL', 'DATABASE_URL', 'JWT_ACCESS_SECRET', 'OTP_PEPPER', 'MESSAGING_HASH_KEY', 'PLATFORM_MFA_KEY', 'SMTP_USERNAME', 'SMTP_PASSWORD', 'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN', 'MYSQL_ROOT_PASSWORD'];
+  const SECRET_NAMES = ['APP_DATABASE_URL', 'DATABASE_URL', 'JWT_ACCESS_SECRET', 'OTP_PEPPER', 'MESSAGING_HASH_KEY', 'PLATFORM_MFA_KEY', 'STAFF_INVITATION_KEY', 'SMTP_USERNAME', 'SMTP_PASSWORD', 'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_APP_SECRET', 'WHATSAPP_WEBHOOK_VERIFY_TOKEN', 'MYSQL_ROOT_PASSWORD'];
   for (const name of ['api', 'edge', 'db']) {
     const e = s(name).environment ?? {};
     for (const secret of SECRET_NAMES) check(!(e[secret] ?? '').trim(), `${name} carries no ${secret} value in its environment (a file only)`);

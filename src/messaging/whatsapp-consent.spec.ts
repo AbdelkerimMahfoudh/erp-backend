@@ -225,6 +225,48 @@ describe('the consent history and its lifecycle', () => {
     expect(await r.expireStalePending(new Date(Date.now() + 2 * PENDING_CONSENT_TTL_MS))).toBe(0);
   });
 
+  it('an employee invitation binds its exact pending row: `pending` answers it, written or found, and only that row is activated (D214)', async () => {
+    const { db, records: r } = records();
+    const first = await r.pending({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'ar', companyId: COMPANY, userId: USER, source: 'employee_activation' });
+    expect(first.write).toBe('recorded');
+    expect(first.pendingId).toEqual(db.whatsAppConsent.rows[0].id);
+    const again = await r.pending({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'ar', companyId: COMPANY, userId: USER, source: 'employee_activation' });
+    expect(again).toEqual({ write: 'unchanged', pendingId: first.pendingId });
+    expect(await r.pendingIsLive(first.pendingId)).toBe(true);
+    // Another row named: nothing is activated, even though this person has a pending agreement for the number.
+    expect(await r.activatePending({ number: NUMBER, userId: USER, companyId: COMPANY, pendingId: Buffer.alloc(16, 7) })).toBe('no_pending');
+    expect(await r.activatePending({ number: NUMBER, userId: USER, companyId: COMPANY, pendingId: first.pendingId })).toBe('activated');
+    expect(db.whatsAppConsent.rows[1]).toMatchObject({ event: 'active', pendingId: first.pendingId });
+    expect(await r.pendingIsLive(first.pendingId)).toBe(false);
+  });
+
+  it('a withdrawn invitation concludes its pending agreement `cancelled`, once, by the Owner; it never counts and can no longer be activated', async () => {
+    const { db, records: r } = records();
+    const OWNER = Buffer.alloc(16, 5);
+    const { pendingId } = await r.pending({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'fr', companyId: COMPANY, userId: USER, source: 'employee_activation' });
+    expect(await r.cancelPending({ pendingId, companyId: COMPANY, userId: OWNER, source: 'invitation_cancelled' })).toBe('recorded');
+    expect(await r.cancelPending({ pendingId, companyId: COMPANY, userId: OWNER, source: 'invitation_replaced' })).toBe('unchanged');
+    expect(db.whatsAppConsent.rows.map((x) => [x.event, x.source])).toEqual([
+      ['pending_unverified', 'employee_activation'],
+      ['cancelled', 'invitation_cancelled'],
+    ]);
+    expect(db.whatsAppConsent.rows[1]).toMatchObject({ pendingId, actorUserId: OWNER, actorCompanyId: COMPANY });
+    expect(db.auditLog.rows.at(-1)).toMatchObject({ userId: OWNER, reason: expect.stringMatching(/invitation was withdrawn/) });
+    expect(await r.pendingIsLive(pendingId)).toBe(false);
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, pendingLive: false });
+    expect(await r.activatePending({ number: NUMBER, userId: USER, companyId: COMPANY, pendingId })).toBe('no_pending');
+    // Nor swept: it is concluded already.
+    expect(await r.expireStalePending(new Date(Date.now() + 2 * PENDING_CONSENT_TTL_MS))).toBe(0);
+  });
+
+  it('an activated agreement is not cancelled afterwards: the consent in force stands', async () => {
+    const { db, records: r } = records();
+    const { pendingId } = await r.pending({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'fr', companyId: COMPANY, userId: USER, source: 'employee_activation' });
+    await r.activatePending({ number: NUMBER, userId: USER, companyId: COMPANY, pendingId });
+    expect(await r.cancelPending({ pendingId, companyId: COMPANY, userId: USER, source: 'invitation_cancelled' })).toBe('unchanged');
+    expect(db.whatsAppConsent.rows.map((x) => x.event)).toEqual(['pending_unverified', 'active']);
+  });
+
   it('refuses an unknown or earlier version even if a caller skipped the check', async () => {
     await expect(agree(records().records, { version: 'wa-consent-2026-10-17' })).rejects.toThrow(/Unknown/);
     await expect(grant(records().records, { version: 'wa-consent-2026-10-17' })).rejects.toThrow(/Unknown/);
