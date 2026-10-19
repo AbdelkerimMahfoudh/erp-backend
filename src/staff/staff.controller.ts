@@ -1,6 +1,7 @@
-import { Body, Controller, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Param, Post, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { StaffInvitationService } from './staff-invitation.service';
@@ -87,9 +88,9 @@ export class StaffActivationController {
   @Post('verify/resend')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Ask for the code again. Answers the same whether or not an account is waiting.',
+    summary: 'Ask for the code. A WhatsApp number needs the person’s own operational consent. Answers the same whether or not an account is waiting.',
   })
-  resend(@Body() dto: StaffVerifyResendDto) {
-    return this.staff.resendPublic(dto.destination, dto.language);
+  resend(@Body() dto: StaffVerifyResendDto, @Req() req: Request) {
+    return this.staff.resendPublic(dto.destination, dto.language, { version: dto.whatsappConsentVersion, locale: dto.whatsappConsentLocale }, req.ip ?? null);
   }
 }

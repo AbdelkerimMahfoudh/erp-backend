@@ -110,4 +110,20 @@ export class StaffVerifyResendDto {
   @IsOptional()
   @IsIn(['en', 'ar', 'fr'])
   language?: 'en' | 'ar' | 'fr';
+
+  /**
+   * For a WhatsApp number: the version of the operational WhatsApp consent the person ticked (D213). Required — the
+   * server refuses `whatsapp_consent_required` / `whatsapp_consent_outdated` — and ignored for an email address.
+   */
+  @ApiPropertyOptional({ maxLength: 40 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  whatsappConsentVersion?: string;
+
+  /** The language the consent was shown in; `language` when not said. */
+  @ApiPropertyOptional({ enum: ['en', 'ar', 'fr'] })
+  @IsOptional()
+  @IsIn(['en', 'ar', 'fr'])
+  whatsappConsentLocale?: 'en' | 'ar' | 'fr';
 }

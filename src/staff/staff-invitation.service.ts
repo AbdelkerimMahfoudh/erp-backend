@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma, type ContactChannel } from '@prisma/client';
@@ -27,6 +28,8 @@ import {
 } from '../platform/staff-activation.service';
 import { SeatAllocationService } from '../platform/seat-allocation.service';
 import type { CreateStaffDto, StaffRole } from './dto/staff.dto';
+import { WhatsAppRecords } from '../messaging/whatsapp-records';
+import { acceptedConsentVersion, consentLocaleOf } from '../messaging/whatsapp-consent';
 
 /**
  * Employee accounts, from the Owner's Team screen (docs/21, 2026-10-05).
@@ -46,9 +49,19 @@ import type { CreateStaffDto, StaffRole } from './dto/staff.dto';
  * deliver, the account is still created and the response says plainly that no
  * code could be sent — nobody is shown a code that would never arrive, and the
  * Owner can send it again once delivery exists.
+ *
+ * A WhatsApp number's code is never sent on the Owner's say-so (D213): the
+ * person sees the operational WhatsApp consent on their own phone, ticks it and
+ * asks for the code (`staff/verify/resend` with the consent's version). The
+ * agreement is theirs — recorded with them as the actor, pending until the code
+ * proves the number, then active.
  */
 
-export type DeliveryState = 'sent' | 'unavailable';
+/**
+ * What happened to a contact's code: sent, impossible right now, or — for a WhatsApp number — waiting for the person
+ * to agree to operational WhatsApp messages and ask for it themselves (D213): an Owner never consents for an employee.
+ */
+export type DeliveryState = 'sent' | 'unavailable' | 'awaiting_consent';
 
 export interface StaffSeatState {
   storeId: string;
@@ -106,6 +119,7 @@ export class StaffInvitationService {
     private readonly entitlement: EntitlementService,
     private readonly activation: StaffActivationService,
     private readonly allocations: SeatAllocationService,
+    @Optional() private readonly whatsappRecords?: WhatsAppRecords,
   ) {}
 
   // ── the Owner creates an account ─────────────────────────────────────────
@@ -277,6 +291,12 @@ export class StaffInvitationService {
       throw new BadRequestException(
         `This account has no ${channel === 'email' ? 'email address' : 'WhatsApp number'} to send to.`,
       );
+    if (channel === 'phone') {
+      throw new ConflictException({
+        code: 'employee_consent_required',
+        message: 'The person agrees to WhatsApp messages and asks for their code themselves, from the Dukan ERP app.',
+      });
+    }
     if (!this.delivery.canDeliver(channel, destination)) {
       throw new ServiceUnavailableException({
         code: 'delivery_unavailable',
@@ -371,6 +391,7 @@ export class StaffInvitationService {
       },
       select: {
         id: true,
+        companyId: true,
         name: true,
         emailVerifiedAt: true,
         phoneVerifiedAt: true,
@@ -405,6 +426,10 @@ export class StaffInvitationService {
             ...(first && passwordHash ? { passwordHash } : {}),
           },
         });
+        // The number is proved: the employee's own pending agreement for it becomes active, in this transaction (D213).
+        if (destination.channel === 'phone' && this.whatsappRecords) {
+          await this.whatsappRecords.activatePending({ number: destination.value, userId: u.id, companyId: u.companyId }, tx);
+        }
       }
     });
 
@@ -429,26 +454,52 @@ export class StaffInvitationService {
    * destination answers that delivery is unavailable. The answer never depends
    * on the account.
    */
-  async resendPublic(rawDestination: string, language: 'en' | 'ar' | 'fr' = 'en'): Promise<{ accepted: true }> {
+  async resendPublic(
+    rawDestination: string,
+    language: 'en' | 'ar' | 'fr' = 'en',
+    consent: { version?: string; locale?: string } = {},
+    ip: string | null = null,
+  ): Promise<{ accepted: true }> {
     const destination = classify(rawDestination);
     if (!destination)
       throw new BadRequestException('Enter the email address or WhatsApp number the invitation was sent to.');
+    // A WhatsApp code only with the person's own agreement (D213), asked of every caller alike: the answer never
+    // depends on whether an account is waiting.
+    const version = destination.channel === 'phone' ? acceptedConsentVersion(consent.version) : null;
     if (!this.delivery.canDeliver(destination.channel, destination.value)) {
       throw new ServiceUnavailableException({
         code: 'delivery_unavailable',
         message: 'No verification code can be sent right now. Ask the business Owner to try again later.',
       });
     }
-    const waiting = await this.prisma.user.findFirst({
+    const waiting = await this.prisma.user.findMany({
       where: {
         deletedAt: null,
         activatedAt: null,
         invitedAt: { not: null },
         ...(destination.channel === 'email' ? { email: destination.value } : { phone: destination.value }),
       },
-      select: { id: true },
+      select: { id: true, companyId: true },
     });
-    if (waiting) await this.verification.start(destination.value, language);
+    if (waiting.length === 0) return { accepted: true };
+    if (version) {
+      if (!this.whatsappRecords) {
+        throw new ServiceUnavailableException({ code: 'delivery_unavailable', message: 'No verification code can be sent right now.' });
+      }
+      // Each waiting account's own agreement, the employee as the actor: pending until the code proves the number.
+      for (const u of waiting) {
+        await this.whatsappRecords.recordPending({
+          number: destination.value,
+          version,
+          locale: consentLocaleOf(consent.locale, language),
+          companyId: u.companyId,
+          userId: u.id,
+          source: 'employee_activation',
+          ip,
+        });
+      }
+    }
+    await this.verification.start(destination.value, language);
     return { accepted: true };
   }
 
@@ -475,7 +526,7 @@ export class StaffInvitationService {
     return user;
   }
 
-  /** Send a code on every selected channel that can deliver; say which could not. */
+  /** Send a code on every selected channel that can deliver — the email address's now, the number's once its person agrees; say which could not. */
   private async deliverCodes(
     user: { id: Buffer; email: string | null; phone: string | null },
     language: 'en' | 'ar' | 'fr',
@@ -490,6 +541,11 @@ export class StaffInvitationService {
       if (!destination) continue;
       if (!this.delivery.canDeliver(channel as ContactChannel, destination)) {
         states[channel] = 'unavailable';
+        continue;
+      }
+      // The WhatsApp code waits for the person's own agreement, asked on their phone (D213).
+      if (channel === 'phone') {
+        states.phone = 'awaiting_consent';
         continue;
       }
       const result = await this.verification.start(destination, language);

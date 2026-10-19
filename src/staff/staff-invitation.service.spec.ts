@@ -2,6 +2,10 @@ import { readFileSync } from 'node:fs';
 import { BadRequestException, ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { StaffInvitationService } from './staff-invitation.service';
 import { newUuidV7Bin, uuidToBin, binToUuid } from '../common/utils/uuid.util';
+import { WhatsAppRecords } from '../messaging/whatsapp-records';
+import { WHATSAPP_CONSENT_VERSION } from '../messaging/whatsapp-consent';
+import { recipientHash } from '../messaging/recipient-hash';
+import { fakeMessagingPrisma } from '../messaging/__testing__/fake-messaging-prisma';
 
 /**
  * Creating an employee account is not the same as the account being usable
@@ -108,6 +112,10 @@ function makeWorld(
       },
     },
   };
+  // The consent records on the same database: an employee's verification and their consent commit together (D213).
+  const messaging = fakeMessagingPrisma();
+  Object.assign(db, { whatsAppConsent: messaging.whatsAppConsent, whatsAppContact: messaging.whatsAppContact, auditLog: messaging.auditLog, $queryRaw: messaging.$queryRaw });
+  const records = new WhatsAppRecords(messaging as never, { hash: (n: string) => recipientHash(n, KEY) } as never);
   const prisma = { ...db, $transaction: async (fn: (t: typeof db) => Promise<unknown>) => fn(db) };
   const tenant = { companyId: () => COMPANY, requireUserId: () => OWNER };
   const audit = { recordTx: async (_tx: unknown, e: unknown) => void audits.push(e) };
@@ -160,9 +168,13 @@ function makeWorld(
     entitlement as never,
     activation as never,
     allocations as never,
+    records,
   );
   return {
     service,
+    records,
+    consents: messaging.whatsAppConsent.rows,
+    consentAudits: messaging.auditLog.rows,
     users,
     userBranches,
     audits,
@@ -174,6 +186,13 @@ function makeWorld(
     setSeatsFull: (ids: string[]) => void (seatsFull = ids),
   };
 }
+
+const KEY = 'test-messaging-hash-key-of-32-characters!';
+const FATIMA = '+22233445566';
+
+/** The employee, on their own phone: ticks the operational WhatsApp consent and asks for their code (D213). */
+const agreeAndAsk = (w: ReturnType<typeof makeWorld>, phone = FATIMA, locale: 'en' | 'fr' | 'ar' = 'fr') =>
+  w.service.resendPublic(phone, locale, { version: WHATSAPP_CONSENT_VERSION, locale }, '198.51.100.7');
 
 const INVITE = {
   name: 'Fatima',
@@ -195,19 +214,20 @@ describe('creating an account', () => {
     expect(row.phone).toBe('+22233445566');
     expect(w.hashed[0]).toMatch(/^hash\(/);
     expect(w.hashed[0]).not.toContain('Fatima');
-    expect(r.verification).toEqual({ email: null, phone: 'sent' });
-    expect(w.started).toEqual(['+22233445566']);
+    // The WhatsApp code waits for Fatima's own agreement, on her phone: the Owner never consents for her (D213).
+    expect(r.verification).toEqual({ email: null, phone: 'awaiting_consent' });
+    expect(w.started).toEqual([]);
+    expect(w.consents).toEqual([]);
     expect(w.userBranches).toHaveLength(1);
     expect(w.audits[0]).toMatchObject({ action: 'create', after: expect.objectContaining({ status: 'pending' }) });
-    // Local development only: the code the outbox holds, so the flow can be finished on one machine.
-    expect(r.devCodes).toEqual({ phone: '123456' });
+    expect(r.devCodes).toBeUndefined();
   });
 
-  it('with both contacts, both codes go out and both must be proven', async () => {
+  it('with both contacts, the email code goes out now; the WhatsApp code waits for the person’s own agreement', async () => {
     const w = makeWorld();
     const r = await w.service.invite({ ...INVITE, email: 'Fatima@Shop.test' });
-    expect(r.verification).toEqual({ email: 'sent', phone: 'sent' });
-    expect(w.started.sort()).toEqual(['+22233445566', 'fatima@shop.test']);
+    expect(r.verification).toEqual({ email: 'sent', phone: 'awaiting_consent' });
+    expect(w.started).toEqual(['fatima@shop.test']);
   });
 
   it('refuses an account with no contact at all', async () => {
@@ -266,6 +286,7 @@ describe('the person proving a contact', () => {
   it('a wrong code, an unknown destination and a code for nobody answer the same way', async () => {
     const w = makeWorld();
     await w.service.invite(INVITE);
+    await agreeAndAsk(w);
     await expect(w.service.confirm('+22233445566', '000000', 'Secret-pass-1')).rejects.toThrow(
       'That code did not match.',
     );
@@ -278,6 +299,7 @@ describe('the person proving a contact', () => {
   it('asks for a password the first time, without spending the code', async () => {
     const w = makeWorld();
     await w.service.invite(INVITE);
+    await agreeAndAsk(w);
     await expect(w.service.confirm('+22233445566', '123456')).rejects.toMatchObject({
       response: { code: 'password_required' },
     });
@@ -289,6 +311,7 @@ describe('the person proving a contact', () => {
   it('marks the contact verified, sets the chosen password, consumes the code, and asks the gate to activate', async () => {
     const w = makeWorld();
     await w.service.invite(INVITE);
+    await agreeAndAsk(w);
     const r = await w.service.confirm('+22233445566', '123456', 'Secret-pass-1');
     const row = w.users.find((u) => u.name === 'Fatima')!;
     expect(row.phoneVerifiedAt).toBeInstanceOf(Date);
@@ -302,6 +325,7 @@ describe('the person proving a contact', () => {
   it('with both contacts, the second proof needs no password and the gate decides when both are done', async () => {
     const w = makeWorld({ activation: { activated: false, pending: ['email_verification'] } });
     await w.service.invite({ ...INVITE, email: 'f@shop.test' });
+    await agreeAndAsk(w);
     const first = await w.service.confirm('+22233445566', '123456', 'Secret-pass-1');
     expect(first.accounts[0]).toMatchObject({ activated: false, pending: ['email_verification'] });
     const second = await w.service.confirm('f@shop.test', '123456');
@@ -315,9 +339,17 @@ describe('the person proving a contact', () => {
 describe('the Owner managing an invitation', () => {
   it('resending is refused honestly when nothing can deliver, and the account stays pending', async () => {
     const w = makeWorld({ canDeliver: () => false });
-    const r = await w.service.invite(INVITE);
-    await expect(w.service.resend(r.user.id, 'phone')).rejects.toBeInstanceOf(ServiceUnavailableException);
+    const r = await w.service.invite({ ...INVITE, email: 'f@shop.test' });
+    await expect(w.service.resend(r.user.id, 'email')).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(w.users.find((u) => u.name === 'Fatima')!.isActive).toBe(false);
+  });
+
+  it('the Owner cannot send the WhatsApp code: the person agrees and asks for it themselves (D213)', async () => {
+    const w = makeWorld();
+    const r = await w.service.invite(INVITE);
+    await expect(w.service.resend(r.user.id, 'phone')).rejects.toMatchObject({ response: { code: 'employee_consent_required' } });
+    expect(w.started).toEqual([]);
+    expect(w.consents).toEqual([]);
   });
 
   it('cancelling withdraws the account and its seat request', async () => {
@@ -359,5 +391,75 @@ describe('the gate holds on every other path', () => {
       const src = readFileSync(f, 'utf8');
       expect({ f, ok: !/activatedAt:\s*(now|new Date)/.test(src) }).toEqual({ f, ok: true });
     }
+  });
+});
+
+describe('the employee’s own WhatsApp consent (D213)', () => {
+  it('no code without the agreement, whoever asks and whether or not an account waits: nothing recorded, nothing sent', async () => {
+    const w = makeWorld();
+    await w.service.invite(INVITE);
+    for (const phone of [FATIMA, '+22299999999']) {
+      await expect(w.service.resendPublic(phone, 'en')).rejects.toMatchObject({ response: { code: 'whatsapp_consent_required' } });
+      await expect(w.service.resendPublic(phone, 'en', { version: 'wa-consent-2026-10-17' })).rejects.toMatchObject({ response: { code: 'whatsapp_consent_outdated' } });
+    }
+    expect(w.started).toEqual([]);
+    expect(w.consents).toEqual([]);
+  });
+
+  it('ticked and asked for: a pending agreement with the employee as the actor, the version, the language shown and the source — then the code', async () => {
+    const w = makeWorld();
+    const r = await w.service.invite(INVITE);
+    expect(await agreeAndAsk(w)).toEqual({ accepted: true });
+    const fatima = w.users.find((u) => u.name === 'Fatima')!;
+    expect(w.consents).toEqual([
+      expect.objectContaining({
+        event: 'pending_unverified',
+        version: WHATSAPP_CONSENT_VERSION,
+        locale: 'fr',
+        source: 'employee_activation',
+        actorUserId: fatima.id,
+        actorCompanyId: COMPANY,
+        numberHash: recipientHash(FATIMA, KEY),
+      }),
+    ]);
+    // Never the Owner.
+    expect(w.consents.some((c) => (c.actorUserId as Buffer).equals(OWNER))).toBe(false);
+    expect(w.consentAudits[0]).toMatchObject({ userId: fatima.id, ip: '198.51.100.7' });
+    expect(w.started).toEqual([FATIMA]);
+    expect(r.user.id).toBe(binToUuid(fatima.id));
+    // Asking again is the same agreement.
+    await agreeAndAsk(w);
+    expect(w.consents).toHaveLength(1);
+  });
+
+  it('a destination nobody waits behind answers the same, records nothing and sends nothing', async () => {
+    const w = makeWorld();
+    expect(await agreeAndAsk(w, '+22299999999')).toEqual({ accepted: true });
+    expect(w.consents).toEqual([]);
+    expect(w.started).toEqual([]);
+  });
+
+  it('the code proves the number and activates exactly the employee’s pending agreement, in the same transaction', async () => {
+    const w = makeWorld();
+    await w.service.invite(INVITE);
+    await agreeAndAsk(w);
+    await w.service.confirm(FATIMA, '123456', 'Secret-pass-1');
+    const fatima = w.users.find((u) => u.name === 'Fatima')!;
+    expect(w.consents.map((c) => c.event)).toEqual(['pending_unverified', 'active']);
+    expect(w.consents[1]).toMatchObject({ actorUserId: fatima.id, pendingId: w.consents[0].id, source: 'employee_activation' });
+    expect(await w.records.contactState(FATIMA)).toMatchObject({ consented: true, consent: 'active' });
+  });
+
+  it('an email address needs no WhatsApp consent: its code goes as before', async () => {
+    const w = makeWorld();
+    await w.service.invite({ ...INVITE, phone: undefined, email: 'f@shop.test' });
+    expect(await w.service.resendPublic('f@shop.test', 'en')).toEqual({ accepted: true });
+    expect(w.started).toEqual(['f@shop.test', 'f@shop.test']);
+    expect(w.consents).toEqual([]);
+  });
+
+  it('no existing employee is opted in: a verified number with no agreement has no consent', async () => {
+    const w = makeWorld();
+    expect(await w.records.contactState(FATIMA)).toMatchObject({ consented: false, consent: 'none' });
   });
 });
