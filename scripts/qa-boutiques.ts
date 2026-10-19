@@ -13,7 +13,9 @@
 //                           cannot compute: one of its recovery codes, spent on one --verify sign-in; never printed
 //
 // Every boutique is its own company with one branch and one Owner
-// (`boutique1@test.com` … `boutique10@test.com`), registered, verified and
+// (`boutique1@test.com` … `boutique10@test.com`, WhatsApp `+1 202 555 0101` … `0110` — the reserved fictional
+// 555-0100–0199 range, so no real person can ever be reached), registered with the operational WhatsApp consent
+// (D213), verified and
 // activated through the platform's own routes; its two categories and 32 products
 // are created through the catalogue, its day is opened, and its stock arrives by an
 // ordinary receipt — 80 phones (IMEI units over 26 variants, some with a second
@@ -40,6 +42,7 @@
 // the QA schema.
 // ===========================================================================
 
+import { WHATSAPP_CONSENT_VERSION } from '../src/messaging/whatsapp-consent';
 import { config as loadEnv } from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { createHash as sha256, createHmac } from 'node:crypto';
@@ -349,8 +352,12 @@ async function codeFor(prisma: PrismaClient, destination: string): Promise<strin
   throw new Error(`could not recover the code for ${destination}`);
 }
 
+/** A boutique's WhatsApp number: fictional (NANP 555-0100–0199, reserved for fiction), never a real person's. */
+export const qaPhone = (n: number) => `+1202555${String(100 + n).padStart(4, '0')}`;
+
 async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, adminCookie: string): Promise<{ companyId: string; created: boolean }> {
   const email = `boutique${n}@test.com`;
+  const phone = qaPhone(n);
   const reg = expectOk(
     await call('POST', 'platform/register', {
       body: {
@@ -360,6 +367,10 @@ async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, ad
         branchName: `Boutique ${n}`,
         city: 'Nouakchott',
         email,
+        // The mandatory WhatsApp number (0099) and the Owner's operational consent, as the app's form sends it (D213).
+        phone,
+        whatsappConsentVersion: WHATSAPP_CONSENT_VERSION,
+        whatsappConsentLocale: 'fr',
         password: pw,
         language: 'fr',
       },
@@ -368,7 +379,8 @@ async function provisionBoutique(n: number, prisma: PrismaClient, pw: string, ad
   );
   if (reg.continuation?.token) {
     expectOk(await call('POST', 'platform/register/verify/start', { body: { continuation: reg.continuation.token, language: 'fr' } }), `verify start ${email}`);
-    const code = await codeFor(prisma, email);
+    // The registration code proves the WhatsApp number (0099): read back from its hash, never delivered anywhere.
+    const code = await codeFor(prisma, phone);
     const done = expectOk(await call('POST', 'platform/register/verify/confirm', { body: { continuation: reg.continuation.token, code } }), `verify ${email}`);
     // Completion signs the Owner in; the fixture is signed into later, so that session is closed at once.
     if (done?.accessToken) await call('POST', 'auth/logout', { token: done.accessToken, body: { refreshToken: done.refreshToken } });
