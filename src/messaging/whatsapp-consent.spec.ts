@@ -10,7 +10,7 @@ import {
   WHATSAPP_CONSENT_VERSION,
 } from './whatsapp-consent';
 import { ALL_TEMPLATES } from './templates';
-import { nextStatus, serviceWindowOpen, WhatsAppRecords } from './whatsapp-records';
+import { nextStatus, PENDING_CONSENT_TTL_MS, serviceWindowOpen, WhatsAppRecords } from './whatsapp-records';
 import { recipientHash } from './recipient-hash';
 import { fakeMessagingPrisma } from './__testing__/fake-messaging-prisma';
 
@@ -139,16 +139,21 @@ describe('the 24-hour customer-service window', () => {
   });
 });
 
-describe('the consent history', () => {
+describe('the consent history and its lifecycle', () => {
+  const OTHER_USER = Buffer.alloc(16, 9);
+  const OTHER_COMPANY = Buffer.alloc(16, 8);
+  const agree = (r: WhatsAppRecords, over: Partial<Parameters<WhatsAppRecords['recordPending']>[0]> = {}) =>
+    r.recordPending({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'fr', companyId: COMPANY, userId: USER, source: 'mobile_registration', ip: '203.0.113.9', ...over });
+  const verify = (r: WhatsAppRecords, userId = USER, companyId = COMPANY) => r.activatePending({ number: NUMBER, userId, companyId });
   const grant = (r: WhatsAppRecords, over: Partial<Parameters<WhatsAppRecords['recordConsent']>[0]> = {}) =>
-    r.recordConsent({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'fr', companyId: COMPANY, userId: USER, source: 'mobile_registration', ip: '203.0.113.9', ...over });
+    r.recordConsent({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'fr', companyId: COMPANY, userId: USER, source: 'account_settings', ip: '203.0.113.9', ...over });
 
-  it('records a grant with its version, locale, purpose, source, masked number and keyed hash, and audits it with the address', async () => {
+  it('a ticked box is PENDING: recorded with version, locale, purpose, source, masked number, keyed hash and an audit event — not a consent', async () => {
     const { db, records: r } = records();
-    expect(await grant(r)).toBe('recorded');
+    expect(await agree(r)).toBe('recorded');
     expect(db.whatsAppConsent.rows).toEqual([
       expect.objectContaining({
-        event: 'granted',
+        event: 'pending_unverified',
         version: WHATSAPP_CONSENT_VERSION,
         locale: 'fr',
         purposes: 'operational_whatsapp',
@@ -159,40 +164,94 @@ describe('the consent history', () => {
         source: 'mobile_registration',
       }),
     ]);
-    expect(db.auditLog.rows).toEqual([expect.objectContaining({ reason: 'Operational WhatsApp consent granted', ip: '203.0.113.9', entityType: 'WhatsAppConsent' })]);
+    expect(db.auditLog.rows).toEqual([expect.objectContaining({ ip: '203.0.113.9', entityType: 'WhatsAppConsent', reason: expect.stringMatching(/waiting for the number to be verified/) })]);
     expect(JSON.stringify([db.auditLog.rows, db.whatsAppConsent.rows])).not.toContain('36963839');
-    expect(await r.contactState(NUMBER)).toMatchObject({ optOutScope: 'none', consented: true, consent: 'granted', consentVersion: WHATSAPP_CONSENT_VERSION });
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'pending', pendingLive: true, consentVersion: WHATSAPP_CONSENT_VERSION, consentedAt: null });
   });
 
-  it('a replay of the same agreement writes nothing; the same number agreed by another person is a new event', async () => {
+  it('verifying the number activates exactly that pending agreement, naming it; a second verification changes nothing', async () => {
     const { db, records: r } = records();
-    await grant(r);
-    expect(await grant(r)).toBe('unchanged');
-    expect(db.whatsAppConsent.rows).toHaveLength(1);
-    expect(await grant(r, { userId: Buffer.alloc(16, 9), companyId: Buffer.alloc(16, 8) })).toBe('recorded');
+    await agree(r);
+    const pendingId = db.whatsAppConsent.rows[0].id as Buffer;
+    expect(await verify(r)).toBe('activated');
+    expect(db.whatsAppConsent.rows[1]).toMatchObject({ event: 'active', pendingId, version: WHATSAPP_CONSENT_VERSION, locale: 'fr', source: 'mobile_registration', actorUserId: USER });
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: true, consent: 'active', pendingLive: false });
+    expect(await verify(r)).toBe('unchanged');
     expect(db.whatsAppConsent.rows).toHaveLength(2);
   });
 
+  it('a replay of the same agreement writes nothing; another person agreeing for the same number is their own pending row', async () => {
+    const { db, records: r } = records();
+    await agree(r);
+    expect(await agree(r)).toBe('unchanged');
+    expect(db.whatsAppConsent.rows).toHaveLength(1);
+    expect(await agree(r, { userId: OTHER_USER, companyId: OTHER_COMPANY })).toBe('recorded');
+    expect(db.whatsAppConsent.rows).toHaveLength(2);
+    // Each person's verification activates their own agreement only.
+    expect(await verify(r, OTHER_USER, OTHER_COMPANY)).toBe('activated');
+    expect(db.whatsAppConsent.rows[2]).toMatchObject({ event: 'active', actorUserId: OTHER_USER, pendingId: db.whatsAppConsent.rows[1].id });
+  });
+
+  it('verifying a number nobody agreed for activates nothing — a verified contact is not a consent', async () => {
+    const { db, records: r } = records();
+    expect(await verify(r)).toBe('no_pending');
+    expect(db.whatsAppConsent.rows).toEqual([]);
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'none' });
+  });
+
+  it('an agreement left 24 hours unverified expires: it never counts, the sweep records it once, and a late verification activates nothing', async () => {
+    const { db, records: r } = records();
+    await agree(r);
+    const pending = db.whatsAppConsent.rows[0];
+    pending.createdAt = new Date(Date.now() - PENDING_CONSENT_TTL_MS - 1000);
+    expect(await r.contactState(NUMBER)).toMatchObject({ consent: 'none', pendingLive: false, consented: false });
+    expect(await verify(r)).toBe('no_pending');
+    expect(await r.expireStalePending()).toBe(1);
+    expect(await r.expireStalePending()).toBe(0);
+    expect(db.whatsAppConsent.rows.map((x) => [x.event, x.source])).toEqual([
+      ['pending_unverified', 'mobile_registration'],
+      ['expired', 'expiry'],
+    ]);
+    expect(db.whatsAppConsent.rows[1].pendingId).toEqual(pending.id);
+    // The pending row stays in the history, unchanged.
+    expect(db.whatsAppConsent.rows[0].event).toBe('pending_unverified');
+  });
+
+  it('a fresh agreement is not swept: the sweep takes only what is older than 24 hours, and never an activated one', async () => {
+    const { records: r } = records();
+    await agree(r);
+    expect(await r.expireStalePending()).toBe(0);
+    await verify(r);
+    expect(await r.expireStalePending(new Date(Date.now() + 2 * PENDING_CONSENT_TTL_MS))).toBe(0);
+  });
+
   it('refuses an unknown or earlier version even if a caller skipped the check', async () => {
+    await expect(agree(records().records, { version: 'wa-consent-2026-10-17' })).rejects.toThrow(/Unknown/);
     await expect(grant(records().records, { version: 'wa-consent-2026-10-17' })).rejects.toThrow(/Unknown/);
   });
 
-  it('a withdrawal ends the consent and keeps every earlier event; re-consent is a new event, not an edit', async () => {
+  it('a withdrawal ends the consent and keeps every earlier event; re-consent on the verified number is a new active row', async () => {
     const { db, records: r } = records();
-    await grant(r);
+    await agree(r);
+    await verify(r);
     expect(await r.withdrawConsent({ number: NUMBER, companyId: COMPANY, userId: USER, source: 'account_settings', ip: '203.0.113.9' })).toBe('recorded');
     expect(await r.withdrawConsent({ number: NUMBER, companyId: COMPANY, userId: USER, source: 'account_settings' })).toBe('unchanged');
     const after = await r.contactState(NUMBER);
-    expect(after).toMatchObject({ consented: false, consent: 'withdrawn', optOutScope: 'all', consentVersion: WHATSAPP_CONSENT_VERSION });
+    expect(after).toMatchObject({ consented: false, consent: 'withdrawn', optOutScope: 'all' });
     expect(after.withdrawnAt).toBeInstanceOf(Date);
     expect(await grant(r)).toBe('recorded');
-    expect(db.whatsAppConsent.rows.map((x) => x.event)).toEqual(['granted', 'withdrawn', 'granted']);
-    expect(await r.contactState(NUMBER)).toMatchObject({ consented: true, consent: 'granted', optOutScope: 'none', withdrawnAt: null });
-    expect(db.auditLog.rows.map((a) => a.reason)).toEqual([
-      'Operational WhatsApp consent granted',
-      'Operational WhatsApp consent withdrawn',
-      'Operational WhatsApp consent granted',
-    ]);
+    expect(db.whatsAppConsent.rows.map((x) => x.event)).toEqual(['pending_unverified', 'active', 'withdrawn', 'active']);
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: true, consent: 'active', optOutScope: 'none', withdrawnAt: null });
+  });
+
+  it('a replaced number is superseded: its consent stops counting and nothing else is written for a number without one', async () => {
+    const { db, records: r } = records();
+    await agree(r);
+    await verify(r);
+    expect(await r.supersede({ number: NUMBER, companyId: COMPANY, userId: USER })).toBe('recorded');
+    expect(await r.supersede({ number: NUMBER, companyId: COMPANY, userId: USER })).toBe('unchanged');
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'superseded' });
+    expect(db.whatsAppConsent.rows.at(-1)).toMatchObject({ event: 'superseded', source: 'number_changed', actorUserId: USER });
   });
 
   it('a consent to an earlier copy is outdated: it never lets a message go, and nothing upgrades it', async () => {
@@ -210,30 +269,31 @@ describe('the consent history', () => {
     expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'outdated', consentVersion: 'wa-consent-2026-10-17' });
   });
 
-  it('a number nobody consented for has no consent — a verified contact is not a consent', async () => {
-    expect(await records().records.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'none' });
-  });
-
-  it('STOP withdraws, recorded by nobody’s account; START grants nothing', async () => {
+  it('STOP withdraws, recorded by nobody’s account; START grants nothing; a new agreement after it is pending again', async () => {
     const { db, records: r } = records();
-    await grant(r);
+    await agree(r);
+    await verify(r);
     const hash = recipientHash(NUMBER, KEY);
     await r.applyInbound(hash, '+222***39', new Date('2026-10-17T10:00:00Z'), 'stop');
     expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'withdrawn', optOutScope: 'all' });
     expect(db.whatsAppConsent.rows.at(-1)).toMatchObject({ event: 'withdrawn', source: 'inbound_keyword', actorUserId: null, actorCompanyId: null });
     await r.applyInbound(hash, '+222***39', new Date('2026-10-17T10:05:00Z'), 'start');
     expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'withdrawn' });
+    await agree(r, { source: 'account_settings' });
+    expect(await r.contactState(NUMBER)).toMatchObject({ consent: 'pending', pendingLive: true, consented: false });
   });
 
   it('lists a person’s own events and keyword withdrawals, never another business’s', async () => {
     const { records: r } = records();
-    await grant(r, { userId: Buffer.alloc(16, 9), companyId: Buffer.alloc(16, 8) });
-    await grant(r);
+    await agree(r, { userId: OTHER_USER, companyId: OTHER_COMPANY });
+    await agree(r);
+    await verify(r);
     await r.applyInbound(recipientHash(NUMBER, KEY), '+222***39', new Date(), 'stop');
     const mine = await r.consentHistory(NUMBER, USER);
     expect(mine.map((h) => [h.event, h.source])).toEqual([
       ['withdrawn', 'inbound_keyword'],
-      ['granted', 'mobile_registration'],
+      ['active', 'mobile_registration'],
+      ['pending_unverified', 'mobile_registration'],
     ]);
     expect(await r.consentHistory(NUMBER, Buffer.alloc(16, 7))).toEqual([expect.objectContaining({ source: 'inbound_keyword' })]);
   });

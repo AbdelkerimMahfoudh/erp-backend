@@ -85,7 +85,10 @@ function harness(opts: { pepper?: string | null; withOtherOwner?: boolean; whats
   const service = new AccountDeletionService(prisma as never, hashing as never, otp, sender, opts.storage as never);
   /** The free trial's setup instructions (0095): told after a number is verified, and nothing else. */
   const trialSetup = { onContactsVerified: jest.fn(async () => undefined) };
-  const records = new WhatsAppRecords(fakeMessagingPrisma() as never, { hash: (n: string) => `h:${n}` } as never);
+  // The consent records on the same database, so the number's verification and its consent commit together.
+  const messaging = fakeMessagingPrisma();
+  Object.assign(prisma, { whatsAppContact: messaging.whatsAppContact, whatsAppConsent: messaging.whatsAppConsent });
+  const records = new WhatsAppRecords(prisma as never, { hash: (n: string) => `h:${n}` } as never);
   const account = new AccountService(prisma as never, hashing as never, otp, service, trialSetup as never, records);
 
   prisma.seed('company', { id: C1, name: 'Boutique Un', isActive: true, closedAt: null, publicPhone: '+22200000001', logoRef: 'logo', isDiscoverable: true });
@@ -470,6 +473,7 @@ describe('a WhatsApp number verified in the app (0095)', () => {
         findFirst: async () => ({ phone: null, phoneVerifiedAt: null }),
         update: async ({ data }: { data: Record<string, unknown> }) => Object.assign(trial.owner(shop), data),
       },
+      $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
       authSession: { updateMany: async () => ({ count: 0 }) },
       auditLog: { create: async () => ({}) },
     };

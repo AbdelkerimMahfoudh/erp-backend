@@ -164,12 +164,13 @@ export class AccountService {
     }
     // Before a challenge is written: with no channel it could never go out, and
     // "could not be delivered to that number" would blame a number that is fine.
-    // A new number needs its own consent (D213), in every mode: the old number's never carries over.
+    // A new number needs its own consent (D213), in every mode: the old number's never carries over. It is pending until
+    // the code proves the number, and authorises nothing but that code.
     const consentVersion = acceptedConsentVersion(input.whatsappConsentVersion);
     if (!this.otp.canDeliverTo(phone)) {
       throw refuse(HttpStatus.SERVICE_UNAVAILABLE, 'verification_unavailable', 'Codes cannot be sent by this server right now.');
     }
-    await this.records().recordConsent({
+    await this.records().recordPending({
       number: phone,
       version: consentVersion,
       locale: consentLocaleOf(input.whatsappConsentLocale, input.language ?? 'en'),
@@ -329,23 +330,26 @@ export class AccountService {
 
     const before = await this.prisma.user.findFirst({ where: { id: p.userId, companyId: p.companyId }, select: { phone: true, phoneVerifiedAt: true } });
     const now = new Date();
+    const candidate = challenge.candidatePhone;
     try {
-      await this.prisma.user.update({
-        where: { id: p.userId },
-        data: { phone: challenge.candidatePhone, phoneVerifiedAt: now },
+      /*
+       * One transaction (D213): the number becomes the verified one, the agreement ticked for it with the code request
+       * becomes the consent in force, and the replaced number's consent is superseded — it never carries over, nor
+       * reaches whoever holds that number next. Recorded, never deleted.
+       */
+      await this.prisma.$transaction(async (tx) => {
+        await tx.user.update({ where: { id: p.userId }, data: { phone: candidate, phoneVerifiedAt: now } });
+        if (!this.whatsappRecords) return;
+        await this.whatsappRecords.activatePending({ number: candidate, userId: p.userId, companyId: p.companyId }, tx);
+        if (before?.phone && before.phoneVerifiedAt && before.phone !== candidate) {
+          await this.whatsappRecords.supersede({ number: before.phone, companyId: p.companyId, userId: p.userId }, tx);
+        }
       });
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
         throw refuse(HttpStatus.CONFLICT, 'phone_in_use', 'Another person in this business already uses that number.');
       }
       throw e;
-    }
-    // The replaced number's consent ends with it (D213): it must not keep receiving this account's messages, nor carry
-    // over to whoever holds that number next. Recorded, never deleted.
-    if (before?.phone && before.phoneVerifiedAt && before.phone !== challenge.candidatePhone && this.whatsappRecords) {
-      await this.whatsappRecords
-        .withdrawConsent({ number: before.phone, companyId: p.companyId, userId: p.userId, source: 'number_changed' })
-        .catch(() => this.logger.warn('Could not record the end of the replaced number’s WhatsApp consent'));
     }
     // A login identifier changed: every OTHER session ends, this one continues.
     await this.prisma.authSession.updateMany({

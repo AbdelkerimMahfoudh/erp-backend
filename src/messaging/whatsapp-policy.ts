@@ -60,31 +60,37 @@ export interface Refusal {
 /**
  * The person's side of the decision, pure and shared by every WhatsApp sender (D213; the routing order of docs/98 §12):
  * after a verified recipient, the consent in force, then the opt-out and undeliverable state. The provider's
- * readiness, the switches and the pacing come after it, in {@link policyRefusal} and the senders themselves.
+ * readiness, the switches and the pacing come after it, in {@link policyRefusal} and the senders themselves. A refusal
+ * here is WhatsApp's alone. Only the informational subscription messages may then go by a verified email
+ * (`notices/`); a code, a recovery, a deletion confirmation, an employee's verification or a financial report never
+ * does — it is refused, and said so (docs/98 §12).
  *
- *  - A withdrawn consent (the app's withdrawal or a STOP) stops every message, codes included.
- *  - A proactive message (`optional`: portal instructions, subscription reminders and notices, closing notices) needs
- *    the consent to the copy in force, no opt-out, and a number not known to be undeliverable.
- *  - A code the person asked for (`essential`) needs the consent in force too — except the code that verifies a number
- *    not yet verified (`verifiesContact`), which is how a number is proved and never creates a consent.
+ *  - The code that verifies a number not yet verified (`verifiesContact`) needs the person's pending agreement for it,
+ *    ticked and asked for within 24 hours — or a consent already active. Nothing else is authorised by a pending one.
+ *  - Every other message needs the consent ACTIVE — agreed and the number verified: codes to the verified number,
+ *    proactive messages (portal instructions, subscription reminders and notices, closing notices) besides.
+ *  - A withdrawn or superseded consent stops every message but a new verification the person asks for after it.
  *  - The operator's delivery check is decided by the test-mode controls alone.
  */
 export function consentRefusal(
   use: TemplateUse,
-  contact: Pick<ContactState, 'optOutScope' | 'consented' | 'consent' | 'undeliverableAt'>,
+  contact: Pick<ContactState, 'optOutScope' | 'consented' | 'consent' | 'pendingLive' | 'undeliverableAt'>,
   verifiesContact = false,
 ): Refusal | null {
   if (use === 'operator') return null;
-  if (contact.consent === 'withdrawn' || contact.optOutScope === 'all') {
+  if (verifiesContact) {
+    return contact.consented || contact.pendingLive ? null : { reason: 'rejected', detail: 'No pending or active operational WhatsApp consent for this number' };
+  }
+  if (contact.consent === 'withdrawn' || contact.consent === 'superseded' || contact.optOutScope === 'all') {
     return { reason: 'rejected', detail: 'The recipient withdrew operational WhatsApp consent' };
+  }
+  if (!contact.consented) {
+    return { reason: 'rejected', detail: contact.consent === 'pending' ? 'The consent is pending: the number is not verified yet' : 'No current operational WhatsApp consent' };
   }
   if (use === 'optional') {
     if (contact.optOutScope === 'optional') return { reason: 'rejected', detail: 'The recipient opted out of WhatsApp notices' };
-    if (!contact.consented) return { reason: 'rejected', detail: 'No current operational WhatsApp consent' };
     if (contact.undeliverableAt) return { reason: 'rejected', detail: 'The number cannot receive WhatsApp messages' };
-    return null;
   }
-  if (!contact.consented && !verifiesContact) return { reason: 'rejected', detail: 'No current operational WhatsApp consent' };
   return null;
 }
 
@@ -93,7 +99,7 @@ export function policyRefusal(
   controls: Pick<WhatsAppSendControls, 'mode' | 'testRecipients' | 'liveSends'>,
   use: TemplateUse,
   to: E164,
-  contact: Pick<ContactState, 'optOutScope' | 'consented' | 'consent' | 'undeliverableAt'>,
+  contact: Pick<ContactState, 'optOutScope' | 'consented' | 'consent' | 'pendingLive' | 'undeliverableAt'>,
   verifiesContact = false,
 ): Refusal | null {
   if (controls.mode === 'test') {

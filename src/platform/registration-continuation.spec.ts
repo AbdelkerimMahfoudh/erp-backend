@@ -162,6 +162,8 @@ function makeWorld(realTrialSetup?: TrialSetupService) {
 
   /** The free trial's setup instructions (0095): told once the registration's contact is proved, never asked first. */
   const trialSetup = { onContactsVerified: jest.fn(async () => undefined) };
+  /** The consent records (D213): the Owner's pending agreement, activated with the number's proof. */
+  const consents = { activatePending: jest.fn(async (_p: unknown, _tx?: unknown) => 'activated' as const) };
 
   const service = new RegistrationContinuationService(
     prisma,
@@ -170,6 +172,7 @@ function makeWorld(realTrialSetup?: TrialSetupService) {
     sessionsService,
     tokensService,
     realTrialSetup ?? (trialSetup as never),
+    consents as never,
   );
 
   function addOwner(over: Partial<any> = {}) {
@@ -190,7 +193,7 @@ function makeWorld(realTrialSetup?: TrialSetupService) {
     return user;
   }
 
-  return { service, prisma, intents, challenges, users, sessions, verification, sessionsService, addOwner, intentService, trialSetup };
+  return { service, prisma, intents, challenges, users, sessions, verification, sessionsService, addOwner, intentService, trialSetup, consents };
 }
 
 /** Register → send code → the code that was actually sent. */
@@ -259,6 +262,28 @@ describe('a registration is finished by proving THIS attempt, not an address', (
     expect(w.verification.start).toHaveBeenCalledWith('+22236000001', 'en');
     expect((await w.service.complete(token, code)).ok).toBe(true);
     expect(w.users.get(owner.id.toString('hex'))).toMatchObject({ emailVerifiedAt: null, phoneVerifiedAt: expect.any(Date) });
+  });
+
+  it('the number proved activates the Owner’s pending WhatsApp agreement in the same transaction — never an email, never a wrong code (D213)', async () => {
+    const w = makeWorld();
+    const owner = w.addOwner({ email: null, phone: '+22236000001' });
+    const { token, code } = await upToCode(w, owner);
+    expect((await w.service.complete(token, '000000')).ok).toBe(false);
+    expect(w.consents.activatePending).not.toHaveBeenCalled();
+    expect((await w.service.complete(token, code, { ip: '203.0.113.5' })).ok).toBe(true);
+    expect(w.consents.activatePending).toHaveBeenCalledTimes(1);
+    const [args, tx] = w.consents.activatePending.mock.calls[0];
+    expect(args).toEqual({ number: '+22236000001', userId: owner.id, companyId: owner.companyId, ip: '203.0.113.5' });
+    // Inside the completion's own transaction (its client passed), before the session it creates: the proof and the
+    // consent commit or roll back together.
+    expect(tx).toBeDefined();
+    expect(w.consents.activatePending.mock.invocationCallOrder[0]).toBeLessThan((w.sessionsService.create as jest.Mock).mock.invocationCallOrder[0]);
+
+    const byEmail = makeWorld();
+    const emailOwner = byEmail.addOwner();
+    const sent = await upToCode(byEmail, emailOwner);
+    expect((await byEmail.service.complete(sent.token, sent.code)).ok).toBe(true);
+    expect(byEmail.consents.activatePending).not.toHaveBeenCalled();
   });
 
   it('marks the contact proved on the Owner, which is what stops a second continuation', async () => {

@@ -103,10 +103,12 @@ describe('the test allowlist', () => {
 });
 
 describe('the decision', () => {
-  const granted = { optOutScope: 'none' as const, consented: true, consent: 'granted' as const, undeliverableAt: null };
+  const granted = { optOutScope: 'none' as const, consented: true, consent: 'active' as const, pendingLive: false, undeliverableAt: null };
   const none = { ...granted, consented: false, consent: 'none' as const };
   const outdated = { ...granted, consented: false, consent: 'outdated' as const };
-  const withdrawn = { optOutScope: 'all' as const, consented: false, consent: 'withdrawn' as const, undeliverableAt: null };
+  const pending = { ...granted, consented: false, consent: 'pending' as const, pendingLive: true };
+  const withdrawn = { optOutScope: 'all' as const, consented: false, consent: 'withdrawn' as const, pendingLive: false, undeliverableAt: null };
+  const superseded = { ...granted, consented: false, consent: 'superseded' as const };
 
   it('test mode reaches ONLY the allowlist — never a number merely because the application has it', () => {
     const c = controls();
@@ -139,18 +141,31 @@ describe('the decision', () => {
     }
   });
 
-  it('the code that verifies a number not yet verified is the one message that goes before a consent', () => {
+  it('a pending agreement authorises the code that verifies its number — and nothing else', () => {
     const c = controls({ mode: 'live', liveSends: true });
-    expect(policyRefusal(c, 'essential', CUSTOMER, none, true)).toBeNull();
-    // Never a proactive message, and never once the number withdrew.
-    expect(policyRefusal(c, 'optional', CUSTOMER, none, true)).not.toBeNull();
-    expect(policyRefusal(c, 'essential', CUSTOMER, withdrawn, true)?.detail).toMatch(/withdrew operational WhatsApp consent/);
+    expect(policyRefusal(c, 'essential', CUSTOMER, pending, true)).toBeNull();
+    // Not a proactive message, not a code to the account's number (a deletion code), not without the verification flag.
+    expect(policyRefusal(c, 'optional', CUSTOMER, pending)?.detail).toBe('The consent is pending: the number is not verified yet');
+    expect(policyRefusal(c, 'essential', CUSTOMER, pending)?.detail).toBe('The consent is pending: the number is not verified yet');
+    expect(policyRefusal(c, 'optional', CUSTOMER, pending, true)).toBeNull();
+  });
+
+  it('the verification code needs the person’s own agreement: none, outdated or withdrawn without a new one refuses it', () => {
+    const c = controls({ mode: 'live', liveSends: true });
+    for (const contact of [none, outdated, withdrawn, superseded]) {
+      expect(policyRefusal(c, 'essential', CUSTOMER, contact, true)?.detail).toBe('No pending or active operational WhatsApp consent for this number');
+    }
+    // A new agreement after a withdrawal is pending again, and authorises its code.
+    expect(policyRefusal(c, 'essential', CUSTOMER, { ...withdrawn, pendingLive: true }, true)).toBeNull();
+    // An active consent covers a re-verification too.
+    expect(policyRefusal(c, 'essential', CUSTOMER, granted, true)).toBeNull();
   });
 
   it('a withdrawal stops everything, codes included — nothing pretends it still works', () => {
     expect(policyRefusal(controls({ mode: 'live', liveSends: true }), 'essential', CUSTOMER, withdrawn)?.detail).toMatch(/withdrew/);
     expect(policyRefusal(controls(), 'essential', TEST_NUMBER, withdrawn)).not.toBeNull();
     expect(consentRefusal('essential', { ...granted, consent: 'withdrawn' })).not.toBeNull();
+    expect(consentRefusal('optional', superseded)?.detail).toMatch(/withdrew/);
   });
 
   it('a STOP recorded before D213 still stops proactive messages, not the codes a consented person asks for', () => {
@@ -254,11 +269,16 @@ describe('the governed channel', () => {
     expect(raw.calls).toHaveLength(3);
   });
 
-  it('a verification code goes to a number without a consent, and records nothing but the send', async () => {
-    const { channel, raw, db } = governed();
+  it('a verification code goes only on the person’s pending agreement, which it never turns into a consent', async () => {
+    const { channel, raw, records, db } = governed();
+    expect((await channel.send({ ...otp(TEST_NUMBER), verifiesContact: true })).status).toBe('failed');
+    await records.recordPending({ number: TEST_NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'en', companyId: COMPANY, userId: USER, source: 'mobile_registration' });
     expect((await channel.send({ ...otp(TEST_NUMBER), verifiesContact: true })).status).toBe('accepted');
+    // Pending is not active: a proactive message or a code to the account's number is still refused.
+    expect((await channel.send(closing(TEST_NUMBER))).status).toBe('failed');
+    expect((await channel.send(otp(TEST_NUMBER))).status).toBe('failed');
     expect(raw.calls).toHaveLength(1);
-    expect(db.whatsAppConsent.rows).toHaveLength(0);
+    expect(db.whatsAppConsent.rows.map((r) => r.event)).toEqual(['pending_unverified']);
   });
 
   it('the delivery check goes in test mode to an allowlisted number, and never in live mode', async () => {
@@ -313,7 +333,10 @@ describe('the development log under the same consent rule', () => {
   it('refuses what a real server would refuse, and passes what it would send', async () => {
     const { channel, raw, records, db } = gated();
     expect(await channel.send(closing(CUSTOMER))).toMatchObject({ status: 'failed', reason: 'rejected', detail: 'No current operational WhatsApp consent' });
+    expect((await channel.send({ ...otp(CUSTOMER), verifiesContact: true })).status).toBe('failed');
+    await records.recordPending({ number: CUSTOMER, version: WHATSAPP_CONSENT_VERSION, locale: 'en', companyId: COMPANY, userId: USER, source: 'mobile_registration' });
     expect((await channel.send({ ...otp(CUSTOMER), verifiesContact: true })).status).toBe('accepted');
+    expect((await channel.send(closing(CUSTOMER))).status).toBe('failed');
     await consent(records, CUSTOMER);
     expect((await channel.send(closing(CUSTOMER))).status).toBe('accepted');
     expect(raw.calls).toHaveLength(2);

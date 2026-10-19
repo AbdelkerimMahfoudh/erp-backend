@@ -28,10 +28,12 @@ export type ConsentLocale = (typeof CONSENT_LOCALES)[number];
 export type ConsentSource =
   | 'mobile_registration'
   | 'website_registration'
+  | 'employee_activation'
   | 'account_settings'
   | 'website'
   | 'number_changed'
-  | 'inbound_keyword';
+  | 'inbound_keyword'
+  | 'expiry';
 
 export interface ConsentCopy {
   version: string;

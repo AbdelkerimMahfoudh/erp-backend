@@ -174,7 +174,7 @@ export function fakeMessagingPrisma() {
     whatsAppMessage: new Table(['idempotencyKey', 'providerMessageId'], () => ({ attempts: 0, createdAt: tick(), statusAt: tick() })),
     whatsAppWebhookEvent: new Table(['dedupeKey'], () => ({ state: 'pending', attempts: 0, nextAttemptAt: new Date(0), receivedAt: tick(), claimToken: null, claimedUntil: null })),
     whatsAppContact: new Table(['numberHash'], () => ({ optOutScope: 'none', optOutAt: null, optOutSource: null, lastInboundAt: null, undeliverableAt: null, createdAt: tick() })),
-    whatsAppConsent: new Table([], () => ({ createdAt: tick() })),
+    whatsAppConsent: new Table(['pendingId'], () => ({ createdAt: tick() })),
     emailMessage: new Table(['idempotencyKey'], () => ({ attempts: 0, createdAt: tick() })),
     otpChallenge: new Table(),
     messagingDeliveryProof: new Table(),

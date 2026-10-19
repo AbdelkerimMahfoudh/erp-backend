@@ -233,7 +233,8 @@ export interface WorldOptions {
 const REGISTERED_CONTACT: ContactState = {
   optOutScope: 'none',
   consented: true,
-  consent: 'granted',
+  consent: 'active',
+  pendingLive: false,
   consentVersion: WHATSAPP_CONSENT_VERSION,
   consentedAt: NOW,
   withdrawnAt: null,

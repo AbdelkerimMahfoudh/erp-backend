@@ -101,9 +101,10 @@ export class RegistrationFlowService {
      */
     const owner = await this.registration.pendingOwnerFor(result.companyId);
     // The agreement is recorded against the Owner it belongs to, with the language it was shown in and an audit event,
-    // before the code is sent. A retry of the same registration writes nothing new: it is the same agreement.
+    // before the code is sent — PENDING (D213): it authorises only that code, and becomes the consent in force only when
+    // the number is verified. A retry of the same registration writes nothing new: it is the same agreement.
     if (owner) {
-      await this.whatsappRecords.recordConsent({
+      await this.whatsappRecords.recordPending({
         number: phone,
         version: consentVersion,
         locale: consentLocale,

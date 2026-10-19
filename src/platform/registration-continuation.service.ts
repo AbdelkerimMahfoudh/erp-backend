@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { OtpPurpose } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionsService } from '../auth/sessions.service';
@@ -6,6 +6,7 @@ import { TokensService } from '../auth/tokens.service';
 import { VerificationIntentService } from '../auth/otp/verification-intent.service';
 import { ContactVerificationService } from './contact-verification.service';
 import { TrialSetupService } from './trial/trial-setup.service';
+import { WhatsAppRecords } from '../messaging/whatsapp-records';
 import { binToUuid } from '../common/utils/uuid.util';
 
 /**
@@ -84,6 +85,7 @@ export class RegistrationContinuationService {
     private readonly sessions: SessionsService,
     private readonly tokens: TokensService,
     private readonly trialSetup: TrialSetupService,
+    @Optional() private readonly whatsappRecords?: WhatsAppRecords,
   ) {}
 
   /**
@@ -225,6 +227,11 @@ export class RegistrationContinuationService {
         where: { id: user.id },
         data: channel === 'email' ? { emailVerifiedAt: now } : { phoneVerifiedAt: now },
       });
+      // The number is proved: the agreement the Owner ticked at registration becomes the consent in force, in this
+      // same transaction (D213) — never before, and never without the code.
+      if (channel === 'phone' && user.phone && this.whatsappRecords) {
+        await this.whatsappRecords.activatePending({ number: user.phone, userId: user.id, companyId: user.companyId, ip: context.ip ?? null }, tx);
+      }
 
       /*
        * On the SAME transaction. `auth_sessions` has a foreign key to `users`,

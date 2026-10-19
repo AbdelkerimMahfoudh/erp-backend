@@ -5862,26 +5862,29 @@ model WhatsAppContact {
   @@map("whatsapp_contacts")
 }
 
-/// The history of a number's WhatsApp consent (0098; D181 §5; D213): every grant (with its copy's version, purpose and
-/// the language it was shown in), withdrawal and keyword STOP, with who made it and where. Append-only: the
-/// application's database account can neither edit nor delete a row (0100's triggers).
+/// The history of a number's WhatsApp consent (0098; D181 §5; D213): every agreement (pending until its number is
+/// verified, then active, with its copy's version, purpose and the language it was shown in), withdrawal, keyword STOP,
+/// replaced number and expiry, with who made it and where. Append-only: the application's database account can neither
+/// edit nor delete a row (0100's triggers).
 model WhatsAppConsent {
   id             Bytes    @id @db.Binary(16)
   numberHash     String   @map("number_hash") @db.Char(64)
   numberMasked   String   @map("number_masked") @db.VarChar(40)
-  /// granted | withdrawn | opted_out_optional (before D213 only)
+  /// pending_unverified | active | withdrawn | superseded | expired (granted | opted_out_optional before D213)
   event          String   @db.VarChar(20)
   version        String?  @db.VarChar(40)
-  /// 0100: the language the copy was shown in (en | fr | ar), for a grant made from 0100 on.
+  /// 0100: the language the copy was shown in (en | fr | ar), for an agreement made from 0100 on.
   locale         String?  @db.VarChar(5)
+  /// 0100: the pending agreement an `active` or `expired` row concludes — once (UNIQUE).
+  pendingId      Bytes?   @unique(map: "ux_whatsapp_consents_pending") @map("pending_id") @db.Binary(16)
   /// Comma-separated purpose categories: `operational_whatsapp` from D213 on.
   purposes       String?  @db.VarChar(255)
   /// Who made it: the business and person acting (a record of the actor, not tenant ownership — the history is
-  /// read by number, across businesses, by the send policy). Both null for a keyword STOP.
+  /// read by number, across businesses, by the send policy). Both null for a keyword STOP and an expiry.
   actorCompanyId Bytes?   @map("actor_company_id") @db.Binary(16)
   actorUserId    Bytes?   @map("actor_user_id") @db.Binary(16)
-  /// mobile_registration | website_registration | account_settings | website | number_changed | inbound_keyword
-  /// (owner_registration | phone_verification | account before D213)
+  /// mobile_registration | website_registration | employee_activation | account_settings | website | number_changed |
+  /// inbound_keyword | expiry (owner_registration | phone_verification | account before D213)
   source         String   @db.VarChar(30)
   createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(6)
 

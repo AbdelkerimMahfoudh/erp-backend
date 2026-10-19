@@ -67,12 +67,12 @@ describe('registration', () => {
     expect(registered).toEqual([]);
   });
 
-  it('records the consent against the new Owner — version, locale shown, purpose, source and an audit event with the address', async () => {
+  it('records the agreement against the new Owner as PENDING — version, locale shown, purpose, source and an audit event with the address', async () => {
     const { flow, db } = registration();
     await flow.register({ ...ATTEMPT, language: 'fr', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION, whatsappConsentLocale: 'ar' } as never, APP);
     expect(db.whatsAppConsent.rows).toEqual([
       expect.objectContaining({
-        event: 'granted',
+        event: 'pending_unverified',
         version: WHATSAPP_CONSENT_VERSION,
         locale: 'ar',
         purposes: 'operational_whatsapp',
@@ -136,16 +136,38 @@ describe('the contact delivery check', () => {
     expect(provider.canDeliver('email', 'aicha@shop.mr')).toBe(true);
   });
 
-  it('marks its code as the one that verifies a contact — and that code creates no consent', async () => {
+  it('marks its code as the one that verifies a contact: it goes only on a pending agreement, which it never activates', async () => {
     const db = fakeMessagingPrisma();
     const records = new WhatsAppRecords(db as never, { hash: (n: string) => recipientHash(n, KEY) } as never);
     const raw = { name: 'cloud-api', isEnabled: true, send: jest.fn(async () => ({ status: 'accepted' as const, providerMessageId: 'wamid.1', provider: 'cloud-api' })) };
     const governed = new GovernedWhatsAppChannel(raw, { mode: 'live', testRecipients: new Set(), liveSends: true, phoneNumberId: '1', maxPerSecond: 10, recipientMinIntervalMs: 0 }, records);
-    const provider = new WhatsAppContactDeliveryProvider(governed, { send: jest.fn() } as never);
+    const email = { name: 'smtp', isEnabled: true, send: jest.fn() };
+    const provider = new WhatsAppContactDeliveryProvider(governed, { send: jest.fn() } as never, email);
+    // Nobody agreed: the code is refused, honestly, and no email carries it instead.
+    await expect(provider.send({ channel: 'phone', destination: NEW_NUMBER, code: '123456', language: 'en' })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await records.recordPending({ number: NEW_NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'en', companyId: COMPANY, userId: USER, source: 'mobile_registration' });
     await provider.send({ channel: 'phone', destination: NEW_NUMBER, code: '123456', language: 'en' });
     expect(raw.send).toHaveBeenCalledWith(expect.objectContaining({ verifiesContact: true }));
-    expect(db.whatsAppConsent.rows).toEqual([]);
+    expect(db.whatsAppConsent.rows.map((r) => r.event)).toEqual(['pending_unverified']);
     expect((await records.contactState(NEW_NUMBER)).consented).toBe(false);
+    expect(email.send).not.toHaveBeenCalled();
+  });
+});
+
+describe('what never goes by email (the owner’s security correction of 2026-10-19)', () => {
+  const read = (path: string) => require('node:fs').readFileSync(require('node:path').join(__dirname, '..', path), 'utf8') as string;
+
+  it('a code, a deletion confirmation or a financial report has no email path: the services that send them hold no email channel', () => {
+    // OTPs (sign-in steps, a changed number, deletion codes), the deletion confirmation, closing reports.
+    for (const file of ['auth/otp/otp.service.ts', 'account/account-deletion.service.ts', 'closing/closing-notice.service.ts']) {
+      expect({ file, email: /EMAIL_CHANNEL|EmailChannel/.test(read(file)) }).toEqual({ file, email: false });
+    }
+  });
+
+  it('a WhatsApp number’s verification code goes by WhatsApp or not at all — the contact delivery never swaps channels', () => {
+    const source = read('platform/contact-delivery.ts');
+    // The email boundary is used for an email address only: the branch is chosen by the contact, never by a failure.
+    expect(source).toMatch(/req\.channel === 'phone'\s*\?\s*await sendWithOneRetry\(\(idempotencyKey\) =>\s*this\.channel\.send/);
   });
 });
 
@@ -161,7 +183,8 @@ describe('my operational WhatsApp consent, in the account', () => {
       emailVerifiedAt: opts.email ? new Date('2026-10-01T10:00:00Z') : null,
       passwordHash: 'h',
     };
-    const prisma = {
+    // One database: the account's rows and the consent records, so a transaction spans both as it does for real.
+    const prisma = Object.assign(db, {
       user: {
         // The caller's own row; nobody else in the business holds the number.
         findFirst: jest.fn(async (args: { where: { id?: unknown } }) =>
@@ -172,8 +195,7 @@ describe('my operational WhatsApp consent, in the account', () => {
       },
       otpChallenge: { findUnique: jest.fn(async () => ({ candidatePhone: NEW_NUMBER })) },
       authSession: { updateMany: jest.fn(async () => ({ count: 0 })) },
-      auditLog: { create: jest.fn() },
-    };
+    });
     const otp = {
       canDeliver: true,
       canDeliverTo: jest.fn(() => opts.canDeliverTo ?? true),
@@ -196,14 +218,14 @@ describe('my operational WhatsApp consent, in the account', () => {
     expect(db.whatsAppConsent.rows).toEqual([]);
   });
 
-  it('agreeing records a new event with the language shown, and the view says granted with its time', async () => {
+  it('agreeing for the verified number records a new active event with the language shown, and the view says active with its time', async () => {
     const { service, db } = account();
     const view = await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION, locale: 'fr' }, 'fr', '198.51.100.4');
-    expect(view).toMatchObject({ state: 'granted', grantedVersion: WHATSAPP_CONSENT_VERSION, withdrawnAt: null });
+    expect(view).toMatchObject({ state: 'active', grantedVersion: WHATSAPP_CONSENT_VERSION, withdrawnAt: null });
     expect(view.grantedAt).toEqual(expect.any(String));
-    expect(db.whatsAppConsent.rows).toEqual([expect.objectContaining({ event: 'granted', locale: 'fr', source: 'account_settings', actorUserId: USER })]);
+    expect(db.whatsAppConsent.rows).toEqual([expect.objectContaining({ event: 'active', locale: 'fr', source: 'account_settings', actorUserId: USER })]);
     expect(db.auditLog.rows[0]).toMatchObject({ ip: '198.51.100.4' });
-    expect(view.history).toEqual([expect.objectContaining({ event: 'granted', version: WHATSAPP_CONSENT_VERSION, locale: 'fr', source: 'account_settings' })]);
+    expect(view.history).toEqual([expect.objectContaining({ event: 'active', version: WHATSAPP_CONSENT_VERSION, locale: 'fr', source: 'account_settings' })]);
   });
 
   it('agreeing needs the current version and a verified number', async () => {
@@ -221,7 +243,7 @@ describe('my operational WhatsApp consent, in the account', () => {
     await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION });
     expect((await service.whatsappConsent(me)).onlyVerifiedContact).toBe(true);
     await expect(service.withdrawWhatsappConsent(me, {})).rejects.toMatchObject({ response: { code: 'withdrawal_needs_acknowledgement', onlyVerifiedContact: true } });
-    expect(db.whatsAppConsent.rows.map((r) => r.event)).toEqual(['granted']);
+    expect(db.whatsAppConsent.rows.map((r) => r.event)).toEqual(['active']);
     const view = await service.withdrawWhatsappConsent(me, { acknowledgeSupportRecovery: true });
     expect(view).toMatchObject({ state: 'withdrawn', grantedAt: null, number: '+222***87' });
     expect(view.withdrawnAt).toEqual(expect.any(String));
@@ -232,7 +254,7 @@ describe('my operational WhatsApp consent, in the account', () => {
     await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION });
     const view = await service.withdrawWhatsappConsent(me, {});
     expect(view).toMatchObject({ state: 'withdrawn', onlyVerifiedContact: false });
-    expect(db.whatsAppConsent.rows.map((r) => r.event)).toEqual(['granted', 'withdrawn']);
+    expect(db.whatsAppConsent.rows.map((r) => r.event)).toEqual(['active', 'withdrawn']);
     expect(prisma.user.update).not.toHaveBeenCalled();
     expect(JSON.stringify(db.auditLog.rows)).not.toMatch(/email/i);
   });
@@ -242,11 +264,11 @@ describe('my operational WhatsApp consent, in the account', () => {
     await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION, locale: 'en' });
     await service.withdrawWhatsappConsent(me, {});
     const view = await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION, locale: 'ar' });
-    expect(view.state).toBe('granted');
+    expect(view.state).toBe('active');
     expect(view.history.map((h) => [h.event, h.locale])).toEqual([
-      ['granted', 'ar'],
+      ['active', 'ar'],
       ['withdrawn', null],
-      ['granted', 'en'],
+      ['active', 'en'],
     ]);
   });
 
@@ -267,18 +289,28 @@ describe('my operational WhatsApp consent, in the account', () => {
     await expect(service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p' })).rejects.toMatchObject({ response: { code: 'whatsapp_consent_required' } });
     expect(otp.request).not.toHaveBeenCalled();
     await service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p', language: 'fr', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION });
-    expect(db.whatsAppConsent.rows).toEqual([expect.objectContaining({ source: 'account_settings', locale: 'fr', numberHash: recipientHash(NEW_NUMBER, KEY) })]);
+    expect(db.whatsAppConsent.rows).toEqual([expect.objectContaining({ event: 'pending_unverified', source: 'account_settings', locale: 'fr', numberHash: recipientHash(NEW_NUMBER, KEY) })]);
   });
 
-  it('once the new number is verified, the replaced number’s consent ends — it never carries over', async () => {
+  it('once the new number is verified, its pending agreement is active and the replaced number’s is superseded — never carried over', async () => {
     const { service, records } = account();
     await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION });
     await service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION });
     await service.confirmPhoneVerification(me, { challengeId: '0192d1a0-0000-7000-8000-000000000001', code: '123456' });
-    expect(await records.contactState(OWNER_NUMBER)).toMatchObject({ consented: false, consent: 'withdrawn' });
-    expect(await records.contactState(NEW_NUMBER)).toMatchObject({ consented: true, consent: 'granted' });
+    expect(await records.contactState(OWNER_NUMBER)).toMatchObject({ consented: false, consent: 'superseded' });
+    expect(await records.contactState(NEW_NUMBER)).toMatchObject({ consented: true, consent: 'active' });
     const old = await records.consentHistory(OWNER_NUMBER, USER);
-    expect(old[0]).toMatchObject({ event: 'withdrawn', source: 'number_changed' });
+    expect(old[0]).toMatchObject({ event: 'superseded', source: 'number_changed' });
+    const fresh = await records.consentHistory(NEW_NUMBER, USER);
+    expect(fresh.map((h) => h.event)).toEqual(['active', 'pending_unverified']);
+  });
+
+  it('a new number whose code is never confirmed stays pending: it authorises nothing proactive and the old number keeps its consent', async () => {
+    const { service, records } = account();
+    await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION });
+    await service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION });
+    expect(await records.contactState(NEW_NUMBER)).toMatchObject({ consented: false, consent: 'pending', pendingLive: true });
+    expect(await records.contactState(OWNER_NUMBER)).toMatchObject({ consented: true, consent: 'active' });
   });
 
   it('number verification refuses up front a number the channel would not send to (test mode), creating no code', async () => {

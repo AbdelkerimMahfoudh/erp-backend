@@ -133,6 +133,55 @@ run('the consent history on real MySQL (0100)', () => {
     expect(await code(insert('granted', WHATSAPP_CONSENT_VERSION, 'de'))).toMatch(/3819|Check constraint/);
   });
 
+  it('pending until verified: four processes verifying the same number at once activate it exactly once', async () => {
+    const to = number();
+    const c = await company();
+    const actor = await user(c);
+    await recordsOn(apps[0]).recordPending({ number: to, version: WHATSAPP_CONSENT_VERSION, locale: 'fr', companyId: c, userId: actor, source: 'employee_activation' });
+    expect(await recordsOn(root).contactState(to)).toMatchObject({ consent: 'pending', consented: false, pendingLive: true });
+    const outcomes = await Promise.all(apps.map((client) => recordsOn(client).activatePending({ number: to, userId: actor, companyId: c })));
+    expect(outcomes.filter((o) => o === 'activated')).toHaveLength(1);
+    expect(outcomes.filter((o) => o === 'unchanged')).toHaveLength(apps.length - 1);
+    const rows = await root.whatsAppConsent.findMany({ where: { numberHash: hasher.hash(to) }, orderBy: { createdAt: 'asc' } });
+    expect(rows.map((r) => r.event)).toEqual(['pending_unverified', 'active']);
+    expect(rows[1].pendingId).toEqual(rows[0].id);
+    expect(await recordsOn(root).contactState(to)).toMatchObject({ consent: 'active', consented: true });
+  });
+
+  it('an agreement left 24 hours: a late verification activates nothing, two sweeps racing write one expiry', async () => {
+    const to = number();
+    const c = await company();
+    const actor = await user(c);
+    const pendingId = newUuidV7Bin();
+    await recordsOn(root).recordPending({ number: to, version: WHATSAPP_CONSENT_VERSION, locale: 'en', companyId: c, userId: actor, source: 'mobile_registration' });
+    // Aged as only an operator can (the application account cannot touch the history): a copy 25 hours old.
+    await root.$executeRaw`INSERT INTO whatsapp_consents (id, number_hash, number_masked, event, version, locale, purposes, actor_company_id, actor_user_id, source, created_at)
+      SELECT ${pendingId}, number_hash, number_masked, event, version, locale, purposes, actor_company_id, actor_user_id, source, NOW(6) - INTERVAL 25 HOUR
+      FROM whatsapp_consents WHERE number_hash = ${hasher.hash(to)} LIMIT 1`;
+    await root.$executeRaw`DELETE FROM whatsapp_consents WHERE number_hash = ${hasher.hash(to)} AND id <> ${pendingId}`;
+    expect(await recordsOn(apps[0]).activatePending({ number: to, userId: actor, companyId: c })).toBe('no_pending');
+    const [a, b] = await Promise.all([recordsOn(apps[1]).expireStalePending(), recordsOn(apps[2]).expireStalePending()]);
+    const expired = await root.whatsAppConsent.findMany({ where: { pendingId } });
+    expect(expired).toEqual([expect.objectContaining({ event: 'expired', source: 'expiry' })]);
+    expect(a + b).toBeGreaterThanOrEqual(1);
+    expect(await recordsOn(root).contactState(to)).toMatchObject({ consented: false, pendingLive: false });
+  });
+
+  it('UNIQUE (pending_id): a pending agreement is concluded once, and an expiry must name the agreement it ends', async () => {
+    const to = number();
+    const c = await company();
+    const actor = await user(c);
+    await recordsOn(apps[0]).recordPending({ number: to, version: WHATSAPP_CONSENT_VERSION, locale: 'en', companyId: c, userId: actor, source: 'mobile_registration' });
+    await recordsOn(apps[0]).activatePending({ number: to, userId: actor, companyId: c });
+    const pending = await root.whatsAppConsent.findFirstOrThrow({ where: { numberHash: hasher.hash(to), event: 'pending_unverified' } });
+    await expect(
+      apps[0].$executeRaw`INSERT INTO whatsapp_consents (id, number_hash, number_masked, event, pending_id, source) VALUES (${newUuidV7Bin()}, ${hasher.hash(to)}, '+222***00', 'expired', ${pending.id}, 'expiry')`,
+    ).rejects.toThrow(/Duplicate|ux_whatsapp_consents_pending|1062/);
+    await expect(
+      apps[0].$executeRaw`INSERT INTO whatsapp_consents (id, number_hash, number_masked, event, source) VALUES (${newUuidV7Bin()}, ${hasher.hash(to)}, '+222***00', 'expired', 'expiry')`,
+    ).rejects.toThrow(/3819|Check constraint/);
+  });
+
   it('a STOP after a grant withdraws, ordered by when it is recorded', async () => {
     const to = number();
     await grant(recordsOn(apps[0]), to, await company());

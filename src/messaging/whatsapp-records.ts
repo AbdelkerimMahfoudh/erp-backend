@@ -17,19 +17,32 @@ import type { TemplateUse } from './templates';
 /** `optional` is a STOP recorded before D213 (2026-10-19); a withdrawal is `all`. Both stop proactive messages. */
 export type OptOutScope = 'none' | 'optional' | 'all';
 
-/** Where a number's consent stands, from its newest grant or withdrawal. */
-export type ConsentState = 'none' | 'granted' | 'outdated' | 'withdrawn';
+/**
+ * Where a number's consent stands (D213):
+ *  - `none` — never agreed (an account from before D213 included);
+ *  - `pending` — the box was ticked and a code asked for, within 24 hours, and the number is not verified yet;
+ *  - `active` — agreed to the copy in force, for a verified number: the only state that lets an operational message go;
+ *  - `outdated` — agreed to an earlier copy;
+ *  - `withdrawn` — withdrawn in the app or by STOP;
+ *  - `superseded` — the number stopped being the person's verified number.
+ */
+export type ConsentState = 'none' | 'pending' | 'active' | 'outdated' | 'withdrawn' | 'superseded';
 
 export interface ContactState {
   optOutScope: OptOutScope;
-  /** The newest grant or withdrawal is a grant of the copy in force — the only state that lets a message go. */
+  /** The newest decision is an activation of the copy in force. */
   consented: boolean;
   consent: ConsentState;
-  /** The version of the newest grant, whatever came after it. */
+  /**
+   * A pending agreement for this number: the copy in force, under {@link PENDING_CONSENT_TTL_MS}, not concluded, and
+   * newer than the newest decision. It authorises only the code that verifies the number — nothing proactive.
+   */
+  pendingLive: boolean;
+  /** The version of the newest agreement (pending or active), whatever came after it. */
   consentVersion: string | null;
-  /** When the consent in force was given; null unless `consented`. */
+  /** When the consent in force became active; null unless `consented`. */
   consentedAt: Date | null;
-  /** When it was withdrawn; null unless the newest event is a withdrawal. */
+  /** When it was withdrawn; null unless the newest decision is a withdrawal. */
   withdrawnAt: Date | null;
   lastInboundAt: Date | null;
   undeliverableAt: Date | null;
@@ -39,6 +52,7 @@ const NO_CONTACT: ContactState = {
   optOutScope: 'none',
   consented: false,
   consent: 'none',
+  pendingLive: false,
   consentVersion: null,
   consentedAt: null,
   withdrawnAt: null,
@@ -46,17 +60,32 @@ const NO_CONTACT: ContactState = {
   undeliverableAt: null,
 };
 
+/**
+ * How long a ticked box waits for its number to be verified: 24 hours. Every code that could verify it lives far less
+ * (registration and contact codes 10 minutes, a registration's continuation 15, an OTP its configured minutes), so a
+ * pending agreement outlives any code it was asked with, and an abandoned one stops authorising anything a day later.
+ */
+export const PENDING_CONSENT_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** The events that decide whether a number has a consent in force; a pending agreement is not one of them. */
+const DECISIONS = ['active', 'granted', 'withdrawn', 'superseded'];
+
 /** One event of a number's consent history, as its owner is shown it: masked, never the hash. */
 export interface ConsentEvent {
-  event: 'granted' | 'withdrawn' | 'opted_out_optional';
+  event: 'pending_unverified' | 'active' | 'withdrawn' | 'superseded' | 'expired' | 'granted' | 'opted_out_optional';
   version: string | null;
   locale: string | null;
   source: string;
   at: Date;
 }
 
-/** Whether a grant or withdrawal was written, or the same one was already the newest (a replay). */
+/** Whether an agreement, a withdrawal or a replacement was written, or the same one was already there (a replay). */
 export type ConsentWrite = 'recorded' | 'unchanged';
+
+/** What verifying a number did to its pending agreement. */
+export type ActivationOutcome = 'activated' | 'unchanged' | 'no_pending';
+
+type ConsentDb = Pick<Prisma.TransactionClient, 'whatsAppConsent' | 'whatsAppContact' | 'auditLog' | '$queryRaw'>;
 
 /** The customer-service window (D181): 24 hours from the person's last inbound message. */
 export const SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -118,24 +147,40 @@ export class WhatsAppRecords {
     return this.contactStateByHash(this.hasher.hash(number));
   }
 
-  async contactStateByHash(numberHash: string): Promise<ContactState> {
-    const [contact, newest, grant] = await Promise.all([
+  async contactStateByHash(numberHash: string, now: Date = new Date()): Promise<ContactState> {
+    const [contact, newest, pending] = await Promise.all([
       this.prisma.whatsAppContact.findUnique({ where: { numberHash } }),
       this.newestDecision(this.prisma, numberHash),
       this.prisma.whatsAppConsent.findFirst({
-        where: { numberHash, event: 'granted' },
+        where: { numberHash, event: 'pending_unverified' },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        select: { version: true },
+        select: { id: true, version: true, createdAt: true },
       }),
     ]);
-    if (!contact && !newest) return NO_CONTACT;
-    const granted = newest?.event === 'granted';
-    const current = granted && isCurrentConsentVersion(newest.version);
+    if (!contact && !newest && !pending) return NO_CONTACT;
+    const pendingLive =
+      pending !== null &&
+      (await this.isLive(this.prisma, pending, now)) &&
+      (!newest || pending.createdAt.getTime() >= newest.createdAt.getTime());
+    const agreed = newest?.event === 'active' || newest?.event === 'granted';
+    const current = agreed && isCurrentConsentVersion(newest.version);
+    const decided: ConsentState = !newest
+      ? 'none'
+      : agreed
+        ? current
+          ? 'active'
+          : 'outdated'
+        : (newest.event as 'withdrawn' | 'superseded');
+    const agreements: { version: string | null; createdAt: Date }[] = [];
+    if (pending) agreements.push(pending);
+    if (agreed) agreements.push(newest);
+    const latestAgreement = agreements.sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime())[0];
     return {
       optOutScope: (contact?.optOutScope as OptOutScope | undefined) ?? 'none',
       consented: current,
-      consent: !newest ? 'none' : newest.event === 'withdrawn' ? 'withdrawn' : current ? 'granted' : 'outdated',
-      consentVersion: grant?.version ?? null,
+      consent: !current && pendingLive ? 'pending' : decided,
+      pendingLive,
+      consentVersion: latestAgreement?.version ?? null,
       consentedAt: current ? newest.createdAt : null,
       withdrawnAt: newest?.event === 'withdrawn' ? newest.createdAt : null,
       lastInboundAt: contact?.lastInboundAt ?? null,
@@ -144,8 +189,9 @@ export class WhatsAppRecords {
   }
 
   /**
-   * A number's consent history, newest first — the events this person made, and the keyword withdrawals nobody made
-   * from an account. Another business's actions on the same number decide the state but are not listed here.
+   * A number's consent history, newest first — the events this person made or that concern their own agreements, and
+   * the keyword withdrawals nobody made from an account. Another business's actions on the same number decide the state
+   * but are not listed here.
    */
   async consentHistory(number: E164, actorUserId: Buffer, take = 20): Promise<ConsentEvent[]> {
     const rows = await this.prisma.whatsAppConsent.findMany({
@@ -157,13 +203,21 @@ export class WhatsAppRecords {
     return rows.map((r) => ({ event: r.event as ConsentEvent['event'], version: r.version ?? null, locale: r.locale ?? null, source: r.source, at: r.createdAt }));
   }
 
-  /** The newest grant or withdrawal of a number: what its consent is now. */
-  private newestDecision(db: Pick<Prisma.TransactionClient, 'whatsAppConsent'>, numberHash: string) {
+  /** The newest decision about a number — activation, withdrawal or replacement: what its consent is now. */
+  private newestDecision(db: Pick<ConsentDb, 'whatsAppConsent'>, numberHash: string) {
     return db.whatsAppConsent.findFirst({
-      where: { numberHash, event: { in: ['granted', 'withdrawn'] } },
+      where: { numberHash, event: { in: DECISIONS } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       select: { event: true, version: true, actorUserId: true, createdAt: true },
     });
+  }
+
+  /** A pending agreement still waiting: the copy in force, under 24 hours, and neither activated nor expired. */
+  private async isLive(db: Pick<ConsentDb, 'whatsAppConsent'>, pending: { id: Buffer; version: string | null; createdAt: Date }, now: Date): Promise<boolean> {
+    if (!isCurrentConsentVersion(pending.version)) return false;
+    if (now.getTime() - pending.createdAt.getTime() >= PENDING_CONSENT_TTL_MS) return false;
+    const concluded = await db.whatsAppConsent.findFirst({ where: { pendingId: pending.id }, select: { event: true } });
+    return concluded === null;
   }
 
   async messageExists(idempotencyKey: string): Promise<boolean> {
@@ -252,7 +306,7 @@ export class WhatsAppRecords {
     if (signal === 'stop') {
       // STOP withdraws the operational consent (D213): recorded in the history like the app's withdrawal, by nobody's
       // account. START grants nothing — a consent is given only with the copy in front of the person.
-      await this.withdraw({ numberHash: senderHash, numberMasked: senderMasked, companyId: null, userId: null, source: 'inbound_keyword', at });
+      await this.withdraw({ numberHash: senderHash, numberMasked: senderMasked, companyId: null, userId: null, source: 'inbound_keyword' });
     }
   }
 
@@ -266,9 +320,125 @@ export class WhatsAppRecords {
   }
 
   /**
-   * Record a grant of the copy in force (D213), clear any opt-out, and audit it — in one transaction. A replay (the
-   * newest decision is already this person's grant of this version) writes nothing. The caller refuses any other
-   * version before this is reached; checked again here.
+   * The box ticked and a code asked for (D213): a `pending_unverified` agreement for this number, by this person, with
+   * the version, the language shown, the source and an audit event — never the consent in force. It authorises only the
+   * code that verifies the number; the number's verification activates it ({@link activatePending}). A replay (this
+   * person's pending agreement to this version, still waiting) writes nothing.
+   */
+  async recordPending(p: {
+    number: E164;
+    version: string;
+    locale: ConsentLocale;
+    companyId: Buffer | null;
+    userId: Buffer | null;
+    source: ConsentSource;
+    ip?: string | null;
+  }): Promise<ConsentWrite> {
+    if (!isCurrentConsentVersion(p.version)) throw new Error('Unknown WhatsApp consent version');
+    const numberHash = this.hasher.hash(p.number);
+    const numberMasked = maskDestination(p.number);
+    await this.ensureContact(numberHash, numberMasked);
+    return this.prisma.$transaction(async (tx) => {
+      await this.lock(tx, numberHash);
+      const mine = await tx.whatsAppConsent.findFirst({
+        where: { numberHash, event: 'pending_unverified', actorUserId: p.userId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { id: true, version: true, createdAt: true },
+      });
+      const newest = await this.newestDecision(tx, numberHash);
+      if (mine && mine.version === p.version && (await this.isLive(tx, mine, new Date())) && (!newest || mine.createdAt >= newest.createdAt)) {
+        return 'unchanged';
+      }
+      const id = newUuidV7Bin();
+      await tx.whatsAppConsent.create({
+        data: {
+          id,
+          numberHash,
+          numberMasked,
+          event: 'pending_unverified',
+          version: p.version,
+          locale: p.locale,
+          purposes: CONSENT_PURPOSES.join(','),
+          actorCompanyId: p.companyId,
+          actorUserId: p.userId,
+          source: p.source,
+        },
+      });
+      if (p.companyId) {
+        await tx.auditLog.create({
+          data: {
+            companyId: p.companyId,
+            userId: p.userId,
+            entityType: 'WhatsAppConsent',
+            entityId: id,
+            action: 'create',
+            after: { event: 'pending_unverified', version: p.version, locale: p.locale, purposes: [...CONSENT_PURPOSES], number: numberMasked, source: p.source },
+            reason: 'Operational WhatsApp consent given; waiting for the number to be verified',
+            ip: p.ip ?? null,
+          },
+        });
+      }
+      return 'recorded';
+    });
+  }
+
+  /**
+   * The number was verified (D213): this person's pending agreement for it becomes the consent in force — a new
+   * `active` row naming the pending row it concludes, with its version, language and source. Pass the transaction that
+   * records the verification so both commit together. Idempotent: an agreement already activated answers `unchanged`;
+   * UNIQUE (`pending_id`) refuses a second conclusion of one pending row, and the contact row's lock orders the rest.
+   * Nothing pending (never ticked, expired, or an earlier copy) activates nothing: `no_pending`.
+   */
+  async activatePending(p: { number: E164; userId: Buffer; companyId: Buffer; ip?: string | null }, tx?: Prisma.TransactionClient): Promise<ActivationOutcome> {
+    const run = async (db: ConsentDb): Promise<ActivationOutcome> => {
+      const numberHash = this.hasher.hash(p.number);
+      await this.lock(db, numberHash);
+      const pending = await db.whatsAppConsent.findFirst({
+        where: { numberHash, event: 'pending_unverified', actorUserId: p.userId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      });
+      if (!pending) return 'no_pending';
+      const concluded = await db.whatsAppConsent.findFirst({ where: { pendingId: pending.id }, select: { event: true } });
+      if (concluded) return concluded.event === 'active' ? 'unchanged' : 'no_pending';
+      if (!isCurrentConsentVersion(pending.version) || Date.now() - pending.createdAt.getTime() >= PENDING_CONSENT_TTL_MS) return 'no_pending';
+      const id = newUuidV7Bin();
+      await db.whatsAppConsent.create({
+        data: {
+          id,
+          numberHash,
+          numberMasked: pending.numberMasked,
+          event: 'active',
+          version: pending.version,
+          locale: pending.locale,
+          pendingId: pending.id,
+          purposes: pending.purposes,
+          actorCompanyId: p.companyId,
+          actorUserId: p.userId,
+          source: pending.source,
+        },
+      });
+      await db.whatsAppContact.updateMany({ where: { numberHash }, data: { optOutScope: 'none', optOutAt: null, optOutSource: null } });
+      await db.auditLog.create({
+        data: {
+          companyId: p.companyId,
+          userId: p.userId,
+          entityType: 'WhatsAppConsent',
+          entityId: id,
+          action: 'update',
+          after: { event: 'active', version: pending.version, number: pending.numberMasked, source: pending.source },
+          reason: 'Operational WhatsApp consent active: the number was verified',
+          ip: p.ip ?? null,
+        },
+      });
+      return 'activated';
+    };
+    return tx ? run(tx) : this.prisma.$transaction((t) => run(t));
+  }
+
+  /**
+   * An agreement to the copy in force for a number the person has ALREADY verified (re-consent from the account):
+   * active at once, as a new row. Ends a withdrawal. A replay (this person's activation of this version is already the
+   * newest decision) writes nothing.
    */
   async recordConsent(p: {
     number: E164;
@@ -284,11 +454,10 @@ export class WhatsAppRecords {
     const numberMasked = maskDestination(p.number);
     await this.ensureContact(numberHash, numberMasked);
     return this.prisma.$transaction(async (tx) => {
-      // The contact row, locked: two grants or a grant and a withdrawal of one number are decided one after the other.
-      await tx.$queryRaw`SELECT id FROM whatsapp_contacts WHERE number_hash = ${numberHash} FOR UPDATE`;
+      await this.lock(tx, numberHash);
       const newest = await this.newestDecision(tx, numberHash);
       if (
-        newest?.event === 'granted' &&
+        newest?.event === 'active' &&
         newest.version === p.version &&
         (newest.actorUserId === null ? p.userId === null : p.userId !== null && Buffer.compare(newest.actorUserId, p.userId) === 0)
       ) {
@@ -300,7 +469,7 @@ export class WhatsAppRecords {
           id,
           numberHash,
           numberMasked,
-          event: 'granted',
+          event: 'active',
           version: p.version,
           locale: p.locale,
           purposes: CONSENT_PURPOSES.join(','),
@@ -321,8 +490,8 @@ export class WhatsAppRecords {
             entityType: 'WhatsAppConsent',
             entityId: id,
             action: 'create',
-            after: { event: 'granted', version: p.version, locale: p.locale, purposes: [...CONSENT_PURPOSES], number: numberMasked, source: p.source },
-            reason: 'Operational WhatsApp consent granted',
+            after: { event: 'active', version: p.version, locale: p.locale, purposes: [...CONSENT_PURPOSES], number: numberMasked, source: p.source },
+            reason: 'Operational WhatsApp consent granted for a verified number',
             ip: p.ip ?? null,
           },
         });
@@ -332,9 +501,9 @@ export class WhatsAppRecords {
   }
 
   /**
-   * Withdraw a number's operational consent (D213): from the app, by a STOP keyword, or because the number stopped
-   * being the person's verified contact. Proactive messages stop; the history keeps every earlier event. A number
-   * already withdrawn writes nothing.
+   * Withdraw a number's operational WhatsApp consent (D213): from the app or by a STOP keyword. WhatsApp stops; email,
+   * a separate channel, is not withdrawn by it. The history keeps every earlier event. A number already withdrawn, with
+   * nothing agreed since, writes nothing.
    */
   async withdrawConsent(p: { number: E164; companyId: Buffer; userId: Buffer; source: ConsentSource; ip?: string | null }): Promise<ConsentWrite> {
     return this.withdraw({
@@ -344,8 +513,77 @@ export class WhatsAppRecords {
       userId: p.userId,
       source: p.source,
       ip: p.ip ?? null,
-      at: new Date(),
     });
+  }
+
+  /**
+   * The person's verified number was replaced (D213): the old number's consent is `superseded` — it never carries over,
+   * nor reaches whoever holds that number next. Nothing to supersede (no consent in force) writes nothing.
+   */
+  async supersede(p: { number: E164; companyId: Buffer; userId: Buffer }, tx?: Prisma.TransactionClient): Promise<ConsentWrite> {
+    const run = async (db: ConsentDb): Promise<ConsentWrite> => {
+      const numberHash = this.hasher.hash(p.number);
+      await this.lock(db, numberHash);
+      const newest = await this.newestDecision(db, numberHash);
+      if (newest?.event !== 'active' && newest?.event !== 'granted') return 'unchanged';
+      const id = newUuidV7Bin();
+      const numberMasked = maskDestination(p.number);
+      await db.whatsAppConsent.create({
+        data: { id, numberHash, numberMasked, event: 'superseded', purposes: CONSENT_PURPOSES.join(','), actorCompanyId: p.companyId, actorUserId: p.userId, source: 'number_changed' },
+      });
+      await db.auditLog.create({
+        data: {
+          companyId: p.companyId,
+          userId: p.userId,
+          entityType: 'WhatsAppConsent',
+          entityId: id,
+          action: 'update',
+          after: { event: 'superseded', number: numberMasked, source: 'number_changed' },
+          reason: 'Operational WhatsApp consent ended: the number was replaced',
+        },
+      });
+      return 'recorded';
+    };
+    return tx ? run(tx) : this.prisma.$transaction((t) => run(t));
+  }
+
+  /**
+   * Abandoned agreements (D213): every pending row older than {@link PENDING_CONSENT_TTL_MS} that nothing concluded gets
+   * its `expired` row, so the history says what became of it. An expired agreement never counted — this only records
+   * it. Idempotent: UNIQUE (`pending_id`) and the contact lock keep it to one conclusion, even racing a verification.
+   */
+  async expireStalePending(now: Date = new Date(), batch = 500): Promise<number> {
+    const cutoff = new Date(now.getTime() - PENDING_CONSENT_TTL_MS);
+    const stale = await this.prisma.whatsAppConsent.findMany({
+      where: { event: 'pending_unverified', createdAt: { lt: cutoff } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: batch,
+    });
+    let expired = 0;
+    for (const pending of stale) {
+      const wrote = await this.prisma.$transaction(async (tx) => {
+        await this.lock(tx, pending.numberHash);
+        const concluded = await tx.whatsAppConsent.findFirst({ where: { pendingId: pending.id }, select: { id: true } });
+        if (concluded) return false;
+        await tx.whatsAppConsent.create({
+          data: {
+            id: newUuidV7Bin(),
+            numberHash: pending.numberHash,
+            numberMasked: pending.numberMasked,
+            event: 'expired',
+            version: pending.version,
+            pendingId: pending.id,
+            purposes: pending.purposes,
+            actorCompanyId: pending.actorCompanyId,
+            actorUserId: pending.actorUserId,
+            source: 'expiry',
+          },
+        });
+        return true;
+      });
+      if (wrote) expired += 1;
+    }
+    return expired;
   }
 
   private async withdraw(p: {
@@ -355,18 +593,23 @@ export class WhatsAppRecords {
     userId: Buffer | null;
     source: ConsentSource;
     ip?: string | null;
-    at: Date;
   }): Promise<ConsentWrite> {
     await this.ensureContact(p.numberHash, p.numberMasked);
     return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM whatsapp_contacts WHERE number_hash = ${p.numberHash} FOR UPDATE`;
+      await this.lock(tx, p.numberHash);
       await tx.whatsAppContact.updateMany({
         where: { numberHash: p.numberHash },
-        data: { optOutScope: 'all', optOutAt: p.at, optOutSource: p.source === 'inbound_keyword' ? 'inbound_keyword' : 'account' },
+        data: { optOutScope: 'all', optOutAt: new Date(), optOutSource: p.source === 'inbound_keyword' ? 'inbound_keyword' : 'account' },
       });
-      // Ordered by when it is recorded, not when a keyword was typed: a late STOP still wins over an earlier grant.
+      // Ordered by when it is recorded, not when a keyword was typed: a late STOP still wins over an earlier agreement.
       const newest = await this.newestDecision(tx, p.numberHash);
-      if (newest?.event === 'withdrawn') return 'unchanged';
+      const pending = await tx.whatsAppConsent.findFirst({
+        where: { numberHash: p.numberHash, event: 'pending_unverified' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { createdAt: true },
+      });
+      const agreedSince = pending && newest && pending.createdAt > newest.createdAt;
+      if (newest?.event === 'withdrawn' && !agreedSince) return 'unchanged';
       const id = newUuidV7Bin();
       await tx.whatsAppConsent.create({
         data: {
@@ -389,13 +632,18 @@ export class WhatsAppRecords {
             entityId: id,
             action: 'update',
             after: { event: 'withdrawn', purposes: [...CONSENT_PURPOSES], number: p.numberMasked, source: p.source },
-            reason: p.source === 'number_changed' ? 'Operational WhatsApp consent ended: the number was replaced' : 'Operational WhatsApp consent withdrawn',
+            reason: 'Operational WhatsApp consent withdrawn',
             ip: p.ip ?? null,
           },
         });
       }
       return 'recorded';
     });
+  }
+
+  /** The contact row, locked: two decisions about one number are made one after the other. */
+  private async lock(db: Pick<ConsentDb, '$queryRaw'>, numberHash: string): Promise<void> {
+    await db.$queryRaw(Prisma.sql`SELECT id FROM whatsapp_contacts WHERE number_hash = ${numberHash} FOR UPDATE`);
   }
 
   /** Create the contact row if it does not exist; a concurrent creation is not an error. */

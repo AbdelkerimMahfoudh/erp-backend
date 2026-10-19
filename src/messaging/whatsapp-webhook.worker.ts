@@ -261,11 +261,16 @@ export class WhatsAppWebhookWorker implements OnApplicationBootstrap, OnModuleDe
     }
   }
 
-  /** Retention (D181 §7), at most hourly. */
+  /**
+   * Retention (D181 §7), at most hourly — and the consent agreements left unverified for 24 hours concluded `expired`
+   * (D213), so the history says what became of them. An expired agreement never authorised anything; this only records
+   * it, and a failure here retries next hour.
+   */
   private async purgeIfDue(): Promise<void> {
     if (Date.now() - this.purgedAt < PURGE_INTERVAL_MS) return;
     this.purgedAt = Date.now();
     await this.purgeExpired(new Date());
+    await this.records.expireStalePending(new Date()).catch((e) => this.log.warn(`Pending consent expiry deferred: ${describe(e)}`));
   }
 
   async purgeExpired(now: Date): Promise<{ events: number; whatsapp: number; email: number }> {
