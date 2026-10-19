@@ -73,10 +73,10 @@ run('the consent history on real MySQL (0100)', () => {
     const c = await company();
     expect(await grant(recordsOn(apps[0]), to, c)).toBe('recorded');
     const rows = await root.whatsAppConsent.findMany({ where: { numberHash: hasher.hash(to) } });
-    expect(rows).toEqual([expect.objectContaining({ event: 'granted', version: WHATSAPP_CONSENT_VERSION, locale: 'ar', purposes: 'operational_whatsapp', source: 'mobile_registration' })]);
+    expect(rows).toEqual([expect.objectContaining({ event: 'active', version: WHATSAPP_CONSENT_VERSION, locale: 'ar', purposes: 'operational_whatsapp', source: 'mobile_registration' })]);
     expect(rows[0].numberMasked).not.toContain(to.slice(4));
     const audit = await root.auditLog.findFirst({ where: { companyId: c, entityType: 'WhatsAppConsent' } });
-    expect(audit).toMatchObject({ ip: '203.0.113.7', reason: 'Operational WhatsApp consent granted' });
+    expect(audit).toMatchObject({ ip: '203.0.113.7', reason: 'Operational WhatsApp consent granted for a verified number' });
   });
 
   it('four processes granting the same agreement at once write one row', async () => {
@@ -114,7 +114,7 @@ run('the consent history on real MySQL (0100)', () => {
     const row = await root.whatsAppConsent.findFirstOrThrow({ where: { numberHash: hasher.hash(to) } });
     await expect(apps[0].$executeRaw`UPDATE whatsapp_consents SET event = 'withdrawn' WHERE id = ${row.id}`).rejects.toThrow(/immutable/);
     await expect(apps[0].$executeRaw`DELETE FROM whatsapp_consents WHERE id = ${row.id}`).rejects.toThrow(/immutable/);
-    expect(await root.whatsAppConsent.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ event: 'granted' });
+    expect(await root.whatsAppConsent.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ event: 'active' });
   });
 
   it('the CHECKs refuse a grant without a version, an unknown event and an unknown locale', async () => {
