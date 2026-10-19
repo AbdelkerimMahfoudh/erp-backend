@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { binToUuid } from '../../common/utils/uuid.util';
 import { DisabledWhatsAppChannel, TestWhatsAppChannel } from '../../messaging/channels';
 import { ProvenWhatsAppChannel } from '../../messaging/delivery-readiness';
+import type { ContactState } from '../../messaging/whatsapp-records';
 import {
   HangingWhatsAppChannel,
   NOW,
@@ -227,25 +228,58 @@ describe('WhatsApp first; email only for a recorded reason, to a verified addres
     expect(sentEmail(w)).toHaveLength(1);
   });
 
-  it('the Owner’s withdrawal, an earlier STOP, or no consent in force — in any mode: not sent, and never carried another way', async () => {
-    const optedOut = await fallback({}, (w, b) => w.contact(b.phone!, { optOutScope: 'optional' }));
-    expect(optedOut.notice).toMatchObject({ state: 'failed', whatsappOutcome: 'refused', failureReason: 'opted_out', fallbackReason: null });
-    expect(sentEmail(optedOut.w)).toEqual([]);
-    const withdrawn = await fallback({}, (w, b) => w.contact(b.phone!, { consented: false, consent: 'withdrawn', optOutScope: 'all' }));
-    expect(withdrawn.notice).toMatchObject({ state: 'failed', failureReason: 'opted_out' });
-    expect(sentEmail(withdrawn.w)).toEqual([]);
+  it('a missing or withdrawn WhatsApp consent: one email to the verified address, with the reason — in any mode, never both', async () => {
+    const cases: [string, Partial<ContactState>, string][] = [
+      ['never agreed (an account from before D213)', { consented: false, consent: 'none' }, 'consent_missing'],
+      ['agreed to an earlier copy', { consented: false, consent: 'outdated' }, 'consent_missing'],
+      ['still pending: the number not verified with it', { consented: false, consent: 'pending', pendingLive: true }, 'consent_missing'],
+      ['withdrawn in the app', { consented: false, consent: 'withdrawn', optOutScope: 'all' }, 'consent_withdrawn'],
+      ['a STOP from before D213', { optOutScope: 'optional' }, 'consent_withdrawn'],
+    ];
     for (const whatsappMode of ['test', 'live'] as const) {
-      for (const consent of ['none', 'outdated'] as const) {
-        // An account from before D213, or a consent to an earlier copy: never opted in by anything but the person.
-        const noConsent = await fallback({ whatsappMode }, (w, b) => w.contact(b.phone!, { consented: false, consent }));
-        expect(noConsent.notice).toMatchObject({ state: 'failed', failureReason: 'no_consent' });
-        expect(sentEmail(noConsent.w)).toEqual([]);
+      for (const [, state, reason] of cases) {
+        const { w, shop, notice } = await fallback({ whatsappMode }, (world, b) => world.contact(b.phone!, state));
+        expect(sentWhatsApp(w)).toEqual([]);
+        expect(sentEmail(w)).toEqual([expect.objectContaining({ to: shop.email, template: 'portal.instructions', idempotencyKey: `notice:${binToUuid(notice.id)}:email` })]);
+        expect(notice).toMatchObject({ state: 'accepted', channel: 'email', fallbackReason: reason, whatsappOutcome: 'unavailable', failureReason: null });
       }
     }
-    // With the consent in force, it goes by WhatsApp only.
-    const consented = await fallback({ whatsappMode: 'live' });
-    expect(consented.notice).toMatchObject({ state: 'accepted', channel: 'whatsapp' });
-    expect(sentEmail(consented.w)).toEqual([]);
+  });
+
+  it('the consent in force: WhatsApp only — no email, even with a verified address', async () => {
+    const { w, notice } = await fallback({ whatsappMode: 'live' });
+    expect(notice).toMatchObject({ state: 'accepted', channel: 'whatsapp', fallbackReason: null });
+    expect(sentWhatsApp(w)).toHaveLength(1);
+    expect(sentEmail(w)).toEqual([]);
+  });
+
+  it('a withdrawal without a verified email: an honest not-sent — never claimed sent', async () => {
+    const w = makeTrialWorld();
+    const shop = w.business({ contacts: 'phone' });
+    w.contact(shop.phone!, { consented: false, consent: 'withdrawn', optOutScope: 'all' });
+    await sendAutomatic(w, shop);
+    expect(w.noticesOf(shop)[0]).toMatchObject({ state: 'failed', fallbackReason: 'consent_withdrawn', failureReason: 'no_email' });
+    expect(sentWhatsApp(w)).toEqual([]);
+    expect(sentEmail(w)).toEqual([]);
+  });
+
+  it('a missing consent with email unavailable: not sent, said why', async () => {
+    const { w, notice } = await fallback({ portalUrl: '' }, (world, b) => world.contact(b.phone!, { consented: false, consent: 'none' }));
+    expect(notice).toMatchObject({ state: 'failed', fallbackReason: 'consent_missing', failureReason: 'email_unavailable' });
+    expect(sentWhatsApp(w)).toEqual([]);
+    expect(sentEmail(w)).toEqual([]);
+  });
+
+  it('one message per notification: a second pass, a retry or a resend of the same identity carries nothing more', async () => {
+    const { w, shop } = await fallback({}, (world, b) => world.contact(b.phone!, { consented: false, consent: 'none' }));
+    for (let i = 0; i < 3; i++) {
+      w.clock.advance(MINUTE);
+      await w.notices.deliverNow();
+      await w.notices.refresh(shop.companyId);
+    }
+    expect(sentEmail(w)).toHaveLength(1);
+    expect(sentWhatsApp(w)).toEqual([]);
+    expect(w.noticesOf(shop)).toHaveLength(1);
   });
 
   it('a reason to fall back but no verified email, or no email to send with: failed — honestly, with the destination masked', async () => {
@@ -384,10 +418,11 @@ describe('what the Owner is told', () => {
     const w = makeTrialWorld();
     const waiting = w.business({ verified: [] });
     expect(await w.setup.appStatus(waiting.owner)).toMatchObject({ delivery: 'waiting_for_contact', missingContacts: ['phone'] });
+    // Withdrawn WhatsApp and no verified email: failed, with both reasons and the number it would have gone to.
     const optedOut = w.business();
     w.contact(optedOut.phone!, { optOutScope: 'optional' });
     await sendAutomatic(w, optedOut);
-    expect(await w.setup.appStatus(optedOut.owner)).toMatchObject({ delivery: 'failed', failureReason: 'opted_out', destination: '+222••••0002', lastSentAt: null });
+    expect(await w.setup.appStatus(optedOut.owner)).toMatchObject({ delivery: 'failed', fallbackReason: 'consent_withdrawn', failureReason: 'no_email', lastSentAt: null });
     const claimed = w.business();
     await w.service.claim(claimed.owner, { idempotencyKey: 'k-1', termsVersion: TRIAL_TERMS_VERSION });
     expect(await w.setup.appStatus(claimed.owner)).toEqual({ state: 'trial_active', eligible: false });
