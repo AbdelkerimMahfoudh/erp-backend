@@ -183,6 +183,10 @@ export function isCurrent(stored: { kind: string; periodKey: string; threshold: 
 
 /** Why email carried a message (`subscription_notices.fallback_reason`). */
 export type FallbackReason =
+  /** The Owner's number has no operational WhatsApp consent in force (never agreed, or to an earlier copy; D213). */
+  | 'consent_missing'
+  /** The Owner withdrew the operational WhatsApp consent, in the app or by STOP — WhatsApp only; email is a separate channel. */
+  | 'consent_withdrawn'
   | 'whatsapp_disabled'
   | 'template_unavailable'
   | 'number_unverified'
@@ -193,9 +197,9 @@ export type FallbackReason =
 
 /** Why nothing carried it (`subscription_notices.failure_reason`). */
 export type FailureReason =
-  /** The Owner withdrew the operational WhatsApp consent (or sent STOP): never carried another way. */
+  /** Before D213's correction: the Owner had withdrawn WhatsApp and nothing carried the message. Kept for old rows. */
   | 'opted_out'
-  /** The number has no consent to the copy in force (D213): never carried another way. */
+  /** Before D213's correction: no consent, and nothing carried the message. Kept for old rows. */
   | 'no_consent'
   /** WhatsApp could not carry it, and the Owner has no verified email address. */
   | 'no_email'
@@ -227,15 +231,17 @@ export interface WhatsAppFacts {
 export type WhatsAppPlan = { action: 'send' } | { action: 'fallback'; reason: FallbackReason } | { action: 'stop'; reason: FailureReason };
 
 /**
- * Before WhatsApp is asked: send, fall back to email with the reason, or stop — in the routing order of D213: a
- * verified recipient, the consent in force, the opt-out and undeliverable state, then the template and the channel.
- * The Owner's own choice, and a missing consent, stop it: email is never a way round them. Only what makes WhatsApp
- * unable to carry the message falls back.
+ * Before WhatsApp is asked: send, or fall back to email with the reason — in the routing order of D213: a verified
+ * number, the consent in force, a deliverable number, the approved template, the channel. These messages are
+ * informational (the portal instructions, the trial and paid reminders, grace and read-only notices), so whatever keeps
+ * WhatsApp from carrying one — a missing or withdrawn consent included — lets a verified email carry it instead: a
+ * withdrawal from WhatsApp is not a withdrawal from operational email, and email never stands in for a WhatsApp consent.
+ * No code, recovery, deletion confirmation, employee verification or financial report is ever routed here.
  */
 export function whatsappPlan(f: WhatsAppFacts): WhatsAppPlan {
   if (!f.numberVerified) return { action: 'fallback', reason: 'number_unverified' };
-  if (f.optOut !== 'none') return { action: 'stop', reason: 'opted_out' };
-  if (!f.consented) return { action: 'stop', reason: 'no_consent' };
+  if (f.optOut !== 'none') return { action: 'fallback', reason: 'consent_withdrawn' };
+  if (!f.consented) return { action: 'fallback', reason: 'consent_missing' };
   if (f.undeliverable) return { action: 'fallback', reason: 'number_undeliverable' };
   if (!f.templateApproved) return { action: 'fallback', reason: 'template_unavailable' };
   if (!f.channelOpen) return { action: 'fallback', reason: 'whatsapp_disabled' };
@@ -258,14 +264,14 @@ export type WhatsAppStep =
 
 /**
  * After WhatsApp answered: accepted; a temporary failure retried until the attempts run out, then the fallback; an
- * immediate refusal falls back — unless the Owner's own choice refused it (`optedOutNow`, read again after a refusal),
- * which stops it.
+ * immediate refusal falls back — named as a withdrawal when the Owner's own choice refused it (`optedOutNow`, read
+ * again after a refusal).
  */
 export function afterWhatsApp(result: DeliveryResult, attempts: number, optedOutNow: boolean): WhatsAppStep {
   if (result.status === 'accepted') return { next: 'accepted', providerMessageId: result.providerMessageId };
   if (result.reason === 'temporary') return attempts < MAX_WHATSAPP_ATTEMPTS ? { next: 'retry' } : { next: 'fallback', reason: 'retries_exhausted' };
   if (result.reason === 'channel_unavailable') return { next: 'fallback', reason: 'whatsapp_disabled' };
-  if (optedOutNow) return { next: 'stop', reason: 'opted_out' };
+  if (optedOutNow) return { next: 'fallback', reason: 'consent_withdrawn' };
   if (result.providerCode === UNDELIVERABLE_CODE) return { next: 'fallback', reason: 'number_undeliverable' };
   return { next: 'fallback', reason: 'provider_refused' };
 }

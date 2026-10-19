@@ -143,28 +143,27 @@ describe('which channel carries it', () => {
     consented: true,
   };
 
-  it('WhatsApp when it can; email for the recorded reasons; the Owner’s own choice stops it', () => {
+  it('WhatsApp when it can; otherwise a verified email, for the reason recorded — a missing or withdrawn consent included', () => {
     expect(whatsappPlan(ready)).toEqual({ action: 'send' });
     expect(whatsappPlan({ ...ready, numberVerified: false })).toEqual({ action: 'fallback', reason: 'number_unverified' });
     expect(whatsappPlan({ ...ready, channelOpen: false })).toEqual({ action: 'fallback', reason: 'whatsapp_disabled' });
     expect(whatsappPlan({ ...ready, templateApproved: false })).toEqual({ action: 'fallback', reason: 'template_unavailable' });
     expect(whatsappPlan({ ...ready, undeliverable: true })).toEqual({ action: 'fallback', reason: 'number_undeliverable' });
-    expect(whatsappPlan({ ...ready, optOut: 'optional' })).toEqual({ action: 'stop', reason: 'opted_out' });
-    expect(whatsappPlan({ ...ready, optOut: 'all' })).toEqual({ action: 'stop', reason: 'opted_out' });
-    expect(whatsappPlan({ ...ready, consented: false })).toEqual({ action: 'stop', reason: 'no_consent' });
+    expect(whatsappPlan({ ...ready, optOut: 'optional' })).toEqual({ action: 'fallback', reason: 'consent_withdrawn' });
+    expect(whatsappPlan({ ...ready, optOut: 'all' })).toEqual({ action: 'fallback', reason: 'consent_withdrawn' });
+    expect(whatsappPlan({ ...ready, consented: false })).toEqual({ action: 'fallback', reason: 'consent_missing' });
   });
 
-  it('decides in the routing order of D213: verified recipient, consent, opt-out and undeliverable, then template and channel', () => {
-    // A missing consent or a withdrawal stops it even when WhatsApp could not carry it anyway: email is never a way round.
+  it('decides in the routing order of D213: verified recipient, consent, deliverable, then template and channel — never a stop', () => {
     const closed = { ...ready, channelOpen: false, templateApproved: false };
-    expect(whatsappPlan({ ...closed, consented: false })).toEqual({ action: 'stop', reason: 'no_consent' });
-    expect(whatsappPlan({ ...closed, optOut: 'all' })).toEqual({ action: 'stop', reason: 'opted_out' });
+    expect(whatsappPlan({ ...closed, consented: false })).toEqual({ action: 'fallback', reason: 'consent_missing' });
+    expect(whatsappPlan({ ...closed, optOut: 'all' })).toEqual({ action: 'fallback', reason: 'consent_withdrawn' });
     expect(whatsappPlan({ ...closed, undeliverable: true })).toEqual({ action: 'fallback', reason: 'number_undeliverable' });
     expect(whatsappPlan({ ...closed })).toEqual({ action: 'fallback', reason: 'template_unavailable' });
     expect(whatsappPlan({ ...closed, numberVerified: false, consented: false })).toEqual({ action: 'fallback', reason: 'number_unverified' });
   });
 
-  it('after WhatsApp answers: accepted; temporary retried, then exhausted; refused or closed falls back; an opt-out stops', () => {
+  it('after WhatsApp answers: accepted; temporary retried, then exhausted; refused, closed or withdrawn falls back', () => {
     const failed = (reason: 'temporary' | 'rejected' | 'channel_unavailable' | 'not_authorized', providerCode?: number) =>
       ({ status: 'failed' as const, reason, detail: 'd', provider: 'p', ...(providerCode ? { providerCode } : {}) });
     expect(afterWhatsApp({ status: 'accepted', providerMessageId: 'w1', provider: 'p' }, 1, false)).toEqual({ next: 'accepted', providerMessageId: 'w1' });
@@ -174,7 +173,8 @@ describe('which channel carries it', () => {
     expect(afterWhatsApp(failed('rejected'), 1, false)).toEqual({ next: 'fallback', reason: 'provider_refused' });
     expect(afterWhatsApp(failed('not_authorized'), 1, false)).toEqual({ next: 'fallback', reason: 'provider_refused' });
     expect(afterWhatsApp(failed('rejected', 131026), 1, false)).toEqual({ next: 'fallback', reason: 'number_undeliverable' });
-    expect(afterWhatsApp(failed('rejected'), 1, true)).toEqual({ next: 'stop', reason: 'opted_out' });
+    // Refused because the Owner withdrew just now: named so, and carried by a verified email like any refusal.
+    expect(afterWhatsApp(failed('rejected'), 1, true)).toEqual({ next: 'fallback', reason: 'consent_withdrawn' });
   });
 
   it('after email answers: accepted; temporary retried, then failed; anything else failed', () => {

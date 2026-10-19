@@ -213,6 +213,35 @@ describe('email, when WhatsApp cannot carry a lifecycle message', () => {
     ]);
     expect(w.noticesOf(shop)[0]).toMatchObject({ state: 'accepted', channel: 'email', fallbackReason: 'template_unavailable' });
   });
+
+  it('a reminder and a read-only notice to an Owner without WhatsApp consent go by the verified email, once each — never also by WhatsApp (D213)', async () => {
+    const w = makeTrialWorld();
+    const shop = w.business({ timezone: 'UTC', contacts: 'both' });
+    w.contact(shop.phone!, { consented: false, consent: 'none' });
+    await w.service.claim(shop.owner, { idempotencyKey: 'k-1', termsVersion: TRIAL_TERMS_VERSION });
+    w.clock.advance(96 * HOUR);
+    await tick(w, shop);
+    await tick(w, shop);
+    w.clock.advance(72 * HOUR);
+    await tick(w, shop);
+    await tick(w, shop);
+    expect(sent(w)).toEqual([]);
+    expect((w.email as TestEmailChannel).sent.map((m) => m.template)).toEqual(['subscription.trial_reminder', 'subscription.trial_expired']);
+    expect(w.noticesOf(shop).filter((n) => n.kind !== 'portal_instructions').map((n) => [n.kind, n.channel, n.fallbackReason])).toEqual([
+      ['trial_reminder', 'email', 'consent_missing'],
+      ['trial_expired', 'email', 'consent_missing'],
+    ]);
+  });
+
+  it('an Owner who withdrew WhatsApp still receives the informational notices by the verified email', async () => {
+    const w = makeTrialWorld();
+    const shop = paidBusiness(w, new Date(NOW.getTime() + 23 * HOUR), { contacts: 'both' });
+    w.contact(shop.phone!, { consented: false, consent: 'withdrawn', optOutScope: 'all' });
+    await tick(w, shop);
+    expect(sent(w)).toEqual([]);
+    expect((w.email as TestEmailChannel).sent).toEqual([expect.objectContaining({ template: 'subscription.paid_reminder' })]);
+    expect(w.noticesOf(shop)[0]).toMatchObject({ state: 'accepted', channel: 'email', fallbackReason: 'consent_withdrawn' });
+  });
 });
 
 describe('the timeline as the portal and the console read it', () => {
