@@ -15,7 +15,8 @@
 #   3. the permission catalogue and the role grants match the code (the deploy-time gate);
 #   4. each identity is refused what it must not do, the audit triggers included (deploy/verify-mysql-identities.sh);
 #   5. the env-gated real-MySQL spec (InnoDB locks, NOWAIT, CHECKs, concurrency) runs on its own `addon_ci` schema;
-#   6. the 0099 real-MySQL spec (grace decisions, the notice outbox, the portal claim) runs on its own `grace_ci` schema.
+#   6. the 0099 real-MySQL spec (grace decisions, the notice outbox, the portal claim) runs on its own `grace_ci` schema;
+#   7. the 0100 real-MySQL spec (the consent history) runs on that same disposable schema.
 # Any failure exits non-zero.
 set -euo pipefail
 
@@ -85,3 +86,7 @@ root -e "CREATE DATABASE grace_ci CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_
 DATABASE_URL=$(url root "${ROOT_PW:-}" grace_ci) npx prisma migrate deploy
 GRACE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) GRACE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/notices/lifecycle.mysql.spec.ts
+
+echo "== 7. the 0100 real-MySQL spec (the consent history: locks, triggers, CHECKs), on the same disposable schema"
+CONSENT_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) CONSENT_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/messaging/consent.mysql.spec.ts

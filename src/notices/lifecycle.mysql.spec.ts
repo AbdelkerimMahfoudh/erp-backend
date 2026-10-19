@@ -66,7 +66,10 @@ const config = {
     return this.templates[configKey] ?? '';
   },
 };
-const records = { contactState: async () => ({ optOutScope: 'none', consented: false, lastInboundAt: null, undeliverableAt: null }) };
+// Every Owner here registered with the operational WhatsApp consent (D213): the consent rule has its own spec.
+const records = {
+  contactState: async () => ({ optOutScope: 'none', consented: true, consent: 'granted', consentVersion: null, consentedAt: null, withdrawnAt: null, lastInboundAt: null, undeliverableAt: null }),
+};
 const hasher = { hash: (value: string) => `hash:${value.trim().toLowerCase()}` };
 
 /** Everything one API process would hold, over the application account. */
