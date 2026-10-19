@@ -69,7 +69,9 @@ root phonestore -e "SET @c = UNHEX(REPLACE(UUID(), '-', '')), @s = UNHEX(REPLACE
   INSERT INTO subscription_events (id, company_id, subscription_id, kind, note) VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @s, 'created', 'CI identity probe');
   SET @p = NOW(6) - INTERVAL 1 DAY;
   INSERT INTO grace_episodes (id, company_id, subscription_id, period_end, decision, started_at, ends_at, uses_before, window_start, recorded_at, recorded_by)
-    VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @s, @p, 'granted', @p, @p + INTERVAL 72 HOUR, 0, @p - INTERVAL 12 MONTH, @p + INTERVAL 1 SECOND, 'sweeper')"
+    VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @s, @p, 'granted', @p, @p + INTERVAL 72 HOUR, 0, @p - INTERVAL 12 MONTH, @p + INTERVAL 1 SECOND, 'sweeper');
+  INSERT INTO whatsapp_consents (id, number_hash, number_masked, event, version, locale, purposes, actor_company_id, source)
+    VALUES (UNHEX(REPLACE(UUID(), '-', '')), REPEAT('0', 64), '+000***00', 'granted', 'ci-probe', 'en', 'operational_whatsapp', @c, 'mobile_registration')"
 DB=phonestore APP_PW="$APP_PW" BACKUP_PW="$BACKUP_PW" MIGRATOR_PW="$MIGRATOR_PW" bash deploy/verify-mysql-identities.sh
 
 echo "== 5. the real-MySQL spec, on its own schema"

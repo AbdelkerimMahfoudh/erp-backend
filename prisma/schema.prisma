@@ -5862,22 +5862,26 @@ model WhatsAppContact {
   @@map("whatsapp_contacts")
 }
 
-/// The history of a number's WhatsApp consent (0098; D181 §5): every grant (with its copy's version and purposes),
-/// opt-out and withdrawal made through the application, with who made it. Append-only.
+/// The history of a number's WhatsApp consent (0098; D181 §5; D213): every grant (with its copy's version, purpose and
+/// the language it was shown in), withdrawal and keyword STOP, with who made it and where. Append-only: the
+/// application's database account can neither edit nor delete a row (0100's triggers).
 model WhatsAppConsent {
   id             Bytes    @id @db.Binary(16)
   numberHash     String   @map("number_hash") @db.Char(64)
   numberMasked   String   @map("number_masked") @db.VarChar(40)
-  /// granted | opted_out_optional | withdrawn
+  /// granted | withdrawn | opted_out_optional (before D213 only)
   event          String   @db.VarChar(20)
   version        String?  @db.VarChar(40)
-  /// Comma-separated purpose categories of the granted copy.
+  /// 0100: the language the copy was shown in (en | fr | ar), for a grant made from 0100 on.
+  locale         String?  @db.VarChar(5)
+  /// Comma-separated purpose categories: `operational_whatsapp` from D213 on.
   purposes       String?  @db.VarChar(255)
   /// Who made it: the business and person acting (a record of the actor, not tenant ownership — the history is
-  /// read by number, across businesses, by the send policy).
+  /// read by number, across businesses, by the send policy). Both null for a keyword STOP.
   actorCompanyId Bytes?   @map("actor_company_id") @db.Binary(16)
   actorUserId    Bytes?   @map("actor_user_id") @db.Binary(16)
-  /// owner_registration | phone_verification | account
+  /// mobile_registration | website_registration | account_settings | website | number_changed | inbound_keyword
+  /// (owner_registration | phone_verification | account before D213)
   source         String   @db.VarChar(30)
   createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(6)
 

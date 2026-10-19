@@ -64,6 +64,15 @@ else
   echo "SKIP grace-decision trigger probes: no grace decision in $DB"
 fi
 
+# A consent decision is history (0100): a grant, withdrawal or STOP is never edited or deleted by the application.
+CONSENT_HEX=$(MYSQL_PWD="$APP_PW" mysql "${CONN[@]}" -u phonestore_app -N -B "$DB" -e "SELECT HEX(id) FROM whatsapp_consents LIMIT 1" 2>/dev/null)
+if [ -n "$CONSENT_HEX" ]; then
+  must_fail "app cannot rewrite a consent decision (trigger)" phonestore_app "$APP_PW" "UPDATE whatsapp_consents SET event='withdrawn' WHERE id=UNHEX('$CONSENT_HEX')" "immutable"
+  must_fail "app cannot delete a consent decision (trigger)" phonestore_app "$APP_PW" "DELETE FROM whatsapp_consents WHERE id=UNHEX('$CONSENT_HEX')" "immutable"
+else
+  echo "SKIP consent-decision trigger probes: no consent decision in $DB"
+fi
+
 # --- the backup account: read everything, change nothing ----------------------
 if [ -n "${BACKUP_PW:-}" ]; then
   must_pass "backup can read"                  phonestore_backup "$BACKUP_PW" "SELECT COUNT(*) FROM audit_logs"

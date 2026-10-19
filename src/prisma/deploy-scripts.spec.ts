@@ -58,11 +58,13 @@ describe('deploy/verify-mysql-identities.sh', () => {
 
   it('passes a trigger probe only on the trigger refusing it, never on a missing grant', () => {
     const probes = verify.split('\n').filter((l) => l.includes('must_fail') && l.includes('(trigger)'));
-    // UPDATE and DELETE on audit_logs and on subscription_events (append-only), and on grace_episodes (0099: a grace
-    // decision is immutable) — each passing only on the trigger's own words.
-    expect(probes).toHaveLength(6);
+    // UPDATE and DELETE on audit_logs and on subscription_events (append-only), on grace_episodes (0099: a grace
+    // decision is immutable) and on whatsapp_consents (0100: a consent decision is history) — each passing only on the
+    // trigger's own words.
+    expect(probes).toHaveLength(8);
     for (const line of probes) {
-      expect(line.trim().endsWith(line.includes('grace_episodes') ? '"immutable"' : '"append-only"')).toBe(true);
+      const immutable = line.includes('grace_episodes') || line.includes('whatsapp_consents');
+      expect(line.trim().endsWith(immutable ? '"immutable"' : '"append-only"')).toBe(true);
       expect(line).not.toMatch(/denied/);
     }
   });
@@ -73,6 +75,14 @@ describe('deploy/verify-mysql-identities.sh', () => {
     for (const line of grace) expect(line).toMatch(/WHERE id=UNHEX\('\$GRACE_HEX'\)/);
     expect(verify).toMatch(/GRACE_HEX=\$\(.*SELECT HEX\(id\) FROM grace_episodes LIMIT 1/);
     expect(readFileSync(join(ROOT, 'deploy', 'ci-database-gates.sh'), 'utf8')).toMatch(/INSERT INTO grace_episodes/);
+  });
+
+  it('aims each consent-decision probe at a row that exists, and the CI gate provides one', () => {
+    const consent = verify.split('\n').filter((l) => l.includes('must_fail') && l.includes('whatsapp_consents'));
+    expect(consent).toHaveLength(2);
+    for (const line of consent) expect(line).toMatch(/WHERE id=UNHEX\('\$CONSENT_HEX'\)/);
+    expect(verify).toMatch(/CONSENT_HEX=\$\(.*SELECT HEX\(id\) FROM whatsapp_consents LIMIT 1/);
+    expect(readFileSync(join(ROOT, 'deploy', 'ci-database-gates.sh'), 'utf8')).toMatch(/INSERT INTO whatsapp_consents/);
   });
 
   it('aims each subscription-event probe at a row that exists: a statement matching nothing fires no trigger', () => {
