@@ -158,10 +158,39 @@ describe('what never goes by email (the owner’s security correction of 2026-10
   const read = (path: string) => require('node:fs').readFileSync(require('node:path').join(__dirname, '..', path), 'utf8') as string;
 
   it('a code, a deletion confirmation or a financial report has no email path: the services that send them hold no email channel', () => {
-    // OTPs (sign-in steps, a changed number, deletion codes), the deletion confirmation, closing reports.
-    for (const file of ['auth/otp/otp.service.ts', 'account/account-deletion.service.ts', 'closing/closing-notice.service.ts']) {
+    // OTPs (sign-in steps, a changed number, deletion codes), the deletion confirmation, closing reports, the employee's
+    // invitation code (D214), the number change and the registration's number code, and the portal's sign-in.
+    for (const file of [
+      'auth/otp/otp.service.ts',
+      'account/account-deletion.service.ts',
+      'closing/closing-notice.service.ts',
+      'staff/staff-invitation.service.ts',
+      'account/account.service.ts',
+      'platform/registration-flow.service.ts',
+      'platform/portal/portal-session.service.ts',
+    ]) {
       expect({ file, email: /EMAIL_CHANNEL|EmailChannel/.test(read(file)) }).toEqual({ file, email: false });
     }
+  });
+
+  it('an employee’s invitation code goes only to the invitation’s own WhatsApp number', () => {
+    const source = read('staff/staff-invitation.service.ts');
+    // One code in the whole service, sent to the number the employee typed and the server matched to the invitation.
+    expect(source.match(/this\.verification\.start\(/g)).toHaveLength(1);
+    expect(source).toMatch(/if \(number !== invitation\.user\.phone\)[\s\S]*this\.verification\.start\(number, language\)/);
+  });
+
+  it('the subscription notices are the one place email carries a WhatsApp-first message, and only their informational kinds', () => {
+    const files = ['notices/notice.service.ts', 'platform/contact-delivery.ts'];
+    // The only holders of the email channel outside the channel itself: the notices (fallback) and the contact delivery
+    // (an email address's own verification code, chosen by the contact, never by a WhatsApp failure).
+    for (const file of files) expect(/EMAIL_CHANNEL|EmailChannel/.test(read(file))).toBe(true);
+    // What the notices carry is exactly the informational set: the portal instructions, the trial and paid reminders
+    // (72/48/24 h), the ends (read-only, grace or none) and the grace reminders — no code, recovery or report among them.
+    const schema = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '..', 'prisma', 'schema.prisma'), 'utf8') as string;
+    const block = schema.match(/enum SubscriptionNoticeKind \{([^}]*)\}/)![1];
+    const kinds = block.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('///'));
+    expect(kinds).toEqual(['portal_instructions', 'trial_reminder', 'trial_expired', 'paid_reminder', 'paid_expired', 'grace_reminder', 'grace_ended']);
   });
 
   it('a WhatsApp number’s verification code goes by WhatsApp or not at all — the contact delivery never swaps channels', () => {

@@ -244,6 +244,77 @@ describe('email, when WhatsApp cannot carry a lifecycle message', () => {
   });
 });
 
+describe('the routing matrix for every informational lifecycle message (D213)', () => {
+  const emails = (w: TrialWorld) => (w.email as TestEmailChannel).sent;
+
+  it('grace started, grace reminders and grace ended, to an Owner who withdrew WhatsApp: each by the verified email once — never by WhatsApp', async () => {
+    const w = makeTrialWorld();
+    const shop = paidBusiness(w, new Date(NOW.getTime() - HOUR), { contacts: 'both' });
+    w.contact(shop.phone!, { consented: false, consent: 'withdrawn', optOutScope: 'all' });
+    w.grace(shop, 'granted');
+    for (let i = 0; i < 4; i++) {
+      await tick(w, shop);
+      await tick(w, shop);
+      w.clock.advance(24 * HOUR);
+    }
+    expect(sent(w)).toEqual([]);
+    expect(emails(w).map((m) => m.template)).toEqual([
+      'subscription.grace_started',
+      'subscription.grace_reminder',
+      'subscription.grace_reminder',
+      'subscription.grace_ended',
+    ]);
+    expect(w.noticesOf(shop).map((n) => [n.kind, n.channel, n.fallbackReason])).toEqual([
+      ['paid_expired', 'email', 'consent_withdrawn'],
+      ['grace_reminder', 'email', 'consent_withdrawn'],
+      ['grace_reminder', 'email', 'consent_withdrawn'],
+      ['grace_ended', 'email', 'consent_withdrawn'],
+    ]);
+  });
+
+  it('the paid end without grace (read-only) to an Owner who never agreed: by the verified email, once', async () => {
+    const w = makeTrialWorld();
+    const shop = paidBusiness(w, new Date(NOW.getTime() - HOUR), { contacts: 'both' });
+    w.contact(shop.phone!, { consented: false, consent: 'none' });
+    w.grace(shop, 'refused', 3);
+    await tick(w, shop);
+    await tick(w, shop);
+    expect(sent(w)).toEqual([]);
+    expect(emails(w)).toEqual([expect.objectContaining({ template: 'subscription.no_grace' })]);
+    expect(w.noticesOf(shop)[0]).toMatchObject({ kind: 'paid_expired', variant: 'no_grace', channel: 'email', fallbackReason: 'consent_missing' });
+  });
+
+  it('no verified email to fall back to: an honest not-sent, nothing by either channel', async () => {
+    const w = makeTrialWorld();
+    const shop = paidBusiness(w, new Date(NOW.getTime() + 23 * HOUR), { contacts: 'phone' });
+    w.contact(shop.phone!, { consented: false, consent: 'withdrawn', optOutScope: 'all' });
+    await tick(w, shop);
+    expect(w.noticesOf(shop)[0]).toMatchObject({ kind: 'paid_reminder', state: 'failed', fallbackReason: 'consent_withdrawn', failureReason: 'no_email' });
+    expect(sent(w)).toEqual([]);
+    expect(emails(w)).toEqual([]);
+  });
+
+  it('email not ready: an honest not-sent, said why — nothing by either channel', async () => {
+    const w = makeTrialWorld({ portalUrl: '' });
+    const shop = paidBusiness(w, new Date(NOW.getTime() + 23 * HOUR), { contacts: 'both' });
+    w.contact(shop.phone!, { consented: false, consent: 'none' });
+    await tick(w, shop);
+    expect(w.noticesOf(shop)[0]).toMatchObject({ state: 'failed', fallbackReason: 'consent_missing', failureReason: 'email_unavailable' });
+    expect(sent(w)).toEqual([]);
+    expect(emails(w)).toEqual([]);
+  });
+
+  it('WhatsApp ready and the consent active: WhatsApp alone — no email, even with a verified address', async () => {
+    const w = makeTrialWorld();
+    const shop = paidBusiness(w, new Date(NOW.getTime() + 23 * HOUR), { contacts: 'both' });
+    await tick(w, shop);
+    await tick(w, shop);
+    expect(sent(w)).toEqual([expect.objectContaining({ template: 'subscription.paid_reminder' })]);
+    expect(emails(w)).toEqual([]);
+    expect(w.noticesOf(shop)[0]).toMatchObject({ state: 'accepted', channel: 'whatsapp', fallbackReason: null });
+  });
+});
+
 describe('the timeline as the portal and the console read it', () => {
   it('the next message as things stand, and the newest one with what became of it', async () => {
     const w = makeTrialWorld();

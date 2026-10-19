@@ -271,8 +271,9 @@ export class AccountService {
   }
 
   /**
-   * Withdraw my operational WhatsApp consent: automatic reminders and notices stop, and codes to my number with them.
-   * Nothing moves to email, my number and my account stay. When WhatsApp is my only verified contact the client must
+   * Withdraw my operational WhatsApp consent: WhatsApp reminders and notices stop, and codes to my number with them.
+   * Informational subscription notices go to my verified email instead (D213); codes, recovery and deletion
+   * confirmation never do. My number and my account stay. When WhatsApp is my only verified contact the client must
    * say I understood that recovery then goes through TSX-MR support — the server refuses otherwise. Audited.
    */
   async withdrawWhatsappConsent(

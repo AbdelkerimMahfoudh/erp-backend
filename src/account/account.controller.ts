@@ -137,8 +137,10 @@ export class AccountController {
   @HttpCode(HttpStatus.OK)
   @Throttle(SENSITIVE_THROTTLE)
   @ApiOperation({
-    summary: 'Withdraw my operational WhatsApp consent: automatic reminders, notices and codes to my number stop',
-    description: 'Nothing moves to email. When WhatsApp is my only verified contact, acknowledgeSupportRecovery is required.',
+    summary: 'Withdraw my operational WhatsApp consent: WhatsApp reminders, notices and codes to my number stop',
+    description:
+      'Informational subscription notices then go to my verified email, if I have one; codes, recovery and deletion ' +
+      'confirmation never do. When WhatsApp is my only verified contact, acknowledgeSupportRecovery is required.',
   })
   withdrawWhatsappConsent(
     @CurrentUser() user: AuthUser,

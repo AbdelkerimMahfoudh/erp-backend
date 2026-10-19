@@ -406,9 +406,6 @@ export class NoticeService {
     });
     // Masked as its Owner is shown it everywhere — the portal, the app's list of verified contacts — so one number reads the same.
     const destination = phone ? { destinationMasked: maskForOwner('phone', phone), destinationHash: this.hasher.hash(phone) } : {};
-    if (plan.action === 'stop') {
-      return { done: true, transition: { state: 'failed', whatsappOutcome: 'refused', failureReason: plan.reason, ...destination, completedAt: now } };
-    }
     if (plan.action === 'fallback') return { done: false, reason: plan.reason, whatsappOutcome: 'unavailable' };
 
     let result: DeliveryResult;
@@ -430,8 +427,6 @@ export class NoticeService {
           done: true,
           transition: { state: 'pending', whatsappOutcome: 'temporary', ...destination, nextAttemptAt: new Date(now.getTime() + noticeBackoffMs(n.attempts)) },
         };
-      case 'stop':
-        return { done: true, transition: { state: 'failed', whatsappOutcome: 'refused', failureReason: step.reason, ...destination, completedAt: this.clock.now() } };
       case 'fallback':
         return { done: false, reason: step.reason, whatsappOutcome: step.reason === 'whatsapp_disabled' ? 'unavailable' : 'failed' };
     }
@@ -585,7 +580,6 @@ export class NoticeService {
       consented: contact?.consented ?? false,
     });
     if (plan.action === 'send') return true;
-    if (plan.action === 'stop') return false;
     return Boolean(owner.email && owner.emailVerifiedAt && this.emailOpen() && this.config.portalSubscriptionUrl);
   }
 

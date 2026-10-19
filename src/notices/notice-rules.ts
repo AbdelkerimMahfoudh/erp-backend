@@ -228,7 +228,8 @@ export interface WhatsAppFacts {
   consented: boolean;
 }
 
-export type WhatsAppPlan = { action: 'send' } | { action: 'fallback'; reason: FallbackReason } | { action: 'stop'; reason: FailureReason };
+/** Send, or fall back to email: an informational message is never stopped on the WhatsApp side alone (D213). */
+export type WhatsAppPlan = { action: 'send' } | { action: 'fallback'; reason: FallbackReason };
 
 /**
  * Before WhatsApp is asked: send, or fall back to email with the reason — in the routing order of D213: a verified
@@ -259,8 +260,7 @@ const UNDELIVERABLE_CODE = 131026;
 export type WhatsAppStep =
   | { next: 'accepted'; providerMessageId: string | null }
   | { next: 'retry' }
-  | { next: 'fallback'; reason: FallbackReason }
-  | { next: 'stop'; reason: FailureReason };
+  | { next: 'fallback'; reason: FallbackReason };
 
 /**
  * After WhatsApp answered: accepted; a temporary failure retried until the attempts run out, then the fallback; an
