@@ -86,8 +86,13 @@ services:
     environment:
       STAGING_API_HOST: ${STAGING_API_HOST:?set STAGING_API_HOST in stack.env}
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in stack.env}
+      # The browser-test site (docs/99 §14): empty unless deploy/staging/web-test.sh enables it.
+      STAGING_WEB_HOST: ${STAGING_WEB_HOST:-}
+      STAGING_WEB_USER: ${STAGING_WEB_USER:-}
+      STAGING_WEB_PASSWORD_HASH: ${STAGING_WEB_PASSWORD_HASH:-}
     volumes:
       - ./staging/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${STAGING_WEB_DIR:-./staging/web-off}:/srv/erp-web:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on: [api]

@@ -22,3 +22,6 @@
 	}
 	header -Server
 }
+
+# The browser-test site (web-test.caddy), only while deploy/staging/web-test.sh has it enabled.
+import /srv/erp-web/enabled/*.caddy

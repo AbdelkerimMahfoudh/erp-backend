@@ -125,6 +125,20 @@ jobs:
           if docker run --rm --env-file .env.staging.example erp-api-tools:ci node deploy/staging/preflight.mjs; then
             echo "the preflight passed a template with no secrets"; exit 1
           fi
+      - name: the staging edge validates — browser-test site off, and on with a release (docs/99 §14)
+        run: |
+          image=$(sed -n 's/^    image: \(caddy:.*\)$/\1/p' deploy/docker-compose.staging.yml)
+          edge() { docker run --rm -e STAGING_API_HOST=staging-api.example.test -e ACME_EMAIL=ops@example.test "$@" \
+            -v "$PWD/deploy/staging/Caddyfile:/etc/caddy/Caddyfile:ro" "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; }
+          edge -v "$PWD/deploy/staging/web-off:/srv/erp-web:ro"
+          web=$(mktemp -d)
+          mkdir -p "$web/releases/r1/site" "$web/enabled"
+          printf '<!doctype html>' > "$web/releases/r1/site/index.html"
+          printf 'route {\n\tfile_server\n}\n' > "$web/releases/r1/routes.caddy"
+          ln -s releases/r1 "$web/current"
+          cp deploy/staging/web-test.caddy "$web/enabled/"
+          hash=$(docker run --rm "$image" caddy hash-password --plaintext ci-only)
+          edge -e STAGING_WEB_HOST=erp-test.example.test -e STAGING_WEB_USER=tester -e STAGING_WEB_PASSWORD_HASH="$hash" -v "$web:/srv/erp-web:ro"
   production-stack:
     name: production stack (images, contract, preflight, backups)
     # The production package (docs/100) as the host will use it: both targets build from the lockfile, the compiled API
