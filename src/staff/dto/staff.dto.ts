@@ -27,21 +27,21 @@ export class CreateStaffDto {
 
   @ApiPropertyOptional({
     maxLength: 160,
-    description: 'Email address. Verified before the account can be used.',
+    description: 'Email address. Optional: never a condition of activation, and verified later if at all (D214).',
   })
   @IsOptional()
   @IsString()
   @MaxLength(160)
   email?: string;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     maxLength: 24,
-    description: 'WhatsApp number in international format. Verified before the account can be used.',
+    description: 'WhatsApp number in international format. Required: the employee proves it from their invitation (D214).',
   })
-  @IsOptional()
   @IsString()
+  @MinLength(6)
   @MaxLength(24)
-  phone?: string;
+  phone: string;
 
   @ApiProperty({
     type: [String],
@@ -57,64 +57,36 @@ export class CreateStaffDto {
   @IsIn(STAFF_ROLES)
   role: StaffRole;
 
-  @ApiPropertyOptional({
-    enum: ['en', 'ar', 'fr'],
-    description: 'The language of the verification message.',
-  })
+  /** Accepted and ignored from older clients: creating an account sends no message (D214). */
+  @ApiPropertyOptional({ enum: ['en', 'ar', 'fr'], deprecated: true })
   @IsOptional()
   @IsIn(['en', 'ar', 'fr'])
   language?: 'en' | 'ar' | 'fr';
 }
 
-export class ResendStaffVerificationDto {
-  @ApiProperty({ enum: ['email', 'phone'] })
-  @IsIn(['email', 'phone'])
-  channel: 'email' | 'phone';
+/** The employee opens their invitation (D214): the reference the Owner gave them. */
+export class StaffJoinOpenDto {
+  @ApiProperty({ maxLength: 40, description: 'The invitation reference, as shown to the Owner (e.g. K7QM-9XRT-2CHD).' })
+  @IsString()
+  @MinLength(8)
+  @MaxLength(40)
+  reference: string;
 }
 
-/** The invited person proves a contact and chooses their password. */
-export class StaffVerifyConfirmDto {
-  @ApiProperty({
-    maxLength: 160,
-    description: 'The email address or WhatsApp number the code was sent to.',
-  })
+/** The employee asks for their code: their number, typed, and their own operational WhatsApp consent (D213, D214). */
+export class StaffJoinRequestCodeDto extends StaffJoinOpenDto {
+  @ApiProperty({ maxLength: 24, description: 'The WhatsApp number the Owner entered — typed by the employee, never shown to them.' })
   @IsString()
-  @MinLength(3)
-  @MaxLength(160)
-  destination: string;
-
-  @ApiProperty()
-  @IsString()
-  @Length(4, 12)
-  code: string;
-
-  @ApiPropertyOptional({
-    minLength: STAFF_PASSWORD_MIN_LENGTH,
-    description: 'Required the first time a contact is proven.',
-  })
-  @IsOptional()
-  @IsString()
-  @MinLength(STAFF_PASSWORD_MIN_LENGTH)
-  @MaxLength(200)
-  password?: string;
-}
-
-export class StaffVerifyResendDto {
-  @ApiProperty({ maxLength: 160 })
-  @IsString()
-  @MinLength(3)
-  @MaxLength(160)
-  destination: string;
+  @MinLength(6)
+  @MaxLength(24)
+  number: string;
 
   @ApiPropertyOptional({ enum: ['en', 'ar', 'fr'] })
   @IsOptional()
   @IsIn(['en', 'ar', 'fr'])
   language?: 'en' | 'ar' | 'fr';
 
-  /**
-   * For a WhatsApp number: the version of the operational WhatsApp consent the person ticked (D213). Required — the
-   * server refuses `whatsapp_consent_required` / `whatsapp_consent_outdated` — and ignored for an email address.
-   */
+  /** The version of the consent copy the employee ticked. Required: refused `whatsapp_consent_required` / `_outdated`. */
   @ApiPropertyOptional({ maxLength: 40 })
   @IsOptional()
   @IsString()
@@ -126,4 +98,19 @@ export class StaffVerifyResendDto {
   @IsOptional()
   @IsIn(['en', 'ar', 'fr'])
   whatsappConsentLocale?: 'en' | 'ar' | 'fr';
+}
+
+/** The employee's code, and their first password. */
+export class StaffJoinConfirmDto extends StaffJoinOpenDto {
+  @ApiProperty()
+  @IsString()
+  @Length(4, 12)
+  code: string;
+
+  @ApiPropertyOptional({ minLength: STAFF_PASSWORD_MIN_LENGTH, description: 'Required the first time.' })
+  @IsOptional()
+  @IsString()
+  @MinLength(STAFF_PASSWORD_MIN_LENGTH)
+  @MaxLength(200)
+  password?: string;
 }

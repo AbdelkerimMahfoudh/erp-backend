@@ -101,6 +101,7 @@ const MODELS = [
   'subscriptionEvent',
   'platformAuditEvent',
   'graceEpisode',
+  'staffInvitation',
 ] as const;
 type Model = (typeof MODELS)[number];
 type Tables = Record<Model, Row[]>;
@@ -583,6 +584,16 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
     const row = /^SELECT id FROM (companies|trial_claims|billing_periods|branches|seat_allocations|users|roles) WHERE id = \? FOR (UPDATE|SHARE) NOWAIT$/.exec(text);
     if (row) return rowLock(row[1], values[0] as Buffer, row[2] === 'SHARE' ? 'share' : 'update');
     if (/^SELECT id FROM branches WHERE id = \? AND company_id = \? FOR UPDATE$/.test(text)) return [];
+    // An employee's live invitation, locked before it is revoked (0101): one process here, nothing to wait for.
+    if (/^SELECT id, pending_consent_id FROM staff_invitations WHERE user_id = \? AND company_id = \? AND used_at IS NULL AND revoked_at IS NULL FOR UPDATE$/.test(text)) {
+      return t.staffInvitation
+        .filter((i) => same(i.userId, values[0]) && same(i.companyId, values[1]) && i.usedAt == null && i.revokedAt == null)
+        .map((i) => ({ id: i.id, pending_consent_id: i.pendingConsentId ?? null }));
+    }
+    if (/^SELECT activated_at, deleted_at FROM users WHERE id = \? FOR UPDATE$/.test(text)) {
+      const u = t.user.find((x) => same(x.id, values[0]));
+      return u ? [{ activated_at: u.activatedAt ?? null, deleted_at: u.deletedAt ?? null }] : [];
+    }
     if (text.includes('COUNT(DISTINCT u.id)')) {
       const companyId = values[0] as Buffer;
       const by = new Map<string, Set<string>>();
@@ -731,6 +742,9 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
       name: o.name,
       email: `${o.name.toLowerCase()}.${binToUuid(id).slice(-6)}@shop.test`,
       emailVerifiedAt: active || o.verified ? now : null,
+      // The WhatsApp number activation waits for (D214).
+      phone: `+2223${String(t.user.length).padStart(7, '0')}`,
+      phoneVerifiedAt: active || o.verified ? now : null,
       isActive: active,
       invitedAt: o.invitedAt ?? now,
       activatedAt: active ? now : null,
@@ -741,8 +755,8 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
   }
 
   /**
-   * The Owner's Team screen at a business: adding and withdrawing accounts. No message channel is configured, so no
-   * code goes out (the person's proof is set on the row by the spec that needs it).
+   * The Owner's Team screen at a business: adding and withdrawing accounts. Adding sends nothing — it issues an
+   * invitation (D214) — and the person's proof is set on the row by the spec that needs it.
    */
   function staff(b: Business): StaffInvitationService {
     return new StaffInvitationService(
@@ -752,10 +766,10 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
       { hash: async () => 'x' } as never,
       { start: async () => ({ delivery: 'outbox' }) } as never,
       { canDeliver: () => false } as never,
-      { peek: () => null } as never,
       entitlement,
       activation,
       seats,
+      { staffInvitationKey: 'a-staff-invitation-key-for-the-trial-world' } as never,
     );
   }
 

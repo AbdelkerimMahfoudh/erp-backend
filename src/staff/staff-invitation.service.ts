@@ -6,11 +6,12 @@ import {
   Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { Prisma, type ContactChannel } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
+import { AppConfigService } from '../common/config/app-config.service';
 
 /** The audit helper is typed for the tenant client; the system client's transaction has the same `auditLog` table. */
 type AuditClient = Parameters<AuditService['recordTx']>[0];
@@ -19,7 +20,7 @@ import { generatePersonalId, isEmail, normaliseEmail, normalisePhone } from '../
 import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { actorRef, contactPresence } from '../common/privacy/audit-contact';
 import { ContactVerificationService } from '../platform/contact-verification.service';
-import { ContactDeliveryProvider, codeMayBeReturned, OutboxDeliveryProvider } from '../platform/contact-delivery';
+import { ContactDeliveryProvider } from '../platform/contact-delivery';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import {
   StaffActivationService,
@@ -30,9 +31,10 @@ import { SeatAllocationService } from '../platform/seat-allocation.service';
 import type { CreateStaffDto, StaffRole } from './dto/staff.dto';
 import { WhatsAppRecords } from '../messaging/whatsapp-records';
 import { acceptedConsentVersion, consentLocaleOf } from '../messaging/whatsapp-consent';
+import { formatReference, joinLink, newReference, normaliseReference, referenceHash, STAFF_INVITATION_TTL_MS } from './invitation-reference';
 
 /**
- * Employee accounts, from the Owner's Team screen (docs/21, 2026-10-05).
+ * Employee accounts, from the Owner's Team screen (docs/21, 2026-10-05; D213, D214).
  *
  * Creating an account and the account becoming usable are two different
  * events, and this file keeps them apart on purpose:
@@ -42,26 +44,30 @@ import { acceptedConsentVersion, consentLocaleOf } from '../messaging/whatsapp-c
  *    any client, old or new, because sign-in refuses inactive accounts before
  *    it looks at the password.
  *  - **Usable** means the server activated it (`StaffActivationService`): the
- *    person proved every contact the Owner selected and a seat is held for
- *    them at each store.
+ *    person proved their WhatsApp number and a seat is held for them at each
+ *    store.
  *
- * Codes go out through the configured delivery provider. When a channel cannot
- * deliver, the account is still created and the response says plainly that no
- * code could be sent — nobody is shown a code that would never arrive, and the
- * Owner can send it again once delivery exists.
+ * Creating an account sends nothing — no WhatsApp, no email (D214). The server
+ * issues an invitation (`staff_invitations`, 0101): a reference the Owner is
+ * shown once and passes on themselves. The employee opens it in the app, types
+ * their number, accepts the operational WhatsApp consent and asks for the code;
+ * the agreement is theirs, recorded with them as the actor, pending until the
+ * code proves the number. Confirming the code activates the consent, uses the
+ * invitation and activates the account in one transaction. Cancelling the
+ * account or issuing a new invitation ends the old invitation and its pending
+ * agreement.
  *
- * A WhatsApp number's code is never sent on the Owner's say-so (D213): the
- * person sees the operational WhatsApp consent on their own phone, ticks it and
- * asks for the code (`staff/verify/resend` with the consent's version). The
- * agreement is theirs — recorded with them as the actor, pending until the code
- * proves the number, then active.
+ * The employee's routes are public and answer every unusable reference — unknown,
+ * expired, revoked, used — the same way, so they tell nobody whether a business,
+ * a person or a number exists.
  */
 
-/**
- * What happened to a contact's code: sent, impossible right now, or — for a WhatsApp number — waiting for the person
- * to agree to operational WhatsApp messages and ask for it themselves (D213): an Owner never consents for an employee.
- */
-export type DeliveryState = 'sent' | 'unavailable' | 'awaiting_consent';
+/** An invitation as issued: the reference shown to the Owner once — never stored, never logged — and its link. */
+export interface IssuedInvitation {
+  reference: string;
+  link: string;
+  expiresAt: string;
+}
 
 export interface StaffSeatState {
   storeId: string;
@@ -83,28 +89,37 @@ export interface StaffInvitationResult {
     status: 'pending';
     stores: { id: string; name: string; role: StaffRole }[];
   };
-  verification: { email: DeliveryState | null; phone: DeliveryState | null };
+  /** Issued by this request, shown once. Null when the person was already waiting: a new one is the Owner's explicit act. */
+  invitation: IssuedInvitation | null;
   seats: StaffSeatState[];
   activation: ActivationOutcome;
-  /**
-   * Local development only (`codeMayBeReturned`): the codes the outbox holds,
-   * so a developer can finish the flow on one machine. Never in staging or
-   * production, where the function is false whatever else is set.
-   */
-  devCodes?: { email?: string; phone?: string };
 }
 
-export interface StaffConfirmResult {
+/** What an employee sees on opening a usable invitation: enough to recognise it, never the number. */
+export interface OpenedInvitation {
+  business: string;
+  name: string;
+  /** The last two digits of the number the Owner entered — a hint, not the number. */
+  numberEnding: string;
+  expiresAt: string;
+}
+
+export interface JoinConfirmResult {
   verified: true;
-  accounts: {
-    business: string;
-    name: string;
-    activated: boolean;
-    pending: PendingReason[];
-  }[];
+  business: string;
+  name: string;
+  activated: boolean;
+  pending: PendingReason[];
 }
 
-const GENERIC_CODE_FAILURE = () => new BadRequestException('That code did not match.');
+const invitationUnavailable = () =>
+  new BadRequestException({
+    code: 'invitation_unavailable',
+    message: 'This invitation cannot be used. Ask your business Owner for a new one.',
+  });
+const codeFailure = () => new BadRequestException({ code: 'code_mismatch', message: 'That code did not match.' });
+
+type Db = PrismaService | Prisma.TransactionClient;
 
 @Injectable()
 export class StaffInvitationService {
@@ -115,10 +130,10 @@ export class StaffInvitationService {
     private readonly hashing: HashingService,
     private readonly verification: ContactVerificationService,
     private readonly delivery: ContactDeliveryProvider,
-    private readonly outbox: OutboxDeliveryProvider,
     private readonly entitlement: EntitlementService,
     private readonly activation: StaffActivationService,
     private readonly allocations: SeatAllocationService,
+    private readonly config: AppConfigService,
     @Optional() private readonly whatsappRecords?: WhatsAppRecords,
   ) {}
 
@@ -127,10 +142,7 @@ export class StaffInvitationService {
   async invite(dto: CreateStaffDto): Promise<StaffInvitationResult> {
     const companyId = this.tenant.companyId();
     const actorId = this.tenant.requireUserId();
-    const actor = await this.prisma.user.findUniqueOrThrow({
-      where: { id: actorId },
-      select: { name: true, email: true, phone: true },
-    });
+    await this.prisma.user.findUniqueOrThrow({ where: { id: actorId }, select: { id: true } });
     // The Owner's account, never their email or number: the seat request and the audit outlive a deletion.
     const actorLabel = actorRef(binToUuid(this.tenant.requireUserId()));
 
@@ -141,15 +153,16 @@ export class StaffInvitationService {
     if (dto.email?.trim() && (!email || !isEmail(dto.email.trim()))) {
       throw new BadRequestException('That does not look like an email address.');
     }
+    // The WhatsApp number is every employee's required contact (D214); the email address is optional.
     const phone = dto.phone?.trim() ? normalisePhone(dto.phone.trim()) : null;
     if (dto.phone?.trim() && !phone) throw new BadRequestException('That does not look like a WhatsApp number.');
-    if (!email && !phone) {
+    if (!phone) {
       throw new BadRequestException({
-        code: 'contact_required',
-        message:
-          'Give an email address, a WhatsApp number, or both — it is how the person signs in and proves it is them.',
+        code: 'whatsapp_required',
+        message: 'Give the person’s WhatsApp number: it is how they activate their account and sign in.',
       });
     }
+    const key = this.invitationKey();
 
     const branchIds = [...new Set(dto.branchIds)].map((id) => uuidToBin(id));
     const branches = await this.prisma.branch.findMany({
@@ -192,12 +205,13 @@ export class StaffInvitationService {
           message: 'Somebody on your team already uses that email address or number.',
         });
       }
-      const verification = await this.deliverCodes(existing, dto.language ?? 'en');
-      return this.describe(existing.id, false, verification);
+      // Nothing is sent and no reference is issued again: a new invitation is the Owner's explicit act.
+      return this.describe(existing.id, false, null);
     }
 
     const userId = newUuidV7Bin();
     const now = new Date();
+    let issued: IssuedInvitation | null = null;
     try {
       await this.prisma.$transaction(async (tx) => {
         await tx.user.create({
@@ -244,6 +258,7 @@ export class StaffInvitationService {
             invitedBy: actorLabel,
           },
         });
+        issued = await this.issue(tx, key, companyId, userId, actorLabel, now);
       });
     } catch (e) {
       // Two Owners adding the same contact at the same instant: the database's
@@ -274,38 +289,34 @@ export class StaffInvitationService {
       }
     }
 
-    const verification = await this.deliverCodes({ id: userId, email, phone }, dto.language ?? 'en');
-    return this.describe(userId, true, verification);
+    return this.describe(userId, true, issued);
   }
 
-  /** The Owner asks for the code to go out again. */
-  async resend(
-    userId: string,
-    channel: 'email' | 'phone',
-    language: 'en' | 'ar' | 'fr' = 'en',
-  ): Promise<{ delivery: DeliveryState }> {
+  /**
+   * A new invitation for a person still waiting — the Owner lost the reference, it expired, or the person never had one
+   * (an account from before 0101). The live one, if any, is revoked and its pending agreement concluded `cancelled`, in
+   * the same transaction that issues the new one. Its reference is shown once.
+   */
+  async reinvite(userId: string): Promise<{ invitation: IssuedInvitation }> {
     const companyId = this.tenant.companyId();
     const user = await this.pendingInCompany(companyId, userId);
-    const destination = channel === 'email' ? user.email : user.phone;
-    if (!destination)
-      throw new BadRequestException(
-        `This account has no ${channel === 'email' ? 'email address' : 'WhatsApp number'} to send to.`,
-      );
-    if (channel === 'phone') {
-      throw new ConflictException({
-        code: 'employee_consent_required',
-        message: 'The person agrees to WhatsApp messages and asks for their code themselves, from the Dukan ERP app.',
+    if (!user.phone) {
+      throw new BadRequestException({
+        code: 'whatsapp_required',
+        message: 'This account has no WhatsApp number. Cancel it and add the person again with their number.',
       });
     }
-    if (!this.delivery.canDeliver(channel, destination)) {
-      throw new ServiceUnavailableException({
-        code: 'delivery_unavailable',
-        message:
-          'No verification code can be sent right now: the message channel is not configured. The account stays pending.',
-      });
-    }
-    await this.verification.start(destination, language);
-    return { delivery: 'sent' };
+    const key = this.invitationKey();
+    const actorId = this.tenant.requireUserId();
+    const actorLabel = actorRef(binToUuid(actorId));
+    const now = new Date();
+    let issued: IssuedInvitation | null = null;
+    await this.prisma.$transaction(async (tx) => {
+      await this.endLive(tx, companyId, user.id, actorId, 'reinvited', now);
+      await this.lockStillPending(tx, user.id);
+      issued = await this.issue(tx, key, companyId, user.id, actorLabel, now);
+    });
+    return { invitation: issued! };
   }
 
   /**
@@ -313,7 +324,8 @@ export class StaffInvitationService {
    *
    * Soft-deleted, like every account: the row and its audit trail stay, the
    * contact becomes available again, and any seat request it caused is
-   * withdrawn with it.
+   * withdrawn with it. Its invitation is revoked and the pending agreement it
+   * carried is concluded `cancelled` — in the same transaction.
    */
   async cancel(userId: string): Promise<{ cancelled: true }> {
     const companyId = this.tenant.companyId();
@@ -326,6 +338,9 @@ export class StaffInvitationService {
     const now = new Date();
 
     await this.prisma.$transaction(async (tx) => {
+      await this.endLive(tx, companyId, user.id, actorId, 'cancelled', now);
+      // The employee may have confirmed their code a moment ago: an activated account is never withdrawn as an invitation.
+      await this.lockStillPending(tx, user.id);
       // The contact is released with the account: it was never activated and
       // holds no history, and the per-company unique index would otherwise
       // keep the same person from being invited again.
@@ -359,151 +374,260 @@ export class StaffInvitationService {
     return { cancelled: true };
   }
 
-  // ── the person proves a contact ──────────────────────────────────────────
+  // ── the employee activates their account ─────────────────────────────────
 
-  /**
-   * Prove one contact with its code, and choose a password the first time.
-   *
-   * The code is checked against the live challenge for the destination WITHOUT
-   * consuming it first, so a person who forgot the password field is told so
-   * and keeps their code. Then, in one transaction, the challenge is consumed,
-   * the contact marked verified and the password set — after which the server
-   * decides whether the account may be activated.
-   *
-   * Public, and shaped not to enumerate: an unknown destination, a wrong code
-   * and an expired one all answer the same way.
-   */
-  async confirm(rawDestination: string, code: string, password?: string): Promise<StaffConfirmResult> {
-    const destination = classify(rawDestination);
-    if (!destination) throw GENERIC_CODE_FAILURE();
-
-    const challengeId = await this.verification.latestChallengeFor(destination.value);
-    if (!challengeId) throw GENERIC_CODE_FAILURE();
-    const outcome = await this.verification.confirmChallenge(challengeId, code);
-    if (outcome !== 'ok') throw GENERIC_CODE_FAILURE();
-
-    const pending = await this.prisma.user.findMany({
-      where: {
-        deletedAt: null,
-        activatedAt: null,
-        invitedAt: { not: null },
-        ...(destination.channel === 'email' ? { email: destination.value } : { phone: destination.value }),
-      },
-      select: {
-        id: true,
-        companyId: true,
-        name: true,
-        emailVerifiedAt: true,
-        phoneVerifiedAt: true,
-        company: { select: { name: true } },
-      },
-    });
-    if (pending.length === 0) throw GENERIC_CODE_FAILURE();
-
-    const needsPassword = pending.some((u) => !u.emailVerifiedAt && !u.phoneVerifiedAt);
-    if (needsPassword && !password) {
-      throw new BadRequestException({
-        code: 'password_required',
-        message: 'Choose a password to finish setting up your account.',
-      });
-    }
-
-    const now = new Date();
-    const passwordHash = password ? await this.hashing.hash(password) : null;
-    await this.prisma.$transaction(async (tx) => {
-      // Consume exactly this challenge; a second submission of the same code is a miss.
-      const consumed = await tx.contactVerification.updateMany({
-        where: { id: challengeId, consumedAt: null },
-        data: { consumedAt: now },
-      });
-      if (consumed.count !== 1) throw GENERIC_CODE_FAILURE();
-      for (const u of pending) {
-        const first = !u.emailVerifiedAt && !u.phoneVerifiedAt;
-        await tx.user.update({
-          where: { id: u.id },
-          data: {
-            ...(destination.channel === 'email' ? { emailVerifiedAt: now } : { phoneVerifiedAt: now }),
-            ...(first && passwordHash ? { passwordHash } : {}),
-          },
-        });
-        // The number is proved: the employee's own pending agreement for it becomes active, in this transaction (D213).
-        if (destination.channel === 'phone' && this.whatsappRecords) {
-          await this.whatsappRecords.activatePending({ number: destination.value, userId: u.id, companyId: u.companyId }, tx);
-        }
-      }
-    });
-
-    const accounts: StaffConfirmResult['accounts'] = [];
-    for (const u of pending) {
-      const result = await this.activation.tryActivate(u.id, actorRef(binToUuid(u.id)));
-      accounts.push({
-        business: u.company.name,
-        name: u.name,
-        activated: result.activated,
-        pending: result.pending,
-      });
-    }
-    return { verified: true, accounts };
+  /** The employee opens an invitation: whose it is, and a hint of the number — or the one answer for every unusable reference. */
+  async open(reference: string): Promise<OpenedInvitation> {
+    const invitation = await this.usable(this.prisma, reference, new Date());
+    return {
+      business: invitation.company.name,
+      name: invitation.user.name,
+      numberEnding: invitation.user.phone!.slice(-2),
+      expiresAt: invitation.expiresAt.toISOString(),
+    };
   }
 
   /**
-   * The person asks for their code again.
+   * The employee typed their number, ticked the operational WhatsApp consent and asked for the code.
    *
-   * Non-enumerating: while the channel can deliver, every destination answers
-   * `accepted` whether or not an account is waiting; while it cannot, every
-   * destination answers that delivery is unavailable. The answer never depends
-   * on the account.
+   * Only now is the agreement recorded — `pending_unverified`, the employee as the actor — and bound to the invitation,
+   * and the code sent. Asking again sends a new code under the SAME pending agreement while it and the invitation are
+   * both still valid; an agreement that expired (24 hours) inside the invitation's 72 is accepted again as a new one.
    */
-  async resendPublic(
-    rawDestination: string,
+  async requestCode(
+    reference: string,
+    typedNumber: string,
     language: 'en' | 'ar' | 'fr' = 'en',
     consent: { version?: string; locale?: string } = {},
     ip: string | null = null,
-  ): Promise<{ accepted: true }> {
-    const destination = classify(rawDestination);
-    if (!destination)
-      throw new BadRequestException('Enter the email address or WhatsApp number the invitation was sent to.');
-    // A WhatsApp code only with the person's own agreement (D213), asked of every caller alike: the answer never
-    // depends on whether an account is waiting.
-    const version = destination.channel === 'phone' ? acceptedConsentVersion(consent.version) : null;
-    if (!this.delivery.canDeliver(destination.channel, destination.value)) {
-      throw new ServiceUnavailableException({
-        code: 'delivery_unavailable',
-        message: 'No verification code can be sent right now. Ask the business Owner to try again later.',
+  ): Promise<{ accepted: true; devCode?: string }> {
+    const version = acceptedConsentVersion(consent.version);
+    const number = normalisePhone((typedNumber ?? '').trim());
+    if (!number) throw new BadRequestException({ code: 'number_invalid', message: 'That does not look like a WhatsApp number.' });
+    const now = new Date();
+    const invitation = await this.usable(this.prisma, reference, now);
+    if (number !== invitation.user.phone) {
+      throw new BadRequestException({
+        code: 'number_mismatch',
+        message: 'That is not the WhatsApp number your business Owner entered for this invitation.',
       });
     }
-    const waiting = await this.prisma.user.findMany({
-      where: {
-        deletedAt: null,
-        activatedAt: null,
-        invitedAt: { not: null },
-        ...(destination.channel === 'email' ? { email: destination.value } : { phone: destination.value }),
-      },
-      select: { id: true, companyId: true },
-    });
-    if (waiting.length === 0) return { accepted: true };
-    if (version) {
-      if (!this.whatsappRecords) {
-        throw new ServiceUnavailableException({ code: 'delivery_unavailable', message: 'No verification code can be sent right now.' });
-      }
-      // Each waiting account's own agreement, the employee as the actor: pending until the code proves the number.
-      for (const u of waiting) {
-        await this.whatsappRecords.recordPending({
-          number: destination.value,
+    if (!this.whatsappRecords || !this.delivery.canDeliver('phone', number)) {
+      throw new ServiceUnavailableException({
+        code: 'delivery_unavailable',
+        message: 'No verification code can be sent right now. Try again later.',
+      });
+    }
+    const records = this.whatsappRecords;
+    await this.prisma.$transaction(async (tx) => {
+      // The invitation first, then the number's consent (inside `pending`): the order every path here takes.
+      const locked = await this.lockLive(tx, invitation.id, now);
+      if (locked.pendingConsentId && (await records.pendingIsLive(locked.pendingConsentId, now, tx))) return;
+      const written = await records.pending(
+        {
+          number,
           version,
           locale: consentLocaleOf(consent.locale, language),
-          companyId: u.companyId,
-          userId: u.id,
+          companyId: invitation.companyId,
+          userId: invitation.userId,
           source: 'employee_activation',
           ip,
+        },
+        tx,
+      );
+      await tx.staffInvitation.update({ where: { id: invitation.id }, data: { pendingConsentId: written.pendingId } });
+    });
+    const sent = await this.verification.start(number, language);
+    return { accepted: true, ...(sent.devCode ? { devCode: sent.devCode } : {}) };
+  }
+
+  /**
+   * The code and a first password. In one transaction: the code consumed, the number verified, the password set, the
+   * invitation's exact pending agreement activated, the invitation used and — when a seat is held — the account
+   * activated. Anything failing leaves all of it as it was. Only this invitation's account is touched: the same number
+   * invited by another business is that business's, activated by its own invitation.
+   */
+  async confirm(reference: string, code: string, password?: string): Promise<JoinConfirmResult> {
+    const now = new Date();
+    const invitation = await this.usable(this.prisma, reference, now);
+    const number = invitation.user.phone!;
+    if (!invitation.pendingConsentId) throw codeFailure();
+
+    const challengeId = await this.verification.latestChallengeFor(number);
+    if (!challengeId) throw codeFailure();
+    if ((await this.verification.confirmChallenge(challengeId, code)) !== 'ok') throw codeFailure();
+
+    const first = !invitation.user.emailVerifiedAt && !invitation.user.phoneVerifiedAt;
+    if (first && !password) {
+      throw new BadRequestException({ code: 'password_required', message: 'Choose a password to finish setting up your account.' });
+    }
+    const passwordHash = first && password ? await this.hashing.hash(password) : null;
+    const records = this.whatsappRecords;
+    if (!records) throw new ServiceUnavailableException({ code: 'delivery_unavailable', message: 'The account cannot be activated right now.' });
+    const actor = actorRef(binToUuid(invitation.userId));
+
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      // Lock order, the same on every path: the company's subscription (the seat census), the invitation, the number.
+      await tx.$queryRaw(Prisma.sql`SELECT id FROM subscriptions WHERE company_id = ${invitation.companyId} FOR UPDATE`);
+      const locked = await this.lockLive(tx, invitation.id, now);
+      if (!locked.pendingConsentId) throw codeFailure();
+      const consumed = await tx.contactVerification.updateMany({ where: { id: challengeId, consumedAt: null }, data: { consumedAt: now } });
+      if (consumed.count !== 1) throw codeFailure();
+      const consent = await records.activatePending(
+        { number, userId: invitation.userId, companyId: invitation.companyId, pendingId: locked.pendingConsentId },
+        tx,
+      );
+      if (consent !== 'activated') {
+        throw new BadRequestException({
+          code: 'consent_expired',
+          message: 'Your agreement to WhatsApp messages expired. Accept it again and ask for a new code.',
         });
       }
-    }
-    await this.verification.start(destination.value, language);
-    return { accepted: true };
+      await tx.user.update({
+        where: { id: invitation.userId },
+        data: { phoneVerifiedAt: now, ...(passwordHash ? { passwordHash } : {}) },
+      });
+      await tx.staffInvitation.update({ where: { id: invitation.id }, data: { usedAt: now } });
+      await tx.auditLog.create({
+        data: {
+          companyId: invitation.companyId,
+          userId: invitation.userId,
+          entityType: 'StaffInvitation',
+          entityId: invitation.id,
+          action: 'status_change',
+          after: { status: 'used', number: 'verified' },
+          reason: 'The employee verified their WhatsApp number from their invitation',
+        },
+      });
+      return this.activation.activateInTx(tx, invitation.userId, actor);
+    });
+
+    // Not activated in the transaction: a seat to price, or a free trial's end to apply first — the service does both.
+    const final = outcome.activated ? outcome : await this.activation.tryActivate(invitation.userId, actor);
+    return {
+      verified: true,
+      business: invitation.company.name,
+      name: invitation.user.name,
+      activated: final.activated,
+      pending: final.pending,
+    };
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
+
+  /** The invitation key, or no invitation at all: a reference is never stored under a weak or missing key. */
+  private invitationKey(): string {
+    const key = this.config.staffInvitationKey;
+    if (!key) {
+      throw new ServiceUnavailableException({
+        code: 'invitations_unavailable',
+        message: 'Employee invitations are not configured on this server.',
+      });
+    }
+    return key;
+  }
+
+  /** Issue an invitation in the caller's transaction. The clear reference leaves only in the answer. */
+  private async issue(tx: Prisma.TransactionClient, key: string, companyId: Buffer, userId: Buffer, issuedBy: string, now: Date): Promise<IssuedInvitation> {
+    const reference = newReference();
+    const expiresAt = new Date(now.getTime() + STAFF_INVITATION_TTL_MS);
+    const id = newUuidV7Bin();
+    await tx.staffInvitation.create({
+      data: { id, companyId, userId, tokenHash: referenceHash(key, reference), issuedBy: issuedBy.slice(0, 160), expiresAt, createdAt: now },
+    });
+    await this.audit.recordTx(tx as unknown as AuditClient, {
+      entityType: 'StaffInvitation',
+      entityId: id,
+      action: 'create',
+      after: { person: actorRef(binToUuid(userId)), expiresAt: expiresAt.toISOString(), issuedBy },
+    });
+    return { reference: formatReference(reference), link: joinLink(reference), expiresAt: expiresAt.toISOString() };
+  }
+
+  /**
+   * Revoke this person's live invitation and conclude its pending agreement — inside the caller's transaction. Lock
+   * order, the same on every path: the invitation, then the number's consent, then the person.
+   */
+  private async endLive(tx: Prisma.TransactionClient, companyId: Buffer, userId: Buffer, actorId: Buffer, reason: 'reinvited' | 'cancelled', now: Date): Promise<void> {
+    // A locking read returns the rows as committed now, whatever the transaction read before.
+    const live = await tx.$queryRaw<{ id: Uint8Array; pending_consent_id: Uint8Array | null }[]>(
+      Prisma.sql`SELECT id, pending_consent_id FROM staff_invitations WHERE user_id = ${userId} AND company_id = ${companyId} AND used_at IS NULL AND revoked_at IS NULL FOR UPDATE`,
+    );
+    for (const row of live) {
+      const id = Buffer.from(row.id);
+      await tx.staffInvitation.update({ where: { id }, data: { revokedAt: now, revokedReason: reason } });
+      if (row.pending_consent_id && this.whatsappRecords) {
+        await this.whatsappRecords.cancelPending(
+          {
+            pendingId: Buffer.from(row.pending_consent_id),
+            companyId,
+            userId: actorId,
+            source: reason === 'cancelled' ? 'invitation_cancelled' : 'invitation_replaced',
+          },
+          tx,
+        );
+      }
+      await this.audit.recordTx(tx as unknown as AuditClient, {
+        entityType: 'StaffInvitation',
+        entityId: id,
+        action: 'status_change',
+        after: { status: 'revoked', reason },
+      });
+    }
+  }
+
+  /** The person's row, locked, still waiting: not activated by a confirmation that won the race, not withdrawn. */
+  private async lockStillPending(tx: Prisma.TransactionClient, userId: Buffer): Promise<void> {
+    const rows = await tx.$queryRaw<{ activated_at: Date | null; deleted_at: Date | null }[]>(
+      Prisma.sql`SELECT activated_at, deleted_at FROM users WHERE id = ${userId} FOR UPDATE`,
+    );
+    if (!rows[0] || rows[0].deleted_at) throw new NotFoundException('Unknown user');
+    if (rows[0].activated_at) throw new BadRequestException({ code: 'not_pending', message: 'This account is already active.' });
+  }
+
+  /**
+   * The invitation behind a typed reference, if it can still be used: not used, not revoked, not expired, its person
+   * still waiting in its business with a number. Every other case — a malformed reference included — is the same answer.
+   */
+  private async usable(db: Db, reference: string, now: Date) {
+    const key = this.invitationKey();
+    const normalised = normaliseReference(reference);
+    if (!normalised) throw invitationUnavailable();
+    const invitation = await db.staffInvitation.findUnique({
+      where: { tokenHash: referenceHash(key, normalised) },
+      include: {
+        company: { select: { name: true } },
+        user: {
+          select: { companyId: true, name: true, phone: true, emailVerifiedAt: true, phoneVerifiedAt: true, invitedAt: true, activatedAt: true, deletedAt: true },
+        },
+      },
+    });
+    if (
+      !invitation ||
+      invitation.usedAt ||
+      invitation.revokedAt ||
+      invitation.expiresAt.getTime() <= now.getTime() ||
+      !invitation.user.companyId.equals(invitation.companyId) ||
+      invitation.user.deletedAt ||
+      invitation.user.activatedAt ||
+      !invitation.user.invitedAt ||
+      !invitation.user.phone
+    ) {
+      throw invitationUnavailable();
+    }
+    return invitation;
+  }
+
+  /** The invitation's row, locked, and still usable once the lock is held — a cancellation or a use may have won. */
+  private async lockLive(tx: Prisma.TransactionClient, id: Buffer, now: Date): Promise<{ pendingConsentId: Buffer | null }> {
+    const rows = await tx.$queryRaw<{ used_at: Date | null; revoked_at: Date | null; expires_at: Date; pending_consent_id: Uint8Array | null }[]>(
+      Prisma.sql`SELECT used_at, revoked_at, expires_at, pending_consent_id FROM staff_invitations WHERE id = ${id} FOR UPDATE`,
+    );
+    const row = rows[0];
+    if (!row || row.used_at || row.revoked_at || new Date(row.expires_at).getTime() <= now.getTime()) throw invitationUnavailable();
+    return { pendingConsentId: row.pending_consent_id ? Buffer.from(row.pending_consent_id) : null };
+  }
+
 
   private async pendingInCompany(companyId: Buffer, userId: string) {
     const user = await this.prisma.user.findFirst({
@@ -526,48 +650,10 @@ export class StaffInvitationService {
     return user;
   }
 
-  /** Send a code on every selected channel that can deliver — the email address's now, the number's once its person agrees; say which could not. */
-  private async deliverCodes(
-    user: { id: Buffer; email: string | null; phone: string | null },
-    language: 'en' | 'ar' | 'fr',
-  ): Promise<{
-    states: { email: DeliveryState | null; phone: DeliveryState | null };
-    devCodes?: { email?: string; phone?: string };
-  }> {
-    const states: { email: DeliveryState | null; phone: DeliveryState | null } = { email: null, phone: null };
-    const devCodes: { email?: string; phone?: string } = {};
-    for (const channel of ['email', 'phone'] as const) {
-      const destination = channel === 'email' ? user.email : user.phone;
-      if (!destination) continue;
-      if (!this.delivery.canDeliver(channel as ContactChannel, destination)) {
-        states[channel] = 'unavailable';
-        continue;
-      }
-      // The WhatsApp code waits for the person's own agreement, asked on their phone (D213).
-      if (channel === 'phone') {
-        states.phone = 'awaiting_consent';
-        continue;
-      }
-      const result = await this.verification.start(destination, language);
-      states[channel] = 'sent';
-      if (codeMayBeReturned() && result.delivery === 'outbox') {
-        const code = this.outbox.peek(destination);
-        if (code) devCodes[channel] = code;
-      }
-    }
-    return {
-      states,
-      devCodes: Object.keys(devCodes).length ? devCodes : undefined,
-    };
-  }
-
   private async describe(
     userId: Buffer,
     created: boolean,
-    verification: {
-      states: { email: DeliveryState | null; phone: DeliveryState | null };
-      devCodes?: { email?: string; phone?: string };
-    },
+    invitation: IssuedInvitation | null,
   ): Promise<StaffInvitationResult> {
     const row = await this.prisma.user.findUniqueOrThrow({
       where: { id: userId },
@@ -615,22 +701,9 @@ export class StaffInvitationService {
           role: ub.role.key as StaffRole,
         })),
       },
-      verification: verification.states,
+      invitation,
       seats,
       activation,
-      ...(verification.devCodes ? { devCodes: verification.devCodes } : {}),
     };
   }
-}
-
-/** Normalise a destination and say which channel it is; null when it is neither. */
-function classify(raw: string): { channel: ContactChannel; value: string } | null {
-  const trimmed = (raw ?? '').trim();
-  if (!trimmed) return null;
-  if (trimmed.includes('@')) {
-    if (!isEmail(trimmed)) return null;
-    return { channel: 'email', value: normaliseEmail(trimmed) };
-  }
-  const phone = normalisePhone(trimmed);
-  return phone ? { channel: 'phone', value: phone } : null;
 }

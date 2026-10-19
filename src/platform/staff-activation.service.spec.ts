@@ -196,14 +196,18 @@ function makeWorld(opts: { additionalSeats?: number } = {}) {
 }
 
 describe('what stands between a pending account and its first sign-in', () => {
-  it('every selected contact must be verified: the email if given, the number if given, both if both', async () => {
+  it('the WhatsApp number must be verified; an email address, verified or not, never holds activation back (D214)', async () => {
     const w = makeWorld();
     const both = w.addUser({ email: 'f@shop.test', phone: '+22233445566' });
-    expect((await w.service.pendingFor(both.id)).pending).toEqual(['email_verification', 'phone_verification']);
+    expect((await w.service.pendingFor(both.id)).pending).toEqual(['phone_verification']);
     both.emailVerifiedAt = NOW;
     expect((await w.service.pendingFor(both.id)).pending).toEqual(['phone_verification']);
-    const emailOnly = w.addUser({ email: 'g@shop.test', branches: [{ branchId: MARKET, role: 'store_employee' }] });
-    expect((await w.service.pendingFor(emailOnly.id)).pending).toEqual(['email_verification']);
+    both.emailVerifiedAt = null;
+    both.phoneVerifiedAt = NOW;
+    expect((await w.service.pendingFor(both.id)).pending).toEqual([]);
+    // An account from before D214 with an email address only: it waits for a number, never for its email.
+    const emailOnly = w.addUser({ email: 'g@shop.test', emailVerifiedAt: NOW, branches: [{ branchId: MARKET, role: 'store_employee' }] });
+    expect((await w.service.pendingFor(emailOnly.id)).pending).toEqual(['phone_verification']);
   });
 
   it('the included seat is free when nobody holds it, and taken when somebody does', async () => {
@@ -275,11 +279,11 @@ describe('activating', () => {
     expect(w.events).toHaveLength(1);
   });
 
-  it('never activates while a contact is unverified, whatever a client claims', async () => {
+  it('never activates while the WhatsApp number is unverified, whatever a client claims — a verified email does not stand in', async () => {
     const w = makeWorld();
-    const u = w.addUser({ email: 'f@shop.test', phone: '+22233445566', phoneVerifiedAt: NOW });
+    const u = w.addUser({ email: 'f@shop.test', emailVerifiedAt: NOW, phone: '+22233445566' });
     const r = await w.service.tryActivate(u.id, 'test');
-    expect(r.activated).toBe(false);
+    expect(r).toMatchObject({ activated: false, pending: ['phone_verification'] });
     expect(u.isActive).toBe(false);
     expect(w.events).toHaveLength(0);
   });

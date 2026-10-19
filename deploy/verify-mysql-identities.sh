@@ -73,6 +73,15 @@ else
   echo "SKIP consent-decision trigger probes: no consent decision in $DB"
 fi
 
+# An employee invitation (0101) keeps its business, person, reference and life, is never deleted, and stays ended.
+INVITATION_HEX=$(MYSQL_PWD="$APP_PW" mysql "${CONN[@]}" -u phonestore_app -N -B "$DB" -e "SELECT HEX(id) FROM staff_invitations LIMIT 1" 2>/dev/null)
+if [ -n "$INVITATION_HEX" ]; then
+  must_fail "app cannot re-point or extend an invitation (trigger)" phonestore_app "$APP_PW" "UPDATE staff_invitations SET expires_at = expires_at + INTERVAL 30 DAY WHERE id=UNHEX('$INVITATION_HEX')" "keeps its business"
+  must_fail "app cannot delete an invitation (trigger)" phonestore_app "$APP_PW" "DELETE FROM staff_invitations WHERE id=UNHEX('$INVITATION_HEX')" "never deleted"
+else
+  echo "SKIP staff-invitation trigger probes: no invitation in $DB"
+fi
+
 # --- the backup account: read everything, change nothing ----------------------
 if [ -n "${BACKUP_PW:-}" ]; then
   must_pass "backup can read"                  phonestore_backup "$BACKUP_PW" "SELECT COUNT(*) FROM audit_logs"

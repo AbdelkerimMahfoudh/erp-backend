@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { SeatAllocationService } from './seat-allocation.service';
@@ -105,6 +106,15 @@ export class StaffActivationService {
       await tx.$queryRaw`SELECT id FROM subscriptions WHERE company_id = ${companyId} FOR UPDATE`;
       return activateIfReadyTx(tx as unknown as ActivationDb, userId, now, actor);
     });
+  }
+
+  /**
+   * Activate inside the caller's transaction, which already holds the company's subscription lock — an employee's
+   * invitation confirmation, where the verified number, the consent and the account commit together (D214). It
+   * activates only; a missing seat is left to {@link tryActivate} after the commit.
+   */
+  activateInTx(tx: Prisma.TransactionClient, userId: Buffer, actor: string): Promise<ActivationOutcome> {
+    return activateIfReadyTx(tx as unknown as ActivationDb, userId, this.clock.now(), actor);
   }
 
   /**

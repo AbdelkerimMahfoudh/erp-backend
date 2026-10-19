@@ -669,6 +669,9 @@ export class AccountDeletionService {
     if (devicesSynced.length > 0) await tx.outboxChange.deleteMany({ where: { companyId, deviceId: { in: devicesSynced.map((d) => d.deviceId) } } });
     await tx.syncDevice.deleteMany({ where: { userId: { in: ids } } });
     await tx.ownerInvitation.updateMany({ where: { userId: { in: ids }, acceptedAt: null, revokedAt: null }, data: { revokedAt: now } });
+    // Their employee invitations (0101): revoked, so none can be opened. A pending consent it carried can never be activated
+    // without it, and the hourly sweep concludes it `expired` within 24 hours.
+    await tx.staffInvitation.updateMany({ where: { userId: { in: ids }, usedAt: null, revokedAt: null }, data: { revokedAt: now, revokedReason: 'cancelled' } });
 
     // Their name on what they recorded, where the record allows it: the counter's exchanges (0092), mistake reports,
     // and the counterparty that was them. Append-only snapshots elsewhere keep theirs (NOT_REMOVED).

@@ -16,7 +16,8 @@
 #   4. each identity is refused what it must not do, the audit triggers included (deploy/verify-mysql-identities.sh);
 #   5. the env-gated real-MySQL spec (InnoDB locks, NOWAIT, CHECKs, concurrency) runs on its own `addon_ci` schema;
 #   6. the 0099 real-MySQL spec (grace decisions, the notice outbox, the portal claim) runs on its own `grace_ci` schema;
-#   7. the 0100 real-MySQL spec (the consent history) runs on that same disposable schema.
+#   7. the 0100 real-MySQL spec (the consent history) runs on that same disposable schema;
+#   8. the 0101 real-MySQL spec (employee invitations: locks, the one-live UNIQUE, triggers, CHECKs) runs there too.
 # Any failure exits non-zero.
 set -euo pipefail
 
@@ -72,7 +73,11 @@ root phonestore -e "SET @c = UNHEX(REPLACE(UUID(), '-', '')), @s = UNHEX(REPLACE
   INSERT INTO grace_episodes (id, company_id, subscription_id, period_end, decision, started_at, ends_at, uses_before, window_start, recorded_at, recorded_by)
     VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @s, @p, 'granted', @p, @p + INTERVAL 72 HOUR, 0, @p - INTERVAL 12 MONTH, @p + INTERVAL 1 SECOND, 'sweeper');
   INSERT INTO whatsapp_consents (id, number_hash, number_masked, event, version, locale, purposes, actor_company_id, source)
-    VALUES (UNHEX(REPLACE(UUID(), '-', '')), REPEAT('0', 64), '+000***00', 'granted', 'ci-probe', 'en', 'operational_whatsapp', @c, 'mobile_registration')"
+    VALUES (UNHEX(REPLACE(UUID(), '-', '')), REPEAT('0', 64), '+000***00', 'granted', 'ci-probe', 'en', 'operational_whatsapp', @c, 'mobile_registration');
+  SET @u = UNHEX(REPLACE(UUID(), '-', ''));
+  INSERT INTO users (id, company_id, name, login, personal_id, password_hash, invited_at, updated_at) VALUES (@u, @c, 'CI probe', 'ci-probe', 'CIPROBE001', 'x', NOW(6), NOW(6));
+  INSERT INTO staff_invitations (id, company_id, user_id, token_hash, issued_by, expires_at)
+    VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @u, REPEAT('a', 64), 'ci-probe', NOW(6) + INTERVAL 72 HOUR)"
 DB=phonestore APP_PW="$APP_PW" BACKUP_PW="$BACKUP_PW" MIGRATOR_PW="$MIGRATOR_PW" bash deploy/verify-mysql-identities.sh
 
 echo "== 5. the real-MySQL spec, on its own schema"
@@ -90,3 +95,7 @@ GRACE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) GRACE_APP_URL=$(url phonestor
 echo "== 7. the 0100 real-MySQL spec (the consent history: locks, triggers, CHECKs), on the same disposable schema"
 CONSENT_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) CONSENT_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/messaging/consent.mysql.spec.ts
+
+echo "== 8. the 0101 real-MySQL spec (employee invitations: locks, one live per person, triggers, CHECKs), on the same disposable schema"
+INVITATION_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) INVITATION_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/staff/staff-invitation.mysql.spec.ts

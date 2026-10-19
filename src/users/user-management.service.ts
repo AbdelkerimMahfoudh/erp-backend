@@ -43,11 +43,22 @@ const CLOSING_PERMISSION = 'closing.perform';
  */
 export type UserStatus = 'active' | 'inactive' | 'pending_contact' | 'pending';
 
-/** What still stands between a pending account and its first sign-in (docs/21, 2026-10-05). */
+/**
+ * Where a pending employee's invitation stands (0101, D214). Never the reference: the server cannot read it back.
+ * `none` — never issued (an account from before 0101): the Owner issues one; `open` — waiting for the employee;
+ * `code_requested` — the employee accepted the consent and asked for their code; `expired` — 72 hours passed unused.
+ */
+export interface InvitationView {
+  state: 'none' | 'open' | 'code_requested' | 'expired';
+  expiresAt: string | null;
+}
+
+/** What still stands between a pending account and its first sign-in (docs/21, 2026-10-05; D214). */
 export interface PendingView {
-  /** `not_selected` when the Owner gave no such contact. */
+  /** Optional and never a condition of activation (D214); `not_selected` when the Owner gave none. */
   email: 'verified' | 'awaiting' | 'not_selected';
   phone: 'verified' | 'awaiting' | 'not_selected';
+  invitation: InvitationView;
   /** One per store: `included` (a free seat), `held` (paid or granted for this person) or `awaiting_payment`. */
   seats: { branchId: string; branchName: string; state: 'included' | 'held' | 'awaiting_payment' }[];
 }
@@ -109,6 +120,13 @@ const USER_SELECT = {
     // `scheduled` (D176): a seat paid for during the free trial, starting when it ends — the person's, shown as held.
     where: { kind: 'seat' as const, status: { in: ['pending_payment', 'paid', 'granted', 'scheduled'] as const } },
     select: { branchId: true, status: true },
+  },
+  // The newest invitation still able to open (0101): its state and its end, never its hash.
+  staffInvitations: {
+    where: { usedAt: null, revokedAt: null },
+    orderBy: { createdAt: 'desc' as const },
+    take: 1,
+    select: { expiresAt: true, pendingConsentId: true },
   },
   userBranches: {
     select: {
@@ -212,6 +230,14 @@ export class UserManagementService {
     // string) and replacing both reset the matching timestamp.
     if (dto.phone !== undefined) {
       const next = this.resolvePhone(dto.phone);
+      // A waiting employee's number is the one their invitation and their own pending consent are for (D214): it is not
+      // edited under them. The Owner cancels the account and adds the person again with the right number.
+      if (next !== before.phone && statusOf(before) === 'pending') {
+        throw new ConflictException({
+          code: 'pending_number_locked',
+          message: 'This person has not activated their account yet. Cancel it and add them again with the right WhatsApp number.',
+        });
+      }
       if (next !== before.phone) {
         data.phone = next;
         data.phoneVerifiedAt = null;
@@ -692,11 +718,20 @@ function statusOf(row: { isActive: boolean; phone: string | null; invitedAt?: Da
   return row.phone ? 'active' : 'pending_contact';
 }
 
+function invitationOf(row: UserRow, now: Date): InvitationView {
+  const live = row.staffInvitations?.[0];
+  if (!live) return { state: 'none', expiresAt: null };
+  const expiresAt = live.expiresAt.toISOString();
+  if (live.expiresAt.getTime() <= now.getTime()) return { state: 'expired', expiresAt };
+  return { state: live.pendingConsentId ? 'code_requested' : 'open', expiresAt };
+}
+
 function pendingOf(row: UserRow): PendingView {
   const allocations = row.seatAllocations ?? [];
   return {
     email: row.email ? (row.emailVerifiedAt ? 'verified' : 'awaiting') : 'not_selected',
     phone: row.phone ? (row.phoneVerifiedAt ? 'verified' : 'awaiting') : 'not_selected',
+    invitation: invitationOf(row, new Date()),
     seats: row.userBranches.map((ub) => {
       const own = allocations.find((a) => a.branchId !== null && a.branchId.equals(ub.branch.id));
       return {

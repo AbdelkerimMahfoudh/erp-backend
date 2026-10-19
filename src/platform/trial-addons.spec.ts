@@ -97,7 +97,8 @@ describe('1. store requested during trial', () => {
 /** The person proves their contact (the code itself is the verification service's, not what is asked here). */
 const proves = (w: TrialBillingWorld, id: Buffer | string) => {
   const row = w.t.user.find((u) => w.uuid(u.id) === (typeof id === 'string' ? id : w.uuid(id)))!;
-  row.emailVerifiedAt = w.clock.now();
+  // The WhatsApp number is what activation waits for (D214); an email address never holds it back.
+  row.phoneVerifiedAt = w.clock.now();
 };
 /** Real instants apart: an invitation is stamped by the wall clock, and coverage follows the invitation order. */
 const aMomentLater = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -131,7 +132,7 @@ describe('2. paid seat requested during trial', () => {
     const { w, b } = await trialWorld({ approve: true });
     w.person(b, { name: 'Ali', stores: ['Main'], active: true });
     const team = w.staff(b);
-    const sara = { name: 'Sara', email: 'sara@shop.test', branchIds: [w.uuid(b.stores.Main)], role: 'store_employee' as const };
+    const sara = { name: 'Sara', phone: '+22236000001', email: 'sara@shop.test', branchIds: [w.uuid(b.stores.Main)], role: 'store_employee' as const };
     const first = await team.invite(sara);
     expect(first).toMatchObject({ created: true, seats: [{ store: 'Main', state: 'awaiting_payment' }] });
     expect(w.requests(b)).toEqual([expect.objectContaining({ kind: 'seat', status: 'pending_payment', monthlyAmount: 100 })]);
@@ -143,7 +144,7 @@ describe('2. paid seat requested during trial', () => {
     await w.confirm(w.uuid(w.requests(b)[0].id), 100, { reference: 'BK-S' });
     const held = await team.invite(sara);
     // Paid during the trial: hers, shown as held, in force when the trial ends — never asked for again.
-    expect(held).toMatchObject({ created: false, seats: [{ store: 'Main', state: 'held' }], activation: { pending: ['email_verification', 'seat_scheduled'] } });
+    expect(held).toMatchObject({ created: false, seats: [{ store: 'Main', state: 'held' }], activation: { pending: ['phone_verification', 'seat_scheduled'] } });
     proves(w, first.user.id);
     await expect(w.activation.tryActivate(Buffer.from(first.user.id.replace(/-/g, ''), 'hex'), 'person')).resolves.toMatchObject({ activated: false, pending: ['seat_scheduled'] });
     expect(w.requests(b)).toHaveLength(1);
@@ -158,13 +159,13 @@ describe('2. paid seat requested during trial', () => {
 
     const team = w.staff(b);
     const main = [w.uuid(b.stores.Main)];
-    const tom = await team.invite({ name: 'Tom', email: 'tom@shop.test', branchIds: main, role: 'store_employee' });
+    const tom = await team.invite({ name: 'Tom', phone: '+22236000002', email: 'tom@shop.test', branchIds: main, role: 'store_employee' });
     await aMomentLater();
-    const uma = await team.invite({ name: 'Uma', email: 'uma@shop.test', branchIds: main, role: 'store_employee' });
+    const uma = await team.invite({ name: 'Uma', phone: '+22236000003', email: 'uma@shop.test', branchIds: main, role: 'store_employee' });
     const asked = (id: string) => w.requests(b).filter((r) => r.userId && w.uuid(r.userId) === id);
     // Tom is covered by the seat already bought; Uma, invited after him, is priced one of her own.
     expect(asked(tom.user.id)).toEqual([]);
-    expect(tom.activation.pending).toEqual(['email_verification', 'seat_scheduled']);
+    expect(tom.activation.pending).toEqual(['phone_verification', 'seat_scheduled']);
     expect(asked(uma.user.id)).toEqual([expect.objectContaining({ status: 'pending_payment', monthlyAmount: 100 })]);
 
     proves(w, tom.user.id);
@@ -731,7 +732,7 @@ describe('11. cancelled or refused request', () => {
     w.person(b, { name: 'Ali', stores: ['Main'], active: true });
     const store = (await askStore(w, b)).allocation.id;
     const seat = (await askSeat(w, b)).allocation.id;
-    const sara = await w.staff(b).invite({ name: 'Sara', email: 'sara@shop.test', branchIds: [w.uuid(b.stores.Main)], role: 'store_employee' });
+    const sara = await w.staff(b).invite({ name: 'Sara', phone: '+22236000001', email: 'sara@shop.test', branchIds: [w.uuid(b.stores.Main)], role: 'store_employee' });
     const saras = w.uuid(w.requests(b).find((r) => r.userId && w.uuid(r.userId) === sara.user.id)!.id);
 
     await expect(withdrawOf(w, b, store)).resolves.toMatchObject({ applied: true, allocation: { status: 'released' } });
@@ -775,7 +776,7 @@ describe('11. cancelled or refused request', () => {
     w.person(b, { name: 'Ali', stores: ['Main'], active: true });
     const team = w.staff(b);
     const main = [w.uuid(b.stores.Main)];
-    const sara = await team.invite({ name: 'Sara', email: 'sara@shop.test', branchIds: main, role: 'store_employee' });
+    const sara = await team.invite({ name: 'Sara', phone: '+22236000001', email: 'sara@shop.test', branchIds: main, role: 'store_employee' });
     const seat = w.uuid(w.requests(b)[0].id);
     await w.confirm(seat, 100, { reference: 'BK-S' });
     await team.cancel(sara.user.id);
@@ -783,7 +784,7 @@ describe('11. cancelled or refused request', () => {
 
     // Nobody holds it now: the next person added there is seated by it, not priced again.
     await aMomentLater();
-    const tom = await team.invite({ name: 'Tom', email: 'tom@shop.test', branchIds: main, role: 'store_employee' });
+    const tom = await team.invite({ name: 'Tom', phone: '+22236000002', email: 'tom@shop.test', branchIds: main, role: 'store_employee' });
     expect(w.requests(b)).toHaveLength(1);
     proves(w, tom.user.id);
     w.clock.set(T);

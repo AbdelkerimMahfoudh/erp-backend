@@ -11,7 +11,9 @@ import { newUuidV7Bin, binToUuid } from '../common/utils/uuid.util';
  */
 
 /**
- * What still stands between a staff account and activation. `seat_scheduled` (D176): a seat for this person — their
+ * What still stands between a staff account and activation. `email_verification` is no longer produced (D214: an email
+ * address is optional and never a condition); it stays in the type for records written before. `seat_scheduled` (D176):
+ * a seat for this person — their
  * own, or one bought for the store that nobody holds — was paid for during the free trial and starts when it ends.
  * Nothing is asked of anyone: the account is activated then.
  */
@@ -101,9 +103,10 @@ export async function evaluateActivation(db: ActivationDb, userId: Buffer): Prom
       eligible: false,
     };
 
+  // The WhatsApp number is every employee's required contact, proved by the employee from their invitation (D214); an
+  // email address is optional and verified later, if ever — it never stands in for the number, nor holds activation back.
   const pending: PendingReason[] = [];
-  if (row.email && !row.emailVerifiedAt) pending.push('email_verification');
-  if (row.phone && !row.phoneVerifiedAt) pending.push('phone_verification');
+  if (!row.phone || !row.phoneVerifiedAt) pending.push('phone_verification');
 
   const storesWithoutSeat: Buffer[] = [];
   const coveredStores: Buffer[] = [];
@@ -230,7 +233,7 @@ export async function activateIfReadyTx(tx: ActivationDb, userId: Buffer, now: D
         companyId,
         subscriptionId: sub.id,
         kind: 'staff_activated',
-        note: `${again.row!.name} activated${stores ? ` at ${stores}` : ''}: every selected contact verified, a seat held.`.slice(
+        note: `${again.row!.name} activated${stores ? ` at ${stores}` : ''}: the WhatsApp number verified, a seat held.`.slice(
           0,
           255,
         ),

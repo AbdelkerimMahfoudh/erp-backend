@@ -138,6 +138,9 @@ async function person(b: Business, o: { name: string; store: string; active?: bo
       personalId: personalId(),
       email: `${o.name.toLowerCase()}.${t}@example.test`,
       emailVerifiedAt: o.invitedAt,
+      // The WhatsApp number activation waits for (D214), unique per person in this database.
+      phone: `+2226${seq.toString().padStart(8, '0')}`,
+      phoneVerifiedAt: o.invitedAt,
       passwordHash: 'x',
       isActive: o.active ?? false,
       invitedAt: o.invitedAt,
