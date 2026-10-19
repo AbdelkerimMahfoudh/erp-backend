@@ -59,12 +59,15 @@ describe('deploy/verify-mysql-identities.sh', () => {
   it('passes a trigger probe only on the trigger refusing it, never on a missing grant', () => {
     const probes = verify.split('\n').filter((l) => l.includes('must_fail') && l.includes('(trigger)'));
     // UPDATE and DELETE on audit_logs and on subscription_events (append-only), on grace_episodes (0099: a grace
-    // decision is immutable) and on whatsapp_consents (0100: a consent decision is history) — each passing only on the
+    // decision is immutable), on whatsapp_consents (0100: a consent decision is history) and on staff_invitations (0101:
+    // an invitation keeps its business, person, reference and life, and is never deleted) — each passing only on the
     // trigger's own words.
-    expect(probes).toHaveLength(8);
+    expect(probes).toHaveLength(10);
     for (const line of probes) {
       const immutable = line.includes('grace_episodes') || line.includes('whatsapp_consents');
-      expect(line.trim().endsWith(immutable ? '"immutable"' : '"append-only"')).toBe(true);
+      const invitation = line.includes('staff_invitations');
+      const words = invitation ? (line.includes('DELETE') ? '"never deleted"' : '"keeps its business"') : immutable ? '"immutable"' : '"append-only"';
+      expect(line.trim().endsWith(words)).toBe(true);
       expect(line).not.toMatch(/denied/);
     }
   });
