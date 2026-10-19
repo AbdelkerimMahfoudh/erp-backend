@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
 
 /** The languages a code may be sent in. The same three the app ships. */
 export const ACCOUNT_LANGUAGES = ['en', 'fr', 'ar'] as const;
@@ -31,20 +31,25 @@ export class StartPhoneVerificationDto {
 
   @IsOptional() @IsIn(ACCOUNT_LANGUAGES) language?: AccountLanguage;
 
-  /** The WhatsApp consent version agreed to (D181 §5). Required while WhatsApp runs live; a stale one is refused. */
+  /** The operational WhatsApp consent version ticked for this number (D213): required, the current one only. */
   @IsOptional() @IsString() @MaxLength(40) whatsappConsentVersion?: string;
+
+  /** The language the consent was shown in; `language` when not said. */
+  @IsOptional() @IsIn(ACCOUNT_LANGUAGES) whatsappConsentLocale?: AccountLanguage;
 }
 
-/** Stop optional WhatsApp notifications, or withdraw WhatsApp as the account contact (D181 §5). */
-export class WhatsAppOptOutDto {
-  @IsIn(['optional', 'all']) scope: 'optional' | 'all';
-
-  @IsOptional() @IsIn(ACCOUNT_LANGUAGES) language?: AccountLanguage;
-}
-
-/** Agree to the current WhatsApp consent copy for my verified number. */
+/** Agree to the copy in force for my verified number (D213). */
 export class WhatsAppConsentDto {
   @IsString() @MaxLength(40) version: string;
+
+  /** The language the copy was shown in. */
+  @IsOptional() @IsIn(ACCOUNT_LANGUAGES) locale?: AccountLanguage;
+}
+
+/** Withdraw my operational WhatsApp consent (D213). */
+export class WithdrawWhatsAppConsentDto {
+  /** Required when WhatsApp is my only verified contact: I understood that recovery then goes through support. */
+  @IsOptional() @IsBoolean() acknowledgeSupportRecovery?: boolean;
 }
 
 export class ConfirmPhoneVerificationDto {

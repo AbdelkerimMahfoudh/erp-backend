@@ -45,14 +45,14 @@ export type MessageLanguage = 'en' | 'ar' | 'fr';
 export type ProviderKind = 'authentication' | 'utility';
 
 /**
- * Who a send serves (D181 §5) — what an opt-out, consent and the test/live controls decide by.
+ * Who a send serves (D181 §5; D213) — what the consent rule and the test/live controls decide by. Every use but the
+ * operator's is an operational message under the one operational consent; there is no marketing use.
  *
  *  - `essential` — a message the person asked for, or that secures their own account: sign-in and contact
- *    verification codes, employee invitation codes, account-deletion codes and the deletion confirmation. Sent after
- *    an opt-out of optional notifications; never after the person withdrew the WhatsApp channel itself.
+ *    verification codes, employee invitation codes, account-deletion codes and the deletion confirmation. Needs the
+ *    consent in force, except the code that verifies a number not yet verified; never after a withdrawal.
  *  - `optional` — an operational notice the person did not ask for at that moment (closing notices, the portal
- *    instructions, the subscription reminders). Never sent after any opt-out; in live mode, only to a number with a
- *    recorded consent.
+ *    instructions, the subscription reminders). Needs the consent in force, no opt-out and a deliverable number.
  *  - `operator` — the operator's own delivery proof (docs/64): test mode only, to an allowlisted number only.
  */
 export type TemplateUse = 'essential' | 'optional' | 'operator';

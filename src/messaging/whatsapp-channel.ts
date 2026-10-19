@@ -40,6 +40,12 @@ export interface WhatsAppMessage {
    * pass it through so a retried delivery cannot duplicate a real message.
    */
   idempotencyKey: string;
+  /**
+   * Set by the server, never from a request: this is the code that verifies a number not yet verified (registration,
+   * an invited employee, a new number). It is the one message that may go before the number has a consent (D213) — it
+   * never creates one — and it is still refused once the number's consent was withdrawn.
+   */
+  verifiesContact?: boolean;
 }
 
 /**

@@ -13,7 +13,7 @@ import { createEmailChannel, EMAIL_CHANNEL, EmailChannel, senderFor } from './em
 import { LoggedEmailChannel } from './email-log';
 import { RecipientHasher } from './recipient-hash';
 import { WhatsAppRecords } from './whatsapp-records';
-import { GovernedWhatsAppChannel, parseTestRecipients, type WhatsAppSendControls } from './whatsapp-policy';
+import { ConsentGatedWhatsAppChannel, GovernedWhatsAppChannel, parseTestRecipients, type WhatsAppSendControls } from './whatsapp-policy';
 import { WhatsAppLiveCheck } from './whatsapp-live-check';
 
 /** The provider adapter itself, before any policy. Injected by nothing but this module. */
@@ -152,13 +152,17 @@ export function cloudApiConfigFrom(config: AppConfigService): CloudApiConfig | n
     {
       /*
        * The Cloud API always goes through the send policy (D181 §4): test mode reaches the allowlist only, live mode
-       * nothing until live sends are enabled, and every send honours the person's opt-out and is recorded. The
-       * development log and the disabled channel send nothing, so there is nothing to govern.
+       * nothing until live sends are enabled, and every send needs the person's consent in force and is recorded. The
+       * development log answers to the same consent rule (D213), so a development server refuses what a real one
+       * would; the disabled channel sends nothing, so there is nothing to govern.
        */
       provide: WHATSAPP_GOVERNED_CHANNEL,
       inject: [AppConfigService, WHATSAPP_RAW_CHANNEL, WhatsAppRecords],
-      useFactory: (config: AppConfigService, raw: WhatsAppChannel, records: WhatsAppRecords): WhatsAppChannel =>
-        raw instanceof CloudApiWhatsAppChannel ? new GovernedWhatsAppChannel(raw, sendControlsFrom(config), records) : raw,
+      useFactory: (config: AppConfigService, raw: WhatsAppChannel, records: WhatsAppRecords): WhatsAppChannel => {
+        if (raw instanceof CloudApiWhatsAppChannel) return new GovernedWhatsAppChannel(raw, sendControlsFrom(config), records);
+        if (raw instanceof DevelopmentLogWhatsAppChannel) return new ConsentGatedWhatsAppChannel(raw, records);
+        return raw;
+      },
     },
     {
       /*

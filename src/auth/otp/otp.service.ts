@@ -236,6 +236,9 @@ export class OtpService {
       params.destination,
       params.language ?? 'en',
       templateForPurpose(params.purpose),
+      // A new number's own code proves it before the account uses it (D213); every other code goes to the account's
+      // verified number and needs its consent in force.
+      params.purpose === 'phone_verification' && params.candidatePhone === params.destination,
     );
     const fresh = await this.prisma.otpChallenge.findUnique({ where: { id: created.id } });
     return { ok: true, challenge: this.toView(fresh!) };
@@ -255,6 +258,7 @@ export class OtpService {
     destination: string,
     language: MessageLanguage,
     template: TemplateDefinition,
+    verifiesContact = false,
   ): Promise<boolean> {
     assertLanguageSupported(template, language);
     const variables = validateTemplateVariables(template, {
@@ -270,6 +274,7 @@ export class OtpService {
         language,
         variables,
         idempotencyKey: binToUuid(challengeId),
+        ...(verifiesContact ? { verifiesContact: true } : {}),
       });
     } catch (e) {
       // An adapter that throws must not leak its exception upward — the message

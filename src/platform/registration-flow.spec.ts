@@ -8,6 +8,9 @@ import { PlatformAdminGuard } from './platform-admin.guard';
 import { PlatformController, PUBLIC_THROTTLE } from './platform.controller';
 import { RegistrationFlowService } from './registration-flow.service';
 import { RegistrationService } from './registration.service';
+import { WhatsAppRecords } from '../messaging/whatsapp-records';
+import { WHATSAPP_CONSENT_VERSION } from '../messaging/whatsapp-consent';
+import { fakeMessagingPrisma } from '../messaging/__testing__/fake-messaging-prisma';
 
 /**
  * A business registering itself through either door (0095, the owner's decision Q1 of 2026-10-13): the website's
@@ -82,7 +85,13 @@ const ATTEMPT = {
   phone: '+22243210987',
   password: 'password-1',
   language: 'en' as const,
+  whatsappConsentVersion: WHATSAPP_CONSENT_VERSION,
 };
+const APP = { source: 'mobile_registration' as const };
+const REQ = { ip: '10.0.0.7', headers: { 'user-agent': 'Dukan/1.0' } };
+
+/** The consent records, in memory: a flow that reaches them records the agreement there. */
+const consentRecords = () => new WhatsAppRecords(fakeMessagingPrisma() as never, { hash: (n: string) => `h:${n}` } as never);
 
 describe('two doors, one registration: the website’s platform/register* and the app’s auth/register*', () => {
   it.each(DOORS)('%s: public, throttled alike, the same method and status — under platform/ and under auth/', (name, path, code) => {
@@ -106,25 +115,26 @@ describe('two doors, one registration: the website’s platform/register* and th
     expect(routes.sort()).toEqual(['continueConfirm', 'continueStart', 'register']);
   });
 
-  it('each door hands its body to the shared flow unchanged — nothing is decided twice', async () => {
+  it('each door hands its body to the shared flow unchanged, adding only where the consent was given — nothing is decided twice', async () => {
     const website = recordingFlow();
     const app = recordingFlow();
-    const req = { ip: '10.0.0.7', headers: { 'user-agent': 'Dukan/1.0' } };
+    const req = REQ;
     const confirm = { continuation: 'c'.repeat(43), code: '123456' };
     const start = { continuation: 'c'.repeat(43), language: 'fr' as const };
 
     const platform = platformWith({ flow: website.flow });
     const appDoor = new AppRegistrationController(app.flow);
-    await platform.register(ATTEMPT as never);
+    await platform.register(ATTEMPT as never, req as never);
     await platform.continueStart(start as never);
     await platform.continueConfirm(confirm as never, req as never);
-    await appDoor.register(ATTEMPT as never);
+    await appDoor.register(ATTEMPT as never, req as never);
     await appDoor.continueStart(start as never);
     await appDoor.continueConfirm(confirm as never, req as never);
 
-    expect(app.calls).toEqual(website.calls);
+    expect(app.calls.slice(1)).toEqual(website.calls.slice(1));
+    expect(app.calls[0]).toEqual(['register', [ATTEMPT, { source: 'mobile_registration', ip: '10.0.0.7' }]]);
     expect(website.calls).toEqual([
-      ['register', [ATTEMPT]],
+      ['register', [ATTEMPT, { source: 'website_registration', ip: '10.0.0.7' }]],
       ['startVerification', [start]],
       ['confirmVerification', [confirm, { ip: '10.0.0.7', userAgent: 'Dukan/1.0' }]],
     ]);
@@ -162,12 +172,12 @@ describe('the shared flow', () => {
           : { ok: false, reason: 'wrong_code' },
     };
     const delivery = { canDeliver: () => opts.deliver ?? true };
-    return { seen, flow: new RegistrationFlowService(registration as never, continuation as never, delivery as never) };
+    return { seen, flow: new RegistrationFlowService(registration as never, continuation as never, delivery as never, consentRecords()) };
   }
 
   it('makes a business that registers itself eligible for its one free trial — eligible, never started', async () => {
     const { seen, flow } = flowWith();
-    const answer = await flow.register(ATTEMPT as never);
+    const answer = await flow.register(ATTEMPT as never, APP);
     expect(seen).toEqual([expect.objectContaining({ trialEligible: true, idempotencyKey: 'k-1' })]);
     expect(answer).toMatchObject({ status: 'pending_activation', created: true, trialEligible: true, next: 'verify_contact' });
     expect(answer.continuation).toMatchObject({ token: 't'.repeat(43), expiresInSeconds: 900 });
@@ -177,13 +187,13 @@ describe('the shared flow', () => {
 
   it('says what the business holds on a retry, as registration recorded it', async () => {
     const { flow } = flowWith({ trialEligible: false, pending: false });
-    await expect(flow.register(ATTEMPT as never)).resolves.toMatchObject({ trialEligible: false, continuation: null, next: 'sign_in' });
+    await expect(flow.register(ATTEMPT as never, APP)).resolves.toMatchObject({ trialEligible: false, continuation: null, next: 'sign_in' });
   });
 
   it('refuses up front with registration_unavailable when no code can be sent — on either door, nothing saved', async () => {
     const { seen, flow } = flowWith({ deliver: false });
     for (const door of [platformWith({ flow }), new AppRegistrationController(flow)]) {
-      const refusal = await door.register(ATTEMPT as never).catch((e: unknown) => e);
+      const refusal = await door.register(ATTEMPT as never, REQ as never).catch((e: unknown) => e);
       expect(refusal).toBeInstanceOf(ServiceUnavailableException);
       expect((refusal as ServiceUnavailableException).getResponse()).toMatchObject({ code: 'registration_unavailable' });
     }
@@ -250,17 +260,22 @@ describe('the WhatsApp number must be able to receive its code, or nothing is sa
       },
     );
     const registration = new RegistrationService(prisma as never, {} as never, { now: () => new Date() });
-    const flow = new RegistrationFlowService(registration, {} as never, {
-      canDeliver: (channel: string) => {
-        asked.push(channel);
-        return canDeliver(channel);
-      },
-    } as never);
+    const flow = new RegistrationFlowService(
+      registration,
+      {} as never,
+      {
+        canDeliver: (channel: string) => {
+          asked.push(channel);
+          return canDeliver(channel);
+        },
+      } as never,
+      consentRecords(),
+    );
     return { flow, touched, asked };
   }
 
   async function refusalOf(flow: RegistrationFlowService, attempt: object): Promise<Record<string, unknown>> {
-    const refusal = await flow.register(attempt as never).catch((e: unknown) => e);
+    const refusal = await flow.register(attempt as never, APP).catch((e: unknown) => e);
     expect(refusal).toBeInstanceOf(ServiceUnavailableException);
     return (refusal as ServiceUnavailableException).getResponse() as Record<string, unknown>;
   }
@@ -278,7 +293,7 @@ describe('the WhatsApp number must be able to receive its code, or nothing is sa
   it('only the number is asked about: an email given beside it needs no code now, and no email provider at all', async () => {
     const { flow, touched, asked } = realFlow((channel) => channel === 'phone');
     // The real registration starts at the database — which this one refuses — so reaching it is the proof.
-    await expect(flow.register(ATTEMPT as never)).rejects.toThrow('the database was reached (registrationAttempt)');
+    await expect(flow.register(ATTEMPT as never, APP)).rejects.toThrow('the database was reached (registrationAttempt)');
     expect(asked).toEqual(['phone']);
     expect(touched).toEqual(['registrationAttempt']);
   });
@@ -287,7 +302,7 @@ describe('the WhatsApp number must be able to receive its code, or nothing is sa
     const { flow, touched, asked } = realFlow(() => true);
     for (const attempt of [{ ...ATTEMPT, phone: undefined }, { ...ATTEMPT, phone: '   ' }]) {
       for (const door of [platformWith({ flow }), new AppRegistrationController(flow)]) {
-        const refusal = await door.register(attempt as never).catch((e: unknown) => e);
+        const refusal = await door.register(attempt as never, REQ as never).catch((e: unknown) => e);
         expect(refusal).toBeInstanceOf(BadRequestException);
       }
     }
@@ -297,7 +312,7 @@ describe('the WhatsApp number must be able to receive its code, or nothing is sa
   it('on either door alike', async () => {
     const { flow } = realFlow((channel) => channel === 'email');
     for (const door of [platformWith({ flow }), new AppRegistrationController(flow)]) {
-      const refusal = await door.register(ATTEMPT as never).catch((e: unknown) => e);
+      const refusal = await door.register(ATTEMPT as never, REQ as never).catch((e: unknown) => e);
       expect((refusal as ServiceUnavailableException).getResponse()).toMatchObject({ unavailableContacts: ['phone'] });
     }
   });

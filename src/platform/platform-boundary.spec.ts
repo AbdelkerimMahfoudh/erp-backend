@@ -15,6 +15,9 @@ import {
   paymentInstructions,
 } from './payment-instructions';
 import { EntitlementService } from '../entitlement/entitlement.service';
+import { WhatsAppRecords } from '../messaging/whatsapp-records';
+import { WHATSAPP_CONSENT_VERSION } from '../messaging/whatsapp-consent';
+import { fakeMessagingPrisma } from '../messaging/__testing__/fake-messaging-prisma';
 import { evaluationColumnsOf, isEvaluationRead } from '../entitlement/__testing__/evaluation-columns';
 import {
   ENTITLEMENT_PENDING,
@@ -273,7 +276,8 @@ describe('the controller, from the platform’s side', () => {
      */
     const stub = {} as never;
     function controllerWith(registration: unknown, delivery: unknown) {
-      const flow = new RegistrationFlowService(registration as never, stub, delivery as never);
+      const records = new WhatsAppRecords(fakeMessagingPrisma() as never, { hash: (n: string) => `h:${n}` } as never);
+      const flow = new RegistrationFlowService(registration as never, stub, delivery as never, records);
       return new PlatformController(stub, stub, stub, stub, registration as never, stub, stub, stub, stub, stub, flow);
     }
     const attempt = {
@@ -285,7 +289,9 @@ describe('the controller, from the platform’s side', () => {
       phone: '+22243210987',
       password: 'password-1',
       language: 'en' as const,
+      whatsappConsentVersion: WHATSAPP_CONSENT_VERSION,
     };
+    const req = { ip: '10.0.0.7' } as never;
 
     it('refuses with its own code, and the database is never reached', async () => {
       const reached: string[] = [];
@@ -293,7 +299,7 @@ describe('the controller, from the platform’s side', () => {
         { register: async () => { reached.push('register'); throw new Error('must not be reached'); } },
         { name: 'none', canDeliver: () => false },
       );
-      const refusal = await controller.register(attempt as never).catch((e: unknown) => e);
+      const refusal = await controller.register(attempt as never, req).catch((e: unknown) => e);
       expect(refusal).toBeInstanceOf(ServiceUnavailableException);
       expect((refusal as ServiceUnavailableException).getResponse()).toMatchObject({ code: 'registration_unavailable' });
       expect(JSON.stringify((refusal as ServiceUnavailableException).getResponse())).toMatch(/Nothing was saved/);
@@ -305,9 +311,9 @@ describe('the controller, from the platform’s side', () => {
       const controller = controllerWith({ register: async () => { throw new Error('must not be reached'); } }, {
         canDeliver: (channel: string) => { asked.push(channel); return false; },
       });
-      await controller.register(attempt as never).catch(() => undefined);
-      await controller.register({ ...attempt, email: undefined } as never).catch(() => undefined);
-      await controller.register({ ...attempt, email: '   ' } as never).catch(() => undefined);
+      await controller.register(attempt as never, req).catch(() => undefined);
+      await controller.register({ ...attempt, email: undefined } as never, req).catch(() => undefined);
+      await controller.register({ ...attempt, email: '   ' } as never, req).catch(() => undefined);
       expect(asked).toEqual(['phone', 'phone', 'phone']);
     });
 
@@ -317,7 +323,7 @@ describe('the controller, from the platform’s side', () => {
       const controller = controllerWith({ register: async () => { reached.push('register'); throw new Error('must not be reached'); } }, {
         canDeliver: (channel: string) => { asked.push(channel); return true; },
       });
-      const refusal = await controller.register({ ...attempt, phone: undefined } as never).catch((e: unknown) => e);
+      const refusal = await controller.register({ ...attempt, phone: undefined } as never, req).catch((e: unknown) => e);
       expect(refusal).toBeInstanceOf(BadRequestException);
       expect([asked, reached]).toEqual([[], []]);
     });
@@ -332,9 +338,9 @@ describe('the controller, from the platform’s side', () => {
         pendingOwnerFor: async () => null,
       };
       const both = controllerWith(registration, { canDeliver: () => true });
-      await expect(both.register(attempt as never)).resolves.toMatchObject({ created: true, next: 'sign_in', continuation: null, trialEligible: true });
+      await expect(both.register(attempt as never, req)).resolves.toMatchObject({ created: true, next: 'sign_in', continuation: null, trialEligible: true });
       const numberOnly = controllerWith(registration, { canDeliver: (channel: string) => channel === 'phone' });
-      await expect(numberOnly.register(attempt as never)).resolves.toMatchObject({ created: true });
+      await expect(numberOnly.register(attempt as never, req)).resolves.toMatchObject({ created: true });
       expect(seen).toEqual(['aicha@example.test|+22243210987', 'aicha@example.test|+22243210987']);
     });
   });

@@ -278,8 +278,8 @@ export class PlatformController {
   @Throttle(registrationThrottle('register'))
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
-  async register(@Body() dto: RegisterDto) {
-    return this.flow.register(dto);
+  async register(@Body() dto: RegisterDto, @Req() req: Request) {
+    return this.flow.register(dto, { source: 'website_registration', ip: req.ip });
   }
 
   // ── Finishing a registration ─────────────────────────────────────────────

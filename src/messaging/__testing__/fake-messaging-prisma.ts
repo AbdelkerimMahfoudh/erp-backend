@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client';
 
 type Row = Record<string, unknown>;
 type Where = Record<string, unknown>;
+type OrderBy = Record<string, 'asc' | 'desc'> | Record<string, 'asc' | 'desc'>[];
 
 function same(a: unknown, b: unknown): boolean {
   if (Buffer.isBuffer(a) && Buffer.isBuffer(b)) return a.equals(b);
@@ -100,12 +101,12 @@ class Table {
     return this.rows.find((r) => matches(r, where)) ?? null;
   });
 
-  findFirst = jest.fn(async ({ where, orderBy }: { where?: Where; orderBy?: Record<string, 'asc' | 'desc'> }) => {
+  findFirst = jest.fn(async ({ where, orderBy }: { where?: Where; orderBy?: OrderBy }) => {
     this.check('findFirst');
     return this.sorted(this.rows.filter((r) => matches(r, where)), orderBy)[0] ?? null;
   });
 
-  findMany = jest.fn(async ({ where, orderBy, take }: { where?: Where; orderBy?: Record<string, 'asc' | 'desc'>; take?: number }) => {
+  findMany = jest.fn(async ({ where, orderBy, take }: { where?: Where; orderBy?: OrderBy; take?: number }) => {
     this.check('findMany');
     return this.sorted(this.rows.filter((r) => matches(r, where)), orderBy).slice(0, take ?? Infinity);
   });
@@ -149,10 +150,18 @@ class Table {
     return { count: before - this.rows.length };
   });
 
-  private sorted(rows: Row[], orderBy?: Record<string, 'asc' | 'desc'>): Row[] {
+  private sorted(rows: Row[], orderBy?: OrderBy): Row[] {
     if (!orderBy) return rows;
-    const [[key, dir]] = Object.entries(orderBy);
-    return [...rows].sort((a, b) => compare(a[key], b[key]) * (dir === 'desc' ? -1 : 1));
+    const keys = (Array.isArray(orderBy) ? orderBy : [orderBy]).flatMap((o) => Object.entries(o));
+    return [...rows].sort((a, b) => {
+      for (const [key, dir] of keys) {
+        const x = a[key];
+        const y = b[key];
+        const c = Buffer.isBuffer(x) && Buffer.isBuffer(y) ? Buffer.compare(x, y) : compare(x, y);
+        if (c !== 0) return c * (dir === 'desc' ? -1 : 1);
+      }
+      return 0;
+    });
   }
 }
 
@@ -171,9 +180,12 @@ export function fakeMessagingPrisma() {
     messagingDeliveryProof: new Table(),
     auditLog: new Table(),
   };
-  return Object.assign(tables, {
-    $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>): Promise<unknown> => fn(tables)),
+  const client = Object.assign(tables, {
+    // The row lock a consent decision takes: one process here, so there is nothing to wait for.
+    $queryRaw: jest.fn(async () => []),
+    $transaction: jest.fn(async (fn: (tx: unknown) => Promise<unknown>): Promise<unknown> => fn(client)),
   });
+  return client;
 }
 
 export type FakeMessagingPrisma = ReturnType<typeof fakeMessagingPrisma>;

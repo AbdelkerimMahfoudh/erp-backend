@@ -1,22 +1,23 @@
 import { BadRequestException } from '@nestjs/common';
 import {
   acceptedConsentVersion,
+  CONSENT_PURPOSES,
   consentCopy,
-  consentRequired,
+  consentLocaleOf,
   foldKeyword,
-  MANDATORY_PURPOSES,
+  isCurrentConsentVersion,
   optOutSignalOf,
-  UNAVAILABLE_WITHOUT_WHATSAPP,
   WHATSAPP_CONSENT_VERSION,
-  withdrawnExplanation,
 } from './whatsapp-consent';
+import { ALL_TEMPLATES } from './templates';
 import { nextStatus, serviceWindowOpen, WhatsAppRecords } from './whatsapp-records';
 import { recipientHash } from './recipient-hash';
 import { fakeMessagingPrisma } from './__testing__/fake-messaging-prisma';
 
 /**
- * WhatsApp consent and opt-out (D181 §3, §5): a versioned copy that names WhatsApp as the mandatory account contact,
- * opt-out keywords decided in memory, the consent history with its audit event, and forward-only statuses.
+ * The operational WhatsApp consent (D213; D181 §3): a versioned copy for operational messages only — never marketing —
+ * required in every mode, opt-out keywords decided in memory, an append-only history with its audit event, and
+ * forward-only statuses.
  */
 
 const KEY = 'test-messaging-hash-key-of-32-characters!';
@@ -30,42 +31,53 @@ function records() {
 }
 
 describe('the consent copy', () => {
-  it('names WhatsApp as the mandatory verified contact and every purpose, in EN, FR and AR, under one version', () => {
+  it('states exactly the operational purposes, the frequency and that it is not marketing — EN, FR, AR, one version', () => {
     const en = consentCopy('en');
     expect(en.version).toBe(WHATSAPP_CONSENT_VERSION);
-    expect(en.body).toMatch(/verified contact/);
-    for (const phrase of ['sign in', 'recover your account', 'employees you invite', 'security alerts', 'account deletion']) expect(en.body).toContain(phrase);
-    expect(en.body).toMatch(/never send marketing/);
-    expect(consentCopy('fr').body).toMatch(/contact vérifié/);
-    expect(consentCopy('ar').body).toMatch(/جهة اتصال موثّقة/);
+    expect(en.agreement).toBe(
+      'I agree to receive operational Dukan ERP messages on WhatsApp, including verification and security codes, ' +
+        'account setup information, trial and subscription status, expiry reminders and important service notices. ' +
+        'Message frequency depends on account activity. This is not consent to marketing messages.',
+    );
+    expect(en.body).toMatch(/required contact for a Dukan ERP account/);
+    expect(consentCopy('fr').agreement).toMatch(/messages opérationnels de Dukan ERP.*pas d’un consentement aux messages marketing/s);
+    expect(consentCopy('ar').agreement).toMatch(/رسائل Dukan ERP التشغيلية.*ليست موافقة على تلقي رسائل تسويقية/s);
     expect(new Set(['en', 'fr', 'ar'].map((l) => consentCopy(l as 'en').version)).size).toBe(1);
-    expect([...MANDATORY_PURPOSES]).toEqual(['authentication', 'account_recovery', 'employee_invitations', 'security_alerts', 'account_deletion']);
+    for (const l of ['en', 'fr', 'ar'] as const) expect(Object.keys(consentCopy(l)).sort()).toEqual(['agreement', 'body', 'language', 'purposes', 'title', 'version']);
+    expect(consentCopy('de' as 'en').language).toBe('en');
   });
 
-  it('says plainly what a withdrawal makes unavailable', () => {
-    expect([...UNAVAILABLE_WITHOUT_WHATSAPP]).toContain('account_deletion');
-    expect(withdrawnExplanation('en')).toMatch(/unavailable/);
-    expect(withdrawnExplanation('fr')).toMatch(/indisponible/);
-    expect(withdrawnExplanation('ar')).toMatch(/لا يتاح/);
+  it('names one purpose, operational — no marketing purpose, and no marketing template exists to send under it', () => {
+    expect([...CONSENT_PURPOSES]).toEqual(['operational_whatsapp']);
+    expect(JSON.stringify(CONSENT_PURPOSES)).not.toMatch(/market|promo/i);
+    expect(ALL_TEMPLATES.map((t) => t.category).filter((c) => /market|promo/i.test(c))).toEqual([]);
+    expect(ALL_TEMPLATES.map((t) => t.key).filter((k) => /market|promo|offer/i.test(k))).toEqual([]);
   });
 
-  it('is required only when the Cloud API sends live', () => {
-    expect(consentRequired('cloud', 'live')).toBe(true);
-    expect(consentRequired('cloud-api', 'live')).toBe(true);
-    expect(consentRequired('cloud', 'test')).toBe(false);
-    expect(consentRequired('disabled', 'live')).toBe(false);
-  });
-
-  it('refuses a stale version always, and a missing one when required', () => {
-    expect(acceptedConsentVersion(WHATSAPP_CONSENT_VERSION, true)).toBe(WHATSAPP_CONSENT_VERSION);
-    expect(acceptedConsentVersion(undefined, false)).toBeNull();
-    expect(() => acceptedConsentVersion('wa-consent-2020-01-01', false)).toThrow(BadRequestException);
-    try {
-      acceptedConsentVersion(undefined, true);
-    } catch (e) {
-      expect((e as BadRequestException).getResponse()).toMatchObject({ code: 'whatsapp_consent_required', currentVersion: WHATSAPP_CONSENT_VERSION });
+  it('is required: a missing version is refused, and so is any version but the one in force', () => {
+    expect(acceptedConsentVersion(WHATSAPP_CONSENT_VERSION)).toBe(WHATSAPP_CONSENT_VERSION);
+    for (const missing of [undefined, null, '', '   ']) {
+      try {
+        acceptedConsentVersion(missing);
+        throw new Error('not refused');
+      } catch (e) {
+        expect(e).toBeInstanceOf(BadRequestException);
+        expect((e as BadRequestException).getResponse()).toMatchObject({ code: 'whatsapp_consent_required', currentVersion: WHATSAPP_CONSENT_VERSION });
+      }
     }
-    expect(() => acceptedConsentVersion('', true)).toThrow(/agreement/);
+    try {
+      acceptedConsentVersion('wa-consent-2026-10-17');
+      throw new Error('not refused');
+    } catch (e) {
+      expect((e as BadRequestException).getResponse()).toMatchObject({ code: 'whatsapp_consent_outdated' });
+    }
+    expect(isCurrentConsentVersion('wa-consent-2026-10-17')).toBe(false);
+  });
+
+  it('records the language it was shown in: one of the three, else the request’s', () => {
+    expect(consentLocaleOf('ar', 'en')).toBe('ar');
+    expect(consentLocaleOf(undefined, 'fr')).toBe('fr');
+    expect(consentLocaleOf('de', 'xx')).toBe('en');
   });
 });
 
@@ -128,36 +140,102 @@ describe('the 24-hour customer-service window', () => {
 });
 
 describe('the consent history', () => {
-  it('records a grant with its version, purposes, masked number and keyed hash, audits it, and ends any opt-out', async () => {
+  const grant = (r: WhatsAppRecords, over: Partial<Parameters<WhatsAppRecords['recordConsent']>[0]> = {}) =>
+    r.recordConsent({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, locale: 'fr', companyId: COMPANY, userId: USER, source: 'mobile_registration', ip: '203.0.113.9', ...over });
+
+  it('records a grant with its version, locale, purpose, source, masked number and keyed hash, and audits it with the address', async () => {
     const { db, records: r } = records();
-    await r.optOut({ number: NUMBER, scope: 'optional', companyId: COMPANY, userId: USER });
-    await r.recordConsent({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, companyId: COMPANY, userId: USER, source: 'owner_registration' });
-    const grant = db.whatsAppConsent.rows.find((x) => x.event === 'granted')!;
-    expect(grant).toMatchObject({
-      version: WHATSAPP_CONSENT_VERSION,
-      purposes: 'authentication,account_recovery,employee_invitations,security_alerts,account_deletion,operational_notices',
-      numberMasked: '+222***39',
+    expect(await grant(r)).toBe('recorded');
+    expect(db.whatsAppConsent.rows).toEqual([
+      expect.objectContaining({
+        event: 'granted',
+        version: WHATSAPP_CONSENT_VERSION,
+        locale: 'fr',
+        purposes: 'operational_whatsapp',
+        numberMasked: '+222***39',
+        numberHash: recipientHash(NUMBER, KEY),
+        actorCompanyId: COMPANY,
+        actorUserId: USER,
+        source: 'mobile_registration',
+      }),
+    ]);
+    expect(db.auditLog.rows).toEqual([expect.objectContaining({ reason: 'Operational WhatsApp consent granted', ip: '203.0.113.9', entityType: 'WhatsAppConsent' })]);
+    expect(JSON.stringify([db.auditLog.rows, db.whatsAppConsent.rows])).not.toContain('36963839');
+    expect(await r.contactState(NUMBER)).toMatchObject({ optOutScope: 'none', consented: true, consent: 'granted', consentVersion: WHATSAPP_CONSENT_VERSION });
+  });
+
+  it('a replay of the same agreement writes nothing; the same number agreed by another person is a new event', async () => {
+    const { db, records: r } = records();
+    await grant(r);
+    expect(await grant(r)).toBe('unchanged');
+    expect(db.whatsAppConsent.rows).toHaveLength(1);
+    expect(await grant(r, { userId: Buffer.alloc(16, 9), companyId: Buffer.alloc(16, 8) })).toBe('recorded');
+    expect(db.whatsAppConsent.rows).toHaveLength(2);
+  });
+
+  it('refuses an unknown or earlier version even if a caller skipped the check', async () => {
+    await expect(grant(records().records, { version: 'wa-consent-2026-10-17' })).rejects.toThrow(/Unknown/);
+  });
+
+  it('a withdrawal ends the consent and keeps every earlier event; re-consent is a new event, not an edit', async () => {
+    const { db, records: r } = records();
+    await grant(r);
+    expect(await r.withdrawConsent({ number: NUMBER, companyId: COMPANY, userId: USER, source: 'account_settings', ip: '203.0.113.9' })).toBe('recorded');
+    expect(await r.withdrawConsent({ number: NUMBER, companyId: COMPANY, userId: USER, source: 'account_settings' })).toBe('unchanged');
+    const after = await r.contactState(NUMBER);
+    expect(after).toMatchObject({ consented: false, consent: 'withdrawn', optOutScope: 'all', consentVersion: WHATSAPP_CONSENT_VERSION });
+    expect(after.withdrawnAt).toBeInstanceOf(Date);
+    expect(await grant(r)).toBe('recorded');
+    expect(db.whatsAppConsent.rows.map((x) => x.event)).toEqual(['granted', 'withdrawn', 'granted']);
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: true, consent: 'granted', optOutScope: 'none', withdrawnAt: null });
+    expect(db.auditLog.rows.map((a) => a.reason)).toEqual([
+      'Operational WhatsApp consent granted',
+      'Operational WhatsApp consent withdrawn',
+      'Operational WhatsApp consent granted',
+    ]);
+  });
+
+  it('a consent to an earlier copy is outdated: it never lets a message go, and nothing upgrades it', async () => {
+    const { db, records: r } = records();
+    db.whatsAppConsent.rows.push({
+      id: Buffer.alloc(16, 3),
       numberHash: recipientHash(NUMBER, KEY),
-      actorCompanyId: COMPANY,
-      actorUserId: USER,
+      numberMasked: '+222***39',
+      event: 'granted',
+      version: 'wa-consent-2026-10-17',
+      purposes: 'authentication,operational_notices',
       source: 'owner_registration',
+      createdAt: new Date('2026-10-17T10:00:00Z'),
     });
-    expect(db.auditLog.rows.map((a) => a.reason)).toEqual(['Optional WhatsApp notifications stopped', 'WhatsApp consent granted']);
-    expect(JSON.stringify(db.auditLog.rows)).not.toContain('36963839');
-    const state = await r.contactState(NUMBER);
-    expect(state).toMatchObject({ optOutScope: 'none', consented: true });
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'outdated', consentVersion: 'wa-consent-2026-10-17' });
   });
 
-  it('refuses an unknown version even if a caller skipped the check', async () => {
-    await expect(records().records.recordConsent({ number: NUMBER, version: 'v0', companyId: null, userId: null, source: 'account' })).rejects.toThrow(/Unknown/);
+  it('a number nobody consented for has no consent — a verified contact is not a consent', async () => {
+    expect(await records().records.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'none' });
   });
 
-  it('a withdrawal ends the consent; an optional opt-out never relaxes a withdrawal', async () => {
+  it('STOP withdraws, recorded by nobody’s account; START grants nothing', async () => {
+    const { db, records: r } = records();
+    await grant(r);
+    const hash = recipientHash(NUMBER, KEY);
+    await r.applyInbound(hash, '+222***39', new Date('2026-10-17T10:00:00Z'), 'stop');
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'withdrawn', optOutScope: 'all' });
+    expect(db.whatsAppConsent.rows.at(-1)).toMatchObject({ event: 'withdrawn', source: 'inbound_keyword', actorUserId: null, actorCompanyId: null });
+    await r.applyInbound(hash, '+222***39', new Date('2026-10-17T10:05:00Z'), 'start');
+    expect(await r.contactState(NUMBER)).toMatchObject({ consented: false, consent: 'withdrawn' });
+  });
+
+  it('lists a person’s own events and keyword withdrawals, never another business’s', async () => {
     const { records: r } = records();
-    await r.recordConsent({ number: NUMBER, version: WHATSAPP_CONSENT_VERSION, companyId: COMPANY, userId: USER, source: 'account' });
-    expect(await r.optOut({ number: NUMBER, scope: 'all', companyId: COMPANY, userId: USER })).toBe('all');
-    expect((await r.contactState(NUMBER)).consented).toBe(false);
-    expect(await r.optOut({ number: NUMBER, scope: 'optional', companyId: COMPANY, userId: USER })).toBe('all');
+    await grant(r, { userId: Buffer.alloc(16, 9), companyId: Buffer.alloc(16, 8) });
+    await grant(r);
+    await r.applyInbound(recipientHash(NUMBER, KEY), '+222***39', new Date(), 'stop');
+    const mine = await r.consentHistory(NUMBER, USER);
+    expect(mine.map((h) => [h.event, h.source])).toEqual([
+      ['withdrawn', 'inbound_keyword'],
+      ['granted', 'mobile_registration'],
+    ]);
+    expect(await r.consentHistory(NUMBER, Buffer.alloc(16, 7))).toEqual([expect.objectContaining({ source: 'inbound_keyword' })]);
   });
 
   it('an inbound message only moves the window forward', async () => {

@@ -2,103 +2,118 @@ import { BadRequestException } from '@nestjs/common';
 import type { MessageLanguage } from './whatsapp-channel';
 
 /**
- * WhatsApp consent: the copy a person agrees to, its version and purposes, the opt-out keywords, and what stops
- * working when the mandatory channel is withdrawn (D181 §3, §5; docs/98).
+ * WhatsApp consent: the copy a person agrees to, its version and purpose, and the rule every sender applies (the
+ * owner's brief of 2026-10-19, D213; refines D181 §5; docs/98).
+ *
+ * One consent, for **operational** Dukan ERP messages on WhatsApp — verification and security codes, account setup,
+ * trial and subscription status, expiry reminders and important service notices. Never marketing: there is no
+ * marketing purpose, copy or template, and none may be added under this consent.
  *
  * The copy is served by the API so the screen that shows it and the record that stores the agreement can never
- * disagree: a client sends back the `version` it displayed, and a stale version is refused. Changing a word here
- * means a new version — never an edit under the same one.
+ * disagree: a client sends back the `version` it displayed, and any other version is refused. Changing a word here
+ * means a new version — never an edit under the same one — and a consent given to an earlier version no longer counts.
  */
 
-export const WHATSAPP_CONSENT_VERSION = 'wa-consent-2026-10-17';
+export const WHATSAPP_CONSENT_VERSION = 'wa-operational-2026-10-19';
 
-/**
- * The purposes the copy names. The first five make WhatsApp the account's mandatory verified contact; only
- * `operational_notices` can be stopped while the account keeps working.
- */
-export const MANDATORY_PURPOSES = [
-  'authentication',
-  'account_recovery',
-  'employee_invitations',
-  'security_alerts',
-  'account_deletion',
-] as const;
-export const OPTIONAL_PURPOSES = ['operational_notices'] as const;
-export const CONSENT_PURPOSES: readonly string[] = [...MANDATORY_PURPOSES, ...OPTIONAL_PURPOSES];
+/** The one purpose the copy names. */
+export const CONSENT_PURPOSE = 'operational_whatsapp';
+export const CONSENT_PURPOSES: readonly string[] = [CONSENT_PURPOSE];
+
+/** The languages the copy is shown in — what a record's `locale` may hold. */
+export const CONSENT_LOCALES = ['en', 'fr', 'ar'] as const;
+export type ConsentLocale = (typeof CONSENT_LOCALES)[number];
+
+/** Where an agreement or a withdrawal was made (`whatsapp_consents.source`). */
+export type ConsentSource =
+  | 'mobile_registration'
+  | 'website_registration'
+  | 'account_settings'
+  | 'website'
+  | 'number_changed'
+  | 'inbound_keyword';
 
 export interface ConsentCopy {
   version: string;
   language: MessageLanguage;
+  /** A heading for the consent. */
   title: string;
+  /** Why it is asked: WhatsApp is the required operational contact of an account. */
   body: string;
+  /** The statement the person ticks: exactly what they agree to. */
   agreement: string;
   purposes: readonly string[];
 }
 
 const COPY: Record<MessageLanguage, Omit<ConsentCopy, 'version' | 'language' | 'purposes'>> = {
   en: {
-    title: 'WhatsApp is your account contact',
+    title: 'Operational messages on WhatsApp',
     body:
-      'Dukan ERP uses your WhatsApp number as the verified contact of your account. TSX-MR sends you WhatsApp ' +
-      'messages to: sign in and verify your number; recover your account; verify the employees you invite; send ' +
-      'security alerts; and confirm an account deletion. These messages are required for your account to work. ' +
-      'With your agreement we also send operational notices, such as closing notices; you can stop them at any time ' +
-      'by replying STOP, without affecting your account. We never send marketing messages.',
-    agreement: 'I agree that TSX-MR contacts me on WhatsApp for these purposes.',
+      'WhatsApp is the required contact for a Dukan ERP account: we verify your number with a code and send your ' +
+      'account’s operational messages there. You can withdraw this agreement at any time in Communication preferences.',
+    agreement:
+      'I agree to receive operational Dukan ERP messages on WhatsApp, including verification and security codes, ' +
+      'account setup information, trial and subscription status, expiry reminders and important service notices. ' +
+      'Message frequency depends on account activity. This is not consent to marketing messages.',
   },
   fr: {
-    title: 'WhatsApp est le contact de votre compte',
+    title: 'Messages opérationnels sur WhatsApp',
     body:
-      'Dukan ERP utilise votre numéro WhatsApp comme contact vérifié de votre compte. TSX-MR vous envoie des ' +
-      'messages WhatsApp pour : vous connecter et vérifier votre numéro ; récupérer votre compte ; vérifier les ' +
-      'employés que vous invitez ; vous envoyer des alertes de sécurité ; et confirmer une suppression de compte. Ces ' +
-      'messages sont nécessaires au fonctionnement de votre compte. Avec votre accord, nous envoyons aussi des avis ' +
-      'opérationnels, comme les avis de clôture ; vous pouvez les arrêter à tout moment en répondant STOP, sans ' +
-      'conséquence pour votre compte. Nous n’envoyons jamais de messages publicitaires.',
-    agreement: 'J’accepte que TSX-MR me contacte sur WhatsApp à ces fins.',
+      'WhatsApp est le contact obligatoire d’un compte Dukan ERP : nous vérifions votre numéro par un code et y ' +
+      'envoyons les messages opérationnels de votre compte. Vous pouvez retirer cet accord à tout moment dans ' +
+      'Préférences de communication.',
+    agreement:
+      'J’accepte de recevoir sur WhatsApp les messages opérationnels de Dukan ERP, notamment les codes de vérification ' +
+      'et de sécurité, les informations de configuration du compte, l’état de l’essai et de l’abonnement, les rappels ' +
+      'd’expiration et les avis de service importants. La fréquence des messages dépend de l’activité du compte. Il ne ' +
+      's’agit pas d’un consentement aux messages marketing.',
   },
   ar: {
-    title: 'واتساب هو جهة الاتصال لحسابك',
+    title: 'الرسائل التشغيلية عبر واتساب',
     body:
-      'يستخدم Dukan ERP رقم واتساب الخاص بك كجهة اتصال موثّقة لحسابك. ترسل لك TSX-MR رسائل واتساب من أجل: ' +
-      'تسجيل الدخول والتحقق من رقمك؛ واستعادة حسابك؛ والتحقق من الموظفين الذين تدعوهم؛ وإرسال تنبيهات الأمان؛ ' +
-      'وتأكيد حذف الحساب. هذه الرسائل ضرورية لعمل حسابك. وبموافقتك نرسل أيضًا إشعارات تشغيلية، مثل إشعارات ' +
-      'الإغلاق، ويمكنك إيقافها في أي وقت بالرد بكلمة STOP أو «توقف» دون أن يتأثر حسابك. لا نرسل أبدًا رسائل تسويقية.',
-    agreement: 'أوافق على أن تتواصل معي TSX-MR عبر واتساب لهذه الأغراض.',
+      'واتساب هو جهة الاتصال المطلوبة لحساب Dukan ERP: نتحقق من رقمك برمز ونرسل إليه الرسائل التشغيلية الخاصة ' +
+      'بحسابك. يمكنك سحب هذه الموافقة في أي وقت من «تفضيلات التواصل».',
+    agreement:
+      'أوافق على تلقي رسائل Dukan ERP التشغيلية عبر واتساب، بما في ذلك رموز التحقق والأمان، ومعلومات إعداد الحساب، ' +
+      'وحالة الفترة التجريبية والاشتراك، وتذكيرات انتهاء الصلاحية، وإشعارات الخدمة المهمة. يعتمد عدد الرسائل على ' +
+      'نشاط الحساب. وهذه ليست موافقة على تلقي رسائل تسويقية.',
   },
 };
 
-/**
- * Whether a number given for WhatsApp must come with a consent (D181 §5): whenever the Cloud API would really send to
- * it in live mode. In test mode only the operator's allowlisted numbers are reached, and with no real channel
- * nothing is; a consent sent anyway is still checked and recorded.
- */
-export function consentRequired(whatsappChannel: string, mode: string): boolean {
-  const channel = whatsappChannel.trim().toLowerCase();
-  return (channel === 'cloud' || channel === 'cloud-api') && mode === 'live';
+/** Whether a recorded version is the one in force: a consent to an earlier copy does not count. */
+export function isCurrentConsentVersion(version: string | null | undefined): boolean {
+  return version === WHATSAPP_CONSENT_VERSION;
 }
 
 /**
- * The consent version a client sent, checked before anything is saved: a stale version is refused (the person saw
- * other words), and a missing one is refused when consent is required. Returns the version to record, or null.
+ * The consent version a client sent, checked before anything is saved: a missing version is refused (nothing may be
+ * inferred from a number being typed or verified), and so is any version but the current one (the person saw other
+ * words). Returns the version to record.
  */
-export function acceptedConsentVersion(given: string | undefined | null, required: boolean): string | null {
+export function acceptedConsentVersion(given: string | undefined | null): string {
   const version = given?.trim() || null;
-  if (version && version !== WHATSAPP_CONSENT_VERSION) {
+  if (!version) {
+    throw new BadRequestException({
+      code: 'whatsapp_consent_required',
+      message: 'Agree to receive operational Dukan ERP messages on WhatsApp to continue. Nothing was saved.',
+      currentVersion: WHATSAPP_CONSENT_VERSION,
+    });
+  }
+  if (!isCurrentConsentVersion(version)) {
     throw new BadRequestException({
       code: 'whatsapp_consent_outdated',
       message: 'The WhatsApp consent shown is not the current one. Show the current text and ask again.',
       currentVersion: WHATSAPP_CONSENT_VERSION,
     });
   }
-  if (!version && required) {
-    throw new BadRequestException({
-      code: 'whatsapp_consent_required',
-      message: 'A WhatsApp number needs the person’s agreement to the WhatsApp consent. Nothing was saved.',
-      currentVersion: WHATSAPP_CONSENT_VERSION,
-    });
-  }
   return version;
+}
+
+/** The locale the copy was shown in, as recorded: one of the copy's languages, else the request's language. */
+export function consentLocaleOf(given: string | undefined | null, fallback: string): ConsentLocale {
+  const pick = (v: string | undefined | null): ConsentLocale | null =>
+    (CONSENT_LOCALES as readonly string[]).includes(v ?? '') ? (v as ConsentLocale) : null;
+  return pick(given) ?? pick(fallback) ?? 'en';
 }
 
 export function consentCopy(language: MessageLanguage): ConsentCopy {
@@ -107,41 +122,12 @@ export function consentCopy(language: MessageLanguage): ConsentCopy {
 }
 
 /**
- * What a person can no longer do once they withdraw WhatsApp as their account contact. Said plainly instead of
- * pretending these keep working without a verified channel (D181 §5).
- */
-export const UNAVAILABLE_WITHOUT_WHATSAPP = [
-  'sign_in_verification',
-  'account_recovery',
-  'employee_invitation_verification',
-  'security_verification',
-  'account_deletion',
-] as const;
-
-const WITHDRAWN_EXPLANATION: Record<MessageLanguage, string> = {
-  en:
-    'You withdrew WhatsApp as your account contact. Until you agree again, these are unavailable: sign-in steps that ' +
-    'need a code, account recovery, verifying the employees you invite, security verification, and deleting your ' +
-    'account (its code goes by WhatsApp only). Your business data is not affected.',
-  fr:
-    'Vous avez retiré WhatsApp comme contact de votre compte. Tant que vous ne l’acceptez pas à nouveau, ceci est ' +
-    'indisponible : les étapes de connexion qui demandent un code, la récupération du compte, la vérification des ' +
-    'employés que vous invitez, la vérification de sécurité et la suppression de votre compte (son code passe ' +
-    'uniquement par WhatsApp). Les données de votre commerce ne sont pas touchées.',
-  ar:
-    'لقد سحبت واتساب كجهة اتصال لحسابك. وإلى أن توافق من جديد، لا يتاح ما يلي: خطوات تسجيل الدخول التي تتطلب ' +
-    'رمزًا، واستعادة الحساب، والتحقق من الموظفين الذين تدعوهم، والتحقق الأمني، وحذف حسابك (يُرسل رمزه عبر ' +
-    'واتساب فقط). لا تتأثر بيانات متجرك.',
-};
-
-export function withdrawnExplanation(language: MessageLanguage): string {
-  return WITHDRAWN_EXPLANATION[language] ?? WITHDRAWN_EXPLANATION.en;
-}
-
-/**
  * The opt-out keywords, EN/FR/AR (D181 §3). A message opts out only when its WHOLE text is one of these, after
  * case, accents, Arabic letter variants and punctuation are folded away — "please don't stop" opts nobody out. The
  * text is examined here, in memory, and dropped: only the resulting signal is kept.
+ *
+ * STOP withdraws the operational consent, exactly as the app's withdrawal does (D213). START is recognised but grants
+ * nothing: a consent is given only with the copy in front of the person, so it returns through the app.
  */
 export const STOP_KEYWORDS: readonly string[] = [
   // en

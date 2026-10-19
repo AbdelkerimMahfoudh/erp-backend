@@ -14,9 +14,9 @@ import type { ContactState, WhatsAppRecords } from './whatsapp-records';
  *    application's data says; `live` may reach real customers;
  *  - `WHATSAPP_LIVE_SENDS` — in live mode, nothing is sent until it is `enabled`.
  *
- * Then the person's own choices: a withdrawn channel stops everything, an opt-out stops optional notices, and in
- * live mode an optional notice needs a recorded consent. Every decision is recorded (`whatsapp_messages`), with the
- * number as a keyed hash and a masked form — never the variables, which can be a code or a token.
+ * Then the person's own choices ({@link consentRefusal}, D213): a message needs the operational consent in force, in
+ * every mode, and a withdrawal stops everything. Every decision is recorded (`whatsapp_messages`), with the number as
+ * a keyed hash and a masked form — never the variables, which can be a code or a token.
  *
  * A refusal is a failed delivery with the boundary's reasons, so every caller already written for a missing
  * channel refuses honestly. Nothing ever falls back to another channel or to a log.
@@ -57,12 +57,44 @@ export interface Refusal {
   detail: string;
 }
 
+/**
+ * The person's side of the decision, pure and shared by every WhatsApp sender (D213; the routing order of docs/98 §12):
+ * after a verified recipient, the consent in force, then the opt-out and undeliverable state. The provider's
+ * readiness, the switches and the pacing come after it, in {@link policyRefusal} and the senders themselves.
+ *
+ *  - A withdrawn consent (the app's withdrawal or a STOP) stops every message, codes included.
+ *  - A proactive message (`optional`: portal instructions, subscription reminders and notices, closing notices) needs
+ *    the consent to the copy in force, no opt-out, and a number not known to be undeliverable.
+ *  - A code the person asked for (`essential`) needs the consent in force too — except the code that verifies a number
+ *    not yet verified (`verifiesContact`), which is how a number is proved and never creates a consent.
+ *  - The operator's delivery check is decided by the test-mode controls alone.
+ */
+export function consentRefusal(
+  use: TemplateUse,
+  contact: Pick<ContactState, 'optOutScope' | 'consented' | 'consent' | 'undeliverableAt'>,
+  verifiesContact = false,
+): Refusal | null {
+  if (use === 'operator') return null;
+  if (contact.consent === 'withdrawn' || contact.optOutScope === 'all') {
+    return { reason: 'rejected', detail: 'The recipient withdrew operational WhatsApp consent' };
+  }
+  if (use === 'optional') {
+    if (contact.optOutScope === 'optional') return { reason: 'rejected', detail: 'The recipient opted out of WhatsApp notices' };
+    if (!contact.consented) return { reason: 'rejected', detail: 'No current operational WhatsApp consent' };
+    if (contact.undeliverableAt) return { reason: 'rejected', detail: 'The number cannot receive WhatsApp messages' };
+    return null;
+  }
+  if (!contact.consented && !verifiesContact) return { reason: 'rejected', detail: 'No current operational WhatsApp consent' };
+  return null;
+}
+
 /** The whole decision, pure: the controls, the template's use, the destination and what is known about it. */
 export function policyRefusal(
   controls: Pick<WhatsAppSendControls, 'mode' | 'testRecipients' | 'liveSends'>,
   use: TemplateUse,
   to: E164,
-  contact: Pick<ContactState, 'optOutScope' | 'consented'>,
+  contact: Pick<ContactState, 'optOutScope' | 'consented' | 'consent' | 'undeliverableAt'>,
+  verifiesContact = false,
 ): Refusal | null {
   if (controls.mode === 'test') {
     if (!controls.testRecipients.has(to)) {
@@ -72,16 +104,7 @@ export function policyRefusal(
     if (use === 'operator') return { reason: 'rejected', detail: 'The delivery check is sent in test mode only' };
     if (!controls.liveSends) return { reason: 'channel_unavailable', detail: 'Live sends are disabled (WHATSAPP_LIVE_SENDS)' };
   }
-  if (contact.optOutScope === 'all') {
-    return { reason: 'rejected', detail: 'The recipient withdrew WhatsApp as their account contact' };
-  }
-  if (use === 'optional' && contact.optOutScope === 'optional') {
-    return { reason: 'rejected', detail: 'The recipient opted out of optional notifications' };
-  }
-  if (use === 'optional' && controls.mode === 'live' && !contact.consented) {
-    return { reason: 'rejected', detail: 'No recorded WhatsApp consent for optional notifications' };
-  }
-  return null;
+  return consentRefusal(use, contact, verifiesContact);
 }
 
 /**
@@ -172,7 +195,7 @@ export class GovernedWhatsAppChannel implements WhatsAppChannel {
       return this.failed('temporary', 'Message records are unavailable');
     }
 
-    const refusal = policyRefusal(this.controls, template.use, message.to, contact);
+    const refusal = policyRefusal(this.controls, template.use, message.to, contact, message.verifiesContact === true);
     if (refusal) {
       await this.record(message, template, { status: 'failed', ...refusal, provider: this.name }, true);
       return this.failed(refusal.reason, refusal.detail);
@@ -219,5 +242,47 @@ export class GovernedWhatsAppChannel implements WhatsAppChannel {
 
   private failed(reason: DeliveryFailureReason, detail: string): DeliveryResult {
     return { status: 'failed', reason, detail, provider: this.name };
+  }
+}
+
+/**
+ * The consent rule around a channel that has no provider controls — the development log (D213). Without it a
+ * development server would show messages a real one refuses, and a test of the rule would pass for the wrong
+ * reason. It records nothing: there is no provider message to record.
+ */
+export class ConsentGatedWhatsAppChannel implements WhatsAppChannel {
+  constructor(
+    private readonly inner: WhatsAppChannel,
+    private readonly records: WhatsAppRecords,
+  ) {}
+
+  get name(): string {
+    return this.inner.name;
+  }
+
+  get isEnabled(): boolean {
+    return this.inner.isEnabled;
+  }
+
+  accepts(to: E164): boolean {
+    return this.inner.accepts ? this.inner.accepts(to) : this.inner.isEnabled;
+  }
+
+  async send(message: WhatsAppMessage): Promise<DeliveryResult> {
+    let template: TemplateDefinition;
+    try {
+      template = getTemplate(message.template);
+    } catch {
+      return { status: 'failed', reason: 'rejected', detail: 'Unknown template', provider: this.name };
+    }
+    let contact: ContactState;
+    try {
+      contact = await this.records.contactState(message.to);
+    } catch {
+      return { status: 'failed', reason: 'temporary', detail: 'Message records are unavailable', provider: this.name };
+    }
+    const refusal = consentRefusal(template.use, contact, message.verifiesContact === true);
+    if (refusal) return { status: 'failed', reason: refusal.reason, detail: refusal.detail, provider: this.name };
+    return this.inner.send(message);
   }
 }

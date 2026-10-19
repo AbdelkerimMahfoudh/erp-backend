@@ -5,6 +5,7 @@ import { MAX_ATTEMPTS, UNKNOWN_MESSAGE_GRACE_MS, WhatsAppWebhookWorker } from '.
 import { WhatsAppRecords } from './whatsapp-records';
 import { recipientHash } from './recipient-hash';
 import { fakeMessagingPrisma, type FakeMessagingPrisma } from './__testing__/fake-messaging-prisma';
+import { WHATSAPP_CONSENT_VERSION } from './whatsapp-consent';
 
 /**
  * The provider's webhook (docs/64 §3; asynchronous since 0098, D181 §8).
@@ -393,32 +394,29 @@ describe('the worker', () => {
     expect(h.db.whatsAppWebhookEvent.rows[0].state).toBe('done');
   });
 
-  it('applies STOP and START from inbound text, keeps the window, and minimises the item once processed', async () => {
+  it('a STOP withdraws the operational consent (D213), keeps the window, and the item is minimised once processed', async () => {
     const h = harness({ verifyToken: 'v', appSecret: SECRET });
     jest.spyOn(h.worker, 'processNow').mockResolvedValue(undefined);
+    await h.records.recordConsent({ number: '+22236963839', version: WHATSAPP_CONSENT_VERSION, locale: 'en', companyId: Buffer.alloc(16, 1), userId: Buffer.alloc(16, 2), source: 'mobile_registration' });
     const now = Math.floor(Date.now() / 1000);
     await deliver(h, inboundBody({ id: 'wamid.in1', from: '22236963839', timestamp: String(now), type: 'text', text: { body: 'STOP' } }));
     await h.worker.sweep();
-    let state = await h.records.contactState('+22236963839');
-    expect(state.optOutScope).toBe('optional');
+    const state = await h.records.contactState('+22236963839');
+    expect(state).toMatchObject({ optOutScope: 'all', consented: false, consent: 'withdrawn' });
     expect(state.lastInboundAt?.getTime()).toBe(now * 1000);
+    expect(h.db.whatsAppConsent.rows.at(-1)).toMatchObject({ event: 'withdrawn', source: 'inbound_keyword', actorUserId: null });
     const event = h.db.whatsAppWebhookEvent.rows[0];
     expect(event).toMatchObject({ state: 'done', senderHash: null, senderMasked: null, optOutSignal: null });
     expect(event.dedupeKey).toBe('m:wamid.in1');
-
-    await deliver(h, inboundBody({ id: 'wamid.in2', from: '22236963839', timestamp: String(now + 5), type: 'text', text: { body: 'ابدأ' } }));
-    await h.worker.sweep();
-    state = await h.records.contactState('+22236963839');
-    expect(state.optOutScope).toBe('none');
   });
 
-  it('a keyword never lifts a withdrawal of the account channel: that takes a new consent', async () => {
+  it('a keyword never grants a consent: START after a withdrawal leaves it withdrawn — that takes the app, with the copy shown', async () => {
     const h = harness({ verifyToken: 'v', appSecret: SECRET });
     jest.spyOn(h.worker, 'processNow').mockResolvedValue(undefined);
-    await h.records.optOut({ number: '+22236963839', scope: 'all', companyId: Buffer.alloc(16, 1), userId: Buffer.alloc(16, 2) });
-    await deliver(h, inboundBody({ id: 'wamid.in3', from: '22236963839', text: { body: 'START' } }));
+    await h.records.withdrawConsent({ number: '+22236963839', companyId: Buffer.alloc(16, 1), userId: Buffer.alloc(16, 2), source: 'account_settings' });
+    await deliver(h, inboundBody({ id: 'wamid.in3', from: '22236963839', text: { body: 'ابدأ' } }));
     await h.worker.sweep();
-    expect((await h.records.contactState('+22236963839')).optOutScope).toBe('all');
+    expect(await h.records.contactState('+22236963839')).toMatchObject({ optOutScope: 'all', consented: false, consent: 'withdrawn' });
   });
 
   it('deletes processed items and message metadata after their retention periods', async () => {

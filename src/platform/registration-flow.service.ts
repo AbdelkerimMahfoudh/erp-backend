@@ -1,9 +1,8 @@
 import { BadRequestException, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
 import type { ContactChannel } from '@prisma/client';
-import { AppConfigService } from '../common/config/app-config.service';
 import { normalisePhone } from '../auth/identifier';
 import { WhatsAppRecords } from '../messaging/whatsapp-records';
-import { acceptedConsentVersion, consentRequired } from '../messaging/whatsapp-consent';
+import { acceptedConsentVersion, consentLocaleOf, type ConsentSource } from '../messaging/whatsapp-consent';
 import { RegistrationService } from './registration.service';
 import { RegistrationContinuationService, CONTINUATION_TTL_SECONDS } from './registration-continuation.service';
 import { ContactDeliveryProvider } from './contact-delivery';
@@ -24,12 +23,14 @@ export class RegistrationFlowService {
     private readonly registration: RegistrationService,
     private readonly continuation: RegistrationContinuationService,
     private readonly delivery: ContactDeliveryProvider,
-    @Optional() private readonly config?: AppConfigService,
     @Optional() private readonly whatsappRecords?: WhatsAppRecords,
   ) {}
 
-  /** Create the business, its Owner and its pending subscription, and hand back the continuation that finishes it. */
-  async register(dto: RegisterDto) {
+  /**
+   * Create the business, its Owner and its pending subscription, and hand back the continuation that finishes it.
+   * `door` is the controller's, never the request's: where the WhatsApp consent was given, and the address it came from.
+   */
+  async register(dto: RegisterDto, door: { source: Extract<ConsentSource, 'mobile_registration' | 'website_registration'>; ip?: string | null }) {
     /*
      * Before anything is created (2026-10-05). A registration can only finish
      * by proving the contact, so a server that cannot send that code must
@@ -49,14 +50,18 @@ export class RegistrationFlowService {
       throw new BadRequestException('Give your WhatsApp number — it is how your account is verified and how Dukan ERP reaches you.');
     }
     /*
-     * The WhatsApp consent (D181 §5), checked before anything is saved: a stale copy is refused, and while WhatsApp
-     * runs live a number without the person's agreement is refused too — the number is the account's mandatory
-     * verified contact, and the consent says so.
+     * The operational WhatsApp consent (D213), checked before anything is saved, in every mode: no registration
+     * finishes without the person's explicit agreement to the copy in force — never inferred from the number being
+     * typed or, later, verified. A missing or earlier version is refused with nothing saved.
      */
-    const consentVersion = acceptedConsentVersion(
-      dto.whatsappConsentVersion,
-      this.config ? consentRequired(this.config.whatsappChannel, this.config.whatsappMode) : false,
-    );
+    const consentVersion = acceptedConsentVersion(dto.whatsappConsentVersion);
+    const consentLocale = consentLocaleOf(dto.whatsappConsentLocale, dto.language);
+    if (!this.whatsappRecords) {
+      throw new ServiceUnavailableException({
+        code: 'registration_unavailable',
+        message: 'Registration cannot be completed right now: the WhatsApp consent cannot be recorded. Nothing was saved.',
+      });
+    }
     if (!this.delivery.canDeliver('phone', phone)) {
       const unavailableContacts: ContactChannel[] = ['phone'];
       throw new ServiceUnavailableException({
@@ -95,15 +100,17 @@ export class RegistrationFlowService {
      * otherwise a public idempotency key would be a way to mint one.
      */
     const owner = await this.registration.pendingOwnerFor(result.companyId);
-    // The agreement is recorded against the Owner it belongs to, with an audit event (a retry records it again, as
-    // the same person agreeing again).
-    if (owner && phone && consentVersion && this.whatsappRecords) {
+    // The agreement is recorded against the Owner it belongs to, with the language it was shown in and an audit event,
+    // before the code is sent. A retry of the same registration writes nothing new: it is the same agreement.
+    if (owner) {
       await this.whatsappRecords.recordConsent({
         number: phone,
         version: consentVersion,
+        locale: consentLocale,
         companyId: owner.companyId,
         userId: owner.userId,
-        source: 'owner_registration',
+        source: door.source,
+        ip: door.ip ?? null,
       });
     }
     const continuation = owner

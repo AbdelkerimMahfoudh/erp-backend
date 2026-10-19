@@ -33,10 +33,13 @@ export class RegisterDto {
   @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
 
   /**
-   * The version of the WhatsApp consent copy the person agreed to (`GET messaging/whatsapp/consent`; D181 §5), when
-   * a WhatsApp number is given. Required while WhatsApp runs live; a stale version is always refused.
+   * The version of the operational WhatsApp consent the person ticked (`GET messaging/whatsapp/consent`; D213).
+   * Required: the server refuses a missing or earlier version with `whatsapp_consent_required` /
+   * `whatsapp_consent_outdated`, and nothing is saved. Optional here only so that refusal carries its stable code.
    */
   @IsOptional() @IsString() @MaxLength(40) whatsappConsentVersion?: string;
+  /** The language the consent was shown in; the registration's `language` when not said. */
+  @IsOptional() @IsIn(['en', 'ar', 'fr']) whatsappConsentLocale?: 'en' | 'ar' | 'fr';
 }
 
 export class ContinueStartDto {

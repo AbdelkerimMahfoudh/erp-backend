@@ -14,7 +14,7 @@ import {
   StartDeletionDto,
   StartPhoneVerificationDto,
   WhatsAppConsentDto,
-  WhatsAppOptOutDto,
+  WithdrawWhatsAppConsentDto,
 } from './account.dto';
 
 /**
@@ -35,6 +35,9 @@ import {
  */
 const ACCOUNT_THROTTLE_LIMIT = Number(process.env.ACCOUNT_THROTTLE_LIMIT) || 5;
 const SENSITIVE_THROTTLE = { default: { limit: ACCOUNT_THROTTLE_LIMIT, ttl: 60_000 } };
+
+/** The language a reply's copy is in: one of the three the app ships, English otherwise. */
+const languageOf = (language?: string): 'en' | 'fr' | 'ar' => (language === 'fr' || language === 'ar' ? language : 'en');
 
 @ApiTags('account')
 @ApiBearerAuth()
@@ -111,34 +114,39 @@ export class AccountController {
   @Post('whatsapp/verify/start')
   @HttpCode(HttpStatus.OK)
   @Throttle(SENSITIVE_THROTTLE)
-  @ApiOperation({ summary: 'Prove a WhatsApp number: my password again, then a code to that number' })
-  startPhone(@CurrentUser() user: AuthUser, @Body() dto: StartPhoneVerificationDto) {
-    return this.account.startPhoneVerification(this.principal(user), dto);
+  @ApiOperation({ summary: 'Prove a WhatsApp number: my password again, my consent for that number, then a code to it' })
+  startPhone(@CurrentUser() user: AuthUser, @Body() dto: StartPhoneVerificationDto, @Req() req: Request) {
+    return this.account.startPhoneVerification(this.principal(user), dto, req.ip ?? null);
   }
 
   @Get('whatsapp/consent')
-  @ApiOperation({ summary: 'My WhatsApp consent: the current copy, what I agreed to, my opt-out, and what a withdrawal stops' })
+  @ApiOperation({ summary: 'My operational WhatsApp consent: the copy in force, where mine stands, and its history' })
   whatsappConsent(@CurrentUser() user: AuthUser, @Query('language') language?: string) {
-    return this.account.whatsappConsent(this.principal(user), language === 'fr' || language === 'ar' ? language : 'en');
+    return this.account.whatsappConsent(this.principal(user), languageOf(language));
   }
 
   @Post('whatsapp/consent')
   @HttpCode(HttpStatus.OK)
   @Throttle(SENSITIVE_THROTTLE)
-  @ApiOperation({ summary: 'Agree to the current WhatsApp consent for my verified number (ends any opt-out)' })
-  grantWhatsappConsent(@CurrentUser() user: AuthUser, @Body() dto: WhatsAppConsentDto, @Query('language') language?: string) {
-    return this.account.grantWhatsappConsent(this.principal(user), dto.version, language === 'fr' || language === 'ar' ? language : 'en');
+  @ApiOperation({ summary: 'Agree to the copy in force for my verified number — a new event; ends a withdrawal' })
+  grantWhatsappConsent(@CurrentUser() user: AuthUser, @Body() dto: WhatsAppConsentDto, @Req() req: Request, @Query('language') language?: string) {
+    return this.account.grantWhatsappConsent(this.principal(user), dto, languageOf(language), req.ip ?? null);
   }
 
-  @Post('whatsapp/opt-out')
+  @Post('whatsapp/consent/withdraw')
   @HttpCode(HttpStatus.OK)
   @Throttle(SENSITIVE_THROTTLE)
   @ApiOperation({
-    summary: 'Stop optional WhatsApp notifications (scope optional), or withdraw WhatsApp as my account contact (scope all)',
-    description: 'A withdrawal answers with the account functions that become unavailable until I agree again.',
+    summary: 'Withdraw my operational WhatsApp consent: automatic reminders, notices and codes to my number stop',
+    description: 'Nothing moves to email. When WhatsApp is my only verified contact, acknowledgeSupportRecovery is required.',
   })
-  optOutWhatsapp(@CurrentUser() user: AuthUser, @Body() dto: WhatsAppOptOutDto) {
-    return this.account.optOutWhatsapp(this.principal(user), dto.scope, dto.language ?? 'en');
+  withdrawWhatsappConsent(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: WithdrawWhatsAppConsentDto,
+    @Req() req: Request,
+    @Query('language') language?: string,
+  ) {
+    return this.account.withdrawWhatsappConsent(this.principal(user), dto, languageOf(language), req.ip ?? null);
   }
 
   @Post('whatsapp/verify/confirm')

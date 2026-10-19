@@ -227,16 +227,25 @@ describe('WhatsApp first; email only for a recorded reason, to a verified addres
     expect(sentEmail(w)).toHaveLength(1);
   });
 
-  it('the Owner’s opt-out, or no consent in live mode: not sent, and never carried another way', async () => {
+  it('the Owner’s withdrawal, an earlier STOP, or no consent in force — in any mode: not sent, and never carried another way', async () => {
     const optedOut = await fallback({}, (w, b) => w.contact(b.phone!, { optOutScope: 'optional' }));
     expect(optedOut.notice).toMatchObject({ state: 'failed', whatsappOutcome: 'refused', failureReason: 'opted_out', fallbackReason: null });
     expect(sentEmail(optedOut.w)).toEqual([]);
-    const noConsent = await fallback({ whatsappMode: 'live' });
-    expect(noConsent.notice).toMatchObject({ state: 'failed', failureReason: 'no_consent' });
-    expect(sentEmail(noConsent.w)).toEqual([]);
-    // With a consent on record, live mode sends.
-    const consented = await fallback({ whatsappMode: 'live' }, (w, b) => w.contact(b.phone!, { consented: true }));
+    const withdrawn = await fallback({}, (w, b) => w.contact(b.phone!, { consented: false, consent: 'withdrawn', optOutScope: 'all' }));
+    expect(withdrawn.notice).toMatchObject({ state: 'failed', failureReason: 'opted_out' });
+    expect(sentEmail(withdrawn.w)).toEqual([]);
+    for (const whatsappMode of ['test', 'live'] as const) {
+      for (const consent of ['none', 'outdated'] as const) {
+        // An account from before D213, or a consent to an earlier copy: never opted in by anything but the person.
+        const noConsent = await fallback({ whatsappMode }, (w, b) => w.contact(b.phone!, { consented: false, consent }));
+        expect(noConsent.notice).toMatchObject({ state: 'failed', failureReason: 'no_consent' });
+        expect(sentEmail(noConsent.w)).toEqual([]);
+      }
+    }
+    // With the consent in force, it goes by WhatsApp only.
+    const consented = await fallback({ whatsappMode: 'live' });
     expect(consented.notice).toMatchObject({ state: 'accepted', channel: 'whatsapp' });
+    expect(sentEmail(consented.w)).toEqual([]);
   });
 
   it('a reason to fall back but no verified email, or no email to send with: failed — honestly, with the destination masked', async () => {

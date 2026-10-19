@@ -6,6 +6,7 @@ import type { EmailChannel, EmailMessage } from '../../messaging/email-channel';
 import { SUBSCRIPTION_TEMPLATES } from '../../messaging/templates';
 import type { DeliveryResult, WhatsAppChannel } from '../../messaging/whatsapp-channel';
 import type { ContactState } from '../../messaging/whatsapp-records';
+import { WHATSAPP_CONSENT_VERSION } from '../../messaging/whatsapp-consent';
 import { NoticeService } from '../../notices/notice.service';
 import { PlatformAuditService } from '../platform-audit.service';
 import { TrialService } from '../trial/trial.service';
@@ -221,11 +222,24 @@ export interface WorldOptions {
   templates?: Record<string, string>;
   /** `<PORTAL_ORIGIN>/subscription`; `''` means no email can carry a message. */
   portalUrl?: string;
-  /** WHATSAPP_MODE: `live` asks for a recorded consent before an optional message. */
+  /** WHATSAPP_MODE. The consent rule is the same in both (D213). */
   whatsappMode?: 'test' | 'live';
 }
 
-const NO_CONTACT: ContactState = { optOutScope: 'none', consented: false, lastInboundAt: null, undeliverableAt: null };
+/**
+ * A number as registration leaves it from D213 on: the Owner ticked the consent to the copy in force. A test of a
+ * number without one — an account from before D213, a withdrawal — says so with `world.contact(...)`.
+ */
+const REGISTERED_CONTACT: ContactState = {
+  optOutScope: 'none',
+  consented: true,
+  consent: 'granted',
+  consentVersion: WHATSAPP_CONSENT_VERSION,
+  consentedAt: NOW,
+  withdrawnAt: null,
+  lastInboundAt: null,
+  undeliverableAt: null,
+};
 
 export function makeTrialWorld(options: WorldOptions = {}) {
   let now = options.now ?? NOW;
@@ -413,7 +427,7 @@ export function makeTrialWorld(options: WorldOptions = {}) {
       return this.templates[configKey] ?? '';
     },
   };
-  const records = { contactState: async (phone: string) => contacts.get(phone) ?? NO_CONTACT };
+  const records = { contactState: async (phone: string) => contacts.get(phone) ?? REGISTERED_CONTACT };
   const hasher = { hash: (value: string) => `hash:${value.trim().toLowerCase()}` };
   const email = options.email ?? new TestEmailChannel();
   const whatsapp = options.whatsapp ?? new TestWhatsAppChannel();
@@ -513,7 +527,7 @@ export function makeTrialWorld(options: WorldOptions = {}) {
     hooks,
     config,
     /** What the WhatsApp records know about a number. */
-    contact: (phone: string, state: Partial<ContactState>) => contacts.set(phone, { ...NO_CONTACT, ...state }),
+    contact: (phone: string, state: Partial<ContactState>) => contacts.set(phone, { ...REGISTERED_CONTACT, ...state }),
     /** The decision recorded at the business's current paid period end, as the sweeper would write it. */
     grace: (b: Business, decision: 'granted' | 'refused', usesBefore = 0) => {
       const sub = t.subscriptions.find((x) => same(x.companyId, b.companyId))!;

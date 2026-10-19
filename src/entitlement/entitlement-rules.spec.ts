@@ -635,10 +635,10 @@ describe('route classification fails closed', () => {
       'POST account/deletion/confirm',
       'POST account/deletion/request',
       'POST account/deletion/resend',
-      // D181 (2026-10-17): the person's own WhatsApp consent and opt-out — a consent record, no business record; a
-      // pending or lapsed shop's people keep the right to stop messages or withdraw the channel.
+      // D181 (2026-10-17), D213 (2026-10-19): the person's own operational WhatsApp consent and its withdrawal — a
+      // consent record, no business record; a pending or lapsed shop's people keep the right to agree or withdraw.
       'POST account/whatsapp/consent',
-      'POST account/whatsapp/opt-out',
+      'POST account/whatsapp/consent/withdraw',
       'POST account/whatsapp/verify/confirm',
       'POST account/whatsapp/verify/start',
       'POST auth/login',

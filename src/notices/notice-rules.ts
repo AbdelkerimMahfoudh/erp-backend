@@ -193,9 +193,9 @@ export type FallbackReason =
 
 /** Why nothing carried it (`subscription_notices.failure_reason`). */
 export type FailureReason =
-  /** The Owner stopped optional WhatsApp messages: never carried another way. */
+  /** The Owner withdrew the operational WhatsApp consent (or sent STOP): never carried another way. */
   | 'opted_out'
-  /** Live mode needs a recorded consent for this message, and there is none: never carried another way. */
+  /** The number has no consent to the copy in force (D213): never carried another way. */
   | 'no_consent'
   /** WhatsApp could not carry it, and the Owner has no verified email address. */
   | 'no_email'
@@ -218,26 +218,27 @@ export interface WhatsAppFacts {
   numberVerified: boolean;
   /** The provider said this number cannot receive messages. */
   undeliverable: boolean;
-  /** The Owner's own choice about optional WhatsApp messages. */
+  /** The Owner's own choice: a withdrawal (`all`), or a STOP recorded before D213 (`optional`). */
   optOut: 'none' | 'optional' | 'all';
-  /** Live mode: an optional message needs a recorded consent. */
-  consentRequired: boolean;
+  /** The number's operational consent is the copy in force (D213), in every mode. */
   consented: boolean;
 }
 
 export type WhatsAppPlan = { action: 'send' } | { action: 'fallback'; reason: FallbackReason } | { action: 'stop'; reason: FailureReason };
 
 /**
- * Before WhatsApp is asked: send, fall back to email with the reason, or stop. What makes WhatsApp unable to carry
- * the message falls back; the Owner's own choice stops it.
+ * Before WhatsApp is asked: send, fall back to email with the reason, or stop — in the routing order of D213: a
+ * verified recipient, the consent in force, the opt-out and undeliverable state, then the template and the channel.
+ * The Owner's own choice, and a missing consent, stop it: email is never a way round them. Only what makes WhatsApp
+ * unable to carry the message falls back.
  */
 export function whatsappPlan(f: WhatsAppFacts): WhatsAppPlan {
   if (!f.numberVerified) return { action: 'fallback', reason: 'number_unverified' };
-  if (!f.channelOpen) return { action: 'fallback', reason: 'whatsapp_disabled' };
-  if (!f.templateApproved) return { action: 'fallback', reason: 'template_unavailable' };
-  if (f.undeliverable) return { action: 'fallback', reason: 'number_undeliverable' };
   if (f.optOut !== 'none') return { action: 'stop', reason: 'opted_out' };
-  if (f.consentRequired && !f.consented) return { action: 'stop', reason: 'no_consent' };
+  if (!f.consented) return { action: 'stop', reason: 'no_consent' };
+  if (f.undeliverable) return { action: 'fallback', reason: 'number_undeliverable' };
+  if (!f.templateApproved) return { action: 'fallback', reason: 'template_unavailable' };
+  if (!f.channelOpen) return { action: 'fallback', reason: 'whatsapp_disabled' };
   return { action: 'send' };
 }
 

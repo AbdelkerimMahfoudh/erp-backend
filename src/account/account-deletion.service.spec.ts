@@ -8,6 +8,9 @@ import { AccountService } from './account.service';
 import { FakePrisma } from './testing/fake-prisma';
 import { DELETED_USER_NAME, UNUSABLE_PASSWORD_HASH } from './deletion-rules';
 import { HangingWhatsAppChannel, makeTrialWorld } from '../platform/__testing__/trial-world';
+import { WhatsAppRecords } from '../messaging/whatsapp-records';
+import { WHATSAPP_CONSENT_VERSION } from '../messaging/whatsapp-consent';
+import { fakeMessagingPrisma } from '../messaging/__testing__/fake-messaging-prisma';
 
 /**
  * Account deletion, end to end against an in-memory database (docs/64).
@@ -82,7 +85,8 @@ function harness(opts: { pepper?: string | null; withOtherOwner?: boolean; whats
   const service = new AccountDeletionService(prisma as never, hashing as never, otp, sender, opts.storage as never);
   /** The free trial's setup instructions (0095): told after a number is verified, and nothing else. */
   const trialSetup = { onContactsVerified: jest.fn(async () => undefined) };
-  const account = new AccountService(prisma as never, hashing as never, otp, service, trialSetup as never);
+  const records = new WhatsAppRecords(fakeMessagingPrisma() as never, { hash: (n: string) => `h:${n}` } as never);
+  const account = new AccountService(prisma as never, hashing as never, otp, service, trialSetup as never, records);
 
   prisma.seed('company', { id: C1, name: 'Boutique Un', isActive: true, closedAt: null, publicPhone: '+22200000001', logoRef: 'logo', isDiscoverable: true });
   prisma.seed('company', { id: C2, name: 'Boutique Deux', isActive: true, closedAt: null, publicPhone: null, logoRef: null, isDiscoverable: false });
@@ -222,7 +226,7 @@ describe('asking to delete', () => {
     it('refuses to verify a WhatsApp number without writing a challenge, and blames no number', async () => {
       const h = harness({ whatsappOff: true });
       await expect(
-        h.account.startPhoneVerification(h.principal(NO_PHONE), { password: 'fatou-pw', phone: '+22231234569' }),
+        h.account.startPhoneVerification(h.principal(NO_PHONE), { password: 'fatou-pw', phone: '+22231234569', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION }),
       ).rejects.toSatisfy((e: unknown) => statusOf(e) === 503 && codeOf(e).code === 'verification_unavailable');
       expect(h.prisma.rows('otpChallenge')).toHaveLength(0);
     });
@@ -435,7 +439,7 @@ describe('the code', () => {
 describe('a WhatsApp number verified in the app (0095)', () => {
   it('is handed to the free trial’s setup instructions once it is saved — and a wrong code hands over nothing', async () => {
     const h = harness();
-    const started = await h.account.startPhoneVerification(h.principal(NO_PHONE), { password: 'fatou-pw', phone: '+22231234569' });
+    const started = await h.account.startPhoneVerification(h.principal(NO_PHONE), { password: 'fatou-pw', phone: '+22231234569', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION });
     const code = h.channel.last!.variables.code;
     const wrong = code === '000000' ? '111111' : '000000';
     await expect(h.account.confirmPhoneVerification(h.principal(NO_PHONE), { challengeId: started.challengeId, code: wrong })).rejects.toSatisfy(
@@ -461,7 +465,11 @@ describe('a WhatsApp number verified in the app (0095)', () => {
     const shop = trial.business({ verified: [] });
     const prisma = {
       otpChallenge: { findUnique: async () => ({ candidatePhone: shop.phone }) },
-      user: { update: async ({ data }: { data: Record<string, unknown> }) => Object.assign(trial.owner(shop), data) },
+      user: {
+        // The number before: none verified yet, so no earlier consent to end.
+        findFirst: async () => ({ phone: null, phoneVerifiedAt: null }),
+        update: async ({ data }: { data: Record<string, unknown> }) => Object.assign(trial.owner(shop), data),
+      },
       authSession: { updateMany: async () => ({ count: 0 }) },
       auditLog: { create: async () => ({}) },
     };

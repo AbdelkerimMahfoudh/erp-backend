@@ -10,15 +10,13 @@ import type { MessageLanguage } from '../messaging/templates';
 import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { TrialSetupService } from '../platform/trial/trial-setup.service';
 import { AccountDeletionService, DeletionPrincipal, DeletionRequestView } from './account-deletion.service';
-import { AppConfigService } from '../common/config/app-config.service';
-import { WhatsAppRecords, type OptOutScope } from '../messaging/whatsapp-records';
+import { WhatsAppRecords, type ConsentState } from '../messaging/whatsapp-records';
 import {
   acceptedConsentVersion,
   consentCopy,
-  consentRequired,
-  UNAVAILABLE_WITHOUT_WHATSAPP,
-  withdrawnExplanation,
+  consentLocaleOf,
   type ConsentCopy,
+  type ConsentLocale,
 } from '../messaging/whatsapp-consent';
 
 /**
@@ -47,16 +45,27 @@ export interface AccountView {
   deletion: DeletionRequestView | null;
 }
 
-/** My WhatsApp consent, as the app shows it (D181 §5). */
+/** My operational WhatsApp consent, as the app shows it (D213). Masked throughout; never the number or its hash. */
 export interface WhatsAppConsentView {
+  /** The copy in force: what a grant agrees to. */
   copy: ConsentCopy;
   /** My verified number, masked; null when I have none. */
   number: string | null;
-  consented: boolean;
-  optOut: OptOutScope;
-  /** What I cannot do while WhatsApp is withdrawn — said plainly, never pretended away. Empty otherwise. */
-  unavailable: readonly string[];
-  explanation: string | null;
+  /**
+   * Where my consent stands: `no_number` (nothing to consent for), `none` (never given — an account from before
+   * D213 is never opted in), `granted` (to the copy in force), `outdated` (to an earlier copy), `withdrawn`.
+   */
+  state: 'no_number' | Exclude<ConsentState, never>;
+  /** The version of my newest grant, whatever came after it. */
+  grantedVersion: string | null;
+  /** UTC ISO: when the consent in force was given. */
+  grantedAt: string | null;
+  /** UTC ISO: when it was withdrawn. */
+  withdrawnAt: string | null;
+  /** WhatsApp is my only verified contact: withdrawing leaves recovery to TSX-MR support. */
+  onlyVerifiedContact: boolean;
+  /** My own consent events for this number, newest first. */
+  history: { event: string; version: string | null; locale: string | null; source: string; at: string }[];
 }
 
 export interface PhoneVerificationStart {
@@ -82,7 +91,6 @@ export class AccountService {
     private readonly otp: OtpService,
     private readonly deletion: AccountDeletionService,
     private readonly trialSetup: TrialSetupService,
-    @Optional() private readonly config?: AppConfigService,
     @Optional() private readonly whatsappRecords?: WhatsAppRecords,
   ) {}
 
@@ -130,7 +138,8 @@ export class AccountService {
    */
   async startPhoneVerification(
     p: DeletionPrincipal,
-    input: { phone: string; password: string; language?: MessageLanguage; whatsappConsentVersion?: string },
+    input: { phone: string; password: string; language?: MessageLanguage; whatsappConsentVersion?: string; whatsappConsentLocale?: string },
+    ip: string | null = null,
   ): Promise<PhoneVerificationStart> {
     const user = await this.prisma.user.findFirst({
       where: { id: p.userId, companyId: p.companyId, deletedAt: null, isActive: true },
@@ -155,23 +164,20 @@ export class AccountService {
     }
     // Before a challenge is written: with no channel it could never go out, and
     // "could not be delivered to that number" would blame a number that is fine.
-    // The WhatsApp consent (D181 §5): a stale copy is refused; while WhatsApp runs live, so is a missing one.
-    const consentVersion = acceptedConsentVersion(
-      input.whatsappConsentVersion,
-      this.config ? consentRequired(this.config.whatsappChannel, this.config.whatsappMode) : false,
-    );
+    // A new number needs its own consent (D213), in every mode: the old number's never carries over.
+    const consentVersion = acceptedConsentVersion(input.whatsappConsentVersion);
     if (!this.otp.canDeliverTo(phone)) {
       throw refuse(HttpStatus.SERVICE_UNAVAILABLE, 'verification_unavailable', 'Codes cannot be sent by this server right now.');
     }
-    if (consentVersion && this.whatsappRecords) {
-      await this.whatsappRecords.recordConsent({
-        number: phone,
-        version: consentVersion,
-        companyId: p.companyId,
-        userId: p.userId,
-        source: 'phone_verification',
-      });
-    }
+    await this.records().recordConsent({
+      number: phone,
+      version: consentVersion,
+      locale: consentLocaleOf(input.whatsappConsentLocale, input.language ?? 'en'),
+      companyId: p.companyId,
+      userId: p.userId,
+      source: 'account_settings',
+      ip,
+    });
 
     const outcome = await this.otp.request({
       companyId: p.companyId,
@@ -204,14 +210,17 @@ export class AccountService {
     };
   }
 
-  // ── WhatsApp consent and opt-out (D181 §5) ─────────────────────────────
+  // ── Operational WhatsApp consent (D213) ──────────────────────────────
 
-  private async verifiedNumber(p: DeletionPrincipal): Promise<string | null> {
+  private async contacts(p: DeletionPrincipal): Promise<{ number: string | null; emailVerified: boolean }> {
     const user = await this.prisma.user.findFirst({
       where: { id: p.userId, companyId: p.companyId, deletedAt: null },
-      select: { phone: true, phoneVerifiedAt: true },
+      select: { phone: true, phoneVerifiedAt: true, email: true, emailVerifiedAt: true },
     });
-    return user?.phone && user.phoneVerifiedAt ? user.phone : null;
+    return {
+      number: user?.phone && user.phoneVerifiedAt ? user.phone : null,
+      emailVerified: Boolean(user?.email && user.emailVerifiedAt),
+    };
   }
 
   private records(): WhatsAppRecords {
@@ -219,41 +228,70 @@ export class AccountService {
     return this.whatsappRecords;
   }
 
-  private async consentView(number: string | null, language: MessageLanguage): Promise<WhatsAppConsentView> {
-    const state = number ? await this.records().contactState(number) : null;
-    const optOut = state?.optOutScope ?? 'none';
+  private async consentView(p: DeletionPrincipal, language: MessageLanguage): Promise<WhatsAppConsentView> {
+    const { number, emailVerified } = await this.contacts(p);
+    const copy = consentCopy(language);
+    if (!number) {
+      return { copy, number: null, state: 'no_number', grantedVersion: null, grantedAt: null, withdrawnAt: null, onlyVerifiedContact: false, history: [] };
+    }
+    const [state, history] = await Promise.all([this.records().contactState(number), this.records().consentHistory(number, p.userId)]);
     return {
-      copy: consentCopy(language),
-      number: number ? maskPhone(number) : null,
-      consented: state?.consented ?? false,
-      optOut,
-      unavailable: optOut === 'all' ? UNAVAILABLE_WITHOUT_WHATSAPP : [],
-      explanation: optOut === 'all' ? withdrawnExplanation(language) : null,
+      copy,
+      number: maskPhone(number),
+      state: state.consent,
+      grantedVersion: state.consentVersion,
+      grantedAt: state.consentedAt?.toISOString() ?? null,
+      withdrawnAt: state.withdrawnAt?.toISOString() ?? null,
+      onlyVerifiedContact: !emailVerified,
+      history: history.map((h) => ({ event: h.event, version: h.version, locale: h.locale, source: h.source, at: h.at.toISOString() })),
     };
   }
 
   async whatsappConsent(p: DeletionPrincipal, language: MessageLanguage = 'en'): Promise<WhatsAppConsentView> {
-    return this.consentView(await this.verifiedNumber(p), language);
-  }
-
-  /** Agree to the current copy for my verified number; it also ends any opt-out. Audited. */
-  async grantWhatsappConsent(p: DeletionPrincipal, version: string, language: MessageLanguage = 'en'): Promise<WhatsAppConsentView> {
-    const accepted = acceptedConsentVersion(version, true) as string;
-    const number = await this.verifiedNumber(p);
-    if (!number) throw refuse(HttpStatus.CONFLICT, 'whatsapp_number_required', 'Verify a WhatsApp number first.');
-    await this.records().recordConsent({ number, version: accepted, companyId: p.companyId, userId: p.userId, source: 'account' });
-    return this.consentView(number, language);
+    return this.consentView(p, language);
   }
 
   /**
-   * Stop optional notifications, or withdraw WhatsApp as my account contact. A withdrawal answers with what becomes
-   * unavailable; nothing pretends the account's security keeps working without a verified channel. Audited.
+   * Agree to the copy in force for my verified number — a new event, never an edit of an earlier one. Ends a
+   * withdrawal. A replay of the same agreement writes nothing. Audited.
    */
-  async optOutWhatsapp(p: DeletionPrincipal, scope: 'optional' | 'all', language: MessageLanguage = 'en'): Promise<WhatsAppConsentView> {
-    const number = await this.verifiedNumber(p);
-    if (!number) throw refuse(HttpStatus.CONFLICT, 'whatsapp_number_required', 'There is no verified WhatsApp number to opt out.');
-    await this.records().optOut({ number, scope, companyId: p.companyId, userId: p.userId });
-    return this.consentView(number, language);
+  async grantWhatsappConsent(
+    p: DeletionPrincipal,
+    input: { version: string; locale?: string },
+    language: MessageLanguage = 'en',
+    ip: string | null = null,
+  ): Promise<WhatsAppConsentView> {
+    const version = acceptedConsentVersion(input.version);
+    const { number } = await this.contacts(p);
+    if (!number) throw refuse(HttpStatus.CONFLICT, 'whatsapp_number_required', 'Verify a WhatsApp number first.');
+    const locale: ConsentLocale = consentLocaleOf(input.locale, language);
+    await this.records().recordConsent({ number, version, locale, companyId: p.companyId, userId: p.userId, source: 'account_settings', ip });
+    return this.consentView(p, language);
+  }
+
+  /**
+   * Withdraw my operational WhatsApp consent: automatic reminders and notices stop, and codes to my number with them.
+   * Nothing moves to email, my number and my account stay. When WhatsApp is my only verified contact the client must
+   * say I understood that recovery then goes through TSX-MR support — the server refuses otherwise. Audited.
+   */
+  async withdrawWhatsappConsent(
+    p: DeletionPrincipal,
+    input: { acknowledgeSupportRecovery?: boolean },
+    language: MessageLanguage = 'en',
+    ip: string | null = null,
+  ): Promise<WhatsAppConsentView> {
+    const { number, emailVerified } = await this.contacts(p);
+    if (!number) throw refuse(HttpStatus.CONFLICT, 'whatsapp_number_required', 'There is no verified WhatsApp number to withdraw consent for.');
+    if (!emailVerified && input.acknowledgeSupportRecovery !== true) {
+      throw refuse(
+        HttpStatus.CONFLICT,
+        'withdrawal_needs_acknowledgement',
+        'WhatsApp is your only verified contact. Confirm that recovering your account will then go through TSX-MR support, or verify an email address first.',
+        { onlyVerifiedContact: true },
+      );
+    }
+    await this.records().withdrawConsent({ number, companyId: p.companyId, userId: p.userId, source: 'account_settings', ip });
+    return this.consentView(p, language);
   }
 
   /** The code came back: the number becomes this person's verified WhatsApp number. */
@@ -289,6 +327,7 @@ export class AccountService {
       throw refuse(HttpStatus.CONFLICT, 'code_not_active', 'That code carries no number to verify.');
     }
 
+    const before = await this.prisma.user.findFirst({ where: { id: p.userId, companyId: p.companyId }, select: { phone: true, phoneVerifiedAt: true } });
     const now = new Date();
     try {
       await this.prisma.user.update({
@@ -300,6 +339,13 @@ export class AccountService {
         throw refuse(HttpStatus.CONFLICT, 'phone_in_use', 'Another person in this business already uses that number.');
       }
       throw e;
+    }
+    // The replaced number's consent ends with it (D213): it must not keep receiving this account's messages, nor carry
+    // over to whoever holds that number next. Recorded, never deleted.
+    if (before?.phone && before.phoneVerifiedAt && before.phone !== challenge.candidatePhone && this.whatsappRecords) {
+      await this.whatsappRecords
+        .withdrawConsent({ number: before.phone, companyId: p.companyId, userId: p.userId, source: 'number_changed' })
+        .catch(() => this.logger.warn('Could not record the end of the replaced number’s WhatsApp consent'));
     }
     // A login identifier changed: every OTHER session ends, this one continues.
     await this.prisma.authSession.updateMany({

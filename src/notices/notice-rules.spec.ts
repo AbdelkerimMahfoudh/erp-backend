@@ -140,8 +140,7 @@ describe('which channel carries it', () => {
     numberVerified: true,
     undeliverable: false,
     optOut: 'none',
-    consentRequired: false,
-    consented: false,
+    consented: true,
   };
 
   it('WhatsApp when it can; email for the recorded reasons; the Owner’s own choice stops it', () => {
@@ -152,8 +151,17 @@ describe('which channel carries it', () => {
     expect(whatsappPlan({ ...ready, undeliverable: true })).toEqual({ action: 'fallback', reason: 'number_undeliverable' });
     expect(whatsappPlan({ ...ready, optOut: 'optional' })).toEqual({ action: 'stop', reason: 'opted_out' });
     expect(whatsappPlan({ ...ready, optOut: 'all' })).toEqual({ action: 'stop', reason: 'opted_out' });
-    expect(whatsappPlan({ ...ready, consentRequired: true })).toEqual({ action: 'stop', reason: 'no_consent' });
-    expect(whatsappPlan({ ...ready, consentRequired: true, consented: true })).toEqual({ action: 'send' });
+    expect(whatsappPlan({ ...ready, consented: false })).toEqual({ action: 'stop', reason: 'no_consent' });
+  });
+
+  it('decides in the routing order of D213: verified recipient, consent, opt-out and undeliverable, then template and channel', () => {
+    // A missing consent or a withdrawal stops it even when WhatsApp could not carry it anyway: email is never a way round.
+    const closed = { ...ready, channelOpen: false, templateApproved: false };
+    expect(whatsappPlan({ ...closed, consented: false })).toEqual({ action: 'stop', reason: 'no_consent' });
+    expect(whatsappPlan({ ...closed, optOut: 'all' })).toEqual({ action: 'stop', reason: 'opted_out' });
+    expect(whatsappPlan({ ...closed, undeliverable: true })).toEqual({ action: 'fallback', reason: 'number_undeliverable' });
+    expect(whatsappPlan({ ...closed })).toEqual({ action: 'fallback', reason: 'template_unavailable' });
+    expect(whatsappPlan({ ...closed, numberVerified: false, consented: false })).toEqual({ action: 'fallback', reason: 'number_unverified' });
   });
 
   it('after WhatsApp answers: accepted; temporary retried, then exhausted; refused or closed falls back; an opt-out stops', () => {

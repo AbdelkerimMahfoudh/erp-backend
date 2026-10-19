@@ -263,6 +263,9 @@ export class WhatsAppContactDeliveryProvider extends ContactDeliveryProvider {
               variables: { code: req.code, ttlMinutes: '10' },
               // A retried `start()` issues a NEW code, so each start is its own message.
               idempotencyKey,
+              // Every code sent here proves a contact not yet verified (D213): the one message a number may receive
+              // before it has a consent. It never creates one.
+              verifiesContact: true,
             }),
           )
         : await sendWithOneRetry((idempotencyKey) =>

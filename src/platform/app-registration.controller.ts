@@ -30,8 +30,8 @@ export class AppRegistrationController {
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Create a business account: the business, its first store, its Owner — pending, and nothing started' })
-  register(@Body() dto: RegisterDto) {
-    return this.flow.register(dto);
+  register(@Body() dto: RegisterDto, @Req() req: Request) {
+    return this.flow.register(dto, { source: 'mobile_registration', ip: req.ip });
   }
 
   @Public()

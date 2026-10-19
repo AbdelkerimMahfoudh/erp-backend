@@ -4,7 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
 import { maskDestination } from './channels';
 import { RecipientHasher } from './recipient-hash';
-import { CONSENT_PURPOSES, WHATSAPP_CONSENT_VERSION } from './whatsapp-consent';
+import { CONSENT_PURPOSES, isCurrentConsentVersion, type ConsentLocale, type ConsentSource } from './whatsapp-consent';
 import type { DeliveryResult, E164, MessageLanguage } from './whatsapp-channel';
 import type { TemplateUse } from './templates';
 
@@ -14,17 +14,49 @@ import type { TemplateUse } from './templates';
  * code, token or message text is ever written here.
  */
 
+/** `optional` is a STOP recorded before D213 (2026-10-19); a withdrawal is `all`. Both stop proactive messages. */
 export type OptOutScope = 'none' | 'optional' | 'all';
+
+/** Where a number's consent stands, from its newest grant or withdrawal. */
+export type ConsentState = 'none' | 'granted' | 'outdated' | 'withdrawn';
 
 export interface ContactState {
   optOutScope: OptOutScope;
-  /** A grant is on record and no withdrawal came after it. */
+  /** The newest grant or withdrawal is a grant of the copy in force — the only state that lets a message go. */
   consented: boolean;
+  consent: ConsentState;
+  /** The version of the newest grant, whatever came after it. */
+  consentVersion: string | null;
+  /** When the consent in force was given; null unless `consented`. */
+  consentedAt: Date | null;
+  /** When it was withdrawn; null unless the newest event is a withdrawal. */
+  withdrawnAt: Date | null;
   lastInboundAt: Date | null;
   undeliverableAt: Date | null;
 }
 
-const NO_CONTACT: ContactState = { optOutScope: 'none', consented: false, lastInboundAt: null, undeliverableAt: null };
+const NO_CONTACT: ContactState = {
+  optOutScope: 'none',
+  consented: false,
+  consent: 'none',
+  consentVersion: null,
+  consentedAt: null,
+  withdrawnAt: null,
+  lastInboundAt: null,
+  undeliverableAt: null,
+};
+
+/** One event of a number's consent history, as its owner is shown it: masked, never the hash. */
+export interface ConsentEvent {
+  event: 'granted' | 'withdrawn' | 'opted_out_optional';
+  version: string | null;
+  locale: string | null;
+  source: string;
+  at: Date;
+}
+
+/** Whether a grant or withdrawal was written, or the same one was already the newest (a replay). */
+export type ConsentWrite = 'recorded' | 'unchanged';
 
 /** The customer-service window (D181): 24 hours from the person's last inbound message. */
 export const SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -87,21 +119,51 @@ export class WhatsAppRecords {
   }
 
   async contactStateByHash(numberHash: string): Promise<ContactState> {
-    const [contact, consent] = await Promise.all([
+    const [contact, newest, grant] = await Promise.all([
       this.prisma.whatsAppContact.findUnique({ where: { numberHash } }),
+      this.newestDecision(this.prisma, numberHash),
       this.prisma.whatsAppConsent.findFirst({
-        where: { numberHash, event: { in: ['granted', 'withdrawn'] } },
-        orderBy: { createdAt: 'desc' },
-        select: { event: true },
+        where: { numberHash, event: 'granted' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: { version: true },
       }),
     ]);
-    if (!contact && !consent) return NO_CONTACT;
+    if (!contact && !newest) return NO_CONTACT;
+    const granted = newest?.event === 'granted';
+    const current = granted && isCurrentConsentVersion(newest.version);
     return {
       optOutScope: (contact?.optOutScope as OptOutScope | undefined) ?? 'none',
-      consented: consent?.event === 'granted',
+      consented: current,
+      consent: !newest ? 'none' : newest.event === 'withdrawn' ? 'withdrawn' : current ? 'granted' : 'outdated',
+      consentVersion: grant?.version ?? null,
+      consentedAt: current ? newest.createdAt : null,
+      withdrawnAt: newest?.event === 'withdrawn' ? newest.createdAt : null,
       lastInboundAt: contact?.lastInboundAt ?? null,
       undeliverableAt: contact?.undeliverableAt ?? null,
     };
+  }
+
+  /**
+   * A number's consent history, newest first — the events this person made, and the keyword withdrawals nobody made
+   * from an account. Another business's actions on the same number decide the state but are not listed here.
+   */
+  async consentHistory(number: E164, actorUserId: Buffer, take = 20): Promise<ConsentEvent[]> {
+    const rows = await this.prisma.whatsAppConsent.findMany({
+      where: { numberHash: this.hasher.hash(number), OR: [{ actorUserId }, { actorUserId: null }] },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take,
+      select: { event: true, version: true, locale: true, source: true, createdAt: true },
+    });
+    return rows.map((r) => ({ event: r.event as ConsentEvent['event'], version: r.version ?? null, locale: r.locale ?? null, source: r.source, at: r.createdAt }));
+  }
+
+  /** The newest grant or withdrawal of a number: what its consent is now. */
+  private newestDecision(db: Pick<Prisma.TransactionClient, 'whatsAppConsent'>, numberHash: string) {
+    return db.whatsAppConsent.findFirst({
+      where: { numberHash, event: { in: ['granted', 'withdrawn'] } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { event: true, version: true, actorUserId: true, createdAt: true },
+    });
   }
 
   async messageExists(idempotencyKey: string): Promise<boolean> {
@@ -188,16 +250,9 @@ export class WhatsAppRecords {
       data: { lastInboundAt: at },
     });
     if (signal === 'stop') {
-      await this.prisma.whatsAppContact.updateMany({
-        where: { numberHash: senderHash, optOutScope: 'none' },
-        data: { optOutScope: 'optional', optOutAt: at, optOutSource: 'inbound_keyword' },
-      });
-    } else if (signal === 'start') {
-      // START restores optional notices only; a withdrawn account channel comes back only through a new consent.
-      await this.prisma.whatsAppContact.updateMany({
-        where: { numberHash: senderHash, optOutScope: 'optional' },
-        data: { optOutScope: 'none', optOutAt: at, optOutSource: 'inbound_keyword' },
-      });
+      // STOP withdraws the operational consent (D213): recorded in the history like the app's withdrawal, by nobody's
+      // account. START grants nothing — a consent is given only with the copy in front of the person.
+      await this.withdraw({ numberHash: senderHash, numberMasked: senderMasked, companyId: null, userId: null, source: 'inbound_keyword', at });
     }
   }
 
@@ -211,22 +266,35 @@ export class WhatsAppRecords {
   }
 
   /**
-   * Record a grant of the current consent copy (D181 §5), clear any opt-out, and audit it — in one transaction. A
-   * stale or unknown version is refused by the caller before this is reached; checked again here.
+   * Record a grant of the copy in force (D213), clear any opt-out, and audit it — in one transaction. A replay (the
+   * newest decision is already this person's grant of this version) writes nothing. The caller refuses any other
+   * version before this is reached; checked again here.
    */
   async recordConsent(p: {
     number: E164;
     version: string;
+    locale: ConsentLocale;
     companyId: Buffer | null;
     userId: Buffer | null;
-    source: 'owner_registration' | 'phone_verification' | 'account';
-  }): Promise<void> {
-    if (p.version !== WHATSAPP_CONSENT_VERSION) throw new Error('Unknown WhatsApp consent version');
+    source: ConsentSource;
+    ip?: string | null;
+  }): Promise<ConsentWrite> {
+    if (!isCurrentConsentVersion(p.version)) throw new Error('Unknown WhatsApp consent version');
     const numberHash = this.hasher.hash(p.number);
     const numberMasked = maskDestination(p.number);
-    const id = newUuidV7Bin();
     await this.ensureContact(numberHash, numberMasked);
-    await this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction(async (tx) => {
+      // The contact row, locked: two grants or a grant and a withdrawal of one number are decided one after the other.
+      await tx.$queryRaw`SELECT id FROM whatsapp_contacts WHERE number_hash = ${numberHash} FOR UPDATE`;
+      const newest = await this.newestDecision(tx, numberHash);
+      if (
+        newest?.event === 'granted' &&
+        newest.version === p.version &&
+        (newest.actorUserId === null ? p.userId === null : p.userId !== null && Buffer.compare(newest.actorUserId, p.userId) === 0)
+      ) {
+        return 'unchanged';
+      }
+      const id = newUuidV7Bin();
       await tx.whatsAppConsent.create({
         data: {
           id,
@@ -234,6 +302,7 @@ export class WhatsAppRecords {
           numberMasked,
           event: 'granted',
           version: p.version,
+          locale: p.locale,
           purposes: CONSENT_PURPOSES.join(','),
           actorCompanyId: p.companyId,
           actorUserId: p.userId,
@@ -252,53 +321,81 @@ export class WhatsAppRecords {
             entityType: 'WhatsAppConsent',
             entityId: id,
             action: 'create',
-            after: { event: 'granted', version: p.version, purposes: [...CONSENT_PURPOSES], number: numberMasked, source: p.source },
-            reason: 'WhatsApp consent granted',
+            after: { event: 'granted', version: p.version, locale: p.locale, purposes: [...CONSENT_PURPOSES], number: numberMasked, source: p.source },
+            reason: 'Operational WhatsApp consent granted',
+            ip: p.ip ?? null,
           },
         });
       }
+      return 'recorded';
     });
   }
 
   /**
-   * The person's own opt-out from the application: `optional` stops optional notices, `all` withdraws WhatsApp as
-   * the account contact. Audited. An `optional` request never relaxes a withdrawal — that takes a new consent.
+   * Withdraw a number's operational consent (D213): from the app, by a STOP keyword, or because the number stopped
+   * being the person's verified contact. Proactive messages stop; the history keeps every earlier event. A number
+   * already withdrawn writes nothing.
    */
-  async optOut(p: { number: E164; scope: 'optional' | 'all'; companyId: Buffer; userId: Buffer }): Promise<OptOutScope> {
-    const numberHash = this.hasher.hash(p.number);
-    const numberMasked = maskDestination(p.number);
-    const id = newUuidV7Bin();
-    await this.ensureContact(numberHash, numberMasked);
-    const now = new Date();
-    await this.prisma.$transaction(async (tx) => {
+  async withdrawConsent(p: { number: E164; companyId: Buffer; userId: Buffer; source: ConsentSource; ip?: string | null }): Promise<ConsentWrite> {
+    return this.withdraw({
+      numberHash: this.hasher.hash(p.number),
+      numberMasked: maskDestination(p.number),
+      companyId: p.companyId,
+      userId: p.userId,
+      source: p.source,
+      ip: p.ip ?? null,
+      at: new Date(),
+    });
+  }
+
+  private async withdraw(p: {
+    numberHash: string;
+    numberMasked: string;
+    companyId: Buffer | null;
+    userId: Buffer | null;
+    source: ConsentSource;
+    ip?: string | null;
+    at: Date;
+  }): Promise<ConsentWrite> {
+    await this.ensureContact(p.numberHash, p.numberMasked);
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM whatsapp_contacts WHERE number_hash = ${p.numberHash} FOR UPDATE`;
+      await tx.whatsAppContact.updateMany({
+        where: { numberHash: p.numberHash },
+        data: { optOutScope: 'all', optOutAt: p.at, optOutSource: p.source === 'inbound_keyword' ? 'inbound_keyword' : 'account' },
+      });
+      // Ordered by when it is recorded, not when a keyword was typed: a late STOP still wins over an earlier grant.
+      const newest = await this.newestDecision(tx, p.numberHash);
+      if (newest?.event === 'withdrawn') return 'unchanged';
+      const id = newUuidV7Bin();
       await tx.whatsAppConsent.create({
         data: {
           id,
-          numberHash,
-          numberMasked,
-          event: p.scope === 'all' ? 'withdrawn' : 'opted_out_optional',
+          numberHash: p.numberHash,
+          numberMasked: p.numberMasked,
+          event: 'withdrawn',
+          purposes: CONSENT_PURPOSES.join(','),
           actorCompanyId: p.companyId,
           actorUserId: p.userId,
-          source: 'account',
+          source: p.source,
         },
       });
-      await tx.whatsAppContact.updateMany({
-        where: { numberHash, ...(p.scope === 'optional' ? { optOutScope: 'none' } : {}) },
-        data: { optOutScope: p.scope, optOutAt: now, optOutSource: 'account' },
-      });
-      await tx.auditLog.create({
-        data: {
-          companyId: p.companyId,
-          userId: p.userId,
-          entityType: 'WhatsAppConsent',
-          entityId: id,
-          action: 'update',
-          after: { event: p.scope === 'all' ? 'withdrawn' : 'opted_out_optional', number: numberMasked },
-          reason: p.scope === 'all' ? 'WhatsApp withdrawn as the account contact' : 'Optional WhatsApp notifications stopped',
-        },
-      });
+      if (p.companyId) {
+        await tx.auditLog.create({
+          data: {
+            companyId: p.companyId,
+            userId: p.userId,
+            entityType: 'WhatsAppConsent',
+            entityId: id,
+            action: 'update',
+            after: { event: 'withdrawn', purposes: [...CONSENT_PURPOSES], number: p.numberMasked, source: p.source },
+            reason: p.source === 'number_changed' ? 'Operational WhatsApp consent ended: the number was replaced' : 'Operational WhatsApp consent withdrawn',
+            ip: p.ip ?? null,
+          },
+        });
+      }
+      return 'recorded';
     });
-    return (await this.contactStateByHash(numberHash)).optOutScope;
   }
 
   /** Create the contact row if it does not exist; a concurrent creation is not an error. */

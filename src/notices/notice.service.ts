@@ -401,8 +401,7 @@ export class NoticeService {
       templateApproved: !real || this.config.whatsappTemplateName(template.configKey) !== '',
       numberVerified: phone !== null,
       undeliverable: contact?.undeliverableAt != null,
-      optOut: contact?.optOutScope ?? 'none',
-      consentRequired: real && this.config.whatsappMode === 'live',
+      optOut: contact?.consent === 'withdrawn' ? 'all' : contact?.optOutScope ?? 'none',
       consented: contact?.consented ?? false,
     });
     // Masked as its Owner is shown it everywhere — the portal, the app's list of verified contacts — so one number reads the same.
@@ -582,8 +581,7 @@ export class NoticeService {
       templateApproved: !real || this.config.whatsappTemplateName(PORTAL_INSTRUCTIONS_TEMPLATE.configKey) !== '',
       numberVerified: phone !== null,
       undeliverable: contact?.undeliverableAt != null,
-      optOut: contact?.optOutScope ?? 'none',
-      consentRequired: real && this.config.whatsappMode === 'live',
+      optOut: contact?.consent === 'withdrawn' ? 'all' : contact?.optOutScope ?? 'none',
       consented: contact?.consented ?? false,
     });
     if (plan.action === 'send') return true;
