@@ -206,6 +206,7 @@ const GOOD_STACK = {
         { mode: 'ingress', target: 443, published: '443', protocol: 'tcp' },
       ],
       environment: { API_HOST: 'api.tsxmr.com', ACME_EMAIL: 'developer@tsxmr.com' },
+      volumes: [{ type: 'bind', source: '/srv/erp-production/web', target: '/srv/erp-web', read_only: true }],
       networks: { edge: null },
       cap_drop: ['ALL'],
       cap_add: ['NET_BIND_SERVICE'],
@@ -252,6 +253,7 @@ describe('deploy/production/check-stack.mjs', () => {
     ['a staging setting', (s) => Object.assign(s.services.api.environment, { STAGING_CONTACT_OUTBOX: 'enabled' }), /holds no staging setting/],
     ['root reachable from the network', (s) => (s.services.db.environment.MYSQL_ROOT_HOST = '%'), /root is reachable from inside its container only/],
     ['writable secrets', (s) => (s.services.api.volumes[0].read_only = false), /one read-only mount/],
+    ['test sites the edge could change (D217)', (s) => (s.services.edge.volumes[0].read_only = false), /edge mounts the test sites once, read-only/],
     ['capabilities kept by the API', (s) => (s.services.api.cap_drop = []), /holds no Linux capability/],
     ['the email proof on the database network', (s) => (s.services['email-proof'].networks = { internal: null, edge: null } as never), /never reaches the database/],
   ];

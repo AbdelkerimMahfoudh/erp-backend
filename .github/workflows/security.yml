@@ -196,13 +196,26 @@ jobs:
                erp-api-tools:ci node deploy/production/preflight.mjs; then
             echo "the preflight passed a template with no secrets"; exit 1
           fi
-      - name: the Caddyfile validates under the pinned Caddy
+      - name: the Caddyfile validates under the pinned Caddy — test sites off, and both on with a release (D217)
         run: |
           image=$(sed -n 's/^    image: \(caddy:.*\)$/\1/p' deploy/docker-compose.production.yml)
+          edge() { docker run --rm -e ACME_EMAIL=developer@tsxmr.com "$@" \
+            -v "$PWD/deploy/production/Caddyfile:/etc/caddy/Caddyfile:ro" "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; }
           for host in api.tsxmr.com api.rehearsal.localhost; do
-            docker run --rm -e API_HOST=$host -e ACME_EMAIL=developer@tsxmr.com \
-              -v "$PWD/deploy/production/Caddyfile:/etc/caddy/Caddyfile:ro" "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+            edge -e API_HOST=$host -v "$PWD/deploy/production/web-off:/srv/erp-web:ro"
           done
+          web=$(mktemp -d)
+          for site in app console; do
+            mkdir -p "$web/$site/releases/r1/site"
+            printf '<!doctype html>' > "$web/$site/releases/r1/site/index.html"
+            printf 'route {\n\tfile_server\n}\n' > "$web/$site/releases/r1/routes.caddy"
+            ln -s releases/r1 "$web/$site/current"
+          done
+          mkdir -p "$web/enabled"
+          cp deploy/production/test-app.caddy deploy/production/test-console.caddy "$web/enabled/"
+          hash=$(docker run --rm "$image" caddy hash-password --plaintext ci-only)
+          edge -e API_HOST=api.tsxmr.com -e TEST_APP_HOST=erp-test.example.test -e TEST_CONSOLE_HOST=dukan-test.example.test \
+            -e TEST_WEB_USER=tester -e TEST_WEB_PASSWORD_HASH="$hash" -v "$web:/srv/erp-web:ro"
       - name: age backups — round trip, wrong key and a changed byte refused
         run: |
           sudo apt-get install -y --no-install-recommends age > /dev/null

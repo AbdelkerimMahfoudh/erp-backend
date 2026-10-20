@@ -39,7 +39,7 @@ case "$DEPLOY_PROFILE" in
     ;;
   *) die "DEPLOY_PROFILE must be production or rehearsal." ;;
 esac
-for path in "$SECRETS_DIR" "$BACKUP_DIR" "$API_ENV_FILE"; do
+for path in "$SECRETS_DIR" "$BACKUP_DIR" "$API_ENV_FILE" ${WEB_DIR:+"$WEB_DIR"}; do
   case "$path" in "$BASE"/*) ;; *) die "$path is outside $BASE: each profile keeps to its own directory." ;; esac
 done
 export DEPLOY_PROFILE PROJECT

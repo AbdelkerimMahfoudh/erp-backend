@@ -92,6 +92,9 @@ process.stdin.on('end', () => {
   const apiMounts = (s('api').volumes ?? []).filter((v) => v.target === '/run/secrets');
   check(apiMounts.length === 1 && apiMounts[0].read_only === true, 'the API reads its secrets from one read-only mount');
   check((s('db').volumes ?? []).filter((v) => v.target === '/secrets').every((v) => v.read_only === true), 'the database reads its secrets read-only');
+  // The private test sites (D217): the edge serves the releases test-sites.sh wrote, and can change none of them.
+  const webMounts = (s('edge').volumes ?? []).filter((v) => v.target === '/srv/erp-web');
+  check(webMounts.length === 1 && webMounts[0].read_only === true, 'the edge mounts the test sites once, read-only');
 
   console.log(`stack contract (${profile}): ${failures.length === 0 ? 'PASS' : 'FAIL'} — ${Object.keys(services).length} services`);
   for (const f of failures) console.log(`  ✗ ${f}`);

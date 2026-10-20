@@ -1,0 +1,22 @@
+# The console and the Owner's portal for persistent test businesses (D217; docs/100 §16): erp-control-web's portal
+# surface, built in preview mode against the production API, behind a password.
+#
+# Installed into the edge only by deploy/production/test-sites.sh; without it the import matches nothing.
+#
+# - Its own hostname (dukan-test.tsxmr.com), never the portal's production name: the PORTAL release gate still refuses
+#   a production build (docs/96), and a preview build carries test values and says so on every page.
+# - Basic authentication on every path. Behind it the console still asks for its own administrator sign-in, second
+#   factor and step-up, and the portal for an Owner's own sign-in: the password is a door, not the authorisation.
+# - The pages and their rules are a release written by erp-control-web scripts/caddy-release.mjs: `site/` and the
+#   `routes.caddy` made from the build's own `_headers` and `_redirects` (its Content Security Policy included).
+{$TEST_CONSOLE_HOST} {
+	basic_auth {
+		{$TEST_WEB_USER} {$TEST_WEB_PASSWORD_HASH}
+	}
+	header {
+		X-Robots-Tag "noindex, nofollow, noarchive"
+		-Server
+	}
+	root * /srv/erp-web/console/current/site
+	import /srv/erp-web/console/current/routes.caddy
+}

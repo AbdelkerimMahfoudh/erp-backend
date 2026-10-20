@@ -113,8 +113,14 @@ services:
     environment:
       API_HOST: ${API_HOST:?set API_HOST in stack.env}
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in stack.env}
+      # The private test sites (D217; docs/100 §16): empty unless deploy/production/test-sites.sh enables them.
+      TEST_APP_HOST: ${TEST_APP_HOST:-}
+      TEST_CONSOLE_HOST: ${TEST_CONSOLE_HOST:-}
+      TEST_WEB_USER: ${TEST_WEB_USER:-}
+      TEST_WEB_PASSWORD_HASH: ${TEST_WEB_PASSWORD_HASH:-}
     volumes:
       - ./production/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${WEB_DIR:-./production/web-off}:/srv/erp-web:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on: [api]

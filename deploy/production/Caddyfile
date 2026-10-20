@@ -29,3 +29,8 @@
 	}
 	header -Server
 }
+
+# The private test sites of persistent test businesses (D217; docs/100 §16): the app's web export and the console, each
+# behind a password, only while deploy/production/test-sites.sh has enabled them. Otherwise this matches nothing and the
+# edge serves the API alone.
+import /srv/erp-web/enabled/*.caddy

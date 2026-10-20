@@ -1,0 +1,31 @@
+# The app's web export for persistent test businesses (D217; docs/100 §16): behind a password, beside the production API.
+#
+# Installed into the edge only by deploy/production/test-sites.sh, which checks every input first; without it the
+# Caddyfile's import matches nothing and the edge serves the API alone.
+#
+# - Its own hostname, DNS only like the API's, so Caddy obtains a certificate for exactly that name. No alias.
+# - Basic authentication on every path, the app's scripts included. The password is never in the build or in Git:
+#   stack.env holds its bcrypt hash only. noindex is said as well, but it is not the protection: every business is
+#   still the API's own sign-in, and a test Owner's account works only inside a business the platform marked as a test.
+# - The pages are a release written by erp-mobile scripts/web-test-release.mjs: `site/` and the `routes.caddy` made
+#   from it (a file that exists, then each dynamic page, then the not-found page with a 404).
+{$TEST_APP_HOST} {
+	basic_auth {
+		{$TEST_WEB_USER} {$TEST_WEB_PASSWORD_HASH}
+	}
+	header {
+		X-Robots-Tag "noindex, nofollow, noarchive"
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	# The bundles are named by their content and never change; a page is asked for again every time.
+	@bundle path /_expo/static/*
+	header @bundle Cache-Control "public, max-age=31536000, immutable"
+	header ?Cache-Control "no-cache"
+	root * /srv/erp-web/app/current/site
+	import /srv/erp-web/app/current/routes.caddy
+}
