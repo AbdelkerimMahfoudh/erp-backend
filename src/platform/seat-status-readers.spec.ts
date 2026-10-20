@@ -399,6 +399,10 @@ const PINNED: { at: string; count?: number; why: string }[] = [
     why: 'The open activity requests of each store, for the options shown (kind = activity). An activity row is never scheduled.',
   },
   {
+    at: 'src/platform/seat-allocation.service.ts SeatAllocationService.grantStore = granted',
+    why: 'The store already opened under a test business’s grant, for a retry with the same name (D217). It is granted and has its branch; a scheduled request has neither, and a test business is never paid for, so it never has one.',
+  },
+  {
     at: 'src/platform/seat-allocation.service.ts SeatAllocationService.confirmNowTx in [pending_payment, granted]',
     why: 'The other open activity requests of a store whose upgrade was just paid, superseded (kind = activity). An activity row is never scheduled.',
   },

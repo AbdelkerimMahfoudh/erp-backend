@@ -17,7 +17,8 @@
 #   5. the env-gated real-MySQL spec (InnoDB locks, NOWAIT, CHECKs, concurrency) runs on its own `addon_ci` schema;
 #   6. the 0099 real-MySQL spec (grace decisions, the notice outbox, the portal claim) runs on its own `grace_ci` schema;
 #   7. the 0100 real-MySQL spec (the consent history) runs on that same disposable schema;
-#   8. the 0101 real-MySQL spec (employee invitations: locks, the one-live UNIQUE, triggers, CHECKs) runs there too.
+#   8. the 0101 real-MySQL spec (employee invitations: locks, the one-live UNIQUE, triggers, CHECKs) runs there too;
+#   9. the 0102 real-MySQL spec (test businesses, the console's stores and invitations: locks and filters) runs there too.
 # Any failure exits non-zero.
 set -euo pipefail
 
@@ -99,3 +100,7 @@ CONSENT_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) CONSENT_APP_URL=$(url phone
 echo "== 8. the 0101 real-MySQL spec (employee invitations: locks, one live per person, triggers, CHECKs), on the same disposable schema"
 INVITATION_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) INVITATION_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/staff/staff-invitation.mysql.spec.ts
+
+echo "== 9. the 0102 real-MySQL spec (test businesses, the console's stores and invitations), on the same disposable schema"
+PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/platform/provisioning.mysql.spec.ts

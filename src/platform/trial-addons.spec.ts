@@ -1116,6 +1116,8 @@ describe('14. correct company/store isolation', () => {
       w.billing,
       w.seats,
       w.activation,
+      // A customer's business: payments are taken (D217 refuses them for a test business only).
+      { assertMayTakePayment: async () => undefined } as never,
     );
 
   it('Alpha’s end — looked at, then swept — changes Alpha’s rows only, taking Alpha’s lock only; Beta’s are untouched until its own end', async () => {
@@ -1251,6 +1253,7 @@ describe('the scheduled requests as the website and the console read them', () =
       unused,
       unused,
       unused,
+      { status: async () => null } as never,
     );
   };
 

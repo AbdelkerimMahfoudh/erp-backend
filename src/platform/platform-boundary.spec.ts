@@ -251,7 +251,7 @@ describe('the controller, from the platform’s side', () => {
   it('creating a business mints an invitation once, and never a password anybody chose', () => {
     const body = bodyOf('createBusiness');
     expect(body).toMatch(/password: randomBytes\(48\)/);
-    expect(body).toMatch(/if \(!result\.created\) \{\s*return \{ \.\.\.result, invitation: null \};/);
+    expect(body).toMatch(/if \(!result\.created\) \{\s*return \{ \.\.\.result, invitation: null, setup: /);
   });
 
   it('no public route answers with a price — the quote by company id is gone (2026-10-05)', () => {
@@ -278,7 +278,7 @@ describe('the controller, from the platform’s side', () => {
     function controllerWith(registration: unknown, delivery: unknown) {
       const records = new WhatsAppRecords(fakeMessagingPrisma() as never, { hash: (n: string) => `h:${n}` } as never);
       const flow = new RegistrationFlowService(registration as never, stub, delivery as never, records);
-      return new PlatformController(stub, stub, stub, stub, registration as never, stub, stub, stub, stub, stub, flow);
+      return new PlatformController(stub, stub, stub, stub, registration as never, stub, stub, stub, stub, stub, flow, stub);
     }
     const attempt = {
       idempotencyKey: 'k-1',

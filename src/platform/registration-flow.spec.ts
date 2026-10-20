@@ -74,6 +74,7 @@ const platformWith = (over: Partial<Record<string, unknown>> = {}) =>
     stub,
     (over.invitations ?? stub) as never,
     (over.flow ?? stub) as never,
+    (over.provisioning ?? stub) as never,
   );
 
 const ATTEMPT = {
@@ -228,6 +229,7 @@ describe('the shared flow', () => {
       },
       audit: { record: async () => undefined },
       invitations: { issue: async () => ({ token: 'i', expiresAt: new Date(), delivery: 'manual', owner: {} }) },
+      provisioning: { assertMayCreate: async () => undefined, status: async () => null },
     });
     const req = { platformAdmin: { id: Buffer.alloc(16, 3), email: 'ops@example.test', name: 'Ops' }, ip: '127.0.0.1' };
     const answer = await platform.createBusiness(

@@ -127,7 +127,7 @@ export class ConnectionsService {
             { name: { startsWith: parsed.value } };
 
     const found = await this.prisma.company.findMany({
-      where: { ...where, isDiscoverable: true, isActive: true },
+      where: { ...where, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
       select: {
         id: true,
         publicStoreId: true,
@@ -155,6 +155,15 @@ export class ConnectionsService {
         )
         .map(toPublicPreview),
     };
+  }
+
+  /**
+   * Whether I am a test business (D217). A test business finds, and is found by, test businesses only — so it never
+   * trades with a real store — and every way to reach another store (search, lookup, a request) filters on it.
+   */
+  private async isTest(me: Buffer): Promise<boolean> {
+    const mine = await this.prisma.company.findUnique({ where: { id: me }, select: { isTest: true } });
+    return mine?.isTest ?? false;
   }
 
   /** Every company in a blocked relationship with me, in either direction. */
@@ -233,7 +242,7 @@ export class ConnectionsService {
     await this.refuseOwnCode(me, code);
 
     const company = await this.prisma.company.findFirst({
-      where: { publicStoreId: code, isDiscoverable: true, isActive: true },
+      where: { publicStoreId: code, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
       select: { id: true, publicStoreId: true, name: true, city: true, logoRef: true },
     });
     if (!company) throw new NotFoundException('No such store');
@@ -270,11 +279,12 @@ export class ConnectionsService {
     await this.refuseOwnCode(me, code);
 
     const them = await this.prisma.company.findFirst({
-      where: { publicStoreId: code, isDiscoverable: true, isActive: true },
+      where: { publicStoreId: code, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
       select: { id: true },
     });
     /**
      * The same 404 a nonexistent store gets. A shop that is not discoverable,
+     * is a test business while I am not (or the reverse, D217),
      * or has blocked me, must not be distinguishable from one that is not there
      * — otherwise this endpoint becomes the oracle that search refuses to be.
      */

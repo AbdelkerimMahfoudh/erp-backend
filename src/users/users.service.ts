@@ -69,7 +69,7 @@ export class UsersService {
   findByIdWithStore(id: Buffer) {
     return this.prisma.user.findUnique({
       where: { id },
-      include: { company: { select: { publicStoreId: true, name: true } } },
+      include: { company: { select: { publicStoreId: true, name: true, isTest: true } } },
     });
   }
 

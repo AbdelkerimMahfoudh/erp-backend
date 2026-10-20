@@ -39,6 +39,7 @@ import { BillingService, ESTIMATE_MAX_STORES } from '../billing/billing.service'
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { SeatAllocationService } from './seat-allocation.service';
 import { StaffActivationService } from './staff-activation.service';
+import { ProvisioningService } from './provisioning.service';
 
 const PUBLIC_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
@@ -130,6 +131,7 @@ export class SeatRequestsController {
     private readonly billing: BillingService,
     private readonly allocations: SeatAllocationService,
     private readonly activation: StaffActivationService,
+    private readonly provisioning: ProvisioningService,
   ) {}
 
   // ── Public: the price list ───────────────────────────────────────────────
@@ -258,6 +260,8 @@ export class SeatRequestsController {
     const companyId = idOf(id, 'business');
     const allocationId = idOf(rid, 'request');
     await this.assertBelongs(companyId, allocationId);
+    // A test business is never paid for (D217): its stores open under its grant.
+    await this.provisioning.assertMayTakePayment(companyId, 'seat_request.confirm_payment', { admin, ip: req.ip ?? null });
 
     const result = await this.allocations.confirmPayment(
       allocationId,

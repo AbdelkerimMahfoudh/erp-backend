@@ -664,6 +664,99 @@ export class SeatAllocationService {
   }
 
   /**
+   * A store a platform administrator opens for a TEST business under its administrative grant (D217; the owner's
+   * decision of 2026-10-20): nothing to pay, so `granted` at once with the grant named as its reason, and opened as
+   * every store opens — Owners assigned, the subscribed count raised, the timeline told — in one transaction behind the
+   * subscription row's lock.
+   *
+   * Only a test business, and only while its grant is in force: a customer's store is {@link requestStore}'s priced
+   * request, opened by a real payment's confirmation, and no rule here prices or limits anything differently. The same
+   * name again answers with the store already opened under the grant.
+   */
+  async grantStore(
+    companyId: Buffer,
+    input: { name: string; activity?: Activity | null; reason: string; by: string },
+  ): Promise<{ allocation: SeatAllocationView; created: boolean }> {
+    const sub = await this.subscriptionOf(companyId);
+    const name = (input.name ?? '').trim();
+    if (!name) throw new BadRequestException('Name the store.');
+    if (name.length > 160) throw new BadRequestException('A store name is at most 160 characters.');
+    const reason = (input.reason ?? '').trim();
+    if (!reason) throw new BadRequestException('A store opened under a grant needs a reason — it is the whole record.');
+    const activity: Activity = input.activity ?? 'electronics';
+    const actor = input.by.slice(0, 160);
+
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      await lockSubscription(tx, companyId);
+      const company = await tx.company.findUnique({ where: { id: companyId }, select: { isTest: true, isActive: true, closedAt: true } });
+      if (!company?.isTest) {
+        throw new ConflictException({
+          code: 'test_business_only',
+          message: 'Only a test business has a store opened under its grant. A customer asks for a store and pays for it.',
+        });
+      }
+      if (!company.isActive || company.closedAt) {
+        throw new ConflictException({ code: 'business_closed', message: 'This business is closed.' });
+      }
+      const now = this.clock.now();
+      const locked = await tx.subscription.findUnique({
+        where: { id: sub.id },
+        select: { status: true, isComplimentary: true, complimentaryUntil: true },
+      });
+      const inForce =
+        locked?.status === 'activated' &&
+        locked.isComplimentary &&
+        locked.complimentaryUntil !== null &&
+        locked.complimentaryUntil.getTime() > now.getTime();
+      if (!inForce) {
+        throw new ConflictException({
+          code: 'grant_required',
+          message: 'Give this test business an administrative grant first: its stores open under that grant.',
+        });
+      }
+      const opened = await tx.seatAllocation.findFirst({
+        where: { companyId, kind: 'store', label: name, status: 'granted', branchId: { not: null } },
+        select: { id: true },
+      });
+      if (opened) return { rowId: opened.id, created: false };
+      const clash = await tx.branch.findFirst({ where: { companyId, name }, select: { id: true } });
+      if (clash) {
+        throw new ConflictException({ code: 'store_name_in_use', message: 'A store with that name already exists.' });
+      }
+
+      const id = newUuidV7Bin();
+      await tx.seatAllocation.create({
+        data: {
+          id,
+          companyId,
+          subscriptionId: sub.id,
+          kind: 'store',
+          status: 'granted',
+          label: name,
+          activityTo: activity,
+          monthlyAmount: 0,
+          requestedBy: actor,
+          confirmedBy: actor,
+          confirmedAt: now,
+          reason: `Opened under the administrative grant: ${reason}`.slice(0, 500),
+        },
+      });
+      const branchId = await this.openStoreTx(tx, {
+        companyId,
+        subscriptionId: sub.id,
+        name,
+        activity,
+        actor,
+        note: `Store "${name}" (${activity}) opened at no charge under the administrative grant: ${reason}`,
+      });
+      await tx.seatAllocation.updateMany({ where: { id }, data: { branchId } });
+      return { rowId: id, created: true };
+    });
+
+    return { allocation: await this.present(await this.load(outcome.rowId)), created: outcome.created };
+  }
+
+  /**
    * Another activity for a branch (D154, docs/73 §3; reviewed 2026-10-09).
    *
    * Priced as the difference between what the branch pays and what it would

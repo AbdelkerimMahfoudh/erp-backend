@@ -74,6 +74,12 @@ export interface RegistrationInput {
    * eligible by default.
    */
   trialEligible?: boolean;
+  /**
+   * A persistent test business (D217), marked in the transaction that creates it — only ever by the console, which
+   * names the administrator in `testMarkedBy`. Absent is false: a business is a customer's unless said otherwise.
+   */
+  isTest?: boolean;
+  testMarkedBy?: string;
 }
 
 export interface RegistrationResult {
@@ -204,6 +210,9 @@ export class RegistrationService {
             currency: 'MRU',
             timezone: 'Africa/Nouakchott',
             settingsJson: {},
+            ...(input.isTest
+              ? { isTest: true, testMarkedAt: this.clock.now(), testMarkedBy: (input.testMarkedBy ?? input.actor ?? 'platform').slice(0, 160) }
+              : {}),
           },
         });
 

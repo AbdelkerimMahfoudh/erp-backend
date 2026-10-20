@@ -93,22 +93,26 @@ export class OwnerInvitationService {
     }
 
     const now = new Date();
-    const replaced = await this.prisma.ownerInvitation.updateMany({
-      where: { companyId, acceptedAt: null, revokedAt: null },
-      data: { revokedAt: now },
-    });
-
     const token = randomBytes(32).toString('base64url');
     const expiresAt = new Date(now.getTime() + OWNER_INVITATION_TTL_HOURS * 60 * 60 * 1000);
-    await this.prisma.ownerInvitation.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId,
-        userId: owner.id,
-        tokenHash: this.hashToken(token),
-        issuedBy: ctx.admin.email,
-        expiresAt,
-      },
+    // The old invitations are revoked and the new one written together: a failure between them leaves the Owner with
+    // the invitation they had, never with none.
+    const replaced = await this.prisma.$transaction(async (tx) => {
+      const revoked = await tx.ownerInvitation.updateMany({
+        where: { companyId, acceptedAt: null, revokedAt: null },
+        data: { revokedAt: now },
+      });
+      await tx.ownerInvitation.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId,
+          userId: owner.id,
+          tokenHash: this.hashToken(token),
+          issuedBy: ctx.admin.email,
+          expiresAt,
+        },
+      });
+      return revoked;
     });
 
     await this.audit.record({
@@ -140,15 +144,18 @@ export class OwnerInvitationService {
   /**
    * Spend an invitation: the Owner sets their password.
    *
-   * One refusal for every failure — unknown, expired, spent, revoked, or an
-   * Owner since deactivated — so the public route cannot be used to tell live
-   * invitations from dead ones. The row is claimed by its own unspent state, so
-   * two accepts of one token produce one winner.
+   * One refusal for every failure — unknown, expired, spent, revoked, an
+   * Owner since deactivated, or a business `mayAccept` refuses (a customer's
+   * while customer activation is closed, D217) — so the public route cannot be
+   * used to tell live invitations from dead ones. The row is claimed by its own
+   * unspent state, so two accepts of one token produce one winner, and the claim
+   * and the password are written in one transaction: an invitation is never
+   * spent without the password it set.
    */
   async accept(
     token: string,
     password: string,
-    meta: { ip?: string | null },
+    meta: { ip?: string | null; mayAccept?: (companyId: Buffer) => Promise<boolean> },
   ): Promise<{ publicStoreId: string; businessName: string }> {
     if (!password || password.length < OWNER_PASSWORD_MIN_LENGTH) {
       throw new BadRequestException(`Use a password of at least ${OWNER_PASSWORD_MIN_LENGTH} characters.`);
@@ -168,16 +175,20 @@ export class OwnerInvitationService {
       },
     });
     if (!invitation || !invitation.user.isActive || invitation.user.deletedAt) throw refuse();
+    if (meta.mayAccept && !(await meta.mayAccept(invitation.companyId))) throw refuse();
 
     const passwordHash = await this.hashing.hash(password);
 
-    const claimed = await this.prisma.ownerInvitation.updateMany({
-      where: { id: invitation.id, acceptedAt: null, revokedAt: null },
-      data: { acceptedAt: now },
+    const claimed = await this.prisma.$transaction(async (tx) => {
+      const won = await tx.ownerInvitation.updateMany({
+        where: { id: invitation.id, acceptedAt: null, revokedAt: null },
+        data: { acceptedAt: now },
+      });
+      if (won.count !== 1) return false;
+      await tx.user.update({ where: { id: invitation.userId }, data: { passwordHash } });
+      return true;
     });
-    if (claimed.count !== 1) throw refuse();
-
-    await this.prisma.user.update({ where: { id: invitation.userId }, data: { passwordHash } });
+    if (!claimed) throw refuse();
     // A password nobody knew is now a password one person knows. Anything
     // signed in before this moment was not that person.
     await this.sessions.revokeAll(invitation.userId);

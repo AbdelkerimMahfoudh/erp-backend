@@ -191,6 +191,16 @@ export class AppConfigService {
     return this.portalOrigin ? `${this.portalOrigin}/subscription` : '';
   }
 
+  /**
+   * Whether the console may activate a customer business (0102, D217): issue its Owner's setup invitation, approve it,
+   * grant it access. Closed, only test businesses may be. Unset is closed in production and open elsewhere, so a
+   * production process never opens it by omission.
+   */
+  get customerActivationOpen(): boolean {
+    const value = this.config.get<string>('CUSTOMER_ACTIVATION');
+    return value ? value === 'open' : !this.isProduction;
+  }
+
   get whatsappApiBaseUrl(): string {
     return this.get('WHATSAPP_API_BASE_URL');
   }

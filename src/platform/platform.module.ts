@@ -19,6 +19,7 @@ import { AuthModule } from '../auth/auth.module';
 import { PortalHandoffService } from './portal-handoff.service';
 import { RegistrationContinuationService } from './registration-continuation.service';
 import { OwnerInvitationService } from './owner-invitation.service';
+import { ProvisioningService } from './provisioning.service';
 import { RegistrationFlowService } from './registration-flow.service';
 import { AppRegistrationController } from './app-registration.controller';
 import { TrialService } from './trial/trial.service';
@@ -127,6 +128,8 @@ export function selectContactDelivery(
     TrialEndSweeper,
     SeatAllocationService,
     StaffActivationService,
+    // Test businesses, the customer-activation gate and the console's stores (D217).
+    ProvisioningService,
     {
       provide: ContactDeliveryProvider,
       /*

@@ -40,7 +40,8 @@ function makeWorld(opts: { ownerActive?: boolean } = {}) {
     (!('acceptedAt' in where) || row.acceptedAt === where.acceptedAt) &&
     (!('revokedAt' in where) || row.revokedAt === where.revokedAt);
 
-  const prisma = {
+  const prisma: any = {
+    $transaction: async (run: (tx: unknown) => Promise<unknown>) => run(prisma),
     company: {
       findUnique: async ({ where }: any) =>
         where.id.equals(COMPANY_ID) ? { id: COMPANY_ID, name: 'Shop', publicStoreId: 'ABCDEF1234' } : null,

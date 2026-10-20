@@ -15,6 +15,7 @@ import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import {
+  IsBoolean,
   IsEmail,
   IsIn,
   IsInt,
@@ -55,6 +56,7 @@ import { RegistrationFlowService } from './registration-flow.service';
 import { ContinueConfirmDto, ContinueStartDto, RegisterDto } from './registration.dto';
 import { IsIdempotencyKey } from '../common/decorators/idempotency-key.decorator';
 import { trialFactsOf, trialSummaryOf, type TrialClaimFacts } from './trial/trial-rules';
+import { ProvisioningService } from './provisioning.service';
 
 /**
  * The platform-control API.
@@ -205,6 +207,23 @@ export class CreateBusinessDto {
   @IsOptional() @IsString() @MaxLength(160) email?: string;
   @IsOptional() @IsString() @MaxLength(24) phone?: string;
   @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
+  /** A persistent test business (D217), marked in the same transaction that creates it. */
+  @IsOptional() @IsBoolean() isTest?: boolean;
+  @IsString() @MinLength(1) @MaxLength(500) reason: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+}
+
+/** Set or clear a business's test status (D217). */
+class TestStatusDto {
+  @IsBoolean() isTest: boolean;
+  @IsString() @MinLength(1) @MaxLength(500) reason: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+}
+
+/** A store from the console: granted under a test business's grant, or a customer's priced request (D217). */
+class ConsoleStoreDto {
+  @IsString() @MinLength(1) @MaxLength(160) name: string;
+  @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
   @IsString() @MinLength(1) @MaxLength(500) reason: string;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
@@ -263,6 +282,7 @@ export class PlatformController {
     private readonly handoff: PortalHandoffService,
     private readonly invitations: OwnerInvitationService,
     private readonly flow: RegistrationFlowService,
+    private readonly provisioning: ProvisioningService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -396,7 +416,10 @@ export class PlatformController {
   @Get('dashboard')
   async dashboard() {
     const now = new Date();
+    // The platform's customers only (D217): a test business keeps its own reports and history, and stays out of these.
+    const customer = { isTest: false };
     const subs = await this.prisma.subscription.findMany({
+      where: { company: customer },
       select: {
         status: true,
         currentPeriodEnd: true,
@@ -429,14 +452,16 @@ export class PlatformController {
       tally[e.state] = (tally[e.state] ?? 0) + 1;
     }
 
-    const [businesses, branches, activeUsers, pendingSeatRequests, pendingStaff] = await Promise.all([
-      this.prisma.company.count(),
-      this.prisma.branch.count(),
-      this.prisma.user.count({ where: { isActive: true, deletedAt: null } }),
+    const [businesses, branches, activeUsers, pendingSeatRequests, pendingStaff, testBusinesses] = await Promise.all([
+      this.prisma.company.count({ where: customer }),
+      this.prisma.branch.count({ where: { company: customer } }),
+      this.prisma.user.count({ where: { isActive: true, deletedAt: null, company: customer } }),
       // Waiting for a payment to be confirmed (docs/21, 2026-10-05).
-      this.prisma.seatAllocation.count({ where: { status: 'pending_payment' } }),
+      this.prisma.seatAllocation.count({ where: { status: 'pending_payment', company: customer } }),
       // Created from Team, not yet activated: waiting on a contact, a payment, or both.
-      this.prisma.user.count({ where: { deletedAt: null, activatedAt: null, invitedAt: { not: null } } }),
+      this.prisma.user.count({ where: { deletedAt: null, activatedAt: null, invitedAt: { not: null }, company: customer } }),
+      // Said apart, so the console shows they exist and that they are not counted above.
+      this.prisma.company.count({ where: { isTest: true } }),
     ]);
 
     return {
@@ -458,6 +483,7 @@ export class PlatformController {
       activeUsers,
       pendingSeatRequests,
       pendingStaff,
+      testBusinesses,
       /*
        * No revenue figure. Payment history is incomplete by construction —
        * this checkpoint records manual payments only, and no provider is
@@ -513,6 +539,7 @@ export class PlatformController {
           city: true,
           createdAt: true,
           timezone: true,
+          isTest: true,
           subscription: true,
           ...TRIAL_FACTS,
           _count: { select: { branches: true, users: true } },
@@ -534,6 +561,8 @@ export class PlatformController {
         publicStoreId: c.publicStoreId,
         city: c.city,
         createdAt: c.createdAt.toISOString(),
+        /** A persistent test business (D217): shown as one wherever it is listed. */
+        isTest: c.isTest,
         branches: c._count.branches,
         users: c._count.users,
         state: listed.state,
@@ -584,6 +613,7 @@ export class PlatformController {
         city: true,
         createdAt: true,
         timezone: true,
+        isTest: true,
         subscription: true,
         branches: { select: { id: true, name: true, type: true, activity: true, activityNext: true } },
         // The free trial as recorded (0095): the eligibility and the claim, for the console to show — never to change.
@@ -623,6 +653,8 @@ export class PlatformController {
     const pricing = sub ? await this.billing.pricingFor(companyId) : null;
 
     const timeline = await this.lifecycle.timeline(id);
+    // Provisioning and activation, separately (D217): the Owner's setup and invitation, the contacts' state.
+    const setup = await this.provisioning.status(companyId);
 
     return {
       id: binToUuid(company.id),
@@ -630,6 +662,8 @@ export class PlatformController {
       publicStoreId: company.publicStoreId,
       city: company.city,
       createdAt: company.createdAt.toISOString(),
+      isTest: company.isTest,
+      setup,
       branches: company.branches.map((b) => ({
         id: binToUuid(b.id),
         name: b.name,
@@ -742,6 +776,15 @@ export class PlatformController {
    * already made and returns it **without a new invitation**: a credential is
    * minted for an explicit request, never for a network hiccup. "Regenerate"
    * is the route below.
+   *
+   * A test business (D217) is marked in the transaction that creates it. While
+   * customer activation is closed, only a test business is created here.
+   *
+   * The business and its invitation are two steps, and the answer says which
+   * happened: should the invitation fail after the business was made, the
+   * business is returned with `invitation: null` and `setup` saying no
+   * invitation exists — the console then offers to issue one — and a retry
+   * finds the business, never a second.
    */
   @Public()
   @UseGuards(PlatformAdminGuard)
@@ -750,6 +793,8 @@ export class PlatformController {
   async createBusiness(@Body() dto: CreateBusinessDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    const isTest = dto.isTest === true;
+    await this.provisioning.assertMayCreate(isTest, { admin, ip: req.ip }, dto.businessName);
 
     const result = await this.registration.register({
       idempotencyKey: `${ADMIN_KEY_PREFIX}${dto.idempotencyKey}`,
@@ -764,11 +809,15 @@ export class PlatformController {
       password: randomBytes(48).toString('base64url'),
       language: dto.language,
       actor: admin.email,
-      note: 'Created by the platform for the shop. Awaiting approval.',
+      note: isTest
+        ? 'Test business created by the platform. Awaiting access.'
+        : 'Created by the platform for the shop. Awaiting approval.',
+      isTest,
+      testMarkedBy: isTest ? admin.email : undefined,
     });
 
     if (!result.created) {
-      return { ...result, invitation: null };
+      return { ...result, invitation: null, setup: await this.provisioning.status(uuidToBin(result.companyId)) };
     }
 
     await this.audit.record({
@@ -785,15 +834,27 @@ export class PlatformController {
         language: dto.language,
         activity: result.activity,
         status: result.status,
+        isTest,
       },
       ip: req.ip ?? null,
     });
 
-    const invitation = await this.invitations.issue(result.companyId, {
-      admin,
-      ip: req.ip,
-      reason: dto.reason,
-    });
+    let invitation;
+    try {
+      invitation = await this.invitations.issue(result.companyId, {
+        admin,
+        ip: req.ip,
+        reason: dto.reason,
+      });
+    } catch {
+      // The business exists; its invitation does not. Said, not hidden: the console issues one from the business.
+      return {
+        ...result,
+        invitation: null,
+        invitationFailed: true,
+        setup: await this.provisioning.status(uuidToBin(result.companyId)),
+      };
+    }
 
     return {
       ...result,
@@ -803,7 +864,36 @@ export class PlatformController {
         delivery: invitation.delivery,
         owner: invitation.owner,
       },
+      setup: await this.provisioning.status(uuidToBin(result.companyId)),
     };
+  }
+
+  /**
+   * Set or clear a business's test status (D217): an administrator's decision, with a reason, audited. Refused where
+   * it would mix test and real (`ProvisioningService.setTestStatus`).
+   */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/test-status')
+  @HttpCode(HttpStatus.OK)
+  async testStatus(@Param('id') id: string, @Body() dto: TestStatusDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    return this.provisioning.setTestStatus(id, { isTest: dto.isTest, reason: dto.reason }, { admin, ip: req.ip });
+  }
+
+  /**
+   * A store for a business (the owner's decision of 2026-10-20): a test business's opens at once, at no charge, under
+   * its administrative grant; a customer's is the priced request its Owner would file, opened by a real payment.
+   */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/stores')
+  @HttpCode(HttpStatus.OK)
+  async consoleStore(@Param('id') id: string, @Body() dto: ConsoleStoreDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    return this.provisioning.openStore(id, { name: dto.name, activity: dto.activity, reason: dto.reason }, { admin, ip: req.ip });
   }
 
   /** A fresh invitation for the Owner. Every unspent one is revoked by it. */
@@ -814,6 +904,7 @@ export class PlatformController {
   async ownerInvitation(@Param('id') id: string, @Body() dto: InvitationDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.provisioning.assertMayActivate(id, 'owner_invitation.issue', { admin, ip: req.ip });
     const invitation = await this.invitations.issue(id, { admin, ip: req.ip, reason: dto.reason });
     return {
       token: invitation.token,
@@ -837,7 +928,11 @@ export class PlatformController {
   @Post('owner-invitation/accept')
   @HttpCode(HttpStatus.OK)
   async acceptOwnerInvitation(@Body() dto: AcceptInvitationDto, @Req() req: Request) {
-    const result = await this.invitations.accept(dto.token, dto.password, { ip: req.ip });
+    const result = await this.invitations.accept(dto.token, dto.password, {
+      ip: req.ip,
+      // A customer's invitation is not spent while customer activation is closed (D217) — refused like any other.
+      mayAccept: (companyId) => this.provisioning.mayAcceptInvitation(companyId),
+    });
     return { ...result, next: 'sign_in' };
   }
 
@@ -850,6 +945,7 @@ export class PlatformController {
   async approve(@Param('id') id: string, @Body() dto: ApproveDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.provisioning.assertMayActivate(id, 'subscription.approve', { admin, ip: req.ip });
     const r = await this.lifecycle.approve(
       id,
       {
@@ -890,6 +986,7 @@ export class PlatformController {
   async setPeriod(@Param('id') id: string, @Body() dto: PeriodDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.provisioning.assertMayActivate(id, 'subscription.period', { admin, ip: req.ip });
     const r = await this.lifecycle.setPeriodEnd(
       id,
       { periodEnd: new Date(dto.periodEnd), reason: dto.reason, expectedVersion: dto.expectedVersion },
@@ -910,6 +1007,7 @@ export class PlatformController {
   async activateGrant(@Param('id') id: string, @Body() dto: GrantDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.provisioning.assertMayActivate(id, 'subscription.activate_grant', { admin, ip: req.ip });
     const r = await this.lifecycle.activateByGrant(
       id,
       { days: dto.days, reason: dto.reason, expectedVersion: dto.expectedVersion },
@@ -925,6 +1023,7 @@ export class PlatformController {
   async extend(@Param('id') id: string, @Body() dto: ExtendDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.provisioning.assertMayActivate(id, 'subscription.extend', { admin, ip: req.ip });
     const r = await this.lifecycle.extend(
       id,
       { months: dto.months, reason: dto.reason, expectedVersion: dto.expectedVersion },
@@ -959,6 +1058,7 @@ export class PlatformController {
   async reinstate(@Param('id') id: string, @Body() dto: ReasonDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.provisioning.assertMayActivate(id, 'subscription.reinstate', { admin, ip: req.ip });
     const r = await this.lifecycle.reinstate(
       id,
       { reason: dto.reason, expectedVersion: dto.expectedVersion },
@@ -989,6 +1089,7 @@ export class PlatformController {
   async payment(@Param('id') id: string, @Body() dto: PaymentDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    if (isUuid(id)) await this.provisioning.assertMayTakePayment(uuidToBin(id), 'subscription.payment', { admin, ip: req.ip });
     const { payment: p, applied } = await this.lifecycle.recordPayment(
       id,
       {

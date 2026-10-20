@@ -111,6 +111,7 @@ describe('deploy/production/preflight.mjs', () => {
     ['the tools on the migrator', { DATABASE_URL: 'mysql://phonestore_migrator:pw@db:3306/phonestore' }, /DATABASE_URL \(the tools\) must connect as phonestore_app/],
     ['the staging schema', { DATABASE_URL: 'mysql://phonestore_app:pw@db:3306/phonestore_staging' }, /to the phonestore schema/],
     ['WhatsApp enabled', { WHATSAPP_CHANNEL: 'cloud' }, /WHATSAPP_CHANNEL must be "disabled"/],
+    ['customer activation opened on the host (D217)', { CUSTOMER_ACTIVATION: 'open' }, /CUSTOMER_ACTIVATION must be "closed"/],
     ['an unknown email channel', { EMAIL_CHANNEL: 'development-log' }, /EMAIL_CHANNEL must be "disabled" or "smtp"/],
     ['rate limits left unstated', { AUTH_THROTTLE_LIMIT: undefined }, /AUTH_THROTTLE_LIMIT must be stated/],
   ])('refuses %s', (_label, change, message) => {

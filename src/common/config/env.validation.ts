@@ -149,6 +149,12 @@ export const envValidationSchema = Joi.object({
   // an https:// origin with no path, and APP_ENV=production anything but https://dukan.tsxmr.com (production-guard.ts).
   PORTAL_ORIGIN: Joi.string().allow('').default(''),
 
+  // ── Customer activation (0102; D217) ──────────────────────────────────────
+  // "closed": the console's owner setup invitation, and the actions that give a business access, are allowed for test
+  // businesses only. "open": for every business. Unset: closed when NODE_ENV=production, open otherwise. The production
+  // preflight refuses "open": real customers are activated only once their release requirements are met.
+  CUSTOMER_ACTIVATION: Joi.string().valid('closed', 'open').optional(),
+
   // File upload foundation.
   UPLOAD_MAX_BYTES: Joi.number().integer().min(1).default(10 * 1024 * 1024),
   UPLOAD_DIR: Joi.string().default('./uploads'),
