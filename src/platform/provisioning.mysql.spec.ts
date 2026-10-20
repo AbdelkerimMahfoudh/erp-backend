@@ -146,6 +146,16 @@ run('test businesses and provisioning on real MySQL (0102)', () => {
     expect(events.map((e) => e.note)).toEqual([expect.stringMatching(/opened at no charge under the administrative grant: second test store/)]);
     expect(await root.platformAuditEvent.count({ where: { targetId: labId, action: 'business.store_grant' } })).toBe(1);
 
+    // The longest name and reason the console accepts still open the store: the timeline’s note is cut to its column
+    // (store-opening.ts), the full reason kept on the allocation and in the audit.
+    const longName = 'N'.repeat(160);
+    const longReason = 'R'.repeat(500);
+    const long = await a.provisioning.openStore(lab.companyId, { name: longName, reason: longReason }, CTX);
+    expect(long).toMatchObject({ mode: 'granted', created: true });
+    const longNote = await root.subscriptionEvent.findFirstOrThrow({ where: { companyId: labId, kind: 'branches_changed', note: { contains: longName } }, select: { note: true } });
+    expect(longNote.note).toHaveLength(255);
+    expect((await root.seatAllocation.findUniqueOrThrow({ where: { id: Buffer.from(long.allocation.id.replace(/-/g, ''), 'hex') }, select: { reason: true } })).reason).toHaveLength(500);
+
     // A customer's store from the console is the priced request, awaiting a real payment.
     const requested = await a.provisioning.openStore(shop.companyId, { name: 'Annex', reason: 'asked by phone' }, CTX);
     expect(requested).toMatchObject({ mode: 'requested', allocation: { status: 'pending_payment' } });
