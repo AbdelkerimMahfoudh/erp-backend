@@ -55,7 +55,9 @@ describe('the app’s one trial route', () => {
     // It finds the routes it is about, so it cannot pass by reading nothing.
     expect(routes).toEqual(expect.arrayContaining(['GET account', 'POST auth/login', 'GET account/trial-setup']));
     const appSide = routes.filter((r) => / (account|auth)(\/|$)/.test(r));
-    expect(appSide.filter((r) => /trial|setup|claim|link|token/i.test(r))).toEqual(['GET account/trial-setup']);
+    // The Owner's one-time setup code (D217) is no trial link: it sets the Owner's password and starts, claims or sends
+    // nothing — the same act as platform/owner-invitation/accept, under auth/ for the app.
+    expect(appSide.filter((r) => /trial|setup|claim|link|token/i.test(r))).toEqual(['POST auth/owner-setup', 'GET account/trial-setup']);
     // The one resend there is the deletion code's (docs/64) — nothing of the trial.
     expect(appSide.filter((r) => /resend/i.test(r))).toEqual(['POST account/deletion/resend']);
   });

@@ -22,6 +22,7 @@ import { OwnerInvitationService } from './owner-invitation.service';
 import { ProvisioningService } from './provisioning.service';
 import { RegistrationFlowService } from './registration-flow.service';
 import { AppRegistrationController } from './app-registration.controller';
+import { AppOwnerSetupController } from './app-owner-setup.controller';
 import { TrialService } from './trial/trial.service';
 import { TrialController } from './trial/trial.controller';
 import { TrialSetupService } from './trial/trial-setup.service';
@@ -97,6 +98,8 @@ export function selectContactDelivery(
     SeatRequestsController,
     PlatformMfaController,
     AppRegistrationController,
+    // An Owner's setup code spent from the app (D217): the same act as platform/owner-invitation/accept.
+    AppOwnerSetupController,
     TrialController,
     TrialSetupController,
     // The Dukan ERP portal (0099): its own sign-in on the app's identity, and the Owner's routes beside the subscription.

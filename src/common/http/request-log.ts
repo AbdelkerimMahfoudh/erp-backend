@@ -43,6 +43,8 @@ export function requestLogOptions(cfg: { logLevel: string; isProduction: boolean
         'req.body.recoveryCode',
         'req.body.enrolmentToken',
         'req.body.confirmPassword',
+        // An Owner's one-time setup code (0075, D217), spent by either door.
+        'req.body.token',
         'res.headers["set-cookie"]',
       ],
       remove: true,

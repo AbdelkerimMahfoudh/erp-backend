@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { AppConfigService } from '../common/config/app-config.service';
 import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 import { ProvisioningService } from './provisioning.service';
+import { AppOwnerSetupController } from './app-owner-setup.controller';
+import { OWNER_SETUP_THROTTLE, PlatformController } from './platform.controller';
 
 /**
  * Platform-superadmin provisioning and persistent test businesses (D217; the owner's decision of 2026-10-20).
@@ -255,5 +257,30 @@ describe('provisioning and activation, separately', () => {
     expect((await service.status(test.id)).invitation.state).toBe('expired');
     prisma.ownerInvitation.findFirst = async () => ({ issuedBy: 'a', createdAt: new Date(0), expiresAt: new Date(Date.now() + 1e6), acceptedAt: null, revokedAt: new Date() });
     expect((await service.status(test.id)).invitation.state).toBe('revoked');
+  });
+});
+
+describe('the setup code’s two doors', () => {
+  const throttleOf = (target: object) => Reflect.getMetadata('THROTTLER:LIMITdefault', target) as number | undefined;
+  const keyOf = (target: object) => Reflect.getMetadata('THROTTLER:KEY_GENERATORdefault', target) as unknown;
+
+  it('the website’s and the app’s spend one budget per address, and both pass the activation gate', async () => {
+    const website = PlatformController.prototype.acceptOwnerInvitation;
+    const app = AppOwnerSetupController.prototype.setup;
+    expect(throttleOf(website)).toBe(OWNER_SETUP_THROTTLE.default.limit);
+    expect(throttleOf(app)).toBe(OWNER_SETUP_THROTTLE.default.limit);
+    expect(keyOf(website)).toBe(OWNER_SETUP_THROTTLE.default.generateKey);
+    expect(keyOf(app)).toBe(OWNER_SETUP_THROTTLE.default.generateKey);
+
+    const seen: unknown[] = [];
+    const invitations = {
+      accept: async (token: string, password: string, meta: { mayAccept?: (c: Buffer) => Promise<boolean> }) => {
+        seen.push({ token, password, gated: await meta.mayAccept?.(Buffer.alloc(16)) });
+        return { publicStoreId: 'P', businessName: 'B' };
+      },
+    };
+    const controller = new AppOwnerSetupController(invitations as never, { mayAcceptInvitation: async () => false } as never);
+    expect(await controller.setup({ token: 't'.repeat(43), password: 'password-1' } as never, { ip: '10.0.0.1' } as never)).toEqual({ publicStoreId: 'P', businessName: 'B', next: 'sign_in' });
+    expect(seen).toEqual([{ token: 't'.repeat(43), password: 'password-1', gated: false }]);
   });
 });

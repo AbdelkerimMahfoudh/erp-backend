@@ -87,6 +87,17 @@ import { ProvisioningService } from './provisioning.service';
  */
 export const PUBLIC_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
+/**
+ * Spending an Owner's setup code (0075, D217), by either door — the website's `platform/owner-invitation/accept` or the
+ * app's `auth/owner-setup` — in one budget per address, so neither is the cheaper one to try codes on.
+ */
+export const OWNER_SETUP_THROTTLE = {
+  default: {
+    ...PUBLIC_THROTTLE.default,
+    generateKey: (_context: unknown, tracker: string, throttler: string) => `owner-setup-${throttler}-${tracker}`,
+  },
+};
+
 /** A step of a business registering itself, as both doors expose it. */
 export type RegistrationStep = 'register' | 'verify-start' | 'verify-confirm';
 
@@ -233,7 +244,7 @@ class InvitationDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
-class AcceptInvitationDto {
+export class AcceptInvitationDto {
   /** The opaque invitation. Never logged. */
   @IsString() @MinLength(16) @MaxLength(200) token: string;
   @IsString() @MinLength(OWNER_PASSWORD_MIN_LENGTH) @MaxLength(200) password: string;
@@ -924,7 +935,7 @@ export class PlatformController {
    * they may do.
    */
   @Public()
-  @Throttle(PUBLIC_THROTTLE)
+  @Throttle(OWNER_SETUP_THROTTLE)
   @Post('owner-invitation/accept')
   @HttpCode(HttpStatus.OK)
   async acceptOwnerInvitation(@Body() dto: AcceptInvitationDto, @Req() req: Request) {
