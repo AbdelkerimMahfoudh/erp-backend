@@ -24,6 +24,8 @@ export interface AuthTokenResponse {
     personalId: string;
     companyId: string;
     publicStoreId: string;
+    /** A persistent test business (D217): the app says so from the first screen, as `/auth/me` does. */
+    isTestBusiness: boolean;
   };
   /** Present ONLY when this login enrolled a new device. The secret appears here and nowhere else. */
   device?: DeviceEnrollment;
@@ -145,7 +147,7 @@ export class AuthService {
   ): Promise<AuthTokenResponse> {
     const company = await this.prisma.company.findUnique({
       where: { id: user.companyId },
-      select: { id: true, isActive: true, publicStoreId: true },
+      select: { id: true, isActive: true, publicStoreId: true, isTest: true },
     });
 
     // A dormant company is refused with the same generic message: whether a
@@ -224,7 +226,7 @@ export class AuthService {
 
     // `company` is guaranteed here: `user` is set only when the company resolved
     // and was active, and we would have thrown otherwise.
-    return { ...this.buildResponse(user, sessionId, secret, company!.publicStoreId), device: enrollment };
+    return { ...this.buildResponse(user, sessionId, secret, company!), device: enrollment };
   }
 
   async refresh(refreshToken: string): Promise<AuthTokenResponse> {
@@ -253,13 +255,13 @@ export class AuthService {
 
     const company = await this.prisma.company.findUnique({
       where: { id: user.companyId },
-      select: { publicStoreId: true },
+      select: { publicStoreId: true, isTest: true },
     });
     if (!company) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    return this.buildResponse(user, sessionId, newSecret, company.publicStoreId);
+    return this.buildResponse(user, sessionId, newSecret, company);
   }
 
   /**
@@ -297,7 +299,7 @@ export class AuthService {
     user: User,
     sessionId: Buffer,
     secret: string,
-    publicStoreId: string,
+    company: { publicStoreId: string; isTest: boolean },
   ): AuthTokenResponse {
     const access = this.tokens.signAccessToken(
       binToUuid(user.id),
@@ -317,7 +319,8 @@ export class AuthService {
         companyId: binToUuid(user.companyId),
         // The public Store Account ID the client namespaces its device
         // credential by (Stage 3.2). Not a secret.
-        publicStoreId,
+        publicStoreId: company.publicStoreId,
+        isTestBusiness: company.isTest,
       },
     };
   }

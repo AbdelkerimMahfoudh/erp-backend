@@ -65,13 +65,13 @@ function user(companyId: Buffer, login: string, over: Partial<FakeUser> = {}): F
 }
 
 function makeService(opts: {
-  companies?: Record<string, { id: Buffer; isActive: boolean; publicStoreId: string }>;
+  companies?: Record<string, { id: Buffer; isActive: boolean; publicStoreId: string; isTest?: boolean }>;
   users?: FakeUser[];
   recognise?: unknown;
   verifyPassword?: boolean;
 } = {}) {
   const sessionId = newUuidV7Bin();
-  const companies = opts.companies ?? { [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A } };
+  const companies = opts.companies ?? { [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A, isTest: false } };
   const users = opts.users ?? [user(COMPANY_A, 'owner')];
 
   const usersSvc = {
@@ -238,6 +238,14 @@ describe('tenant resolution from the credential (CP3)', () => {
     await expect(
       service.login({ identifier: shared, password: 'wrong' } as never, {}),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('says from the sign-in itself whether the business is a test business (D217), as /auth/me does', async () => {
+    // The app takes the user from this answer: without the flag here, a test business's first session would show no
+    // test banner until the app restarted and read /auth/me.
+    expect((await doLogin(makeService().service)).user.isTestBusiness).toBe(false);
+    const { service } = makeService({ companies: { [STORE_A]: { id: COMPANY_A, isActive: true, publicStoreId: STORE_A, isTest: true } } });
+    expect((await doLogin(service)).user.isTestBusiness).toBe(true);
   });
 
   it('a deactivated user is never even a candidate', async () => {
