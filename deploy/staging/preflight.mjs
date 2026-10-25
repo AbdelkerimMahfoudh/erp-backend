@@ -51,6 +51,7 @@ const secrets = {
   MESSAGING_HASH_KEY: 32,
   PLATFORM_MFA_KEY: 32,
   STAFF_INVITATION_KEY: 32,
+  REFERRAL_KEY: 32,
 };
 for (const [name, min] of Object.entries(secrets)) {
   check(val(name).length >= min, `${name} must be at least ${min} characters (generate it; docs/99 §3).`);
@@ -66,7 +67,7 @@ const mfaBytes = /^[0-9a-f]{64}$/i.test(mfa) ? 32 : (() => {
 })();
 check(mfaBytes === 32, 'PLATFORM_MFA_KEY must decode to exactly 32 bytes (64 hex characters, or base64 of 32 bytes).');
 const values = Object.keys(secrets).map(val).filter(Boolean);
-check(new Set(values).size === values.length, 'JWT_ACCESS_SECRET, OTP_PEPPER, MESSAGING_HASH_KEY, PLATFORM_MFA_KEY and STAFF_INVITATION_KEY must all be different.');
+check(new Set(values).size === values.length, 'JWT_ACCESS_SECRET, OTP_PEPPER, MESSAGING_HASH_KEY, PLATFORM_MFA_KEY, STAFF_INVITATION_KEY and REFERRAL_KEY must all be different.');
 
 // ── Surface ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 check(val('COOKIE_SECURE') === 'true', 'COOKIE_SECURE must be "true".');

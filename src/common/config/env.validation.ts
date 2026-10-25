@@ -77,6 +77,7 @@ export const envValidationSchema = Joi.object({
   PLATFORM_MFA_KEY: Joi.string().allow('').default(''),
   // Keys the hashes of employee invitation references (0101, D214); 32+ characters. No default.
   STAFF_INVITATION_KEY: Joi.string().allow('').default(''),
+  REFERRAL_KEY: Joi.string().allow('').default(''),
 
   // Security limits, not Owner-editable settings.
   OTP_TTL_SECONDS: Joi.number().integer().min(60).max(900).default(300),

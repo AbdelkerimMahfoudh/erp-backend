@@ -44,6 +44,16 @@ import {
   isRealChannel,
 } from './contact-delivery';
 import { WHATSAPP_CHANNEL, WhatsAppChannel } from '../messaging/whatsapp-channel';
+import { AcquisitionService } from '../acquisition/acquisition.service';
+import { LookupLimiter } from '../acquisition/lookup-limiter';
+import { PromoterService } from '../acquisition/promoter.service';
+import { ReferralInvitationService } from '../acquisition/referral-invitation.service';
+import {
+  AppAcquisitionController,
+  PromotersController,
+  ReferralInvitationsController,
+  WebsiteAcquisitionController,
+} from '../acquisition/acquisition.controllers';
 import { EMAIL_CHANNEL, EmailChannel } from '../messaging/email-channel';
 
 /**
@@ -107,6 +117,12 @@ export function selectContactDelivery(
     PortalAccountController,
     // The console's oversight of the lifecycle (0099): messages, grace decisions, trial claims — reads only.
     PlatformOversightController,
+    // Where a self-registered business came from (0103, D221): promoters, user invitations, the public lookups by both
+    // doors, and the console's reports. Here because the registration that writes the attribution lives here.
+    WebsiteAcquisitionController,
+    AppAcquisitionController,
+    PromotersController,
+    ReferralInvitationsController,
   ],
   providers: [
     HashingService,
@@ -133,6 +149,10 @@ export function selectContactDelivery(
     StaffActivationService,
     // Test businesses, the customer-activation gate and the console's stores (D217).
     ProvisioningService,
+    AcquisitionService,
+    LookupLimiter,
+    PromoterService,
+    ReferralInvitationService,
     {
       provide: ContactDeliveryProvider,
       /*

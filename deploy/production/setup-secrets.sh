@@ -6,7 +6,7 @@
 # Writes, under SECRETS_DIR (mode 700, files mode 600, owned by the deployment account — the API container's `node`
 # user has the same uid, 1000, so it can read its own files through the read-only mount and nothing else can):
 #   db/    mysql_root.pw migrator.pw app.pw backup.pw admin.pw      read by the database container only
-#   api/   app_database_url jwt_access_secret otp_pepper messaging_hash_key platform_mfa_key staff_invitation_key
+#   api/   app_database_url jwt_access_secret otp_pepper messaging_hash_key platform_mfa_key staff_invitation_key referral_key
 #          (+ smtp_username smtp_password: the owner's, entered through a hidden prompt — never generated here)
 #   database.env   DATABASE_URL as phonestore_app, for the one-off tools container
 #   migrator.env   DATABASE_URL as phonestore_migrator, for the one-off migrate container only
@@ -32,7 +32,7 @@ new_secret() { # file generator...
 for name in mysql_root migrator app backup admin; do new_secret "$SECRETS_DIR/db/$name.pw" openssl rand -hex 24; done
 # 48 random bytes, base64url (64 characters): the API's keys. The MFA key is exactly 32 bytes, as 64 hex characters.
 b64url48() { openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n'; echo; }
-for name in jwt_access_secret otp_pepper messaging_hash_key staff_invitation_key; do new_secret "$SECRETS_DIR/api/$name" b64url48; done
+for name in jwt_access_secret otp_pepper messaging_hash_key staff_invitation_key referral_key; do new_secret "$SECRETS_DIR/api/$name" b64url48; done
 new_secret "$SECRETS_DIR/api/platform_mfa_key" openssl rand -hex 32
 
 # The connection strings, rebuilt from the password files every time (they hold nothing the password files do not).

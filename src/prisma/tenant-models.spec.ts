@@ -36,6 +36,10 @@ const PLATFORM_REALM = [
   'WhatsAppWebhookEvent',
   'WhatsAppContact',
   'WhatsAppConsent',
+  // Promoters and their codes (0103, D221): the platform administrator's records, belonging to no business — reached
+  // only by the acquisition code on the unscoped client.
+  'Promoter',
+  'PromoterCode',
 ];
 
 /**

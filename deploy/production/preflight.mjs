@@ -50,7 +50,7 @@ function readSecret(name) {
 }
 const PLACEHOLDER = /change|example|placeholder|secret|test|xxx|todo/i;
 const keys = {};
-for (const name of ['JWT_ACCESS_SECRET', 'OTP_PEPPER', 'MESSAGING_HASH_KEY', 'PLATFORM_MFA_KEY', 'STAFF_INVITATION_KEY']) {
+for (const name of ['JWT_ACCESS_SECRET', 'OTP_PEPPER', 'MESSAGING_HASH_KEY', 'PLATFORM_MFA_KEY', 'STAFF_INVITATION_KEY', 'REFERRAL_KEY']) {
   const s = readSecret(name);
   check(s.ok, `${s.why ?? ''} (setup-secrets.sh writes it).`);
   if (!s.ok) continue;
@@ -64,7 +64,7 @@ if (keys.PLATFORM_MFA_KEY !== undefined) {
   check(bytes === 32, 'PLATFORM_MFA_KEY must be exactly 32 bytes (64 hex characters, or base64 of 32 bytes).');
 }
 const values = Object.values(keys);
-check(new Set(values).size === values.length, 'JWT_ACCESS_SECRET, OTP_PEPPER, MESSAGING_HASH_KEY, PLATFORM_MFA_KEY and STAFF_INVITATION_KEY must all be different.');
+check(new Set(values).size === values.length, 'JWT_ACCESS_SECRET, OTP_PEPPER, MESSAGING_HASH_KEY, PLATFORM_MFA_KEY, STAFF_INVITATION_KEY and REFERRAL_KEY must all be different.');
 
 // ── Database: the application identity on the production schema, never the migrator ────────────────────────────────
 function dbUrl(raw) {

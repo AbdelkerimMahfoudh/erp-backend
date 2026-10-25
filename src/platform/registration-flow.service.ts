@@ -7,6 +7,7 @@ import { RegistrationService } from './registration.service';
 import { RegistrationContinuationService, CONTINUATION_TTL_SECONDS } from './registration-continuation.service';
 import { ContactDeliveryProvider } from './contact-delivery';
 import type { ContinueConfirmDto, ContinueStartDto, RegisterDto } from './registration.dto';
+import { AcquisitionService, AcquisitionUnavailableException } from '../acquisition/acquisition.service';
 
 /**
  * A business registering itself — the one flow behind both of its doors (0095, the owner's decision Q1 of
@@ -24,6 +25,7 @@ export class RegistrationFlowService {
     private readonly continuation: RegistrationContinuationService,
     private readonly delivery: ContactDeliveryProvider,
     @Optional() private readonly whatsappRecords?: WhatsAppRecords,
+    @Optional() private readonly acquisition?: AcquisitionService,
   ) {}
 
   /**
@@ -71,6 +73,17 @@ export class RegistrationFlowService {
       });
     }
 
+    /*
+     * Where the business came from (0103, D221), if anywhere: at most one source, and a caller who has spent their
+     * wrong guesses cannot use the registration as one more. A source refused inside the registration counts as one.
+     */
+    const claimed = { promoCode: dto.promoCode, referralToken: dto.referralToken };
+    if (!this.acquisition && (claimed.promoCode?.trim() || claimed.referralToken?.trim())) {
+      throw new AcquisitionUnavailableException(claimed.promoCode?.trim() ? 'promoter' : 'user_invite');
+    }
+    const acquisition = this.acquisition?.claimOf(claimed) ?? null;
+    if (acquisition) this.acquisition!.assertMayClaim(door.ip);
+
     const result = await this.registration.register({
       idempotencyKey: dto.idempotencyKey,
       ownerName: dto.ownerName,
@@ -84,6 +97,10 @@ export class RegistrationFlowService {
       language: dto.language,
       // A business that registers itself may claim one free trial (0095). Eligible — not started.
       trialEligible: true,
+      acquisition,
+    }).catch((e: unknown) => {
+      if (e instanceof AcquisitionUnavailableException) this.acquisition?.recordRefusedClaim(door.ip);
+      throw e;
     });
 
     /*

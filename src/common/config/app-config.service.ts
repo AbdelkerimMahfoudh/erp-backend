@@ -178,7 +178,8 @@ export class AppConfigService {
 
   /**
    * The Dukan ERP portal's origin (0099), for the one address the portal instructions and the subscription messages
-   * carry — and for nothing else: no request is ever compared with it. Empty when unset, and then no such message can
+   * carry, and for the registration links of promoters' QR cards and user invitations (`<portal>/join?r=…`, 0103) —
+   * and for nothing else: no request is ever compared with it. Empty when unset, and then no such message can
    * be sent. Production refuses anything but an https:// origin with no path, and APP_ENV=production anything but
    * https://dukan.tsxmr.com (`production-guard.ts`); elsewhere a trailing slash is forgiven.
    */
@@ -250,6 +251,17 @@ export class AppConfigService {
    */
   get staffInvitationKey(): string | null {
     const value = (this.config.get<string>('STAFF_INVITATION_KEY') ?? '').trim();
+    return value.length >= 32 ? value : null;
+  }
+
+  /**
+   * Secret. Signs the registration links of promoters' QR cards and of user invitations (0103, D221): a key of its
+   * own, so a link is comparable with no other secret's MAC. Null when unset or shorter than 32 characters — then no
+   * link can be made or opened (promo codes, which need no signature, still work). Never logged. Rotating it voids every
+   * printed QR card and every shared invitation.
+   */
+  get referralKey(): string | null {
+    const value = (this.config.get<string>('REFERRAL_KEY') ?? '').trim();
     return value.length >= 32 ? value : null;
   }
 

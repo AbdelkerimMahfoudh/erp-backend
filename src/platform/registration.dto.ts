@@ -1,6 +1,7 @@
 import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { IsIdempotencyKey } from '../common/decorators/idempotency-key.decorator';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
+import { REFERRAL_TOKEN_LENGTH } from '../acquisition/referral-token';
 
 /**
  * A business registering itself, and finishing its registration (docs/68; 0095).
@@ -40,6 +41,15 @@ export class RegisterDto {
   @IsOptional() @IsString() @MaxLength(40) whatsappConsentVersion?: string;
   /** The language the consent was shown in; the registration's `language` when not said. */
   @IsOptional() @IsIn(['en', 'ar', 'fr']) whatsappConsentLocale?: 'en' | 'ar' | 'fr';
+
+  /**
+   * Where the business came from, if anywhere (0103, D221) — at most one: a promoter's six-digit code (ASCII or Arabic
+   * digits), or the `r` of a registration link (a promoter's QR or a user's invitation). Both at once is refused with
+   * `acquisition_conflict`; a source that is no longer usable with `acquisition_unavailable`, and nothing is saved.
+   * Optional: a registration without one is exactly the registration it always was. Never logged.
+   */
+  @IsOptional() @IsString() @MaxLength(20) promoCode?: string;
+  @IsOptional() @IsString() @MaxLength(REFERRAL_TOKEN_LENGTH + 8) referralToken?: string;
 }
 
 export class ContinueStartDto {

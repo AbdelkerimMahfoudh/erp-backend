@@ -357,6 +357,9 @@ model Company {
   users                          User[]
   ownerInvitations               OwnerInvitation[]
   staffInvitations               StaffInvitation[]
+  referralInvitations            ReferralInvitation[]
+  acquisition                    BusinessAcquisition?  @relation("AcquiredCompany")
+  invitedAcquisitions            BusinessAcquisition[] @relation("InviterCompany")
   roles                          Role[]
   rolePermissions                RolePermission[]
   userBranches                   UserBranch[]
@@ -584,6 +587,9 @@ model User {
   consignmentLedgerEntries ConsignmentLedgerEntry[]
   ownerInvitations         OwnerInvitation[]
   staffInvitations         StaffInvitation[]
+  referralInvitations      ReferralInvitation[]  @relation("ReferralInvitationCreator")
+  revokedReferrals         ReferralInvitation[]  @relation("ReferralInvitationRevoker")
+  invitedAcquisitions      BusinessAcquisition[]
   accountDeletionRequests  AccountDeletionRequest[]
 
   /// Loan roles. Named, because who proposed and who decided must stay
@@ -4726,6 +4732,8 @@ model RegistrationAttempt {
 
   createdAt DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
+  acquisition BusinessAcquisition?
+
   @@index([createdAt], map: "ix_registration_created")
   @@map("registration_attempts")
 }
@@ -4792,6 +4800,110 @@ model StaffInvitation {
   @@index([companyId, createdAt], map: "ix_staff_invitations_company")
   @@index([userId, createdAt], map: "ix_staff_invitations_user")
   @@map("staff_invitations")
+}
+
+/// A promoter the platform administrator registered (0103, D221): who brought a registration, as a fact — attribution
+/// and factual counts only. The WhatsApp number and the note are the administrator's alone: never in a public
+/// answer, a QR link, a registration, an analytics event or a log. `publicRef` is what a QR link carries, never `id`.
+model Promoter {
+  id             Bytes    @id @db.Binary(16)
+  publicRef      Bytes    @unique(map: "ux_promoters_public_ref") @map("public_ref") @db.Binary(16)
+  displayName    String   @map("display_name") @db.VarChar(80)
+  /// Normalised E.164. Administrator-only; masked in lists.
+  whatsappNumber String   @map("whatsapp_number") @db.VarChar(24)
+  /// Administrator-only.
+  note           String?  @db.VarChar(500)
+  isActive       Boolean  @default(true) @map("is_active")
+  currentCodeId  Bytes?   @unique(map: "ux_promoters_current_code") @map("current_code_id") @db.Binary(16)
+  createdBy      String   @map("created_by") @db.VarChar(160)
+  updatedBy      String   @map("updated_by") @db.VarChar(160)
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.DateTime(6)
+
+  currentCode  PromoterCode?         @relation("PromoterCurrentCode", fields: [currentCodeId], references: [id], map: "fk_promoters_current_code")
+  codes        PromoterCode[]        @relation("PromoterCodes")
+  acquisitions BusinessAcquisition[]
+
+  @@index([createdAt], map: "ix_promoters_created")
+  @@index([displayName], map: "ix_promoters_name")
+  @@map("promoters")
+}
+
+/// Every six-digit code a promoter has held (0103). Unique for ever: a retired code is never issued again. `version`
+/// is also the version the promoter's QR link is signed with, so retiring a code retires its link.
+model PromoterCode {
+  id         Bytes     @id @db.Binary(16)
+  promoterId Bytes     @map("promoter_id") @db.Binary(16)
+  code       String    @unique(map: "ux_promoter_codes_code") @db.Char(6)
+  version    Int       @db.UnsignedInt
+  issuedBy   String    @map("issued_by") @db.VarChar(160)
+  issuedAt   DateTime  @default(now()) @map("issued_at") @db.DateTime(6)
+  retiredAt  DateTime? @map("retired_at") @db.DateTime(6)
+  retiredBy  String?   @map("retired_by") @db.VarChar(160)
+
+  promoter     Promoter              @relation("PromoterCodes", fields: [promoterId], references: [id], map: "fk_promoter_codes_promoter")
+  currentOf    Promoter?             @relation("PromoterCurrentCode")
+  acquisitions BusinessAcquisition[]
+
+  @@unique([promoterId, version], map: "ux_promoter_codes_version")
+  @@map("promoter_codes")
+}
+
+/// A link a signed-in user shares to invite somebody to register their own business (0103, D221). It belongs to the
+/// business; the user who made it is kept for the audit. No recipient is ever recorded.
+model ReferralInvitation {
+  id              Bytes     @id @db.Binary(16)
+  publicRef       Bytes     @unique(map: "ux_referral_invitations_ref") @map("public_ref") @db.Binary(16)
+  companyId       Bytes     @map("company_id") @db.Binary(16)
+  createdByUserId Bytes     @map("created_by_user_id") @db.Binary(16)
+  /// en | fr | ar — the language of the message it was made for.
+  language        String    @db.VarChar(2)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  revokedAt       DateTime? @map("revoked_at") @db.DateTime(6)
+  revokedByUserId Bytes?    @map("revoked_by_user_id") @db.Binary(16)
+
+  company      Company               @relation(fields: [companyId], references: [id], map: "fk_referral_invitations_company")
+  createdBy    User                  @relation("ReferralInvitationCreator", fields: [createdByUserId], references: [id], map: "fk_referral_invitations_user")
+  revokedBy    User?                 @relation("ReferralInvitationRevoker", fields: [revokedByUserId], references: [id], map: "fk_referral_invitations_revoker")
+  acquisitions BusinessAcquisition[]
+
+  @@index([companyId, createdAt], map: "ix_referral_invitations_company")
+  @@index([createdByUserId, createdAt], map: "ix_referral_invitations_user")
+  @@map("referral_invitations")
+}
+
+/// The one original attribution of a self-registered business (0103, D221), written in the registration's transaction
+/// and never changed: a promoter (by code or QR link) or a user invitation, never both. No phone number is snapshotted.
+model BusinessAcquisition {
+  id                    Bytes    @id @db.Binary(16)
+  companyId             Bytes    @unique(map: "ux_business_acquisitions_company") @map("company_id") @db.Binary(16)
+  registrationAttemptId Bytes    @unique(map: "ux_business_acquisitions_attempt") @map("registration_attempt_id") @db.Binary(16)
+  /// promoter | user_invite
+  source                String   @db.VarChar(16)
+  /// promo_code | promoter_qr | user_invite
+  mechanism             String   @db.VarChar(16)
+  promoterId            Bytes?   @map("promoter_id") @db.Binary(16)
+  promoterCodeId        Bytes?   @map("promoter_code_id") @db.Binary(16)
+  codeVersion           Int?     @map("code_version") @db.UnsignedInt
+  /// The promoter's display name as it was at registration.
+  promoterName          String?  @map("promoter_name") @db.VarChar(80)
+  invitationId          Bytes?   @map("invitation_id") @db.Binary(16)
+  inviterCompanyId      Bytes?   @map("inviter_company_id") @db.Binary(16)
+  inviterUserId         Bytes?   @map("inviter_user_id") @db.Binary(16)
+  attributedAt          DateTime @default(now()) @map("attributed_at") @db.DateTime(6)
+
+  company        Company             @relation("AcquiredCompany", fields: [companyId], references: [id], map: "fk_business_acquisitions_company")
+  attempt        RegistrationAttempt @relation(fields: [registrationAttemptId], references: [id], map: "fk_business_acquisitions_attempt")
+  promoter       Promoter?           @relation(fields: [promoterId], references: [id], map: "fk_business_acquisitions_promoter")
+  promoterCode   PromoterCode?       @relation(fields: [promoterCodeId], references: [id], map: "fk_business_acquisitions_code")
+  invitation     ReferralInvitation? @relation(fields: [invitationId], references: [id], map: "fk_business_acquisitions_invitation")
+  inviterCompany Company?            @relation("InviterCompany", fields: [inviterCompanyId], references: [id], map: "fk_business_acquisitions_inviter_company")
+  inviterUser    User?               @relation(fields: [inviterUserId], references: [id], map: "fk_business_acquisitions_inviter_user")
+
+  @@index([source, attributedAt], map: "ix_business_acquisitions_source")
+  @@index([promoterId, attributedAt], map: "ix_business_acquisitions_promoter")
+  @@index([inviterCompanyId, attributedAt], map: "ix_business_acquisitions_inviter")
+  @@map("business_acquisitions")
 }
 
 /// A code sent to prove somebody holds a contact.

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, Optional } from '@nestjs/common';
 import { Prisma, type TrialRegistrationMethod } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -8,6 +8,7 @@ import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { provisionDefaultRoles } from '../rbac/role-provisioning';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { TRIAL_DURATION_DAYS } from './trial/trial-rules';
+import { AcquisitionService, AcquisitionUnavailableException, type AcquisitionClaim } from '../acquisition/acquisition.service';
 import {
   generatePersonalId,
   isEmail,
@@ -80,6 +81,12 @@ export interface RegistrationInput {
    */
   isTest?: boolean;
   testMarkedBy?: string;
+  /**
+   * Where the business came from (0103, D221): a promoter's code or link, or a user's invitation — at most one, already
+   * shaped by `AcquisitionService.claimOf`. Resolved again inside the transaction and written with the business, or
+   * the whole registration is refused (`acquisition_unavailable`). Only the public self-registration routes pass it.
+   */
+  acquisition?: AcquisitionClaim | null;
 }
 
 export interface RegistrationResult {
@@ -137,6 +144,7 @@ export class RegistrationService {
     private readonly prisma: PrismaService,
     private readonly hashing: HashingService,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Optional() private readonly acquisition?: AcquisitionService,
   ) {}
 
   async register(input: RegistrationInput): Promise<RegistrationResult> {
@@ -182,6 +190,7 @@ export class RegistrationService {
     const companyId = newUuidV7Bin();
     const branchId = newUuidV7Bin();
     const userId = newUuidV7Bin();
+    const attemptId = newUuidV7Bin();
 
     try {
       await this.prisma.$transaction(async (tx) => {
@@ -189,7 +198,7 @@ export class RegistrationService {
         // here, before either has created a company.
         await tx.registrationAttempt.create({
           data: {
-            id: newUuidV7Bin(),
+            id: attemptId,
             idempotencyKey: input.idempotencyKey,
             companyId,
             businessName: input.businessName.slice(0, 160),
@@ -298,6 +307,16 @@ export class RegistrationService {
             actor: input.actor?.slice(0, 120) ?? 'self-service',
           },
         });
+
+        /*
+         * Where the business came from (0103, D221): its one original attribution, resolved again here and written with
+         * the business it belongs to — a source no longer usable refuses the whole registration, and nothing is saved.
+         * A retry recognised above never reaches here, so a replay never attributes twice.
+         */
+        if (input.acquisition) {
+          if (!this.acquisition) throw new AcquisitionUnavailableException(input.acquisition.promoCode ? 'promoter' : 'user_invite');
+          await this.acquisition.attributeTx(tx, input.acquisition, { companyId, attemptId, at: this.clock.now() });
+        }
 
         /*
          * The free trial's eligibility (0095), in the same transaction as the

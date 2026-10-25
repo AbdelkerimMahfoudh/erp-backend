@@ -23,6 +23,7 @@ const SAFE = {
   PLATFORM_MFA_KEY: 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=',
   // Keys employee invitation references (0101) — a test value.
   STAFF_INVITATION_KEY: 'a-staff-invitation-key-of-at-least-32-chars',
+  REFERRAL_KEY: 'a-referral-link-signing-key-of-32-chars-plus',
   // The website the free trial's setup links point to (0095).
   PORTAL_ORIGIN: 'https://dukan.example.com',
 };
@@ -434,6 +435,12 @@ describe('administrator MFA in production (0094)', () => {
       expect(productionConfigProblems({ ...SAFE, STAFF_INVITATION_KEY: key }).join('\n')).toMatch(/STAFF_INVITATION_KEY is missing/);
     }
     expect(productionConfigProblems(SAFE)).toEqual([]);
+  });
+
+  it('refuses to start without a REFERRAL_KEY of 32+ characters: no QR card or invitation could be opened (0103)', () => {
+    for (const key of [undefined, '', 'short-key']) {
+      expect(productionConfigProblems({ ...SAFE, REFERRAL_KEY: key }).join('\n')).toMatch(/REFERRAL_KEY is missing/);
+    }
   });
 
   it('refuses to start without a well-formed PLATFORM_MFA_KEY: the portal would be a password alone', () => {

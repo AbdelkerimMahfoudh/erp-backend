@@ -21,6 +21,7 @@ const SECRET_FILES: Record<string, string> = {
   messaging_hash_key: `${KEY('c')}\n`,
   platform_mfa_key: `${'d'.repeat(64)}\n`,
   staff_invitation_key: `${KEY('e')}\n`,
+  referral_key: `${KEY('f')}\n`,
   smtp_username: 'login@smtp-brevo.com\n',
   smtp_password: 'xsmtpsib-0123456789abcdef\n',
 };
@@ -38,6 +39,7 @@ const GOOD_ENV: Record<string, string> = {
   MESSAGING_HASH_KEY_FILE: '/run/secrets/messaging_hash_key',
   PLATFORM_MFA_KEY_FILE: '/run/secrets/platform_mfa_key',
   STAFF_INVITATION_KEY_FILE: '/run/secrets/staff_invitation_key',
+  REFERRAL_KEY_FILE: '/run/secrets/referral_key',
   DATABASE_URL: 'mysql://phonestore_app:example-app-password-0123@db:3306/phonestore',
   COOKIE_SECURE: 'true',
   SWAGGER_ENABLED: 'false',

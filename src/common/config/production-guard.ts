@@ -82,6 +82,7 @@ export interface ProductionGuardEnv {
   PLATFORM_ADMIN_KEY?: string;
   PLATFORM_MFA_KEY?: string;
   STAFF_INVITATION_KEY?: string;
+  REFERRAL_KEY?: string;
   SEED_DEMO?: string;
   PORTAL_ORIGIN?: string;
   SMTP_PASSWORD_FILE?: string;
@@ -385,6 +386,14 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
    */
   if ((env.STAFF_INVITATION_KEY ?? '').trim().length < 32) {
     problems.push('STAFF_INVITATION_KEY is missing or shorter than 32 characters. Employee invitation references are stored only as hashes under it: without it no employee can be activated.');
+  }
+
+  /*
+   * Registration links (0103, D221): a promoter's QR card and a user's invitation are signed under this key. Without
+   * it no link could be made or opened, and every printed card would lead to an "unavailable" notice.
+   */
+  if ((env.REFERRAL_KEY ?? '').trim().length < 32) {
+    problems.push('REFERRAL_KEY is missing or shorter than 32 characters. Promoter QR links and user invitations are signed under it: without it none can be made or opened.');
   }
 
   /*

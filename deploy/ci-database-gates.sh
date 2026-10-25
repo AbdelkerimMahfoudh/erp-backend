@@ -18,7 +18,8 @@
 #   6. the 0099 real-MySQL spec (grace decisions, the notice outbox, the portal claim) runs on its own `grace_ci` schema;
 #   7. the 0100 real-MySQL spec (the consent history) runs on that same disposable schema;
 #   8. the 0101 real-MySQL spec (employee invitations: locks, the one-live UNIQUE, triggers, CHECKs) runs there too;
-#   9. the 0102 real-MySQL spec (test businesses, the console's stores and invitations: locks and filters) runs there too.
+#   9. the 0102 real-MySQL spec (test businesses, the console's stores and invitations: locks and filters) runs there too;
+#  10. the 0103 real-MySQL spec (promoter codes, attribution, user invitations: locks, uniqueness, triggers, CHECKs) too.
 # Any failure exits non-zero.
 set -euo pipefail
 
@@ -78,7 +79,13 @@ root phonestore -e "SET @c = UNHEX(REPLACE(UUID(), '-', '')), @s = UNHEX(REPLACE
   SET @u = UNHEX(REPLACE(UUID(), '-', ''));
   INSERT INTO users (id, company_id, name, login, personal_id, password_hash, invited_at, updated_at) VALUES (@u, @c, 'CI probe', 'ci-probe', 'CIPROBE001', 'x', NOW(6), NOW(6));
   INSERT INTO staff_invitations (id, company_id, user_id, token_hash, issued_by, expires_at)
-    VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @u, REPEAT('a', 64), 'ci-probe', NOW(6) + INTERVAL 72 HOUR)"
+    VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @u, REPEAT('a', 64), 'ci-probe', NOW(6) + INTERVAL 72 HOUR);
+  SET @p = UNHEX(REPLACE(UUID(), '-', '')), @pc = UNHEX(REPLACE(UUID(), '-', '')), @ra = UNHEX(REPLACE(UUID(), '-', ''));
+  INSERT INTO promoters (id, public_ref, display_name, whatsapp_number, created_by, updated_by) VALUES (@p, RANDOM_BYTES(16), 'CI probe', '+22200000000', 'ci-probe', 'ci-probe');
+  INSERT INTO promoter_codes (id, promoter_id, code, version, issued_by) VALUES (@pc, @p, '000001', 1, 'ci-probe');
+  INSERT INTO registration_attempts (id, idempotency_key, company_id, business_name, owner_name) VALUES (@ra, 'ci-probe-attempt', @c, 'CI identity probe', 'CI probe');
+  INSERT INTO business_acquisitions (id, company_id, registration_attempt_id, source, mechanism, promoter_id, promoter_code_id, code_version, promoter_name)
+    VALUES (UNHEX(REPLACE(UUID(), '-', '')), @c, @ra, 'promoter', 'promo_code', @p, @pc, 1, 'CI probe')"
 DB=phonestore APP_PW="$APP_PW" BACKUP_PW="$BACKUP_PW" MIGRATOR_PW="$MIGRATOR_PW" bash deploy/verify-mysql-identities.sh
 
 echo "== 5. the real-MySQL spec, on its own schema"
@@ -104,3 +111,7 @@ INVITATION_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) INVITATION_APP_URL=$(url
 echo "== 9. the 0102 real-MySQL spec (test businesses, the console's stores and invitations), on the same disposable schema"
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/platform/provisioning.mysql.spec.ts
+
+echo "== 10. the 0103 real-MySQL spec (promoter codes, attribution, user invitations), on the same disposable schema"
+ACQUISITION_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ACQUISITION_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/acquisition/acquisition.mysql.spec.ts
