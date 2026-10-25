@@ -45,6 +45,9 @@ export function requestLogOptions(cfg: { logLevel: string; isProduction: boolean
         'req.body.confirmPassword',
         // An Owner's one-time setup code (0075, D217), spent by either door.
         'req.body.token',
+        // Where a business came from (0103): a promoter's code and a registration address's token (`token` above).
+        'req.body.promoCode',
+        'req.body.referralToken',
         'res.headers["set-cookie"]',
       ],
       remove: true,
