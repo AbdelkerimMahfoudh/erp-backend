@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiExcludeController, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
@@ -181,7 +181,8 @@ export class PromotersController {
 
   @Public()
   @UseGuards(PlatformAdminGuard)
-  @Patch('promoters/:id')
+  @Post('promoters/:id')
+  @HttpCode(HttpStatus.OK)
   async update(@Param('id') id: string, @Body() dto: PromoterUpdateDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
