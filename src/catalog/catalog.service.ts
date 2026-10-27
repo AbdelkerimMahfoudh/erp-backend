@@ -107,6 +107,19 @@ export interface ProductDetail extends ProductListRow {
   updatedAt: string;
 }
 
+/**
+ * A product that passed every creation rule and is ready to be written — by the
+ * catalogue screen, or inside a stock intake's own transaction (D223). The id
+ * is fixed here, so an intake can refer to the product before it exists.
+ */
+export interface PreparedProduct {
+  data: Prisma.ProductUncheckedCreateInput & { id: Buffer; companyId: Buffer };
+  extras: string[];
+}
+
+/** What writing a product needs from a caller's transaction: the row, its audit entry, its recognition outbox. */
+export type ProductTxClient = Pick<TenantPrisma, 'product' | 'auditLog'>;
+
 /** Exactly the columns a catalog row may expose. */
 const LIST_SELECT = {
   id: true,
@@ -213,6 +226,23 @@ export class CatalogService {
   }
 
   async create(dto: CreateProductDto): Promise<Product> {
+    const prepared = await this.prepareProduct(dto);
+    const product = await this.db.$transaction((tx) => this.insertProductTx(tx, prepared));
+    await this.outbox.processNow();
+    return product;
+  }
+
+  /**
+   * Everything that decides whether a product may be created, done before any
+   * transaction opens: price authority, specification safety, barcode, category
+   * and tracking mode, attribute schema.
+   *
+   * Split from the write so stock intake can create a product inside ITS OWN
+   * transaction (D223): the product, the unit or counted receipt, the cost and
+   * the audit then commit together or not at all. The catalogue screen calls
+   * both halves in one transaction of its own, exactly as before.
+   */
+  async prepareProduct(dto: CreateProductDto): Promise<PreparedProduct> {
     const companyId = this.tenant.companyId();
 
     // Price is authority, not metadata (G1). Cost is never product metadata at
@@ -260,62 +290,67 @@ export class CatalogService {
     const schema = this.attributes.parseSchema(schemaRaw);
     const { extras } = this.attributes.validateValues(schema, dto.specifications);
 
-    const product = await this.db.$transaction(async (tx) => {
-      const created = await tx.product.create({
-        data: {
-          id: newUuidV7Bin(),
-          companyId,
-          categoryId,
-          brand: dto.brand.trim(),
-          model: dto.model.trim(),
-          variant: dto.variant?.trim() || null,
-          trackingType: trackingType ?? 'imei',
-          specifications: (dto.specifications ?? undefined) as Prisma.InputJsonValue | undefined,
-          barcode,
-          defaultCost: dto.defaultCost ?? null,
-          defaultPrice: dto.defaultPrice ?? null,
-          reorderThreshold: dto.reorderThreshold ?? 0,
-        },
-      });
+    return {
+      data: {
+        id: newUuidV7Bin(),
+        companyId,
+        categoryId,
+        brand: dto.brand.trim(),
+        model: dto.model.trim(),
+        variant: dto.variant?.trim() || null,
+        trackingType: trackingType ?? 'imei',
+        specifications: (dto.specifications ?? undefined) as Prisma.InputJsonValue | undefined,
+        barcode,
+        defaultCost: dto.defaultCost ?? null,
+        defaultPrice: dto.defaultPrice ?? null,
+        reorderThreshold: dto.reorderThreshold ?? 0,
+      },
+      extras,
+    };
+  }
 
-      await this.audit.recordTx(tx, {
-        entityType: 'Product',
-        entityId: created.id,
-        action: 'create',
-        after: {
-          brand: created.brand,
-          model: created.model,
-          trackingType: created.trackingType,
-          ...(extras.length ? { attributesForReview: extras } : {}),
-        },
-      });
+  /**
+   * The write half of `create`, inside the caller's transaction: the product,
+   * its audit entry and its barcode's recognition alias. The caller runs
+   * `outbox.processNow()` after its own commit.
+   */
+  async insertProductTx(tx: ProductTxClient, prepared: PreparedProduct): Promise<Product> {
+    const created = await tx.product.create({ data: prepared.data });
 
-      /**
-       * A product's barcode becomes a recognition alias. Queued in the SAME
-       * transaction as the product, so a crash cannot leave a product whose
-       * barcode the scanner never learned.
-       */
-      if (created.barcode) {
-        await this.outbox.enqueueTx(tx as never, [
-          {
-            companyId,
-            // Catalog creation has no purchase; the unique event key is
-            // (company, null, barcode, code), so re-creating the same barcode
-            // alias is a no-op rather than duplicate evidence.
-            purchaseId: null,
-            codeType: 'barcode',
-            code: created.barcode,
-            productId: created.id,
-            source: 'manual',
-          },
-        ]);
-      }
-
-      return created;
+    await this.audit.recordTx(tx as never, {
+      entityType: 'Product',
+      entityId: created.id,
+      action: 'create',
+      after: {
+        brand: created.brand,
+        model: created.model,
+        trackingType: created.trackingType,
+        ...(prepared.extras.length ? { attributesForReview: prepared.extras } : {}),
+      },
     });
 
-    await this.outbox.processNow();
-    return product;
+    /**
+     * A product's barcode becomes a recognition alias. Queued in the SAME
+     * transaction as the product, so a crash cannot leave a product whose
+     * barcode the scanner never learned.
+     */
+    if (created.barcode) {
+      await this.outbox.enqueueTx(tx as never, [
+        {
+          companyId: prepared.data.companyId,
+          // Catalog creation has no purchase; the unique event key is
+          // (company, null, barcode, code), so re-creating the same barcode
+          // alias is a no-op rather than duplicate evidence.
+          purchaseId: null,
+          codeType: 'barcode',
+          code: created.barcode,
+          productId: created.id,
+          source: 'manual',
+        },
+      ]);
+    }
+
+    return created;
   }
 
   /**

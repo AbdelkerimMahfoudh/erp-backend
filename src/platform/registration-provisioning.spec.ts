@@ -3,6 +3,7 @@ import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { ALL_PERMISSION_KEYS, ROLE_PERMISSIONS, STORE_FACING_ROLES } from '../rbac/role-permissions';
 import { stateOf } from '../entitlement/entitlement-rules';
 import { trialFactsOf } from './trial/trial-rules';
+import { DEFAULT_CATEGORIES } from '../catalog/default-categories';
 
 /**
  * What a self-service registration must leave behind.
@@ -33,6 +34,7 @@ function makeStore(failOn?: string) {
     subscriptionEvent: [],
     trialEligibility: [],
     trialClaim: [],
+    productCategory: [],
   };
   const permissions = ALL_PERMISSION_KEYS.map((key) => ({ id: newUuidV7Bin(), key }));
 
@@ -109,6 +111,7 @@ function makeStore(failOn?: string) {
         }),
       },
       userBranch: simple('userBranch'),
+      productCategory: simple('productCategory'),
       subscription: simple('subscription'),
       subscriptionEvent: simple('subscriptionEvent'),
       // The free trial's rows (0095): one eligibility per company, and the claim the Owner may make later.
@@ -233,6 +236,23 @@ describe('self-service registration provisions a usable tenant', () => {
     expect(store.tables.subscriptionEvent[0].actor).toBe('self-service');
   });
 
+  it('gives the new company the built-in categories, each subcategory under its own parent (D223)', async () => {
+    const store = makeStore();
+    await makeService(store).register(INPUT);
+
+    const rows = store.tables.productCategory;
+    expect(rows).toHaveLength(DEFAULT_CATEGORIES.length);
+    const companyId = store.tables.company[0].id;
+    const byKey = new Map(rows.map((r: any) => [r.key, r]));
+    for (const c of DEFAULT_CATEGORIES) {
+      const row: any = byKey.get(c.key);
+      expect(row.companyId.equals(companyId)).toBe(true);
+      expect(row.defaultTrackingType).toBe(c.trackingType);
+      if (c.parentKey) expect(row.parentId.equals((byKey.get(c.parentKey) as any).id)).toBe(true);
+      else expect(row.parentId).toBeNull();
+    }
+  });
+
   it('rolls the WHOLE tenant back when a later write fails', async () => {
     // The subscription insert fails — AFTER the roles and their permissions
     // have been written inside the same transaction.
@@ -250,6 +270,7 @@ describe('self-service registration provisions a usable tenant', () => {
     expect(store.tables.role).toHaveLength(0);
     expect(store.tables.rolePermission).toHaveLength(0);
     expect(store.tables.user).toHaveLength(0);
+    expect(store.tables.productCategory).toHaveLength(0);
     expect(store.tables.registrationAttempt).toHaveLength(0);
   });
 

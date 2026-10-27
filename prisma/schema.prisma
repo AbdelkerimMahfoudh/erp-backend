@@ -358,8 +358,8 @@ model Company {
   ownerInvitations               OwnerInvitation[]
   staffInvitations               StaffInvitation[]
   referralInvitations            ReferralInvitation[]
-  acquisition                    BusinessAcquisition?  @relation("AcquiredCompany")
-  invitedAcquisitions            BusinessAcquisition[] @relation("InviterCompany")
+  acquisition                    BusinessAcquisition?           @relation("AcquiredCompany")
+  invitedAcquisitions            BusinessAcquisition[]          @relation("InviterCompany")
   roles                          Role[]
   rolePermissions                RolePermission[]
   userBranches                   UserBranch[]
@@ -587,8 +587,8 @@ model User {
   consignmentLedgerEntries ConsignmentLedgerEntry[]
   ownerInvitations         OwnerInvitation[]
   staffInvitations         StaffInvitation[]
-  referralInvitations      ReferralInvitation[]  @relation("ReferralInvitationCreator")
-  revokedReferrals         ReferralInvitation[]  @relation("ReferralInvitationRevoker")
+  referralInvitations      ReferralInvitation[]     @relation("ReferralInvitationCreator")
+  revokedReferrals         ReferralInvitation[]     @relation("ReferralInvitationRevoker")
   invitedAcquisitions      BusinessAcquisition[]
   accountDeletionRequests  AccountDeletionRequest[]
 
@@ -836,6 +836,10 @@ model Product {
 model ProductCategory {
   id                  Bytes        @id @db.Binary(16)
   companyId           Bytes        @map("company_id") @db.Binary(16)
+  /// A built-in category's stable key (D223, src/catalog/default-categories.ts); null for a shop's own category.
+  key                 String?      @db.VarChar(48)
+  /// One level of depth: a subcategory's top-level category.
+  parentId            Bytes?       @map("parent_id") @db.Binary(16)
   name                String       @db.VarChar(80)
   defaultTrackingType TrackingType @map("default_tracking_type")
   attributeSchema     Json?        @map("attribute_schema") @db.Json
@@ -843,11 +847,16 @@ model ProductCategory {
   createdAt           DateTime     @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt           DateTime     @updatedAt @map("updated_at") @db.DateTime(6)
 
-  company  Company   @relation(fields: [companyId], references: [id])
+  company  Company           @relation(fields: [companyId], references: [id])
+  parent   ProductCategory?  @relation("CategoryParent", fields: [parentId], references: [id], onDelete: Restrict)
+  children ProductCategory[] @relation("CategoryParent")
   products Product[]
 
-  @@unique([companyId, name])
+  // A shop's own names stay unique among its own categories: migration 0104 enforces it on a generated column
+  // (`custom_name`, the name when `key` is null), which Prisma cannot describe. Built-in names may repeat a shop's.
+  @@unique([companyId, key])
   @@index([companyId])
+  @@index([parentId])
   @@map("product_categories")
 }
 

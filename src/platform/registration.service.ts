@@ -9,6 +9,7 @@ import { provisionDefaultRoles } from '../rbac/role-provisioning';
 import { CLOCK, type Clock } from '../entitlement/clock';
 import { TRIAL_DURATION_DAYS } from './trial/trial-rules';
 import { AcquisitionService, AcquisitionUnavailableException, type AcquisitionClaim } from '../acquisition/acquisition.service';
+import { seedDefaultCategories } from '../catalog/default-categories';
 import {
   generatePersonalId,
   isEmail,
@@ -224,6 +225,9 @@ export class RegistrationService {
               : {}),
           },
         });
+
+        // The built-in electronics categories, in the same transaction (D223).
+        await seedDefaultCategories(tx, companyId);
 
         await tx.branch.create({
           data: {

@@ -16,6 +16,7 @@ import * as argon2 from 'argon2';
 import { newUuidV7Bin, uuidToBin, binToUuid } from './lib/uuid';
 import { demoSeedAllowed } from './lib/demo-seed-policy';
 import { generateStoreCode } from '../src/common/utils/store-code.util';
+import { seedDefaultCategories } from '../src/catalog/default-categories';
 import { provisionDefaultRoles } from '../src/rbac/role-provisioning';
 import {
   PERMISSIONS,
@@ -155,18 +156,29 @@ async function seedDemo() {
     },
     { name: 'Accessories', trackingType: TrackingType.quantity, schema: [] },
   ];
+  // The demo company's own categories: a shop's own names are unique among its own (key NULL) since 0104.
   for (const c of categories) {
-    await prisma.productCategory.upsert({
-      where: { companyId_name: { companyId: company.id, name: c.name } },
-      update: { defaultTrackingType: c.trackingType, attributeSchema: c.schema as Prisma.InputJsonValue },
-      create: {
-        id: newUuidV7Bin(),
-        companyId: company.id,
-        name: c.name,
-        defaultTrackingType: c.trackingType,
-        attributeSchema: c.schema as Prisma.InputJsonValue,
-      },
-    });
+    const own = await prisma.productCategory.findFirst({ where: { companyId: company.id, key: null, name: c.name } });
+    if (own) {
+      await prisma.productCategory.update({
+        where: { id: own.id },
+        data: { defaultTrackingType: c.trackingType, attributeSchema: c.schema as Prisma.InputJsonValue },
+      });
+    } else {
+      await prisma.productCategory.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: company.id,
+          name: c.name,
+          defaultTrackingType: c.trackingType,
+          attributeSchema: c.schema as Prisma.InputJsonValue,
+        },
+      });
+    }
+  }
+  // And the built-in taxonomy every company has (D223), once.
+  if ((await prisma.productCategory.count({ where: { companyId: company.id, key: { not: null } } })) === 0) {
+    await seedDefaultCategories(prisma, company.id);
   }
   console.log(`✓ Product categories: ${categories.length}`);
 
