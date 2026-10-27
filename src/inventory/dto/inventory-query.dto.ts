@@ -26,6 +26,16 @@ export class InventoryQueryDto {
   trackingType?: TrackingType;
 
   @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'Only stock filed under this category, or under one of its subcategories (D223). ' +
+      'A category of another company is simply not found, and lists nothing.',
+  })
+  @IsOptional()
+  @IsUUID()
+  categoryId?: string;
+
+  @ApiPropertyOptional({
     description:
       'Free text matched server-side against product name, variant, barcode, ' +
       'IMEI (both) and serial number. Searches the whole branch, not just the ' +

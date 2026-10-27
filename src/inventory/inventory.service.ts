@@ -96,6 +96,8 @@ export interface InventoryFilter {
   productId?: string;
   /** Only this tracking type; `imei` is "Phones". Quantity rows only when unset or `quantity`. */
   trackingType?: TrackingType;
+  /** Only this category and its subcategories (D223). */
+  categoryId?: string;
   /** Free text across product name, barcode and serialized identifiers. */
   search?: string;
   cursor?: string;
@@ -1061,6 +1063,26 @@ export class InventoryService {
     const cursor = filter.cursor ? decodeCursor(filter.cursor) : null;
     const search = filter.search?.trim() || undefined;
 
+    /*
+     * A category means itself and its subcategories (one level, D223). Looked
+     * up through the tenant client, so another company's id finds nothing and
+     * the filter then matches nothing rather than everything.
+     */
+    let categoryIds: Buffer[] | undefined;
+    if (filter.categoryId) {
+      const id = uuidToBin(filter.categoryId);
+      const found = await this.db.productCategory.findMany({
+        where: { OR: [{ id }, { parentId: id }] },
+        select: { id: true },
+      });
+      categoryIds = found.map((c) => c.id);
+    }
+    const productFilter = {
+      ...(filter.trackingType ? { trackingType: filter.trackingType } : {}),
+      ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
+    };
+    const hasProductFilter = Object.keys(productFilter).length > 0;
+
     // Quantity stock has no lifecycle, so it only belongs under "in stock" and
     // the unfiltered view. Listing it under Sold or Faulty would be meaningless.
     const includeQuantity =
@@ -1071,7 +1093,7 @@ export class InventoryService {
       // A phone whose purchase was cancelled is in no list unless asked for by its status (0079).
       status: filter.status ?? { not: 'voided' as const },
       ...(productId ? { productId } : {}),
-      ...(filter.trackingType ? { product: { trackingType: filter.trackingType } } : {}),
+      ...(hasProductFilter ? { product: productFilter } : {}),
       ...(search ? { OR: unitSearchClauses(search) } : {}),
     };
     const stockWhere = {
@@ -1079,6 +1101,7 @@ export class InventoryService {
       ...(productId ? { productId } : {}),
       // A zero row is a product that once had stock here; it is not stock.
       quantity: { gt: 0 },
+      ...(categoryIds ? { product: { categoryId: { in: categoryIds } } } : {}),
       ...(search ? { OR: stockSearchClauses(search) } : {}),
     };
 

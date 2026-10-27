@@ -93,12 +93,16 @@ function matches(row: any, where: any): boolean {
         if (value == null) return false;
         if (!String(value).toLowerCase().includes(String(c.contains).toLowerCase())) return false;
       }
+      if ('in' in c) {
+        const list = c.in as Buffer[];
+        if (!list.some((b) => Buffer.isBuffer(value) && value.equals(b))) return false;
+      }
       if ('notIn' in c) {
         const list = c.notIn as Buffer[];
         if (list.some((b) => Buffer.isBuffer(value) && value.equals(b))) return false;
       }
       // Nested relation filter, e.g. { product: { brand: { contains } } }
-      const nestedKeys = Object.keys(c).filter((k) => !['lt', 'gt', 'contains', 'notIn'].includes(k));
+      const nestedKeys = Object.keys(c).filter((k) => !['lt', 'gt', 'contains', 'in', 'notIn'].includes(k));
       if (nestedKeys.length && value && typeof value === 'object') {
         if (!matches(value, Object.fromEntries(nestedKeys.map((k) => [k, c[k]])))) return false;
       }
@@ -114,7 +118,7 @@ function sortDesc(rows: any[]) {
   return [...rows].sort((a, b) => Buffer.compare(b.id, a.id));
 }
 
-function makeStore(units: any[], stock: any[], branchId: Buffer | null = BRANCH) {
+function makeStore(units: any[], stock: any[], branchId: Buffer | null = BRANCH, categories: any[] = []) {
   const model = (rows: any[]) => ({
     findMany: jest.fn(async ({ where, take, cursor, skip }: any) => {
       let page = sortDesc(rows.filter((r) => matches(r, where)));
@@ -133,7 +137,7 @@ function makeStore(units: any[], stock: any[], branchId: Buffer | null = BRANCH)
     }),
     count: jest.fn(async ({ where }: any) => rows.filter((r) => matches(r, where)).length),
   });
-  const db = { unit: model(units), stockItem: model(stock) };
+  const db = { unit: model(units), stockItem: model(stock), productCategory: model(categories) };
   /**
    * Listing now confirms the caller belongs to the branch it is asked about
    * (H1.4.1): the route has no `@RequirePermissions`, so the guard never did.
@@ -499,5 +503,42 @@ describe('inventory rows under cost gating', () => {
     expect(result.nextCursor).toBe('abc');
     expect(result.hasMore).toBe(true);
     expect(result.totals).toEqual({ units: 220, stock: 4 });
+  });
+});
+
+describe('listStock — by category (D223)', () => {
+  const PHONES = id(30_001);
+  const REFURB = id(30_002);
+  const CABLES = id(30_003);
+  const categories = [
+    { id: PHONES, parentId: null },
+    { id: REFURB, parentId: PHONES },
+    { id: CABLES, parentId: null },
+  ];
+  const units = [
+    makeUnit(1, { product: { ...baseProduct, categoryId: PHONES } }),
+    makeUnit(2, { product: { ...baseProduct, categoryId: REFURB } }),
+    makeUnit(3, { product: { ...baseProduct, categoryId: null } }),
+  ];
+  const stock = [makeStock(1, { product: { ...baseProduct, trackingType: 'quantity', categoryId: CABLES } })];
+  const uuid = (b: Buffer) => b.toString('hex').replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+
+  it('lists a category with its subcategories', async () => {
+    const { service } = makeStore(units, stock, BRANCH, categories);
+    const { all } = await drain(service, { categoryId: uuid(PHONES) });
+    expect(all.map((r) => r.identifier).sort()).toEqual(['356888000000001', '356888000000002']);
+  });
+
+  it('filters counted stock the same way', async () => {
+    const { service } = makeStore(units, stock, BRANCH, categories);
+    const { all } = await drain(service, { categoryId: uuid(CABLES) });
+    expect(all).toHaveLength(1);
+    expect(all[0].kind).toBe('stock');
+  });
+
+  it('lists nothing for a category it cannot find, never everything', async () => {
+    const { service } = makeStore(units, stock, BRANCH, categories);
+    const { all } = await drain(service, { categoryId: uuid(id(39_999)) });
+    expect(all).toEqual([]);
   });
 });
