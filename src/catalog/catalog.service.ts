@@ -170,6 +170,27 @@ export class CatalogService {
     }
   }
 
+  /**
+   * Creating a product from stock intake still needs `catalog.manage` (D223):
+   * the intake endpoint is guarded by the receiving permissions only, so this
+   * is asked again here rather than letting a receiving role define products.
+   */
+  async assertMayManageCatalog(): Promise<void> {
+    const cached = this.cls.get('permissions');
+    const userId = this.cls.get('userId');
+    const permissions =
+      cached ??
+      (userId
+        ? await this.access.getEffectivePermissions(uuidToBin(userId), this.tenant.branchId())
+        : new Set<string>());
+    if (!permissions.has('catalog.manage')) {
+      throw new ForbiddenException({
+        code: 'catalog_manage_required',
+        message: 'Creating a product needs catalog.manage. Ask the Owner to create it, then receive it.',
+      });
+    }
+  }
+
   /** Trim, upper-case and collapse a barcode; '' means "no barcode". */
   private normalizeBarcode(raw: string | null | undefined): string | null {
     if (raw === null || raw === undefined) return null;

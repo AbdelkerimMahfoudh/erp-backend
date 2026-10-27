@@ -84,6 +84,7 @@ function harness(account: { isActive: boolean } | null = { isActive: true }, fai
     { assign: async () => '2026-09-22', today: async () => '2026-09-22' } as never,
     // The day is always open here: a closed day refuses the receipt (purchase-store-closed.spec.ts).
     { assertCounterOpen: async () => undefined, assertCounterOpenTx: async () => undefined } as never,
+    {} as never, // CatalogService: these deliveries create no product
   );
   return { service, writes, db, notifications };
 }

@@ -5,7 +5,7 @@ import {
   Inject,
   Injectable,
 } from '@nestjs/common';
-import { CodeType, Prisma, Product } from '@prisma/client';
+import { CodeType, Prisma, TrackingType } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
@@ -21,7 +21,8 @@ import { ROLLUP_QUEUE, RollupQueue, requestRollupTx } from '../analytics/rollup-
 import { BusinessDayService, dateValue } from '../common/business-day/business-day.service';
 import { ClosingService } from '../closing/closing.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
-import { CreatePurchaseDto, ReceiveItemDto } from './dto/create-purchase.dto';
+import { CatalogService, PreparedProduct } from '../catalog/catalog.service';
+import { CreatePurchaseDto, NewProductDto, ReceiveItemDto } from './dto/create-purchase.dto';
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -51,12 +52,17 @@ function fingerprint(dto: CreatePurchaseDto): string {
     items: (dto.items ?? [])
       .map((i) => {
         const entries = unitEntries(i);
+        const line = lineKey(i);
         const secondaries = entries
           .filter((e) => e.imeiSecondary)
           .map((e) => `${e.identifier}|${e.imeiSecondary}`)
           .sort();
         return {
+          line,
           productId: i.productId,
+          // Only present on a line that creates its product (D223), so every
+          // request without one hashes exactly as it did before.
+          ...(i.newProduct ? { newProduct: canonicalNewProduct(i.newProduct) } : {}),
           unitCost: i.unitCost,
           quantity: i.quantity ?? null,
           price: i.price ?? null,
@@ -67,9 +73,50 @@ function fingerprint(dto: CreatePurchaseDto): string {
           ...(secondaries.length ? { secondaries } : {}),
         };
       })
-      .sort((a, b) => (a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0)),
+      .sort((a, b) => (a.line < b.line ? -1 : a.line > b.line ? 1 : 0))
+      .map(({ line: _line, ...rest }) => rest),
   };
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+/**
+ * Which product a new-product line names: brand, model and variant, compared
+ * as the database's unique key compares them (case-insensitive collation).
+ */
+function newProductKey(np: NewProductDto): string {
+  return [np.brand, np.model, np.variant ?? ''].map((v) => v.trim().toLowerCase()).join('|');
+}
+
+/** The sort key of a line: its product, or the product it creates. */
+function lineKey(item: ReceiveItemDto): string {
+  return item.productId ?? `new:${item.newProduct ? newProductKey(item.newProduct) : ''}`;
+}
+
+/** Everything a new-product line asks for, in a fixed shape. */
+function canonicalNewProduct(np: NewProductDto) {
+  return {
+    brand: np.brand.trim(),
+    model: np.model.trim(),
+    variant: np.variant?.trim() || null,
+    categoryId: np.categoryId?.toLowerCase() ?? null,
+    trackingType: np.trackingType ?? null,
+    specifications: np.specifications ?? null,
+    barcode: np.barcode?.trim() || null,
+  };
+}
+
+/** What a line needs to know about its product, whether it exists or this intake creates it. */
+interface LineProduct {
+  id: Buffer;
+  trackingType: TrackingType;
+  defaultPrice: Prisma.Decimal | null;
+}
+
+interface CreatedProduct {
+  productId: string;
+  brand: string;
+  model: string;
+  variant: string | null;
 }
 
 /** Every unit on a line, whichever form the client used. */
@@ -133,6 +180,7 @@ export class PurchasingService {
     @Inject(ROLLUP_QUEUE) private readonly rollups: RollupQueue,
     private readonly businessDay: BusinessDayService,
     private readonly closing: ClosingService,
+    private readonly catalog: CatalogService,
   ) {}
 
   async createPurchase(dto: CreatePurchaseDto) {
@@ -199,10 +247,31 @@ export class PurchasingService {
       throw new BadRequestException({ code: 'account_inactive', message: 'That payment account is no longer active' });
     }
 
+    for (const item of items) {
+      if (!item.productId === !item.newProduct) {
+        throw new BadRequestException({
+          code: 'product_or_new_product',
+          message: 'Each line names an existing product or a new one, not both and not neither',
+        });
+      }
+    }
+    // Products this intake creates, decided before anything is written (D223).
+    const newProducts = await this.prepareNewProducts(items);
+
     // Load every referenced product once (must belong to this company).
-    const productIds = [...new Set(items.map((i) => i.productId))];
-    const products = await this.db.product.findMany({ where: { id: { in: productIds.map(uuidToBin) } } });
+    const productIds = [...new Set(items.flatMap((i) => (i.productId ? [i.productId] : [])))];
+    const products = productIds.length
+      ? await this.db.product.findMany({ where: { id: { in: productIds.map(uuidToBin) } } })
+      : [];
     const productByUuid = new Map(products.map((p) => [binToUuid(p.id), p]));
+    const lineProduct = (item: ReceiveItemDto): LineProduct | undefined => {
+      if (item.productId) return productByUuid.get(item.productId);
+      const prepared = newProducts.get(newProductKey(item.newProduct!))!;
+      // A product created at intake has no selling price: intake records cost only.
+      return { id: prepared.data.id, trackingType: prepared.data.trackingType as TrackingType, defaultPrice: null };
+    };
+    const lineLabel = (item: ReceiveItemDto): string =>
+      item.productId ?? `${item.newProduct!.brand} ${item.newProduct!.model}`.trim();
 
     const rejected: RejectedLine[] = [];
     const preparedUnits: PreparedUnit[] = [];
@@ -212,9 +281,9 @@ export class PurchasingService {
 
     // 1. Dispatch each item by its product's tracking strategy (product-first).
     for (const item of items) {
-      const product = productByUuid.get(item.productId);
+      const product = lineProduct(item);
       if (!product) {
-        rejected.push({ identifier: item.productId, reason: 'unknown product' });
+        rejected.push({ identifier: lineLabel(item), reason: 'unknown product' });
         continue;
       }
       const strategy = this.strategies.get(product.trackingType);
@@ -222,7 +291,7 @@ export class PurchasingService {
       if (strategy.perUnit) {
         const entries = unitEntries(item);
         if (entries.length === 0) {
-          rejected.push({ identifier: item.productId, reason: `${strategy.identifierLabel} required` });
+          rejected.push({ identifier: lineLabel(item), reason: `${strategy.identifierLabel} required` });
           continue;
         }
         const imei = this.strategies.get('imei');
@@ -262,7 +331,7 @@ export class PurchasingService {
       } else {
         const quantity = item.quantity ?? 0;
         if (quantity < 1) {
-          rejected.push({ identifier: item.productId, reason: 'quantity required' });
+          rejected.push({ identifier: lineLabel(item), reason: 'quantity required' });
           continue;
         }
         preparedStock.push({
@@ -314,6 +383,7 @@ export class PurchasingService {
     });
 
     if (committableUnits.length === 0 && preparedStock.length === 0) {
+      // Nothing received, so nothing is created either: never a product-only success.
       return {
         purchaseId: null,
         unitsCreated: 0,
@@ -321,8 +391,21 @@ export class PurchasingService {
         total: 0,
         rejected,
         accepted: { identifiers: [] as string[], stockProductIds: [] as string[] },
+        createdProducts: [] as CreatedProduct[],
       };
     }
+
+    /*
+     * Only the new products that receive something are created: a line refused
+     * above leaves no empty product behind. Teaching is limited the same way,
+     * so no recognition event points at a product that was never written.
+     */
+    const usedIds = new Set([...committableUnits, ...preparedStock].map((l) => l.productId.toString('hex')));
+    const toCreate = [...newProducts.values()].filter((p) => usedIds.has(p.data.id.toString('hex')));
+    const notCreated = new Set(
+      [...newProducts.values()].map((p) => p.data.id.toString('hex')).filter((id) => !usedIds.has(id)),
+    );
+    const teach = learnPlans.filter((plan) => !notCreated.has(plan.productId.toString('hex')));
 
     // 3. Totals.
     const unitsCost = committableUnits.reduce((s, u) => s + u.cost, 0);
@@ -361,6 +444,14 @@ export class PurchasingService {
        */
       purchaseId = await withLockRetry(() => this.db.$transaction(async (tx) => {
         const pid = newUuidV7Bin();
+        /*
+         * The product, its stock, its cost and its audit commit together (D223).
+         * If anything below refuses, the product is rolled back with the rest,
+         * so the client is never told a product exists without its stock.
+         */
+        for (const prepared of toCreate) {
+          await this.catalog.insertProductTx(tx as never, prepared);
+        }
         await tx.purchase.create({
           data: {
             id: pid,
@@ -465,7 +556,12 @@ export class PurchasingService {
           entityType: 'Purchase',
           entityId: pid,
           action: 'create',
-          after: { total, units: committableUnits.length, stockLines: preparedStock.length },
+          after: {
+            total,
+            units: committableUnits.length,
+            stockLines: preparedStock.length,
+            ...(toCreate.length ? { productsCreated: toCreate.length } : {}),
+          },
           branchId,
         });
 
@@ -476,7 +572,7 @@ export class PurchasingService {
          * from it either both exist or neither does. One event per code, so a
          * delivery carrying several codes retries each independently.
          */
-        await this.outbox.enqueueTx(tx as never, learnPlans.map((plan) => ({
+        await this.outbox.enqueueTx(tx as never, teach.map((plan) => ({
           companyId,
           purchaseId: pid,
           codeType: plan.codeType,
@@ -512,6 +608,13 @@ export class PurchasingService {
          */
         const winner = await this.findReplay(dto, companyId);
         if (winner) return winner;
+        // Another request created the same product (or barcode) a moment ago.
+        if (toCreate.length && String(e.meta?.target ?? '').includes('products_')) {
+          throw new ConflictException({
+            code: 'product_exists',
+            message: 'That product was just created by another intake. Choose it and receive again.',
+          });
+        }
         throw new ConflictException('A duplicate identifier was detected during commit — please retry');
       }
       throw e;
@@ -554,7 +657,65 @@ export class PurchasingService {
         identifiers: committableUnits.map((u) => u.identifier),
         stockProductIds: [...new Set(preparedStock.map((l) => binToUuid(l.productId)))],
       },
+      /** The products this intake created, so the client can file its lines under their real ids. */
+      createdProducts: toCreate.map((p) => ({
+        productId: binToUuid(p.data.id),
+        brand: p.data.brand,
+        model: p.data.model,
+        variant: p.data.variant ?? null,
+      })),
     };
+  }
+
+  /**
+   * Validate every product this intake would create, before any transaction.
+   *
+   * Lines naming the same brand, model and variant share ONE product and must
+   * describe it identically. A product that already exists is refused (409
+   * `product_exists`): intake then receives into it rather than creating a
+   * second copy. Creating needs `catalog.manage`, like the catalogue screen.
+   */
+  private async prepareNewProducts(items: ReceiveItemDto[]): Promise<Map<string, PreparedProduct>> {
+    const byKey = new Map<string, NewProductDto>();
+    for (const item of items) {
+      if (!item.newProduct) continue;
+      const key = newProductKey(item.newProduct);
+      const seen = byKey.get(key);
+      if (seen && JSON.stringify(canonicalNewProduct(seen)) !== JSON.stringify(canonicalNewProduct(item.newProduct))) {
+        throw new BadRequestException({
+          code: 'new_product_conflict',
+          message: 'Two lines describe the same new product differently',
+        });
+      }
+      byKey.set(key, item.newProduct);
+    }
+    const prepared = new Map<string, PreparedProduct>();
+    if (byKey.size === 0) return prepared;
+
+    await this.catalog.assertMayManageCatalog();
+    const barcodes = new Set<string>();
+    for (const [key, np] of byKey) {
+      const barcode = np.barcode?.trim().replace(/\s+/g, '').toUpperCase();
+      if (barcode) {
+        if (barcodes.has(barcode)) {
+          throw new BadRequestException({ code: 'new_product_conflict', message: 'Two new products share one barcode' });
+        }
+        barcodes.add(barcode);
+      }
+      const existing = await this.db.product.findFirst({
+        where: { brand: np.brand.trim(), model: np.model.trim(), variant: np.variant?.trim() || null },
+        select: { id: true },
+      });
+      if (existing) {
+        throw new ConflictException({
+          code: 'product_exists',
+          message: 'That product already exists. Receive into it instead of creating it again.',
+          productId: binToUuid(existing.id),
+        });
+      }
+      prepared.set(key, await this.catalog.prepareProduct(np));
+    }
+    return prepared;
   }
 
   /**
@@ -603,12 +764,40 @@ export class PurchasingService {
           ),
         ],
       },
+      createdProducts: await this.replayedCreatedProducts(dto),
       replayed: true,
     };
   }
 
+  /**
+   * The products a replayed request created, found again by name: a replay
+   * answers what the first attempt did, new product ids included.
+   */
+  private async replayedCreatedProducts(dto: CreatePurchaseDto): Promise<CreatedProduct[]> {
+    const created: CreatedProduct[] = [];
+    const seen = new Set<string>();
+    for (const item of dto.items ?? []) {
+      if (!item.newProduct) continue;
+      const key = newProductKey(item.newProduct);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const product = await this.db.product.findFirst({
+        where: {
+          brand: item.newProduct.brand.trim(),
+          model: item.newProduct.model.trim(),
+          variant: item.newProduct.variant?.trim() || null,
+        },
+        select: { id: true, brand: true, model: true, variant: true },
+      });
+      if (product) {
+        created.push({ productId: binToUuid(product.id), brand: product.brand, model: product.model, variant: product.variant });
+      }
+    }
+    return created;
+  }
+
   /** Map an identifier onto the right unit column for the product's type. */
-  private identifierColumns(product: Product, identifier: string): { imeiPrimary: string | null; serialNo: string | null } {
+  private identifierColumns(product: LineProduct, identifier: string): { imeiPrimary: string | null; serialNo: string | null } {
     const field = this.strategies.get(product.trackingType).identifierField;
     return {
       imeiPrimary: field === 'imeiPrimary' ? identifier : null,
@@ -621,7 +810,7 @@ export class PurchasingService {
    * echoed from /scan, else a derived key (TAC for IMEI). Serial has no learnable
    * key yet (reserved); quantity barcodes are already taught at product create.
    */
-  private learnPlanFor(product: Product, item: ReceiveItemDto): LearnPlan | null {
+  private learnPlanFor(product: LineProduct, item: ReceiveItemDto): LearnPlan | null {
     if (item.recognitionKey) {
       return { productId: product.id, codeType: item.recognitionKey.codeType, code: item.recognitionKey.code };
     }

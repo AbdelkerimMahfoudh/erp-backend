@@ -133,6 +133,7 @@ function harness(day = DAY) {
     { processNow: async () => undefined } as never,
     businessDay,
     closing,
+    {} as never, // CatalogService: these deliveries create no product
   );
   return { service, state, db, tx, inventory, writes, lockReads, bumps };
 }

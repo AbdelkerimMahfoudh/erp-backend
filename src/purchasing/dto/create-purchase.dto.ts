@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { CodeType } from '@prisma/client';
+import { CodeType, TrackingType } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -8,6 +8,7 @@ import {
   IsIn,
   IsInt,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   IsUUID,
@@ -50,15 +51,69 @@ export class ReceiveUnitDto {
 }
 
 /**
+ * A product that does not exist yet, created by this intake in the SAME
+ * transaction as the stock it receives (D223): both are committed, or neither.
+ *
+ * The catalogue's own creation rules apply (category, the modes it allows,
+ * attribute schema, barcode). No price and no cost: buying cost belongs to the
+ * receipt line, and intake sets no selling price.
+ */
+export class NewProductDto {
+  @ApiProperty({ maxLength: 80 })
+  @IsString()
+  @MaxLength(80)
+  brand: string;
+
+  @ApiProperty({ maxLength: 120 })
+  @IsString()
+  @MaxLength(120)
+  model: string;
+
+  @ApiPropertyOptional({ maxLength: 120 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  variant?: string;
+
+  @ApiPropertyOptional({ format: 'uuid' })
+  @IsOptional()
+  @IsUUID()
+  categoryId?: string;
+
+  @ApiPropertyOptional({ enum: TrackingType, description: "One the category allows; omitted → the category's recommendation" })
+  @IsOptional()
+  @IsEnum(TrackingType)
+  trackingType?: TrackingType;
+
+  @ApiPropertyOptional({ description: 'Category-defined attribute values' })
+  @IsOptional()
+  @IsObject()
+  specifications?: Record<string, unknown>;
+
+  @ApiPropertyOptional({ maxLength: 64, description: 'The reusable product barcode — never an IMEI or a serial' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  barcode?: string;
+}
+
+/**
  * One receiving line — PRODUCT-FIRST. The product's tracking type decides the
  * workflow; the client never labels a line "phone" or "accessory":
  *   imei/serial → `identifiers[]` and/or `units[]` (one unit per entry)
  *   quantity    → `quantity` (bulk, no identifiers)
  */
 export class ReceiveItemDto {
-  @ApiProperty({ format: 'uuid' })
+  @ApiPropertyOptional({ format: 'uuid', description: 'An existing product. Exactly one of productId and newProduct.' })
+  @IsOptional()
   @IsUUID()
-  productId: string;
+  productId?: string;
+
+  @ApiPropertyOptional({ type: NewProductDto, description: 'A product created by this intake. Exactly one of productId and newProduct.' })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => NewProductDto)
+  newProduct?: NewProductDto;
 
   @ApiProperty({ minimum: 0.01, description: 'Per-unit (imei/serial) or per-item (quantity) purchase cost' })
   @IsNumber({ maxDecimalPlaces: 2 })
