@@ -99,7 +99,8 @@ export class SalesService {
     const branchId = this.tenant.requireBranchId();
     const userId = this.tenant.userId();
     if (!userId) throw new BadRequestException('No authenticated user');
-    const hasOverride = this.cls.get('permissions')?.has('discount.override') ?? false;
+    // The Owner and Store Managers may sell at a loss after a warning (D223).
+    const mayAcceptLoss = this.cls.get('permissions')?.has('sale.below_cost') ?? false;
 
     // Idempotency (offline retries).
     if (dto.clientUuid) {
@@ -270,7 +271,10 @@ export class SalesService {
          * It is advisory. It never refuses the sale; it asks once, and a
          * confirmation bound to this exact payload lets it through.
          */
-        const warnings = await this.magnitudeWarnings(tx, prepared, branchId);
+        const warnings = [
+          ...(await this.magnitudeWarnings(tx, prepared, branchId)),
+          ...(mayAcceptLoss ? this.lossWarnings(prepared, dto.saleDiscount ?? 0) : []),
+        ];
         const verdict = this.gate.check({
           operation: 'sale.create',
           // The token is excluded from what the token is bound to. Including it
@@ -314,7 +318,7 @@ export class SalesService {
            * wins. Checking first and writing after would let both through.
            */
           const approval =
-            line.unitId && line.configuredPrice !== null && line.price < line.configuredPrice
+            !mayAcceptLoss && line.unitId && line.price < line.cost
               ? await this.approvals.consume(tx as unknown as Prisma.TransactionClient, {
                   unitId: line.unitId,
                   requestedPrice: line.price,
@@ -327,8 +331,8 @@ export class SalesService {
               : null;
           this.policy.assertPriceAllowed({
             price: line.price,
-            configuredPrice: line.configuredPrice,
             cost: line.cost,
+            mayAcceptLoss,
             approval,
             reason: dto.overrideReason,
             line: {
@@ -338,11 +342,17 @@ export class SalesService {
             },
           });
         }
-        this.policy.assertDiscountsKeepCost(prepared, total, (index) => ({
-          index,
-          unitId: prepared[index].unitId ? binToUuid(prepared[index].unitId as Buffer) : null,
-          identifier: dto.lines[index]?.identifier ?? null,
-        }));
+        this.policy.assertDiscountsKeepCost(
+          prepared,
+          total,
+          (index) => ({
+            index,
+            unitId: prepared[index].unitId ? binToUuid(prepared[index].unitId as Buffer) : null,
+            identifier: dto.lines[index]?.identifier ?? null,
+          }),
+          mayAcceptLoss,
+          dto.overrideReason,
+        );
         // Each part's payer number (D151): well formed, and never on cash — refused before anything is written.
         assertPayerNumbers(dto.payments);
         assertPaymentParts(dto.payments);
@@ -1358,6 +1368,50 @@ export class SalesService {
    * history, and inventing a reference for it would fire on every genuinely new
    * item until people learned to tap through the dialog.
    */
+  /**
+   * The high-friction warning before a sale at a loss (D223).
+   *
+   * Raised only for a seller who may accept it (`sale.below_cost`); anyone else
+   * is refused outright and asks for an approval instead. Caution severity, so
+   * the gate demands a deliberate acknowledgement bound to this exact payload
+   * before anything is written. The figures echoed are the seller's own prices;
+   * the cost is described, never quoted, because a Manager reading this may
+   * hold `sale.below_cost` without `cost.view`.
+   */
+  private lossWarnings(prepared: readonly PreparedLine[], saleDiscount: number): Warning[] {
+    const out: Warning[] = [];
+    for (const [index, line] of prepared.entries()) {
+      const sold = line.price * line.quantity - line.discount;
+      if (sold < line.cost * line.quantity - 0.005) {
+        out.push({
+          code: 'loss.below_cost',
+          severity: 'caution',
+          messageKey: 'warnings.loss.below_cost',
+          params: {},
+          field: `lines.${index}.price`,
+          submitted: line.price,
+          reference: { kind: 'unit_cost', amount: null, sample: null },
+        });
+      }
+    }
+    if (out.length === 0 && saleDiscount > 0) {
+      const sold = prepared.reduce((s, l) => s + l.price * l.quantity - l.discount, 0) - saleDiscount;
+      const cost = prepared.reduce((s, l) => s + l.cost * l.quantity, 0);
+      if (sold < cost - 0.005) {
+        out.push({
+          code: 'loss.below_cost',
+          severity: 'caution',
+          messageKey: 'warnings.loss.below_cost',
+          params: {},
+          field: 'saleDiscount',
+          submitted: saleDiscount,
+          reference: { kind: 'unit_cost', amount: null, sample: null },
+        });
+      }
+    }
+    return out;
+  }
+
   private async magnitudeWarnings(
     tx: MagnitudeReads,
     prepared: readonly PreparedLine[],

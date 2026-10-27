@@ -49,7 +49,7 @@ describe('a malformed record id is not found, never a crash', () => {
     [
       'discount approvals: deciding one',
       () =>
-        bare(DiscountApprovalsService, { tenant, db: { discountApproval: untouched() }, cls: { get: () => new Set(['discount.override']) } }).decide(BAD, {
+        bare(DiscountApprovalsService, { tenant, db: { discountApproval: untouched() }, cls: { get: () => new Set(['sale.below_cost']) } }).decide(BAD, {
           approve: true,
           expectedVersion: 0,
         }),

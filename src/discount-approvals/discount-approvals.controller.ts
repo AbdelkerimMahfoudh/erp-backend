@@ -23,7 +23,7 @@ export class DiscountApprovalsController {
 
   @Post()
   @RequirePermissions('sale.create')
-  @ApiOperation({ summary: 'Ask the Owner to allow one sale below the set price' })
+  @ApiOperation({ summary: 'Ask a Manager or the Owner to allow one sale below cost' })
   request(@Body() dto: RequestDiscountApprovalDto) {
     return this.approvals.request(dto);
   }
@@ -43,8 +43,8 @@ export class DiscountApprovalsController {
   }
 
   @Post(':id/decide')
-  @RequirePermissions('discount.override')
-  @ApiOperation({ summary: 'Approve or reject one request (Owner only)' })
+  @RequirePermissions('sale.below_cost')
+  @ApiOperation({ summary: 'Approve or reject one below-cost request (a Manager or the Owner)' })
   decide(@Param('id') id: string, @Body() dto: DecideDiscountApprovalDto) {
     return this.approvals.decide(id, dto);
   }

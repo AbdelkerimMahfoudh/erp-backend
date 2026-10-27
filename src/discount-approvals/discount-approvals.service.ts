@@ -122,27 +122,24 @@ export class DiscountApprovalsService {
       },
       branchId,
     );
-    if (resolved.price === null) {
-      /*
-       * No configured price means no floor. There is nothing to make an
-       * exception TO, and inventing one from cost would substitute the rule
-       * this feature exists to stop substituting.
-       */
-      throw new BadRequestException(
-        'This product has no set price, so there is no price to seek an exception to',
-      );
-    }
-
-    const configuredPrice = resolved.price;
+    /*
+     * D223: there is no price floor. An approval is only ever about selling
+     * below COST; the set price is snapshotted for the record (the request
+     * price when nothing is set) and no longer decides anything.
+     */
+    const configuredPrice = resolved.price ?? input.requestedPrice;
     const cost = Number(unit.cost);
     const requested = input.requestedPrice;
 
-    if (requested >= configuredPrice) {
-      throw new BadRequestException('That price is not below the set price — no approval is needed');
+    if (requested >= cost) {
+      throw new BadRequestException({
+        code: 'approval_not_needed',
+        message: 'That price is not below cost, so no approval is needed',
+      });
     }
 
-    const belowCost = requested < cost;
-    if (belowCost && !input.reason?.trim()) {
+    const belowCost = true;
+    if (!input.reason?.trim()) {
       throw new BadRequestException('A reason is required to request a price below cost');
     }
 
@@ -183,7 +180,7 @@ export class DiscountApprovalsService {
         priceVersion: resolved.version ?? 0,
         unitCost: new Prisma.Decimal(cost.toFixed(2)),
         requestedPrice: new Prisma.Decimal(requested.toFixed(2)),
-        discountAmount: new Prisma.Decimal((configuredPrice - requested).toFixed(2)),
+        discountAmount: new Prisma.Decimal(Math.max(configuredPrice - requested, 0).toFixed(2)),
         belowCost,
         unitBranchId: unit.branchId,
         requesterId,
@@ -235,8 +232,8 @@ export class DiscountApprovalsService {
     id: string,
     input: { approve: boolean; note?: string; expectedVersion: number },
   ) {
-    if (!this.may('discount.override')) {
-      throw new ForbiddenException('Only an Owner may approve a price below the set price');
+    if (!this.may('sale.below_cost')) {
+      throw new ForbiddenException('Only a Manager or the Owner may approve a sale below cost');
     }
     const approverId = this.tenant.userId();
     if (!approverId) throw new ForbiddenException('Not signed in');
@@ -357,7 +354,7 @@ export class DiscountApprovalsService {
    * client filter is a display preference, not a boundary.
    */
   async list(status?: DiscountApprovalStatus) {
-    const mineOnly = !this.may('discount.override');
+    const mineOnly = !this.may('sale.below_cost');
     const rows = await this.db.discountApproval.findMany({
       where: {
         ...(status ? { status } : {}),
@@ -384,7 +381,7 @@ export class DiscountApprovalsService {
       include: DETAIL,
     });
     if (!row) throw new NotFoundException('No such request');
-    if (!this.may('discount.override') && !row.requesterId.equals(this.tenant.userId() ?? Buffer.alloc(16))) {
+    if (!this.may('sale.below_cost') && !row.requesterId.equals(this.tenant.userId() ?? Buffer.alloc(16))) {
       throw new ForbiddenException('That request is not yours');
     }
     return this.present(await this.settleIfStale(row));
@@ -490,13 +487,11 @@ export class DiscountApprovalsService {
     },
   ): VoidReason | null {
     if (!row.unitBranchId.equals(params.currentBranchId)) return 'unit_transferred';
-    if (
-      params.currentConfiguredPrice === null ||
-      Math.abs(Number(row.configuredPrice) - params.currentConfiguredPrice) > 0.005 ||
-      (params.currentPriceVersion !== null && row.priceVersion !== params.currentPriceVersion)
-    ) {
-      return 'price_changed';
-    }
+    /*
+     * The set price no longer voids an approval (D223): with no floor, it is
+     * not what was decided. The cost is — a loss approved against one cost is
+     * not a loss approved against another.
+     */
     if (Math.abs(Number(row.unitCost) - params.currentCost) > 0.005) return 'cost_changed';
     return null;
   }
@@ -515,16 +510,16 @@ export class DiscountApprovalsService {
   /**
    * Tell whoever can actually answer.
    *
-   * `discount.override` is Owner-only and **not delegatable**, so a role lookup
-   * is the complete set of people who can decide this. If it ever becomes
-   * delegatable, per-branch grants have to be unioned in here or a delegated
-   * approver would silently never be told.
+   * `sale.below_cost` is granted by role only (the Owner and Store Managers,
+   * D223), so a role lookup is the complete set of people who can decide this.
+   * If it ever becomes delegatable, per-branch grants have to be unioned in
+   * here or a delegated approver would silently never be told.
    */
   private async approvers(): Promise<Buffer[]> {
     const assignments = await this.db.userBranch.findMany({
       where: {
         user: { isActive: true, deletedAt: null },
-        role: { rolePermissions: { some: { permission: { key: 'discount.override' } } } },
+        role: { rolePermissions: { some: { permission: { key: 'sale.below_cost' } } } },
       },
       select: { userId: true },
       distinct: ['userId'],

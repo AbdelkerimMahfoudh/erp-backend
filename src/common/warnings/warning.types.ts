@@ -42,6 +42,8 @@ export type WarningCode =
   | 'magnitude.configured_price'
   | 'magnitude.expense_amount'
   | 'magnitude.debt_payment'
+  // D223 — selling at a loss, for a seller who may (Owner, Store Manager)
+  | 'loss.below_cost'
   // A3 — deterministic anomalies
   | 'anomaly.dead_stock'
   | 'anomaly.overdue_debt'

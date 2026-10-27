@@ -72,7 +72,8 @@ describe('store-facing roles', () => {
     // 62 → 63 in 0076 — `closing.start_early`.
     // 63 → 64 in 0082 — `money.anchor.record`.
     // 64 → 73 in 0090 — the nine keys of the Money Services Agent activity (docs/73 §7).
-    expect(ROLE_PERMISSIONS.owner.length).toBe(73);
+    // 73 → 74 in 0105 — `sale.below_cost` (D223).
+    expect(ROLE_PERMISSIONS.owner.length).toBe(74);
     expect(has('owner', 'cost.view')).toBe(true);
     expect(has('owner', 'expense.manage')).toBe(true);
     expect(has('owner', 'settings.manage')).toBe(true);

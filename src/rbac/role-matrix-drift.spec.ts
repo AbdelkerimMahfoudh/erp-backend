@@ -168,6 +168,8 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0068_customer_manage_permission'),
     // 0090: the nine agent keys (docs/73 §7) — seven to the Store Manager, three to the Store Employee.
     sqlOf('0090_agent_permissions'),
+    // 0105 (D223): `sale.below_cost` to the Store Manager.
+    sqlOf('0105_sale_below_cost_permission'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from

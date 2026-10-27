@@ -71,6 +71,12 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    * as anybody else's.
    */
   { key: 'discount.override',   label: 'Approve selling below the set price' },
+  /**
+   * D223 (2026-10-27): selling at a loss. Its holders — the Owner and Store
+   * Managers, by role — may sell below cost after a high-friction warning and
+   * with a reason, and decide a seller's request to do so. Not delegatable.
+   */
+  { key: 'sale.below_cost',     label: 'Sell below cost after a warning, and approve a seller\'s request' },
   { key: 'unit.add',            label: 'Add inventory units' },
   { key: 'unit.transfer',       label: 'Transfer stock between branches' },
   { key: 'import.run',          label: 'Run Excel/CSV inventory import' },
@@ -223,6 +229,7 @@ const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
   (k) =>
     k !== 'cost.view' &&
     k !== 'discount.override' &&
+    k !== 'sale.below_cost' &&
     k !== 'price.edit' &&
     k !== 'import.run' &&
     // 0076: starting a shop's day early is the Owner's call alone.
@@ -261,6 +268,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
    */
   store_manager: [
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
+    // D223: a manager may sell at a loss after the warning, and approve a seller's request.
+    'sale.below_cost',
     /**
      * I1: reading sale history, and changing the return policy AT SALE TIME.
      * Overriding an EXPIRED deadline after the fact is a different, Owner-only

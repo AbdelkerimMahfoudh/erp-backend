@@ -8,10 +8,11 @@ import { FINANCIAL_FIELDS } from '../common/interceptors/financial-fields';
  * The approval lifecycle, and the invariants that keep it from becoming a
  * permission.
  *
- * The rule (A2, as corrected by the owner): **the configured selling price is
- * the floor**, not cost. Selling below it needs the Owner's approval even when
- * the sale is still profitable. Below cost is a high-risk subset — same
- * approval, plus a reason.
+ * The rule (D223, 2026-10-27, replacing A2): **there is no price floor**; the
+ * configured selling price is a suggestion. Selling below COST is what stays
+ * guarded: the Owner and Store Managers (`sale.below_cost`) may do it after a
+ * high-friction warning and with a reason, and anyone else needs one of them
+ * to approve that exact unit at that exact price.
  *
  * The database-shaped behaviour (atomic consumption, voiding, concurrency) is
  * proved over real MySQL in the CP6 run; what is pinned here is the shape of
@@ -29,23 +30,26 @@ const POLICY = source('src/sales/sales-policy.service.ts');
 const SALES = source('src/sales/sales.service.ts');
 const SCHEMA = source('prisma/schema.prisma');
 
-describe('the floor is the configured selling price', () => {
-  it('the policy compares against the configured price, not cost', () => {
-    expect(POLICY).toMatch(/configuredPrice/);
-    expect(POLICY).toMatch(/belowFloor/);
-    // The old rule computed a margin and called that the floor.
-    expect(POLICY).not.toMatch(/assertBelowCostAllowed/);
+describe('no price floor; a loss is guarded (D223)', () => {
+  it('the policy measures the price against cost only', () => {
+    const code = withoutComments(POLICY);
+    expect(code).not.toMatch(/belowFloor/);
+    expect(code).not.toMatch(/configuredPrice/);
+    expect(code).toMatch(/price >= cost - EPSILON/);
   });
 
-  it('treats below-cost as a subset, not a separate gate', () => {
-    // Both thresholds lead to the same requirement: an Owner approval. Below
-    // cost adds a reason; it does not add a different door.
-    expect(POLICY).toMatch(/belowCost/);
-    expect(POLICY).toMatch(/A reason is required to sell below cost/);
+  it('always asks for a reason below cost, whoever sells', () => {
+    expect(POLICY).toMatch(/Say why you are selling below cost/);
   });
 
-  it('has no price floor when the ladder says unpriced', () => {
-    expect(POLICY).toMatch(/configuredPrice !== null/);
+  it('only ever asks for an approval to sell below cost', () => {
+    expect(SERVICE).toMatch(/approval_not_needed/);
+    expect(withoutComments(SERVICE)).toMatch(/requested >= cost/);
+  });
+
+  it('warns the Owner or a Manager before a loss, and refuses anyone else without an approval', () => {
+    expect(SALES).toMatch(/mayAcceptLoss \? this\.lossWarnings\(/);
+    expect(SALES).toMatch(/!mayAcceptLoss && line\.unitId && line\.price < line\.cost/);
   });
 
   it('checks per line, never on the sale total', () => {
@@ -65,8 +69,15 @@ describe('the floor is the configured selling price', () => {
   });
 });
 
-describe('an approval is not a permission', () => {
-  it('is Owner-only to grant', () => {
+describe('who decides a loss', () => {
+  it('is the Owner and the Store Manager, by role', () => {
+    const holders = Object.entries(ROLE_PERMISSIONS)
+      .filter(([, keys]) => keys.includes('sale.below_cost'))
+      .map(([role]) => role);
+    expect(holders).toEqual(['owner', 'store_manager']);
+  });
+
+  it('leaves discount.override (setting a price below cost) with the Owner alone', () => {
     const holders = Object.entries(ROLE_PERMISSIONS)
       .filter(([, keys]) => keys.includes('discount.override'))
       .map(([role]) => role);
@@ -79,19 +90,18 @@ describe('an approval is not a permission', () => {
     expect(ROLE_PERMISSIONS.branch_manager).not.toContain('discount.override');
   });
 
-  it('no longer lets its holder bypass the workflow', () => {
-    // The permission does not authorise a sale in the policy at all. Only a
-    // consumed approval does.
-    expect(POLICY).not.toMatch(/hasOverride/);
-    expect(POLICY).toMatch(/approval/);
+  it('lets its holder past the approval only, never past the reason', () => {
+    const code = withoutComments(POLICY);
+    expect(code).toMatch(/if \(!mayAcceptLoss\) \{/);
+    expect(code).toMatch(/reason_required/);
   });
 
   it('requesting needs only the permission to make the sale', () => {
     expect(CONTROLLER).toMatch(/@RequirePermissions\('sale\.create'\)[\s\S]{0,200}request\(/);
   });
 
-  it('deciding needs discount.override', () => {
-    expect(CONTROLLER).toMatch(/@RequirePermissions\('discount\.override'\)[\s\S]{0,200}decide\(/);
+  it('deciding needs sale.below_cost', () => {
+    expect(CONTROLLER).toMatch(/@RequirePermissions\('sale\.below_cost'\)[\s\S]{0,200}decide\(/);
   });
 
   it('lets an Owner approve their own request, through the same workflow', () => {
@@ -134,7 +144,6 @@ describe('one sale, one unit, one price', () => {
 
 describe('what voids an approval', () => {
   it.each([
-    ['the configured price moved', 'price_changed'],
     ['the confirmed cost moved', 'cost_changed'],
     ['the unit went to another branch', 'unit_transferred'],
     ['the unit was sold', 'unit_sold'],
@@ -147,9 +156,9 @@ describe('what voids an approval', () => {
     // A decision made about a different world is not a decision about this sale.
     const stale = SERVICE.slice(SERVICE.indexOf('private staleReason('));
     expect(stale).toMatch(/unitBranchId/);
-    expect(stale).toMatch(/configuredPrice/);
-    expect(stale).toMatch(/priceVersion/);
     expect(stale).toMatch(/unitCost/);
+    // D223: with no floor, a moved set price is not what was decided.
+    expect(withoutComments(stale.slice(0, stale.indexOf('async voidForUnit')))).not.toMatch(/price_changed/);
   });
 
   it('expires lazily rather than with a scheduler', () => {
@@ -268,7 +277,7 @@ describe('notifications', () => {
   });
 
   it('reach approvers by permission, not by a hardcoded role name', () => {
-    expect(SERVICE).toContain("permission: { key: 'discount.override' }");
+    expect(SERVICE).toContain("permission: { key: 'sale.below_cost' }");
   });
 
   it('are addressed to a person and land on the request itself', () => {
@@ -304,14 +313,14 @@ describe('reading a request', () => {
      * request and the price each was asking for. A client-side filter is a
      * display preference; this is a boundary.
      */
-    expect(SERVICE).toContain("const mineOnly = !this.may('discount.override');");
+    expect(SERVICE).toContain("const mineOnly = !this.may('sale.below_cost');");
     expect(SERVICE).toContain('...(mineOnly ? { requesterId: this.tenant.userId() ?? Buffer.alloc(16) } : {}),');
   });
 
   it('refuses a deep link into another person’s request', () => {
     // A notification's link is a convenience, never an authorisation.
     const get = SERVICE.slice(SERVICE.indexOf('async get(id: string)'));
-    expect(get).toContain("if (!this.may('discount.override') && !row.requesterId.equals(");
+    expect(get).toContain("if (!this.may('sale.below_cost') && !row.requesterId.equals(");
     expect(get).toContain('ForbiddenException');
   });
 
