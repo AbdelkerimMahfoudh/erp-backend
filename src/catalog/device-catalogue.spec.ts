@@ -1,3 +1,5 @@
+import { CHECKED_NOT_ADDED, PROVENANCE, REFRESH_BRANDS, REFRESH_REVIEWED_ON } from './catalogue-refresh';
+import { buildRefreshSql } from '../../scripts/generate-catalogue-refresh-migration';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -34,6 +36,11 @@ describe('the device catalogue', () => {
       'realme',
       'Huawei',
       'Honor',
+      // D223, read from each manufacturer (catalogue-refresh.ts).
+      'Google Pixel',
+      'OnePlus',
+      'Motorola',
+      'HMD',
       'Other brand',
     ]);
   });
@@ -83,7 +90,11 @@ describe('the device catalogue', () => {
     const names = (key: string) => modelsForBrand(key).map((m) => m.name);
 
     it('leads Apple exactly as a shopkeeper reads it', () => {
-      expect(names('apple').slice(0, 10)).toEqual([
+      expect(names('apple').slice(0, 13)).toEqual([
+        // D223: Apple's compare page order — the foldable, then the 18 Pro line.
+        'iPhone Duo',
+        'iPhone 18 Pro Max',
+        'iPhone 18 Pro',
         'iPhone 17 Pro Max',
         'iPhone 17 Pro',
         'iPhone Air',
@@ -257,10 +268,14 @@ describe('the device catalogue', () => {
       'utf8',
     );
 
-    it('inserts every brand and every model', () => {
-      expect(sql.match(/INSERT INTO `device_brands`/g)).toHaveLength(BRANDS.length);
-      expect(sql.match(/INSERT INTO `device_models`/g)).toHaveLength(MODELS.length);
-      for (const b of BRANDS) expect(sql).toContain(`'${b.key}'`);
+    // 0062 is history: the catalogue as it was, before the refresh of 2026-10-27 (0106).
+    const original = BRANDS.filter((b) => !(REFRESH_BRANDS as readonly string[]).includes(b.key));
+    const refreshed = new Set(PROVENANCE.map((p) => `${p.brandKey}|${p.name}`));
+
+    it('inserts every brand and every model the catalogue had before the refresh', () => {
+      expect(sql.match(/INSERT INTO `device_brands`/g)).toHaveLength(original.length);
+      expect(sql.match(/INSERT INTO `device_models`/g)).toHaveLength(MODELS.length - PROVENANCE.length);
+      for (const b of original) expect(sql).toContain(`'${b.key}'`);
     });
 
     it('records the review date the source declares', () => {
@@ -275,7 +290,7 @@ describe('the device catalogue', () => {
        */
       expect(sql).not.toMatch(/INSERT IGNORE/i);
       expect(sql).not.toMatch(/\bREPLACE INTO\b/i);
-      expect(sql.match(/WHERE NOT EXISTS/g)?.length).toBe(BRANDS.length + MODELS.length);
+      expect(sql.match(/WHERE NOT EXISTS/g)?.length).toBe(original.length + MODELS.length - refreshed.size);
       expect(sql).toContain('CREATE TABLE IF NOT EXISTS `device_brands`');
       expect(sql).toContain('CREATE TABLE IF NOT EXISTS `device_models`');
     });
@@ -297,6 +312,66 @@ describe('the device catalogue', () => {
        */
       expect(sql).not.toMatch(/,'official',/);
       expect(sql).toMatch(/,'curated',/);
+    });
+  });
+
+  /**
+   * The refresh of 2026-10-27 (D223): every row read from the manufacturer's own
+   * pages, with its provenance, and inserted by 0106 exactly.
+   */
+  describe('the refresh is official, recorded and idempotent (0106)', () => {
+    const sql = readFileSync(
+      join(__dirname, '..', '..', 'prisma', 'migrations', '0106_device_catalogue_refresh', 'migration.sql'),
+      'utf8',
+    );
+    const original = readFileSync(
+      join(__dirname, '..', '..', 'prisma', 'migrations', '0062_device_catalogue', 'migration.sql'),
+      'utf8',
+    );
+
+    it('is exactly what the generator writes from the source', () => {
+      expect(sql.replace(/\r\n/g, '\n')).toBe(buildRefreshSql());
+    });
+
+    it('records where every added model was read, and only models the catalogue holds', () => {
+      for (const p of PROVENANCE) {
+        expect([p.name, MODELS.some((m) => m.brandKey === p.brandKey && m.name === p.name)]).toEqual([p.name, true]);
+      }
+    });
+
+    it('adds nothing without provenance: every model not in 0062 is in the manifest', () => {
+      const recorded = new Set(PROVENANCE.map((p) => `${p.brandKey}|${p.name}`));
+      for (const m of MODELS) {
+        const before = original.includes(`WHERE \`brand_key\` = '${m.brandKey}' AND \`name\` = '${m.name.replace(/'/g, "''")}'`);
+        expect([m.name, before || recorded.has(`${m.brandKey}|${m.name}`)]).toEqual([m.name, true]);
+      }
+    });
+
+    it('reads only from the manufacturers themselves', () => {
+      const official = /^https:\/\/(www\.apple\.com|support\.google\.com|www\.oneplus\.com|www\.motorola\.com|www\.hmd\.com)\//;
+      for (const p of PROVENANCE) {
+        expect(p.listedAt).toMatch(official);
+        expect(p.datedBy).toMatch(official);
+      }
+      for (const c of CHECKED_NOT_ADDED) expect(c.checkedAt).toMatch(official);
+    });
+
+    it('does not add what Apple does not list', () => {
+      const names = MODELS.filter((m) => m.brandKey === 'apple').map((m) => m.name);
+      expect(names).toEqual(expect.arrayContaining(['iPhone Duo', 'iPhone 18 Pro Max', 'iPhone 18 Pro']));
+      for (const missing of ['iPhone 18', 'iPhone 18e', 'iPhone Air 2']) {
+        expect(names).not.toContain(missing);
+        expect(CHECKED_NOT_ADDED.some((c) => c.name === missing)).toBe(true);
+      }
+    });
+
+    it('is idempotent, curated and destroys nothing', () => {
+      expect(sql).not.toMatch(/INSERT IGNORE/i);
+      expect(sql).not.toMatch(/\bREPLACE INTO\b/i);
+      expect(sql.match(/WHERE NOT EXISTS/g)?.length).toBe(REFRESH_BRANDS.length + PROVENANCE.length);
+      expect(sql).not.toMatch(/\bDELETE FROM\b|\bDROP\b|UPDATE `products`/i);
+      expect(sql).not.toMatch(/,'official',/);
+      expect(sql).toContain(REFRESH_REVIEWED_ON);
     });
   });
 });

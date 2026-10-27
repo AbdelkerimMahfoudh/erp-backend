@@ -51,6 +51,10 @@
  *
  * This file is the single source of truth. Migration `0062` inserts a snapshot
  * of it, and `device-catalogue.spec.ts` fails the build if the two drift.
+ *
+ * The refresh of 2026-10-27 (D223) added the rows named in
+ * `catalogue-refresh.ts`, each read from the manufacturer's own pages, with its
+ * provenance; migration `0106` inserts exactly those, and re-ranks.
  */
 
 export const CATALOGUE_SOURCE = 'curated' as const;
@@ -114,10 +118,19 @@ export const BRANDS: readonly CatalogueBrand[] = [
   { key: 'realme', name: 'realme', aliases: [], order: 10 },
   { key: 'huawei', name: 'Huawei', aliases: [], order: 11 },
   { key: 'honor', name: 'Honor', aliases: [], order: 12 },
+  // D223 (2026-10-27): models read from each manufacturer's own pages — see catalogue-refresh.ts.
+  { key: 'google', name: 'Google Pixel', aliases: ['google', 'pixel'], order: 13 },
+  { key: 'oneplus', name: 'OnePlus', aliases: ['one plus'], order: 14 },
+  { key: 'motorola', name: 'Motorola', aliases: ['moto', 'motorola razr'], order: 15 },
+  { key: 'hmd', name: 'HMD', aliases: ['human mobile devices'], order: 16 },
   { key: 'other', name: 'Other brand', aliases: ['unknown', 'autre', 'أخرى'], order: 999 },
 ];
 
 const apple: CatalogueModel[] = [
+  // Apple's compare page order (D223): the foldable first, then the 18 Pro line.
+  { brandKey: 'apple', name: 'iPhone Duo', family: 'iPhone Duo', releaseRank: 2026 },
+  { brandKey: 'apple', name: 'iPhone 18 Pro Max', family: 'iPhone 18', releaseRank: 2026 },
+  { brandKey: 'apple', name: 'iPhone 18 Pro', family: 'iPhone 18', releaseRank: 2026 },
   { brandKey: 'apple', name: 'iPhone 17 Pro Max', family: 'iPhone 17', releaseRank: 2025 },
   { brandKey: 'apple', name: 'iPhone 17 Pro', family: 'iPhone 17', releaseRank: 2025 },
   { brandKey: 'apple', name: 'iPhone Air', family: 'iPhone Air', releaseRank: 2025 },
@@ -495,6 +508,64 @@ function ranked(models: CatalogueModel[]): RankedCatalogueModel[] {
   return models.map((m, index) => ({ ...m, displayRank: RANK_BASE - index * RANK_STEP }));
 }
 
+const google: CatalogueModel[] = [
+  { brandKey: 'google', name: 'Pixel 11 Pro Fold', family: 'Pixel 11', releaseRank: 2026 },
+  { brandKey: 'google', name: 'Pixel 11 Pro XL', family: 'Pixel 11', releaseRank: 2026 },
+  { brandKey: 'google', name: 'Pixel 11 Pro', family: 'Pixel 11', releaseRank: 2026 },
+  { brandKey: 'google', name: 'Pixel 11', family: 'Pixel 11', releaseRank: 2026 },
+  { brandKey: 'google', name: 'Pixel 10 Pro Fold', family: 'Pixel 10', releaseRank: 2025 },
+  { brandKey: 'google', name: 'Pixel 10 Pro XL', family: 'Pixel 10', releaseRank: 2025 },
+  { brandKey: 'google', name: 'Pixel 10 Pro', family: 'Pixel 10', releaseRank: 2025 },
+  { brandKey: 'google', name: 'Pixel 10', family: 'Pixel 10', releaseRank: 2025 },
+  { brandKey: 'google', name: 'Pixel 10a', family: 'Pixel 10', releaseRank: 2026 },
+  { brandKey: 'google', name: 'Pixel 9 Pro Fold', family: 'Pixel 9', releaseRank: 2024 },
+  { brandKey: 'google', name: 'Pixel 9 Pro XL', family: 'Pixel 9', releaseRank: 2024 },
+  { brandKey: 'google', name: 'Pixel 9 Pro', family: 'Pixel 9', releaseRank: 2024 },
+  { brandKey: 'google', name: 'Pixel 9', family: 'Pixel 9', releaseRank: 2024 },
+  { brandKey: 'google', name: 'Pixel 9a', family: 'Pixel 9', releaseRank: 2025 },
+  { brandKey: 'google', name: 'Pixel 8 Pro', family: 'Pixel 8', releaseRank: 2023 },
+  { brandKey: 'google', name: 'Pixel 8', family: 'Pixel 8', releaseRank: 2023 },
+  { brandKey: 'google', name: 'Pixel 8a', family: 'Pixel 8', releaseRank: 2024 },
+  { brandKey: 'google', name: 'Pixel Fold', family: 'Pixel Fold', releaseRank: 2023 },
+  { brandKey: 'google', name: 'Pixel 7 Pro', family: 'Pixel 7', releaseRank: 2022 },
+  { brandKey: 'google', name: 'Pixel 7', family: 'Pixel 7', releaseRank: 2022 },
+  { brandKey: 'google', name: 'Pixel 7a', family: 'Pixel 7', releaseRank: 2023 },
+  { brandKey: 'google', name: 'Pixel 6 Pro', family: 'Pixel 6', releaseRank: 2021 },
+  { brandKey: 'google', name: 'Pixel 6', family: 'Pixel 6', releaseRank: 2021 },
+  { brandKey: 'google', name: 'Pixel 6a', family: 'Pixel 6', releaseRank: 2022 },
+];
+
+const oneplus: CatalogueModel[] = [
+  { brandKey: 'oneplus', name: 'OnePlus 15', family: 'OnePlus 15', releaseRank: 2025 },
+  { brandKey: 'oneplus', name: 'OnePlus 13', family: 'OnePlus 13', releaseRank: 2025 },
+  { brandKey: 'oneplus', name: 'OnePlus 13R', family: 'OnePlus 13', releaseRank: 2025 },
+  { brandKey: 'oneplus', name: 'OnePlus 12', family: 'OnePlus 12', releaseRank: 2024 },
+  { brandKey: 'oneplus', name: 'OnePlus 12R', family: 'OnePlus 12', releaseRank: 2024 },
+  { brandKey: 'oneplus', name: 'OnePlus Nord 5', family: 'OnePlus Nord', releaseRank: 2025 },
+  { brandKey: 'oneplus', name: 'OnePlus Nord CE5', family: 'OnePlus Nord', releaseRank: 2025 },
+];
+
+/** Motorola's own spelling: lower case, the year part of the name. */
+const motorola: CatalogueModel[] = [
+  { brandKey: 'motorola', name: 'razr ultra 2026', family: 'razr', releaseRank: 2026 },
+  { brandKey: 'motorola', name: 'razr+ 2026', family: 'razr', releaseRank: 2026, aliases: ['razr plus 2026'] },
+  { brandKey: 'motorola', name: 'razr 2026', family: 'razr', releaseRank: 2026 },
+  { brandKey: 'motorola', name: 'edge 2026', family: 'edge', releaseRank: 2026 },
+  { brandKey: 'motorola', name: 'edge 2025', family: 'edge', releaseRank: 2025 },
+  { brandKey: 'motorola', name: 'edge 2024', family: 'edge', releaseRank: 2024 },
+  { brandKey: 'motorola', name: 'moto g stylus 2026', family: 'moto g', releaseRank: 2026 },
+  { brandKey: 'motorola', name: 'moto g power 2026', family: 'moto g', releaseRank: 2026 },
+  { brandKey: 'motorola', name: 'moto g 2026', family: 'moto g', releaseRank: 2026 },
+];
+
+const hmd: CatalogueModel[] = [
+  { brandKey: 'hmd', name: 'HMD Terra M', family: 'HMD Terra', releaseRank: 2026 },
+  { brandKey: 'hmd', name: 'HMD Fuse', family: 'HMD Fuse', releaseRank: 2025 },
+  { brandKey: 'hmd', name: 'HMD Fusion X1', family: 'HMD Fusion', releaseRank: 2025 },
+  { brandKey: 'hmd', name: 'HMD Barça Fusion', family: 'HMD Fusion', releaseRank: 2025, aliases: ['hmd barca fusion'] },
+  { brandKey: 'hmd', name: 'HMD Touch 4G', family: 'HMD Touch', releaseRank: 2025 },
+];
+
 export const MODELS: readonly RankedCatalogueModel[] = [
   ...ranked(apple),
   ...ranked(samsung),
@@ -508,6 +579,10 @@ export const MODELS: readonly RankedCatalogueModel[] = [
   ...ranked(realmeModels),
   ...ranked(huawei),
   ...ranked(honor),
+  ...ranked(google),
+  ...ranked(oneplus),
+  ...ranked(motorola),
+  ...ranked(hmd),
 ];
 
 /**
