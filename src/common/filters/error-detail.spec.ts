@@ -167,6 +167,14 @@ describe('per-item detail survives the filter', () => {
     expect(body).toMatchObject({ code: 'store_closed', closedReason: 'not_opened', businessDate: '2026-10-01' });
   });
 
+  it('names the product an intake should receive into when it already exists (D223)', () => {
+    // Found by the disposable end-to-end run: the service attached the id and the filter dropped it.
+    const body = runFilter(
+      new ConflictException({ code: 'product_exists', message: 'exists', productId: '018f0000-0000-7000-8000-00000000a001' }),
+    );
+    expect(body).toMatchObject({ code: 'product_exists', productId: '018f0000-0000-7000-8000-00000000a001' });
+  });
+
   it('says what a branch is subscribed to and what the route needed (D156)', () => {
     // The app says "this branch does not sell" from the two fields, never from the sentence.
     const body = runFilter(

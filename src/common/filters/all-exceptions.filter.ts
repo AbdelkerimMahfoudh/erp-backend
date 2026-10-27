@@ -32,6 +32,7 @@ interface ErrorBody {
   lineIndex?: unknown;
   unitId?: unknown;
   identifier?: unknown;
+  productId?: unknown;
   acknowledgement?: unknown;
   businessDate?: unknown;
   closedReason?: unknown;
@@ -90,6 +91,8 @@ const DETAIL_KEYS = [
   'lineIndex',
   'unitId',
   'identifier',
+  /* D223: `product_exists` names the product the intake should receive into instead — an id of the caller's own company. */
+  'productId',
   /* Why an acknowledgement was refused. Deliberately not named `reason`: that
    * word is free text on half the mutations in this app, and allowlisting it
    * would pass whatever any of them happened to attach. */
