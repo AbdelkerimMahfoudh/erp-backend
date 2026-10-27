@@ -78,10 +78,10 @@
     "typescript": "^5.5.4"
   },
   "overrides": {
-    "multer": "2.4.0",
+    "multer": "2.5.0",
     "lodash": "4.18.1",
     "js-yaml@4": "4.3.2",
-    "body-parser@1": "1.20.8",
+    "body-parser@1": "1.20.9",
     "qs@6": "6.16.1"
   },
   "jest": {
