@@ -58,6 +58,7 @@ interface CategoryRow {
   defaultTrackingType: string;
   attributeSchema: unknown;
   isActive: boolean;
+  key?: string | null;
 }
 
 function product(over: Partial<ProductRow> = {}): ProductRow {
@@ -746,18 +747,19 @@ describe('metadata update', () => {
  * drives it. A client that sent a mode won, so the Phone category could be
  * asked for `quantity` — a phone received in bulk that never gets an IMEI.
  */
-describe('the category decides how its products are received', () => {
-  const category = (defaultTrackingType: string, name = 'Cat'): CategoryRow => ({
+describe('the category recommends the mode; the Owner chooses what it allows (D223)', () => {
+  const category = (defaultTrackingType: string, name = 'Cat', key: string | null = null): CategoryRow => ({
     id: newUuidV7Bin(),
     companyId: COMPANY,
     name,
     defaultTrackingType,
     attributeSchema: null,
     isActive: true,
+    key,
   });
 
-  it('refuses a phone category asked to skip IMEI tracking', async () => {
-    const cat = category('imei', 'Phones');
+  it('refuses the built-in Phones category asked to skip IMEI tracking', async () => {
+    const cat = category('imei', 'Phones', 'phones');
     const { service, products } = makeService({ categories: [cat] });
 
     await expect(
@@ -766,8 +768,8 @@ describe('the category decides how its products are received', () => {
     expect(products).toHaveLength(0);
   });
 
-  it('refuses a counted category asked to demand IMEIs', async () => {
-    const cat = category('quantity', 'Accessories');
+  it('refuses the built-in Cables category asked to demand IMEIs', async () => {
+    const cat = category('quantity', 'Cables', 'cables');
     const { service, products } = makeService({ categories: [cat] });
 
     await expect(
@@ -776,21 +778,33 @@ describe('the category decides how its products are received', () => {
     expect(products).toHaveLength(0);
   });
 
-  it('accepts a client that agrees with the category', async () => {
-    const cat = category('quantity');
+  it('takes the recommendation when the client names no mode', async () => {
+    const cat = category('quantity', 'Cables', 'cables');
     const { service, products } = makeService({ categories: [cat] });
 
-    await service.create(baseDto({ categoryId: binToUuid(cat.id), trackingType: 'quantity' as never }));
+    await service.create(baseDto({ categoryId: binToUuid(cat.id) }));
 
     expect(products[0].trackingType).toBe('quantity');
   });
 
-  /**
-   * A television scanned by its serial has to be able to become a product. The
-   * category rule above is what stops counted stock being individually tracked;
-   * an uncategorised product has no category to contradict, so the mode is the
-   * client's to state.
-   */
+  it('accepts a mode the built-in category allows instead: a cellular tablet tracked by IMEI', async () => {
+    const cat = category('serial', 'Tablets', 'tablets');
+    const { service, products } = makeService({ categories: [cat] });
+
+    await service.create(baseDto({ categoryId: binToUuid(cat.id), trackingType: 'imei' as never }));
+
+    expect(products[0].trackingType).toBe('imei');
+  });
+
+  it("a shop's own category lets the Owner choose any mode: earbuds tracked by serial", async () => {
+    const cat = category('quantity', 'My audio');
+    const { service, products } = makeService({ categories: [cat] });
+
+    await service.create(baseDto({ categoryId: binToUuid(cat.id), trackingType: 'serial' as never }));
+
+    expect(products[0].trackingType).toBe('serial');
+  });
+
   it('accepts serial as a newly chosen mode on an uncategorised product', async () => {
     const { service, products } = makeService();
 
@@ -801,49 +815,59 @@ describe('the category decides how its products are received', () => {
   });
 
   /**
-   * Re-filing a product is a tracking change even though the request never
-   * mentions one — which is exactly how a shelf of counted accessories could
-   * otherwise end up demanding IMEIs.
+   * Re-filing a product is a tracking change when the new category does not
+   * allow its mode — which is how a phone could otherwise become a counted cable.
    */
-  it('re-derives the mode when the product moves to a different category', async () => {
-    const phones = category('imei', 'Phones');
-    const accessories = category('quantity', 'Accessories');
+  it("a re-filed product takes the new category's recommendation when its own mode is not allowed there", async () => {
+    const phones = category('imei', 'Phones', 'phones');
+    const cables = category('quantity', 'Cables', 'cables');
     const p = product({ trackingType: 'imei', categoryId: phones.id });
-    const { service } = makeService({ products: [p], categories: [phones, accessories] });
+    const { service } = makeService({ products: [p], categories: [phones, cables] });
 
-    await service.update(binToUuid(p.id), { categoryId: binToUuid(accessories.id) } as UpdateProductDto);
+    await service.update(binToUuid(p.id), { categoryId: binToUuid(cables.id) } as UpdateProductDto);
 
     expect(p.trackingType).toBe('quantity');
   });
 
-  it('blocks that re-derivation when the product already holds stock', async () => {
-    const phones = category('imei', 'Phones');
-    const accessories = category('quantity', 'Accessories');
+  it('a re-filed product keeps its mode when the new category allows it', async () => {
+    const phones = category('imei', 'Phones', 'phones');
+    const tablets = category('serial', 'Tablets', 'tablets');
+    const p = product({ trackingType: 'imei', categoryId: phones.id });
+    const { service } = makeService({ products: [p], categories: [phones, tablets] });
+
+    await service.update(binToUuid(p.id), { categoryId: binToUuid(tablets.id) } as UpdateProductDto);
+
+    expect(p.trackingType).toBe('imei');
+  });
+
+  it('blocks that change of mode when the product already holds stock', async () => {
+    const phones = category('imei', 'Phones', 'phones');
+    const cables = category('quantity', 'Cables', 'cables');
     const p = product({ trackingType: 'imei', categoryId: phones.id });
     const { service } = makeService({
       products: [p],
-      categories: [phones, accessories],
+      categories: [phones, cables],
       units: [{ productId: p.id, branchId: BRANCH, status: 'in_stock' }],
     });
 
     await expect(
-      service.update(binToUuid(p.id), { categoryId: binToUuid(accessories.id) } as UpdateProductDto),
+      service.update(binToUuid(p.id), { categoryId: binToUuid(cables.id) } as UpdateProductDto),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(p.trackingType).toBe('imei');
   });
 
   it('leaves the mode alone when the category does not change', async () => {
-    const accessories = category('quantity', 'Accessories');
-    const p = product({ trackingType: 'quantity', categoryId: accessories.id });
-    const { service } = makeService({ products: [p], categories: [accessories] });
+    const cables = category('quantity', 'Cables', 'cables');
+    const p = product({ trackingType: 'quantity', categoryId: cables.id });
+    const { service } = makeService({ products: [p], categories: [cables] });
 
     await service.update(binToUuid(p.id), { brand: 'Anker' } as UpdateProductDto);
 
     expect(p.trackingType).toBe('quantity');
   });
 
-  it('refuses a mode that contradicts the category the product already has', async () => {
-    const phones = category('imei', 'Phones');
+  it("refuses a mode the product's built-in category does not allow", async () => {
+    const phones = category('imei', 'Phones', 'phones');
     const p = product({ trackingType: 'imei', categoryId: phones.id });
     const { service } = makeService({ products: [p], categories: [phones] });
 

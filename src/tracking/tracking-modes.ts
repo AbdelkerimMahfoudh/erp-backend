@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { TrackingType } from '@prisma/client';
+import { defaultCategory } from '../catalog/default-categories';
 
 /**
  * The one place the current product rule about intake modes lives.
@@ -25,11 +26,10 @@ import { TrackingType } from '@prisma/client';
  * serial is the worse misconfiguration: it asks for a number the device does
  * not have.
  *
- * The protection that actually matters is elsewhere and is unchanged: a
- * category still DECIDES the mode (`resolveTrackingType` refuses a client that
- * contradicts it), so cables in an Accessories category cannot become
- * individually tracked whatever a form suggests. The mode is only the client's
- * to state for an uncategorised product.
+ * Since 2026-10-27 (D223) a category RECOMMENDS the mode and the Owner may
+ * choose another the category allows (`resolveTrackingType`): a built-in Cables
+ * category still cannot become individually tracked, a built-in Phones category
+ * cannot be counted, and a shop's own category allows every selectable mode.
  */
 export const SELECTABLE_TRACKING_TYPES: readonly TrackingType[] = [
   TrackingType.imei,
@@ -59,23 +59,52 @@ export function assertSelectableTrackingType(next: TrackingType, previous?: Trac
   }
 }
 
+/** The category facts the rule needs: its recommended mode, and its built-in key when it has one. */
+export interface TrackingCategory {
+  defaultTrackingType: TrackingType;
+  key?: string | null;
+}
+
 /**
- * The client does not get a vote on the mode when a category is involved.
+ * The modes a category lets the Owner choose (D223).
  *
- * A contradiction is refused rather than ignored. Silently overwriting the
- * client's value would leave a shop staring at a form that said one thing and a
- * product that does another; refusing says which one is authoritative. This is
- * the server-side half of "category drives the mode" — a manipulated client
- * cannot pick the Phone category and ask for `quantity` to skip the IMEI, nor
- * pick Accessories and ask for `imei`.
+ * A built-in category lists them (`default-categories.ts`): a phone is only ever
+ * IMEI-tracked, a cable only ever counted, a tablet IMEI-, serial- or
+ * quantity-tracked depending on whether it is cellular. A shop's own category
+ * allows every selectable mode — it is the Owner's to decide.
  */
-export function resolveTrackingType(categoryMode: TrackingType, clientMode?: TrackingType | null): TrackingType {
-  if (clientMode !== undefined && clientMode !== null && clientMode !== categoryMode) {
+export function allowedTrackingTypes(category: TrackingCategory): readonly TrackingType[] {
+  return defaultCategory(category.key)?.allowed ?? SELECTABLE_TRACKING_TYPES;
+}
+
+/**
+ * The category RECOMMENDS the mode; the Owner may choose another it allows (D223).
+ *
+ * Until 2026-10-27 the category decided and any other mode was refused. The
+ * owner reversed that: a headset, a smartwatch or a tablet is not one universal
+ * rule. What stays refused is a mode the category does not allow — a manipulated
+ * client still cannot pick Phones and ask for `quantity` to skip the IMEI, nor
+ * pick Cables and ask for `imei`. A refusal names the category's mode and the
+ * one asked for, so the client can tell which it got wrong.
+ */
+export function resolveTrackingType(category: TrackingCategory, clientMode?: TrackingType | null): TrackingType {
+  if (clientMode === undefined || clientMode === null) return category.defaultTrackingType;
+  if (!allowedTrackingTypes(category).includes(clientMode)) {
     throw new BadRequestException(
-      `This category is tracked by '${categoryMode}', so '${clientMode}' cannot be used. The category decides how its products are received.`,
+      `This category is tracked by '${category.defaultTrackingType}', so '${clientMode}' cannot be used. ` +
+        `It allows: ${allowedTrackingTypes(category).join(', ')}.`,
     );
   }
-  return categoryMode;
+  return clientMode;
+}
+
+/**
+ * The mode a product takes when it is re-filed under another category and the
+ * request names no mode: its own, if the new category allows it; else the new
+ * category's recommendation (still subject to `assertTrackingChangeSafe`).
+ */
+export function trackingAfterRecategorise(category: TrackingCategory, current: TrackingType): TrackingType {
+  return allowedTrackingTypes(category).includes(current) ? current : category.defaultTrackingType;
 }
 
 /**

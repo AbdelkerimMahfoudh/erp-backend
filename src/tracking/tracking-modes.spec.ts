@@ -6,6 +6,8 @@ import {
   assertTrackingChangeSafe,
   isSerialized,
   resolveTrackingType,
+  trackingAfterRecategorise,
+  allowedTrackingTypes,
 } from './tracking-modes';
 
 describe('which modes may be chosen', () => {
@@ -60,31 +62,41 @@ describe('serialized means "one row per physical thing"', () => {
   });
 });
 
-describe('the category decides, not the client', () => {
-  it('returns the category mode when the client says nothing', () => {
-    expect(resolveTrackingType(TrackingType.imei)).toBe('imei');
-    expect(resolveTrackingType(TrackingType.quantity, undefined)).toBe('quantity');
-    expect(resolveTrackingType(TrackingType.quantity, null)).toBe('quantity');
+describe('the category recommends, the Owner chooses what it allows (D223)', () => {
+  const phones = { defaultTrackingType: TrackingType.imei, key: 'phones' };
+  const cables = { defaultTrackingType: TrackingType.quantity, key: 'cables' };
+  const tablets = { defaultTrackingType: TrackingType.serial, key: 'tablets' };
+  const ownCategory = { defaultTrackingType: TrackingType.quantity, key: null };
+
+  it('returns the recommended mode when the client says nothing', () => {
+    expect(resolveTrackingType(phones)).toBe('imei');
+    expect(resolveTrackingType(cables, undefined)).toBe('quantity');
+    expect(resolveTrackingType(ownCategory, null)).toBe('quantity');
   });
 
-  it('allows a client that agrees', () => {
-    expect(resolveTrackingType(TrackingType.imei, TrackingType.imei)).toBe('imei');
+  it('accepts another mode the category allows: a cellular tablet, a serial-tracked own product', () => {
+    expect(resolveTrackingType(tablets, TrackingType.imei)).toBe('imei');
+    expect(resolveTrackingType(tablets, TrackingType.quantity)).toBe('quantity');
+    expect(resolveTrackingType(ownCategory, TrackingType.serial)).toBe('serial');
   });
 
-  /**
-   * The two attacks this exists to stop. Before this, the client's value won
-   * and the category was only a fallback.
-   */
-  it('refuses a phone category asked to skip IMEI tracking', () => {
-    expect(() => resolveTrackingType(TrackingType.imei, TrackingType.quantity)).toThrow(BadRequestException);
+  /** The two attacks the old rule stopped are still stopped, by the allowed list. */
+  it('refuses a phone asked to skip IMEI tracking', () => {
+    expect(() => resolveTrackingType(phones, TrackingType.quantity)).toThrow(BadRequestException);
   });
 
-  it('refuses a counted category asked to demand IMEIs', () => {
-    expect(() => resolveTrackingType(TrackingType.quantity, TrackingType.imei)).toThrow(BadRequestException);
+  it('refuses a cable asked to demand IMEIs', () => {
+    expect(() => resolveTrackingType(cables, TrackingType.imei)).toThrow(BadRequestException);
   });
 
-  it('names both modes in the refusal, so the client can tell which it got wrong', () => {
-    expect(() => resolveTrackingType(TrackingType.imei, TrackingType.quantity)).toThrow(/imei[\s\S]*quantity/);
+  it('names the recommended mode and the one asked for in the refusal', () => {
+    expect(() => resolveTrackingType(phones, TrackingType.quantity)).toThrow(/imei[\s\S]*quantity/);
+  });
+
+  it('a re-filed product keeps its mode when the new category allows it, else takes the recommendation', () => {
+    expect(trackingAfterRecategorise(tablets, TrackingType.imei)).toBe('imei');
+    expect(trackingAfterRecategorise(cables, TrackingType.serial)).toBe('quantity');
+    expect(allowedTrackingTypes(ownCategory)).toEqual(['imei', 'serial', 'quantity']);
   });
 });
 

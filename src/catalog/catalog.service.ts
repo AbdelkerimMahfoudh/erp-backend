@@ -19,6 +19,8 @@ import {
   assertSelectableTrackingType,
   assertTrackingChangeSafe,
   resolveTrackingType,
+  trackingAfterRecategorise,
+  type TrackingCategory,
 } from '../tracking/tracking-modes';
 import { RecognitionService } from '../scanner/recognition.service';
 import { RecognitionOutboxService } from '../scanner/recognition-outbox.service';
@@ -264,17 +266,11 @@ export class CatalogService {
       if (!category) throw new NotFoundException('Category not found');
       categoryId = category.id;
       /**
-       * The category **decides** the mode; it is not merely a default.
-       *
-       * This used to read `trackingType ?? category.defaultTrackingType`, which
-       * said the opposite of what its own comment claimed: the client won and
-       * the category was the fallback. A request could therefore name the Phone
-       * category and ask for `quantity` — a phone received in bulk that never
-       * gets an IMEI — or name Accessories and ask for `imei`, demanding a
-       * serial number for a charging cable. Neither is reachable now: a
-       * contradiction is a 400, and agreement is redundant but harmless.
+       * The category recommends the mode; the Owner may choose another the
+       * category allows (D223). A mode it does not allow is a 400 — a phone is
+       * never counted in bulk, a cable never asks for an IMEI.
        */
-      trackingType = resolveTrackingType(category.defaultTrackingType, dto.trackingType);
+      trackingType = resolveTrackingType(category, dto.trackingType);
       schemaRaw = category.attributeSchema;
     } else if (trackingType !== undefined) {
       /**
@@ -605,13 +601,14 @@ export class CatalogService {
      * lands — the one the tracking type is then derived from. `null` means it
      * will have no category, so there is nothing to derive from.
      */
-    let categoryMode: TrackingType | null = null;
+    let governing: TrackingCategory | null = null;
+    let recategorised = false;
     if (dto.categoryId !== undefined) {
       const nextId = dto.categoryId === null ? null : uuidToBin(dto.categoryId);
       if (nextId) {
         const category = await this.db.productCategory.findUnique({ where: { id: nextId } });
         if (!category) throw new NotFoundException('Category not found');
-        categoryMode = category.defaultTrackingType;
+        governing = category;
       }
       const sameCategory =
         (nextId === null && before.categoryId === null) ||
@@ -619,22 +616,28 @@ export class CatalogService {
       if (!sameCategory) {
         data.category = nextId ? { connect: { id: nextId } } : { disconnect: true };
         changed.push('categoryId');
+        recategorised = true;
       }
     } else if (before.categoryId) {
-      // Category untouched: the one it already has still governs the mode.
-      const category = await this.db.productCategory.findUnique({ where: { id: before.categoryId } });
-      categoryMode = category?.defaultTrackingType ?? null;
+      // Category untouched: the one it already has still bounds the mode.
+      governing = await this.db.productCategory.findUnique({ where: { id: before.categoryId } });
     }
 
     /**
-     * Tracking mode decides how stock is counted, and the category decides the
-     * tracking mode — so a category change is a tracking change whenever the
-     * two categories disagree, even though the request never mentioned one.
-     * Deriving it here is what stops "just re-file this under Accessories" from
-     * leaving a quantity product whose rows are all `Unit`s.
+     * Tracking mode decides how stock is counted, and the category bounds it
+     * (D223): a mode the request names must be one the category allows; a
+     * re-filed product keeps its mode when the new category allows it, else
+     * takes the new category's recommendation — and either change is still
+     * refused while stock or history exists (`assertTrackingChangeSafe`).
      */
     const nextTracking =
-      categoryMode !== null ? resolveTrackingType(categoryMode, dto.trackingType) : (dto.trackingType ?? before.trackingType);
+      governing === null
+        ? (dto.trackingType ?? before.trackingType)
+        : dto.trackingType !== undefined && dto.trackingType !== null
+          ? resolveTrackingType(governing, dto.trackingType)
+          : recategorised
+            ? trackingAfterRecategorise(governing, before.trackingType)
+            : before.trackingType;
 
     if (nextTracking !== before.trackingType) {
       // Historical `serial` may persist, but may not be newly chosen.
