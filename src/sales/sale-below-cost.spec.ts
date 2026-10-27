@@ -127,7 +127,7 @@ describe('the Owner or a Store Manager (sale.below_cost)', () => {
     });
     const result: any = await h.service.createSale(sell({ price: 650 }, { overrideReason: 'display unit' }, 650) as never);
     expect(result).toMatchObject({ status: 'warnings_pending' });
-    expect(seen).toEqual([expect.objectContaining({ code: 'loss.below_cost', severity: 'caution', field: 'lines.0.price' })]);
+    expect(seen).toEqual([expect.objectContaining({ code: 'loss.below_cost', severity: 'caution', field: 'lines.0.price', messageKey: 'warning.loss.belowCost' })]);
     // The cost is described, never quoted.
     expect(seen[0].reference).toEqual({ kind: 'unit_cost', amount: null, sample: null });
     expect(h.tx.sale.create).not.toHaveBeenCalled();

@@ -38,7 +38,7 @@ import { DiscountApprovalsService } from '../discount-approvals/discount-approva
 import { MagnitudeReads, MagnitudeService, SALE_PRICE_MIN_SAMPLE } from '../common/warnings/magnitude.service';
 import { magnitudeWarning } from '../common/warnings/magnitude';
 import { WarningGate } from '../common/warnings/warning-gate.service';
-import { Warning, WarningResponse } from '../common/warnings/warning.types';
+import { Warning, WarningResponse, messageKeyFor } from '../common/warnings/warning.types';
 
 /** Every value the filters accept, kept next to the enums they mirror. */
 const PAY_STATUSES = ['paid', 'partial', 'credit'] as const satisfies readonly SalePayStatus[];
@@ -1386,7 +1386,7 @@ export class SalesService {
         out.push({
           code: 'loss.below_cost',
           severity: 'caution',
-          messageKey: 'warnings.loss.below_cost',
+          messageKey: messageKeyFor('loss.below_cost'),
           params: {},
           field: `lines.${index}.price`,
           submitted: line.price,
@@ -1401,7 +1401,7 @@ export class SalesService {
         out.push({
           code: 'loss.below_cost',
           severity: 'caution',
-          messageKey: 'warnings.loss.below_cost',
+          messageKey: messageKeyFor('loss.below_cost'),
           params: {},
           field: 'saleDiscount',
           submitted: saleDiscount,
