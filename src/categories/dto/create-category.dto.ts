@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { TrackingType } from '@prisma/client';
-import { IsArray, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsArray, IsEnum, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 import { AttributeDef } from '../../tracking/attribute-def';
 
 export class CreateCategoryDto {
@@ -24,4 +24,12 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsArray()
   attributeSchema?: AttributeDef[];
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'A top-level category to file this one under. One level only: a subcategory has no children.',
+  })
+  @IsOptional()
+  @IsUUID()
+  parentId?: string;
 }

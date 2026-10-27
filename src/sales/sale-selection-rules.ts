@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { isValidImei } from '../inventory/imei.util';
+import { isMistypedImei } from '../inventory/imei.util';
 
 /**
  * Choosing the phone to sell — the rules every way of finding it shares.
@@ -61,7 +61,7 @@ export function assertLookupIdentifier(identifier: string): void {
   if (identifier.length === 0) {
     throw new BadRequestException({ code: 'identifier_missing', message: 'Enter an identifier' });
   }
-  if (looksLikeImei(identifier) && !isValidImei(identifier)) {
+  if (isMistypedImei(identifier)) {
     throw new BadRequestException({ code: 'imei_checksum', message: 'That is not a valid IMEI — check the digits' });
   }
 }

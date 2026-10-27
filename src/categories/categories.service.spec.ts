@@ -30,6 +30,7 @@ function makeService(seed: { categories?: any[]; productsPerCategory?: number } 
         return row ? { ...row } : null;
       }),
       create: jest.fn(async ({ data }: any) => (categories.push(data), data)),
+      count: jest.fn(async ({ where }: any) => categories.filter((c) => c.parentId && c.parentId.equals(where.parentId)).length),
       update: jest.fn(async ({ where, data }: any) => {
         const row = categories.find((c) => c.id.equals(where.id));
         Object.assign(row, data);
@@ -175,5 +176,70 @@ describe('changing a category tracking mode', () => {
     await service.update(cat.id.toString('hex'), { name: 'Cables' } as UpdateCategoryDto);
 
     expect(db.product.count).not.toHaveBeenCalled();
+  });
+});
+
+describe('built-in categories and subcategories (D223)', () => {
+  const phones = () => category({ id: Buffer.alloc(16, 2), name: 'Phones', key: 'phones', defaultTrackingType: TrackingType.imei, parentId: null });
+  const own = () => category({ id: Buffer.alloc(16, 3), name: 'Refurbished', key: null, parentId: null });
+  const hex = (b: Buffer) => b.toString('hex');
+  const uuid = (b: Buffer) => hex(b).replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
+
+  it('files a shop category under a built-in, with a mode the parent allows', async () => {
+    const { service, categories } = makeService({ categories: [phones()] });
+    await service.create(createDto({ name: 'Refurbished phones', defaultTrackingType: TrackingType.imei, parentId: uuid(Buffer.alloc(16, 2)) }));
+    expect(categories[1].parentId.equals(Buffer.alloc(16, 2))).toBe(true);
+    expect(categories[1].key).toBeUndefined();
+  });
+
+  it('refuses a mode the built-in parent does not allow', async () => {
+    const { service } = makeService({ categories: [phones()] });
+    await expect(
+      service.create(createDto({ name: 'Bulk phones', defaultTrackingType: TrackingType.quantity, parentId: uuid(Buffer.alloc(16, 2)) })),
+    ).rejects.toMatchObject({ response: { code: 'category_mode_not_allowed' } });
+  });
+
+  it('goes one level deep only', async () => {
+    const child = category({ id: Buffer.alloc(16, 4), name: 'Child', parentId: Buffer.alloc(16, 2) });
+    const { service } = makeService({ categories: [phones(), child] });
+    await expect(
+      service.create(createDto({ name: 'Grandchild', parentId: uuid(Buffer.alloc(16, 4)) })),
+    ).rejects.toMatchObject({ response: { code: 'category_depth' } });
+  });
+
+  it('keeps a category with subcategories top-level', async () => {
+    const child = category({ id: Buffer.alloc(16, 4), name: 'Child', parentId: Buffer.alloc(16, 3) });
+    const target = category({ id: Buffer.alloc(16, 5), name: 'Other', parentId: null });
+    const { service } = makeService({ categories: [own(), child, target] });
+    await expect(
+      service.update(hex(Buffer.alloc(16, 3)), { parentId: uuid(Buffer.alloc(16, 5)) } as UpdateCategoryDto),
+    ).rejects.toMatchObject({ response: { code: 'category_depth' } });
+  });
+
+  it('lets a built-in be hidden and shown again', async () => {
+    const { service, categories } = makeService({ categories: [phones()] });
+    await service.update(hex(Buffer.alloc(16, 2)), { isActive: false } as UpdateCategoryDto);
+    expect(categories[0].isActive).toBe(false);
+  });
+
+  it('refuses renaming or re-moding a built-in', async () => {
+    const { service } = makeService({ categories: [phones()] });
+    await expect(service.update(hex(Buffer.alloc(16, 2)), { name: 'Mobiles' } as UpdateCategoryDto)).rejects.toMatchObject({
+      response: { code: 'builtin_category_fixed' },
+    });
+    await expect(
+      service.update(hex(Buffer.alloc(16, 2)), { defaultTrackingType: TrackingType.serial } as UpdateCategoryDto),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('turns a duplicate own name into a clear conflict', async () => {
+    const { service, db } = makeService();
+    const { Prisma } = jest.requireActual('@prisma/client');
+    db.productCategory.create.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'test' }),
+    );
+    await expect(service.create(createDto({ name: 'Laptops' }))).rejects.toMatchObject({
+      response: { code: 'category_name_taken' },
+    });
   });
 });

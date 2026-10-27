@@ -47,6 +47,17 @@ describe('TrackingStrategyRegistry', () => {
       expect(s.validateIdentifier('').ok).toBe(false);
       expect(s.recognitionKey('SN-ABC')).toBeNull(); // serial_prefix reserved for 2C.5c
     });
+
+    /**
+     * Sale refuses fifteen digits with a failing checksum before any lookup, so a
+     * serial like that could be received but never sold. Intake refuses it too
+     * (D223). Fictional values: the first passes Luhn, the second does not.
+     */
+    it('refuses a mistyped IMEI as a serial, and keeps a fifteen-digit serial that passes the checksum', () => {
+      expect(s.validateIdentifier('490154203237518').ok).toBe(true);
+      expect(s.validateIdentifier('490154203237519')).toMatchObject({ ok: false, reason: expect.stringMatching(/mistyped IMEI/) });
+      expect(s.validateIdentifier('12345678901234').ok).toBe(true); // fourteen digits: not IMEI-shaped
+    });
   });
 
   describe('quantity strategy', () => {

@@ -283,7 +283,10 @@ export class CatalogService {
     if (dto.categoryId) {
       // The tenant client scopes this lookup, so a category from another company
       // is simply not found — cross-company references cannot be created.
-      const category = await this.db.productCategory.findUnique({ where: { id: uuidToBin(dto.categoryId) } });
+      const category = await this.db.productCategory.findUnique({
+        where: { id: uuidToBin(dto.categoryId) },
+        include: { parent: { select: { key: true } } },
+      });
       if (!category) throw new NotFoundException('Category not found');
       categoryId = category.id;
       /**
@@ -627,7 +630,10 @@ export class CatalogService {
     if (dto.categoryId !== undefined) {
       const nextId = dto.categoryId === null ? null : uuidToBin(dto.categoryId);
       if (nextId) {
-        const category = await this.db.productCategory.findUnique({ where: { id: nextId } });
+        const category = await this.db.productCategory.findUnique({
+          where: { id: nextId },
+          include: { parent: { select: { key: true } } },
+        });
         if (!category) throw new NotFoundException('Category not found');
         governing = category;
       }
@@ -641,7 +647,10 @@ export class CatalogService {
       }
     } else if (before.categoryId) {
       // Category untouched: the one it already has still bounds the mode.
-      governing = await this.db.productCategory.findUnique({ where: { id: before.categoryId } });
+      governing = await this.db.productCategory.findUnique({
+        where: { id: before.categoryId },
+        include: { parent: { select: { key: true } } },
+      });
     }
 
     /**

@@ -1,6 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { TrackingType } from '@prisma/client';
-import { IsArray, IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsArray, IsBoolean, IsEnum, IsOptional, IsString, IsUUID, MaxLength, ValidateIf } from 'class-validator';
 import { AttributeDef } from '../../tracking/attribute-def';
 
 export class UpdateCategoryDto {
@@ -24,4 +24,10 @@ export class UpdateCategoryDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({ format: 'uuid', nullable: true, description: 'Move under a top-level category; null makes it top-level.' })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsUUID()
+  parentId?: string | null;
 }

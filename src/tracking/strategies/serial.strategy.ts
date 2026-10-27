@@ -1,5 +1,6 @@
 import { TrackingType } from '@prisma/client';
 import { RecognitionKey, TrackingStrategy } from '../tracking-strategy';
+import { isMistypedImei } from '../../inventory/imei.util';
 
 /**
  * Serial-tracked (TVs, laptops, consoles, cameras, power stations, …): each unit
@@ -21,6 +22,8 @@ export class SerialStrategy implements TrackingStrategy {
     const serial = this.normalize(code);
     if (serial.length < 1) return { ok: false, reason: 'Serial number is required' };
     if (serial.length > 64) return { ok: false, reason: 'Serial number is too long (max 64)' };
+    // Fifteen digits with a failing checksum is a mistyped IMEI: Sale could never find it (D223).
+    if (isMistypedImei(serial)) return { ok: false, reason: 'This looks like a mistyped IMEI - check the digits' };
     return { ok: true };
   }
 

@@ -59,10 +59,15 @@ export function assertSelectableTrackingType(next: TrackingType, previous?: Trac
   }
 }
 
-/** The category facts the rule needs: its recommended mode, and its built-in key when it has one. */
+/**
+ * The category facts the rule needs: its recommended mode, its built-in key
+ * when it has one, and its parent's key — a shop's own subcategory of a
+ * built-in (a "Refurbished" under Smartphones) keeps the parent's allowed modes.
+ */
 export interface TrackingCategory {
   defaultTrackingType: TrackingType;
   key?: string | null;
+  parent?: { key: string | null } | null;
 }
 
 /**
@@ -74,7 +79,7 @@ export interface TrackingCategory {
  * allows every selectable mode — it is the Owner's to decide.
  */
 export function allowedTrackingTypes(category: TrackingCategory): readonly TrackingType[] {
-  return defaultCategory(category.key)?.allowed ?? SELECTABLE_TRACKING_TYPES;
+  return defaultCategory(category.key ?? category.parent?.key)?.allowed ?? SELECTABLE_TRACKING_TYPES;
 }
 
 /**
