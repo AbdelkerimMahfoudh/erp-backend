@@ -233,11 +233,33 @@ export class TestProvisioningService {
     const role = await this.prisma.role.findFirst({ where: { companyId, key: input.role }, select: { id: true } });
     if (!role) throw new BadRequestException('That role does not exist in this business.');
 
-    // The seat rule holds: a store with no free seat is refused, never priced and never overfilled.
-    const seats = await this.entitlement.maySeat(companyId, branchIds);
-    if (!seats.allowed) {
-      await this.refuse(new ConflictException({ code: 'seat_unavailable', message: 'A chosen store has no free seat. Grant one to the business first.' }), ctx, 'account.create', target, { stores: seats.full });
+    // Seats (the owner's decision, 2026-10-28): a test business is never paid for, so where a chosen store has no free
+    // seat — counting the people already provisioned there and still waiting — this person is GRANTED a seat there, at
+    // no charge, held for them and audited, exactly as a test business's stores are granted. Never priced; the seat
+    // census counts it like any held seat. Only under the business's administrative grant in force.
+    const sub = await this.prisma.subscription.findFirst({ where: { companyId }, select: { id: true, status: true, isComplimentary: true, complimentaryUntil: true } });
+    const granted = sub?.status === 'activated' && sub.isComplimentary && sub.complimentaryUntil !== null && sub.complimentaryUntil.getTime() > Date.now();
+    if (!sub || !granted) {
+      await this.refuse(new ConflictException({ code: 'grant_required', message: 'Give this test business an administrative grant first: its staff are seated under that grant.' }), ctx, 'account.create', target);
     }
+    const seats = await this.entitlement.maySeat(companyId, branchIds);
+    const waiting = await this.prisma.userBranch.groupBy({
+      by: ['branchId'],
+      where: {
+        companyId,
+        branchId: { in: branchIds },
+        role: { key: { not: 'owner' } },
+        // Every person still waiting there: a seat granted to one of them raises the store's limit, and is theirs.
+        user: { invitedAt: { not: null }, activatedAt: null, deletedAt: null },
+      },
+      _count: { _all: true },
+    });
+    const toGrant = branches.filter((b) => {
+      const line = seats.stores.find((s) => s.branchId === binToUuid(b.id));
+      const pending = waiting.find((w) => w.branchId.equals(b.id))?._count._all ?? 0;
+      const room = line ? line.seatLimit - line.seatsUsed - pending : 0;
+      return room <= 0 || seats.full.includes(binToUuid(b.id));
+    });
 
     const userId = newUuidV7Bin();
     const now = new Date();
@@ -268,6 +290,25 @@ export class TestProvisioningService {
         for (const branch of branches) {
           await tx.userBranch.create({ data: { id: newUuidV7Bin(), companyId, userId, branchId: branch.id, roleId: role.id } });
         }
+        for (const branch of toGrant) {
+          await tx.seatAllocation.create({
+            data: {
+              id: newUuidV7Bin(),
+              companyId,
+              subscriptionId: sub!.id,
+              branchId: branch.id,
+              userId,
+              kind: 'seat',
+              status: 'granted',
+              label: name,
+              monthlyAmount: 0,
+              requestedBy: `platform:${ctx.admin.email}`.slice(0, 160),
+              confirmedBy: `platform:${ctx.admin.email}`.slice(0, 160),
+              confirmedAt: now,
+              reason: `Seat granted at no charge under the test business's administrative grant, for ${name}`.slice(0, 500),
+            },
+          });
+        }
         if (deferral) {
           await tx.phoneVerificationDeferral.create({
             data: { id: newUuidV7Bin(), companyId, userId, grantedById: ctx.admin.id, grantedBy: ctx.admin.email.slice(0, 160), reason: deferral.reason, reviewAt: deferral.reviewAt, grantedAt: now },
@@ -297,6 +338,7 @@ export class TestProvisioningService {
               person: actorRef(binToUuid(userId)),
               role: input.role,
               stores,
+              seatsGranted: toGrant.map((b) => b.name),
               phoneVerification: deferred ? 'deferred_by_platform' : 'required',
               reviewAt: deferral?.reviewAt?.toISOString() ?? null,
               outcome: 'created',

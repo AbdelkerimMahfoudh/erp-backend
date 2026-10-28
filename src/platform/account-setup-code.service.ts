@@ -148,8 +148,14 @@ export class AccountSetupCodeService {
     // A password nobody knew is now a password one person knows: anything signed in before was not that person.
     await this.sessions.revokeAll(row.userId);
     const actor = actorRef(binToUuid(row.userId));
-    // A staff account becomes usable once its stores hold a seat; an Owner's account already is.
-    const activated = row.user.invitedAt ? (await this.activation.tryActivate(row.userId, actor)).activated : true;
+    // A staff account becomes usable once its stores hold a seat; an Owner's account already is. Activation only, behind
+    // the subscription lock: a setup code never prices a seat (its provisioning seated the person, or said why not).
+    const activated = row.user.invitedAt
+      ? await this.prisma.$transaction(async (tx) => {
+          await tx.$queryRaw(Prisma.sql`SELECT id FROM subscriptions WHERE company_id = ${row.companyId} FOR UPDATE`);
+          return (await this.activation.activateInTx(tx, row.userId, actor)).activated;
+        })
+      : true;
     await this.recordRedemption(row.companyId, row.company.name, row.userId, 'used', meta.ip, activated);
     return { spent: true, companyId: row.companyId, userId: row.userId, business: row.company.name, publicStoreId: row.company.publicStoreId, activated };
   }

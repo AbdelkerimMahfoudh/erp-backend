@@ -225,7 +225,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
     expect(conditions).toEqual(expect.arrayContaining(['kill_switch', 'mfa', 'step_up', 'step_up', 'test_business_only']));
   });
 
-  it('preserves the rules: no Owner from the console, unique numbers, the business’s own stores, the seat limit', async () => {
+  it('preserves the rules: no Owner from the console, unique numbers, the business’s own stores; a full store’s seat is granted, never priced', async () => {
     const lab = await business(true);
     const other = await business(true);
     const number = phone();
@@ -234,19 +234,21 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
     expect(codeOf(await a.provisioning.createStaff(lab.companyId, { name: 'Owner2', phone: phone(), role: 'owner' as never, branchIds: [lab.branchId], verification: 'required' }, actor).catch((e: unknown) => e))).toBe('role_not_allowed');
     // Another business's store is no store of this one.
     expect(await a.provisioning.createStaff(lab.companyId, { name: 'Cross', phone: phone(), role: 'store_employee', branchIds: [other.branchId], verification: 'required' }, actor).catch((e: unknown) => e)).toBeInstanceOf(NotFoundException);
-    // Fill the store's seats, then one more is refused, never priced.
-    let refused: unknown = null;
-    for (let i = 0; i < 12 && !refused; i++) {
-      refused = await a.provisioning.createStaff(lab.companyId, { name: `Fill ${i}`, phone: phone(), role: 'store_employee', branchIds: [lab.branchId], verification: 'required' }, actor).then(() => null, (e: unknown) => e);
-      // A seat is held only once someone is active: spend each code under a deferral so the census counts it.
-      if (!refused) {
-        const last = await root.user.findFirstOrThrow({ where: { companyId: hex(lab.companyId), name: `Fill ${i}` }, select: { id: true } });
-        await root.$executeRaw`UPDATE users SET is_active = 1, activated_at = NOW(6) WHERE id = ${last.id}`;
-      }
+    // A full store (the owner's decision, 2026-10-28): each further person is GRANTED a seat there, held for them, at
+    // no charge — never a priced request — and every one of them becomes usable with their own code.
+    const many = [];
+    for (let i = 0; i < 4; i++) {
+      many.push(await a.provisioning.createStaff(lab.companyId, { name: `Crew ${i}`, phone: phone(), role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor));
     }
-    expect(refused).toBeInstanceOf(ConflictException);
-    expect(codeOf(refused)).toBe('seat_unavailable');
+    for (const [i, m] of many.entries()) expect(await a.codes.spend(m.setupCode.token, `crew-password-${i}`, {})).toMatchObject({ spent: true, activated: true });
+    const held = await root.seatAllocation.findMany({ where: { companyId: hex(lab.companyId), kind: 'seat' }, select: { status: true, monthlyAmount: true, userId: true } });
+    expect(held.length).toBeGreaterThanOrEqual(3);
+    expect(held.every((h) => h.status === 'granted' && h.monthlyAmount === 0 && h.userId !== null)).toBe(true);
     expect(await root.seatAllocation.count({ where: { companyId: hex(lab.companyId), status: 'pending_payment' } })).toBe(0);
+    // Without the administrative grant in force, nobody is seated from the console.
+    const bare = await a.registration.register({ idempotencyKey: `admin:${tag()}`, ownerName: 'No Grant', businessName: `Bare ${tag()}`, branchName: '', city: 'Nouakchott', phone: phone(), password: 'unusable-password-for-the-spec', language: 'en', actor: ADMIN.email, isTest: true, testMarkedBy: ADMIN.email });
+    const bareBranch = await root.branch.findFirstOrThrow({ where: { companyId: hex(bare.companyId) }, select: { id: true } });
+    expect(codeOf(await a.provisioning.createStaff(bare.companyId, { name: 'N', phone: phone(), role: 'store_employee', branchIds: [binToUuid(bareBranch.id)], verification: 'required' }, actor).catch((e: unknown) => e))).toBe('grant_required');
   });
 
   it('a deferred Owner of a new test business, its code instead of the setup invitation, and a deferred account never reads verified', async () => {
