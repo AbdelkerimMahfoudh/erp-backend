@@ -351,7 +351,7 @@ export class PricingService {
     const unit = await this.loadUnitByIdentifier(identifier);
     this.assertUnitInActiveBranch(unit.branchId, branchId);
     this.assertUnitPriceable(unit.status, identifier);
-    this.assertNotBelowCost(dto.price, Number(unit.cost), dto.reason, 'this phone');
+    this.assertNotBelowCost(dto.price, unit.cost === null ? null : Number(unit.cost), dto.reason, 'this phone');
 
     await this.db.$transaction(async (tx) => {
       const existing = await tx.unitPriceOverride.findFirst({
@@ -500,7 +500,7 @@ export class PricingService {
       });
       if (!stock) throw new NotFoundException('This product has no stock in this branch yet');
 
-      this.assertNotBelowCost(dto.price, Number(stock.cost), dto.reason, 'this item');
+      this.assertNotBelowCost(dto.price, stock.cost === null ? null : Number(stock.cost), dto.reason, 'this item');
 
       const updated = await tx.stockItem.updateMany({
         where: { id: stock.id, companyId, version: dto.expectedVersion },
@@ -742,11 +742,12 @@ export class PricingService {
    */
   private assertNotBelowCost(
     price: number,
-    cost: number,
+    /** NULL: the buying cost is not known yet (0107), so there is nothing to be below. */
+    cost: number | null,
     reason: string | undefined,
     subject: string,
   ): void {
-    if (price >= cost) return;
+    if (cost === null || price >= cost) return;
     if (!this.has('discount.override')) {
       throw new ForbiddenException(`That price is below what you paid for ${subject}. Ask the owner to approve it.`);
     }

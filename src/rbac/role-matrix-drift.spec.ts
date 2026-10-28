@@ -170,6 +170,8 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0090_agent_permissions'),
     // 0105 (D223): `sale.below_cost` to the Store Manager.
     sqlOf('0105_sale_below_cost_permission'),
+    // 0107: `cost.complete` to the Store Manager.
+    sqlOf('0107_unknown_cost'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from

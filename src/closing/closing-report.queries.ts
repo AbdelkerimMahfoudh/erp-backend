@@ -38,7 +38,7 @@ export async function salesFigures(db: RawRunner, companyId: Buffer, branchId: B
        AND s.business_date = ${date} AND s.is_reversed = 0`);
   const [lines] = await db.$queryRaw<{ items: unknown; missing: bigint }[]>(Prisma.sql`
     SELECT COALESCE(SUM(si.quantity), 0) AS items,
-           COALESCE(SUM(si.cost <= ${MISSING_COST_EPSILON}), 0) AS missing
+           COALESCE(SUM(si.cost IS NULL OR si.cost <= ${MISSING_COST_EPSILON}), 0) AS missing
       FROM sale_items si
       JOIN sales s ON s.id = si.sale_id
      WHERE s.company_id = ${companyId} AND s.branch_id = ${branchId}
@@ -60,7 +60,7 @@ export async function returnFigures(db: RawRunner, companyId: Buffer, branchId: 
            COALESCE(SUM(adjustment_total), 0) AS adj,
            COALESCE(SUM(net_refund_due), 0) AS net,
            COALESCE(SUM(line_cost), 0) AS cost,
-           COALESCE(SUM(line_cost <= ${MISSING_COST_EPSILON}), 0) AS missing
+           COALESCE(SUM(line_cost IS NULL OR line_cost <= ${MISSING_COST_EPSILON}), 0) AS missing
       FROM return_reversals
      WHERE company_id = ${companyId} AND branch_id = ${branchId} AND approval_date = ${date}`);
   return {
@@ -122,7 +122,7 @@ export async function cancellationFigures(db: RawRunner, companyId: Buffer, bran
        AND fc.target_kind = 'sale' AND fc.status = 'approved' AND fc.correction_date = ${date}`);
   const [lines] = await db.$queryRaw<{ items: unknown; missing: unknown }[]>(Prisma.sql`
     SELECT COALESCE(SUM(si.quantity), 0) AS items,
-           COALESCE(SUM(si.cost <= ${MISSING_COST_EPSILON}), 0) AS missing
+           COALESCE(SUM(si.cost IS NULL OR si.cost <= ${MISSING_COST_EPSILON}), 0) AS missing
       FROM financial_corrections fc
       JOIN sale_items si ON si.sale_id = fc.target_sale_id AND si.voided = 0
      WHERE fc.company_id = ${companyId} AND fc.branch_id = ${branchId}

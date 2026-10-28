@@ -23,7 +23,8 @@ export type RollupCause =
   | 'correction_approved'
   | 'purchase_received'
   | 'transfer_shipped'
-  | 'transfer_received';
+  | 'transfer_received'
+  | 'cost_completed';
 
 /** `daily`: recompute one branch-day. `branch`: refresh the branch's stock snapshots (valuation + velocity). */
 export type RollupRequest =

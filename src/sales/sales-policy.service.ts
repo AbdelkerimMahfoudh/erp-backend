@@ -92,8 +92,12 @@ export class SalesPolicyService {
   assertPriceAllowed(input: {
     /** What the line is actually being sold for. */
     price: number;
-    /** The unit's confirmed cost, or the branch's average for counted stock. */
-    cost: number;
+    /**
+     * The unit's confirmed cost, or the branch's average for counted stock —
+     * `null` when it is not known (0107): there is no cost to be below, so
+     * nothing is refused or approved, and the sale's profit stays incomplete.
+     */
+    cost: number | null;
     /** The seller holds `sale.below_cost`. */
     mayAcceptLoss: boolean;
     /** A consumed approval covering exactly this unit at exactly this price. */
@@ -110,7 +114,7 @@ export class SalesPolicyService {
     line?: { index: number; unitId: string | null; identifier: string | null };
   }): void {
     const { price, cost, mayAcceptLoss, approval, reason } = input;
-    if (price >= cost - EPSILON) return;
+    if (cost === null || price >= cost - EPSILON) return;
 
     if (!mayAcceptLoss) {
       if (!approval) {
@@ -162,7 +166,7 @@ export class SalesPolicyService {
    * of that exact final price, which a further discount would no longer be.
    */
   assertDiscountsKeepCost(
-    lines: readonly { price: number; quantity: number; discount: number; cost: number }[],
+    lines: readonly { price: number; quantity: number; discount: number; cost: number | null }[],
     total: number,
     describe: (index: number) => { index: number; unitId: string | null; identifier: string | null },
     /** The seller holds `sale.below_cost`: the loss warning and a reason cover it instead (D223). */
@@ -181,6 +185,8 @@ export class SalesPolicyService {
     for (const [index, line] of lines.entries()) {
       const share = shares.get(ids[index].toString('hex')) ?? 0n;
       const listed = toCents(line.price) * BigInt(line.quantity);
+      // An unknown cost (0107) has nothing for a discount to fall below.
+      if (line.cost === null) continue;
       const cost = toCents(line.cost) * BigInt(line.quantity);
       if (share < listed && share < cost) {
         if (mayAcceptLoss) {

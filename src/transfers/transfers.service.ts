@@ -769,17 +769,19 @@ export class TransfersService {
       for (const i of quantityLines) {
         const source = await tx.stockItem.findFirst({
           where: { companyId: this.tenant.companyId(), productId: i.productId!, branchId: fromBranchId },
-          select: { cost: true, quantity: true, reservedQuantity: true },
+          select: { cost: true, quantity: true, reservedQuantity: true, missingCostQuantity: true },
         });
         /**
-         * Cost is `NOT NULL` in the schema, so this cannot normally fire — but
-         * it is checked rather than assumed, because the alternative to knowing
-         * the cost is inventing one, and a zero here would quietly turn into
-         * pure profit at the destination.
+         * The shipped cost must be KNOWN. Stock received without its buying
+         * cost (0107) has none, or a known cost for only some of its pieces —
+         * and nobody can say which pieces leave. Inventing one, a zero or the
+         * known pieces' average, would quietly become profit at the
+         * destination, so the cost is entered first (cost.complete).
          */
-        if (!source || source.cost === null || source.cost === undefined) {
+        if (!source || source.cost === null || source.cost === undefined || source.missingCostQuantity > 0) {
           throw new ConflictException({
-            message: 'That stock has no recorded cost, so it cannot be shipped',
+            message: 'Some of that stock has no buying cost yet. Enter it before shipping',
+            code: 'cost_missing',
             problems: [{ productId: binToUuid(i.productId!), reason: 'no cost on the source stock' }],
           });
         }

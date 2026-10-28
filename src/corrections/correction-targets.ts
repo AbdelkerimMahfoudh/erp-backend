@@ -90,7 +90,7 @@ export interface PlanEffects {
   /** Sale lines released from the sold-once index. */
   releaseLines?: Buffer[];
   /** Quantity goods back on the shelf, at the cost the sale recorded. */
-  restock?: { productId: Buffer; quantity: number; unitCost: number }[];
+  restock?: { productId: Buffer; quantity: number; unitCost: number | null }[];
   /** Quantity goods taken back out of stock: the branch's stock of them afterwards. */
   destock?: { productId: Buffer; quantity: number; cost: number }[];
 }
@@ -387,7 +387,8 @@ export async function planSale(db: CorrectionDb, ctx: PlanContext, input: PlanIn
       sale: { id: sale.id, customerId: sale.customerId, owedBefore: round2(num(sale.balanceDue)), collected: round2(num(sale.amountPaid)), owed: 0, payStatus: 'paid' },
       units: lines.filter((l) => l.unit).map((l) => ({ id: l.unit!.id, from: 'sold' as const, to: 'in_stock' as const })),
       releaseLines: lines.map((l) => l.id),
-      restock: lines.filter((l) => !l.unit && l.productId).map((l) => ({ productId: l.productId!, quantity: l.quantity, unitCost: round2(num(l.cost)) })),
+      // A line sold at an unknown cost goes back as pieces of unknown cost (0107), never at zero.
+      restock: lines.filter((l) => !l.unit && l.productId).map((l) => ({ productId: l.productId!, quantity: l.quantity, unitCost: l.cost === null ? null : round2(num(l.cost)) })),
     },
   };
 }
@@ -545,8 +546,10 @@ export async function planPurchase(db: CorrectionDb, ctx: PlanContext, input: Pl
 
   // Quantity lines, one per product, against the branch's stock of it now.
   const byProduct = new Map<string, { productId: Buffer; bought: number; value: number; name: string }>();
+  let costMissing = false;
   for (const it of purchase.items) {
     if (it.product.trackingType !== 'quantity') continue;
+    if (it.unitCost === null) costMissing = true;
     const key = it.productId.toString('hex');
     const cur = byProduct.get(key) ?? { productId: it.productId, bought: 0, value: 0, name: productName(it.product) };
     cur.bought += it.quantity;
@@ -556,9 +559,10 @@ export async function planPurchase(db: CorrectionDb, ctx: PlanContext, input: Pl
   const stockRows = byProduct.size
     ? await db.stockItem.findMany({
         where: { branchId: purchase.branchId, productId: { in: [...byProduct.values()].map((b) => b.productId) } },
-        select: { productId: true, quantity: true, reservedQuantity: true, cost: true },
+        select: { productId: true, quantity: true, reservedQuantity: true, cost: true, missingCostQuantity: true },
       })
     : [];
+  if (stockRows.some((r) => r.missingCostQuantity > 0)) costMissing = true;
   const stock = [...byProduct.values()].map((b) => {
     const row = stockRows.find((r) => r.productId.equals(b.productId));
     const unitCost = b.bought > 0 ? b.value / b.bought : 0;
@@ -591,6 +595,7 @@ export async function planPurchase(db: CorrectionDb, ctx: PlanContext, input: Pl
       paymentRequestPending: purchase.payments.some((p) => !ctx.ignoreCorrectionId && p.corrections.some((c) => c.status === 'requested')),
       units: purchase.units.map((u) => ({ status: u.status, atBranch: u.branchId.equals(purchase.branchId) })),
       stock: stock.map((s) => ({ onHand: s.onHand, reserved: s.reserved, bought: s.bought, averageCost: s.averageCost, unitCost: s.unitCost })),
+      costMissing,
     }),
   );
   return {

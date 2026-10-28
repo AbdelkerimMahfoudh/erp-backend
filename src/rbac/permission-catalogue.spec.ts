@@ -37,15 +37,17 @@ describe('the canonical catalogue', () => {
     // 63 → 64 in 0082 — `money.anchor.record`, the Owner's alone too.
     // 64 → 73 in 0090 — the nine keys of the Money Services Agent activity (docs/73 §7).
     // 73 → 74 in 0105 — `sale.below_cost`, selling at a loss (D223).
-    expect(PERMISSIONS).toHaveLength(74);
-    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(74);
+    // 74 → 75 in 0107 — `cost.complete`, entering a buying cost that was not known.
+    expect(PERMISSIONS).toHaveLength(75);
+    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(75);
   });
 
   it('gives Owner 62, Manager 44 and Employee 20', () => {
-    expect(ROLE_PERMISSIONS.owner).toHaveLength(74);
+    expect(ROLE_PERMISSIONS.owner).toHaveLength(75);
     // 43 → 42 in 0076: a manager signs the day off only as a named delegate.
     // 49 → 50 in 0105: a manager may sell at a loss after the warning (D223).
-    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(50);
+    // 50 → 51 in 0107: and enters a buying cost that was not known.
+    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(51);
     // The Employee is deliberately unchanged: they attribute a sale to an
     // existing customer, and do not create one.
     expect(ROLE_PERMISSIONS.store_employee).toHaveLength(23);
@@ -107,7 +109,7 @@ describe(`migration ${CATALOGUE_MIGRATION}`, () => {
      * Each entry here is a single additive insert, guarded by NOT EXISTS on the
      * key. Adding to this list is part of writing such a migration.
      */
-    const additive = ['0068_customer_manage_permission', '0076_business_day_and_reopen', '0082_money_anchors', '0090_agent_permissions', '0105_sale_below_cost_permission'];
+    const additive = ['0068_customer_manage_permission', '0076_business_day_and_reopen', '0082_money_anchors', '0090_agent_permissions', '0105_sale_below_cost_permission', '0107_unknown_cost'];
     expect(touching).toEqual(additive);
 
     for (const name of additive) {

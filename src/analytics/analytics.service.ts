@@ -62,11 +62,13 @@ export class AnalyticsService {
       quantity: toNum(r.quantity),
       inventoryValue: toNum(r.inv_value),
       expectedRevenue: toNum(r.exp_rev),
-      expectedProfit: toNum(r.exp_rev) - toNum(r.inv_value),
+      // Over the holdings of known cost only (0107); `missingCostItems` says how many are left out.
+      expectedProfit: toNum(r.exp_rev_known) - toNum(r.inv_value),
+      missingCostItems: toNum(r.missing_cost),
     }));
 
     const names = await this.categoryNames(rows.map((r) => r.categoryId));
-    const totals = { inventoryValue: 0, expectedRevenue: 0, expectedProfit: 0, productCount: rows.length, unitsCount: 0, quantity: 0 };
+    const totals = { inventoryValue: 0, expectedRevenue: 0, expectedProfit: 0, productCount: rows.length, unitsCount: 0, quantity: 0, missingCostItems: 0 };
     const byTracking = new Map<TrackingType, { inventoryValue: number; expectedProfit: number }>();
     const byCategory = new Map<string, { categoryId: string | null; name: string | null; inventoryValue: number; expectedProfit: number }>();
 
@@ -76,6 +78,7 @@ export class AnalyticsService {
       totals.inventoryValue += iv;
       totals.expectedRevenue += num(r.expectedRevenue);
       totals.expectedProfit += ep;
+      totals.missingCostItems += r.missingCostItems;
       totals.unitsCount += r.unitsCount;
       totals.quantity += r.quantity;
 
@@ -188,18 +191,20 @@ export class AnalyticsService {
       this.db.productDailyRollup.groupBy({
         by: ['productId'],
         where: { day: { gte: from }, ...(branchId ? { branchId } : {}) },
-        _sum: { qtySold: true, revenue: true, cogs: true },
+        _sum: { qtySold: true, revenue: true, cogs: true, grossProfit: true },
       }),
       productAdjustments(this.db, this.tenant.companyId(), branchId, dayKey(from)),
     ]);
 
-    const rows = new Map<string, { productId: Buffer; qty: number; returned: number; revenue: number; cogs: number }>();
+    // `profit` is the rollup's own gross profit — over lines of known cost (0107) — less the adjustments' effect on it.
+    const rows = new Map<string, { productId: Buffer; qty: number; returned: number; revenue: number; cogs: number; profit: number }>();
     for (const g of grouped) {
-      rows.set(g.productId.toString('hex'), { productId: g.productId, qty: num(g._sum.qtySold), returned: 0, revenue: num(g._sum.revenue), cogs: num(g._sum.cogs) });
+      rows.set(g.productId.toString('hex'), { productId: g.productId, qty: num(g._sum.qtySold), returned: 0, revenue: num(g._sum.revenue), cogs: num(g._sum.cogs), profit: num(g._sum.grossProfit) });
     }
     for (const a of adjustments) {
       const key = a.productId.toString('hex');
-      const r = rows.get(key) ?? { productId: a.productId, qty: 0, returned: 0, revenue: 0, cogs: 0 };
+      const r = rows.get(key) ?? { productId: a.productId, qty: 0, returned: 0, revenue: 0, cogs: 0, profit: 0 };
+      r.profit -= a.profitEffect;
       r.qty -= a.cancelledUnits;
       r.returned += a.returnedUnits;
       r.revenue -= a.cancelledRevenue + a.returnedRevenue;
@@ -236,7 +241,7 @@ export class AnalyticsService {
             unitsReturned: r.returned,
             revenue: round2(r.revenue),
             cogs: round2(r.cogs),
-            grossProfit: round2(r.revenue - r.cogs),
+            grossProfit: round2(r.profit),
             sold30d: v?.sold30d ?? 0,
             lastSoldAt: v?.lastSoldAt ?? null,
           };
@@ -253,18 +258,19 @@ export class AnalyticsService {
       this.db.productDailyRollup.groupBy({
         by: ['categoryId'],
         where: { day: { gte: from }, ...(branchId ? { branchId } : {}) },
-        _sum: { qtySold: true, revenue: true, cogs: true },
+        _sum: { qtySold: true, revenue: true, cogs: true, grossProfit: true },
       }),
       productAdjustments(this.db, this.tenant.companyId(), branchId, dayKey(from)),
     ]);
 
-    const rows = new Map<string, { categoryId: Buffer | null; qty: number; returned: number; revenue: number; cogs: number }>();
+    const rows = new Map<string, { categoryId: Buffer | null; qty: number; returned: number; revenue: number; cogs: number; profit: number }>();
     for (const g of grouped) {
-      rows.set(g.categoryId ? g.categoryId.toString('hex') : 'none', { categoryId: g.categoryId, qty: num(g._sum.qtySold), returned: 0, revenue: num(g._sum.revenue), cogs: num(g._sum.cogs) });
+      rows.set(g.categoryId ? g.categoryId.toString('hex') : 'none', { categoryId: g.categoryId, qty: num(g._sum.qtySold), returned: 0, revenue: num(g._sum.revenue), cogs: num(g._sum.cogs), profit: num(g._sum.grossProfit) });
     }
     for (const a of adjustments) {
       const key = a.categoryId ? a.categoryId.toString('hex') : 'none';
-      const r = rows.get(key) ?? { categoryId: a.categoryId, qty: 0, returned: 0, revenue: 0, cogs: 0 };
+      const r = rows.get(key) ?? { categoryId: a.categoryId, qty: 0, returned: 0, revenue: 0, cogs: 0, profit: 0 };
+      r.profit -= a.profitEffect;
       r.qty -= a.cancelledUnits;
       r.returned += a.returnedUnits;
       r.revenue -= a.cancelledRevenue + a.returnedRevenue;
@@ -283,7 +289,7 @@ export class AnalyticsService {
           unitsReturned: r.returned,
           revenue: round2(r.revenue),
           cogs: round2(r.cogs),
-          grossProfit: round2(r.revenue - r.cogs),
+          grossProfit: round2(r.profit),
         }))
         .sort((a, b) => b.grossProfit - a.grossProfit),
     };

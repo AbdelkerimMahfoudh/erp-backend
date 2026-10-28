@@ -73,7 +73,7 @@ describe('the reversal is dated, immutable and singular', () => {
 
   it('snapshots the line, so later price or cost changes cannot alter it', () => {
     expect(code).toMatch(/lineRevenue: gross/);
-    expect(code).toMatch(/lineCost: num\(request\.saleItem\.cost\)/);
+    expect(code).toMatch(/lineCost: request\.saleItem\.cost === null \? null : num\(request\.saleItem\.cost\)/);
   });
 
   it('is unique per sale line and per request, in the database', () => {
@@ -165,7 +165,7 @@ describe('reporting', () => {
    */
   it('subtracts returns from net profit explicitly', () => {
     // 0079: a cancelled sale's effect is subtracted beside the returns', explicitly too.
-    expect(rollupCode).toMatch(/grossProfit - returnsGrossProfit - \(cancelledRevenue - cancelledCogs\) - expenses/);
+    expect(rollupCode).toMatch(/grossProfit - returnsGrossProfit - \(cancelledProfitRevenue - cancelledCogs\) - expenses/);
   });
 
   /**
@@ -188,7 +188,7 @@ describe('reporting', () => {
    */
   it('credits the original cost back rather than writing the asset off', () => {
     expect(rollupCode).not.toMatch(/const returnsCogs = 0;/);
-    expect(rollupCode).toMatch(/returnsRevenue - returnsAdjustments - returnsCogs/);
+    expect(rollupCode).toMatch(/CASE WHEN line_cost IS NOT NULL THEN gross_refund - adjustment_total - line_cost END/);
   });
 
   it('snapshots the day’s returns into the locked closing', () => {

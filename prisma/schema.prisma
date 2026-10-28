@@ -1024,7 +1024,7 @@ model Unit {
   // NOTE: a generated STORED `identifier` = COALESCE(imei_primary, serial_no)
   // with a UNIQUE index exists in the DB (migration 0008) — not modelled here
   // (Prisma can't express generated columns; appears as an expected diff extra).
-  cost          Decimal    @db.Decimal(14, 2) // exact per-unit cost (D4)
+  cost          Decimal?   @db.Decimal(14, 2) // exact per-unit cost (D4); NULL = not known yet (0107)
   status        UnitStatus @default(in_stock)
   dateIn        DateTime   @default(now()) @map("date_in") @db.DateTime(6)
   dateSold      DateTime?  @map("date_sold") @db.DateTime(6)
@@ -1178,28 +1178,30 @@ model PriceChangeEvent {
 }
 
 model StockItem {
-  id               Bytes    @id @db.Binary(16)
-  companyId        Bytes    @map("company_id") @db.Binary(16)
-  productId        Bytes    @map("product_id") @db.Binary(16)
-  branchId         Bytes    @map("branch_id") @db.Binary(16)
-  quantity         Int      @default(0) // CHECK (>=0) in 0002
-  cost             Decimal  @db.Decimal(14, 2)
+  id                  Bytes    @id @db.Binary(16)
+  companyId           Bytes    @map("company_id") @db.Binary(16)
+  productId           Bytes    @map("product_id") @db.Binary(16)
+  branchId            Bytes    @map("branch_id") @db.Binary(16)
+  quantity            Int      @default(0) // CHECK (>=0) in 0002
+  cost                Decimal? @db.Decimal(14, 2)
   /// Branch selling price. NULLABLE since `0034`: a transfer can deliver stock
   /// into a branch that has never priced it, and neither inventing a price nor
   /// refusing the goods is acceptable. NULL means "unpriced" and falls through
   /// to `Product.defaultPrice`, then to the `unpriced` state the price ladder
   /// already models. It is never treated as zero.
-  price            Decimal? @db.Decimal(14, 2)
+  price               Decimal? @db.Decimal(14, 2)
   /// Physically owned at this branch. NEVER reduced to express unavailability —
   /// reserved goods are still company property and still count in valuation.
   /// Promised to an open transfer and therefore NOT sellable (0030).
   /// Available to sell = `quantity - reservedQuantity`, enforced by CHECKs.
-  reservedQuantity Int      @default(0) @map("reserved_quantity")
+  /// Pieces on hand whose buying cost is not known (0107). `cost` averages the others; NULL while none is known.
+  missingCostQuantity Int      @default(0) @map("missing_cost_quantity")
+  reservedQuantity    Int      @default(0) @map("reserved_quantity")
   /// Optimistic concurrency for branch price edits (0029). `updatedAt` cannot
   /// serve: MySQL keeps microseconds, a JS Date only milliseconds.
-  version          Int      @default(0)
-  createdAt        DateTime @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt        DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+  version             Int      @default(0)
+  createdAt           DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
   product Product @relation(fields: [productId], references: [id])
@@ -1292,13 +1294,13 @@ model Purchase {
 }
 
 model PurchaseItem {
-  id         Bytes   @id @db.Binary(16)
-  companyId  Bytes   @map("company_id") @db.Binary(16)
-  purchaseId Bytes   @map("purchase_id") @db.Binary(16)
-  productId  Bytes   @map("product_id") @db.Binary(16)
+  id         Bytes    @id @db.Binary(16)
+  companyId  Bytes    @map("company_id") @db.Binary(16)
+  purchaseId Bytes    @map("purchase_id") @db.Binary(16)
+  productId  Bytes    @map("product_id") @db.Binary(16)
   quantity   Int
-  unitCost   Decimal @map("unit_cost") @db.Decimal(14, 2)
-  taxAmount  Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  unitCost   Decimal? @map("unit_cost") @db.Decimal(14, 2)
+  taxAmount  Decimal  @default(0) @map("tax_amount") @db.Decimal(14, 2)
 
   company  Company  @relation(fields: [companyId], references: [id])
   purchase Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
@@ -1522,20 +1524,20 @@ model Sale {
 }
 
 model SaleItem {
-  id                     Bytes   @id @db.Binary(16)
-  companyId              Bytes   @map("company_id") @db.Binary(16)
-  saleId                 Bytes   @map("sale_id") @db.Binary(16)
-  unitId                 Bytes?  @map("unit_id") @db.Binary(16)
-  productId              Bytes?  @map("product_id") @db.Binary(16)
-  quantity               Int     @default(1)
-  price                  Decimal @db.Decimal(14, 2)
-  cost                   Decimal @db.Decimal(14, 2)
-  discount               Decimal @default(0) @db.Decimal(14, 2)
-  taxAmount              Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
-  voided                 Boolean @default(false)
+  id                     Bytes    @id @db.Binary(16)
+  companyId              Bytes    @map("company_id") @db.Binary(16)
+  saleId                 Bytes    @map("sale_id") @db.Binary(16)
+  unitId                 Bytes?   @map("unit_id") @db.Binary(16)
+  productId              Bytes?   @map("product_id") @db.Binary(16)
+  quantity               Int      @default(1)
+  price                  Decimal  @db.Decimal(14, 2)
+  cost                   Decimal? @db.Decimal(14, 2)
+  discount               Decimal  @default(0) @db.Decimal(14, 2)
+  taxAmount              Decimal  @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  voided                 Boolean  @default(false)
   /// The approved sale cancellation that released this line's unit from the
   /// sold-once index (0079). The line itself is never rewritten.
-  releasedByCorrectionId Bytes?  @map("released_by_correction_id") @db.Binary(16)
+  releasedByCorrectionId Bytes?   @map("released_by_correction_id") @db.Binary(16)
 
   company        Company              @relation(fields: [companyId], references: [id])
   sale           Sale                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
@@ -2743,17 +2745,19 @@ model BranchCounter {
 // with category_id + tracking_type denormalized for fast grouping.
 
 model DailyRollup {
-  id          Bytes    @id @db.Binary(16)
-  companyId   Bytes    @map("company_id") @db.Binary(16)
-  branchId    Bytes    @map("branch_id") @db.Binary(16)
-  day         DateTime @db.Date
-  revenue     Decimal  @db.Decimal(14, 2)
-  cogs        Decimal  @db.Decimal(14, 2)
-  grossProfit Decimal  @map("gross_profit") @db.Decimal(14, 2)
-  salesCount  Int      @map("sales_count")
-  qtySold     Int      @map("qty_sold")
-  expenses    Decimal  @db.Decimal(14, 2)
-  netProfit   Decimal  @map("net_profit") @db.Decimal(14, 2)
+  id               Bytes    @id @db.Binary(16)
+  companyId        Bytes    @map("company_id") @db.Binary(16)
+  branchId         Bytes    @map("branch_id") @db.Binary(16)
+  day              DateTime @db.Date
+  revenue          Decimal  @db.Decimal(14, 2)
+  cogs             Decimal  @db.Decimal(14, 2)
+  grossProfit      Decimal  @map("gross_profit") @db.Decimal(14, 2)
+  salesCount       Int      @map("sales_count")
+  qtySold          Int      @map("qty_sold")
+  /// Sold lines of the day whose buying cost is not known (0107): `grossProfit` covers the others, and says so.
+  missingCostLines Int      @default(0) @map("missing_cost_lines")
+  expenses         Decimal  @db.Decimal(14, 2)
+  netProfit        Decimal  @map("net_profit") @db.Decimal(14, 2)
 
   /// Returns APPROVED on this day (I2), stored as POSITIVE magnitudes and
   /// subtracted explicitly by every consumer. Keyed on the approval date, never
@@ -3277,9 +3281,9 @@ model ReturnReversal {
   unitId          Bytes @map("unit_id") @db.Binary(16)
   returnRequestId Bytes @map("return_request_id") @db.Binary(16)
 
-  lineRevenue Decimal @map("line_revenue") @db.Decimal(14, 2)
-  lineCost    Decimal @map("line_cost") @db.Decimal(14, 2)
-  lineMargin  Decimal @map("line_margin") @db.Decimal(14, 2)
+  lineRevenue Decimal  @map("line_revenue") @db.Decimal(14, 2)
+  lineCost    Decimal? @map("line_cost") @db.Decimal(14, 2) // NULL when the sold line's cost was unknown (0107)
+  lineMargin  Decimal  @map("line_margin") @db.Decimal(14, 2)
 
   grossRefund     Decimal @map("gross_refund") @db.Decimal(14, 2)
   adjustmentTotal Decimal @default(0) @map("adjustment_total") @db.Decimal(14, 2)
@@ -5087,7 +5091,7 @@ model StockReceipt {
   quantity          Int      @db.Int
   /// What this delivery cost per item — the input to the weighted average, kept
   /// so the average can be explained after the fact.
-  unitCost          Decimal  @map("unit_cost") @db.Decimal(14, 2)
+  unitCost          Decimal? @map("unit_cost") @db.Decimal(14, 2)
   createdAt         DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])

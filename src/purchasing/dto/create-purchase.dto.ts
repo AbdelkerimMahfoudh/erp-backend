@@ -115,11 +115,17 @@ export class ReceiveItemDto {
   @Type(() => NewProductDto)
   newProduct?: NewProductDto;
 
-  @ApiProperty({ minimum: 0.01, description: 'Per-unit (imei/serial) or per-item (quantity) purchase cost' })
+  /**
+   * Omitted when the buying cost is not known (0107, after the app's explicit
+   * warning). It is then UNKNOWN — stored as NULL, never as zero — and can be
+   * entered later by `cost.complete`. When given, it is validated as before.
+   */
+  @ApiPropertyOptional({ minimum: 0.01, description: 'Per-unit (imei/serial) or per-item (quantity) purchase cost. Omitted: not known yet.' })
+  @IsOptional()
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0.01)
   @IsMoney({ min: 0.01 })
-  unitCost: number;
+  unitCost?: number;
 
   @ApiPropertyOptional({ type: [String], description: 'Serialized products: one IMEI/serial per physical unit' })
   @IsOptional()

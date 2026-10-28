@@ -115,7 +115,8 @@ export class SaleSelectionService {
        * financial-fields interceptor for any caller without `cost.view`, so a
        * role that may not see cost never receives it.
        */
-      cost: Number(unit.cost),
+      // NULL while the buying cost is not known (0107) — never shown as zero.
+      cost: unit.cost === null ? null : Number(unit.cost),
       dateIn: unit.dateIn,
     };
   }

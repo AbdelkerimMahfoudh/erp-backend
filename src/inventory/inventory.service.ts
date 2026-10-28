@@ -181,7 +181,8 @@ type StockWithProduct = {
   productId: Buffer;
   quantity: number;
   reservedQuantity: number;
-  cost: Prisma.Decimal;
+  cost: Prisma.Decimal | null;
+  missingCostQuantity: number;
   price: Prisma.Decimal | null;
   product: InventoryProduct | null;
 };
@@ -198,6 +199,7 @@ function toUnitRow(unit: UnitWithProduct): InventoryUnitRow {
     serialNo: unit.serialNo,
     status: unit.status,
     cost: unit.cost,
+    costMissing: unit.cost === null,
     dateIn: unit.dateIn,
     productId: unit.productId,
     product: unit.product,
@@ -213,6 +215,7 @@ function toStockRow(line: StockWithProduct): InventoryStockRow {
     reservedQuantity: line.reservedQuantity,
     availableQuantity: line.quantity - line.reservedQuantity,
     cost: line.cost,
+    missingCostQuantity: line.missingCostQuantity,
     price: line.price,
     product: line.product,
   };
@@ -237,8 +240,10 @@ export interface InventoryUnitRow {
   imeiSecondary: string | null;
   serialNo: string | null;
   status: UnitStatus;
-  /** Stripped for callers without `cost.view`. */
-  cost: Prisma.Decimal;
+  /** Stripped for callers without `cost.view`. NULL: not known yet (0107) — never zero. */
+  cost: Prisma.Decimal | null;
+  /** The buying cost is not known yet (0107). Stripped with the cost. */
+  costMissing: boolean;
   dateIn: Date;
   productId: Buffer;
   product: InventoryProduct | null;
@@ -264,8 +269,10 @@ export interface InventoryStockRow {
    * matter to different people, and conflating them is how a shop miscounts.
    */
   availableQuantity: number;
-  /** Stripped for callers without `cost.view`. */
-  cost: Prisma.Decimal;
+  /** Stripped for callers without `cost.view`. NULL: not known yet (0107) — never zero. */
+  cost: Prisma.Decimal | null;
+  /** Pieces on hand received without a buying cost (0107). Stripped with the cost. */
+  missingCostQuantity: number;
   /**
    * `null` means **unpriced**, not free (`0034`).
    *
@@ -285,7 +292,8 @@ export interface CreateUnitData {
   imeiPrimary?: string | null;
   imeiSecondary?: string | null;
   serialNo?: string | null;
-  cost: number;
+  /** NULL: received without its buying cost (0107). */
+  cost: number | null;
   supplierId?: Buffer | null;
   purchaseId?: Buffer | null;
 }
@@ -379,7 +387,7 @@ export class InventoryService {
   async reactivateUnit(
     tx: UnitTxClient,
     unitId: Buffer,
-    data: { productId: Buffer; branchId: Buffer; cost: number; purchaseId: Buffer; imeiSecondary: string | null },
+    data: { productId: Buffer; branchId: Buffer; cost: number | null; purchaseId: Buffer; imeiSecondary: string | null },
   ): Promise<void> {
     const moved = await tx.unit.updateMany({
       where: { id: unitId, status: 'voided' },
@@ -1333,7 +1341,8 @@ export class InventoryService {
       if (!this.may('cost.view')) {
         throw new ForbiddenException('Correcting the cost needs permission to see cost.');
       }
-      const current = Number(unit.cost);
+      // NULL when it was received without one (0107): entering it here is a change, never "0 → x".
+      const current = unit.cost === null ? null : Number(unit.cost);
       if (dto.cost !== current) {
         data.cost = dto.cost;
         before.cost = current;

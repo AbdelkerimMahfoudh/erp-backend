@@ -104,12 +104,12 @@ describe('the rollup applies that formula', () => {
   });
 
   it('computes the reduction as gross − adjustments − cogs', () => {
-    expect(rollup).toMatch(/returnsRevenue - returnsAdjustments - returnsCogs/);
+    expect(rollup).toMatch(/CASE WHEN line_cost IS NOT NULL THEN gross_refund - adjustment_total - line_cost END/);
   });
 
   it('still subtracts it explicitly from net profit', () => {
     // 0079: a cancelled sale's effect is subtracted beside the returns', explicitly too.
-    expect(rollup).toMatch(/grossProfit - returnsGrossProfit - \(cancelledRevenue - cancelledCogs\) - expenses/);
+    expect(rollup).toMatch(/grossProfit - returnsGrossProfit - \(cancelledProfitRevenue - cancelledCogs\) - expenses/);
   });
 
   it('takes the figures from the reversal snapshot, never from a live product', () => {
@@ -177,7 +177,7 @@ describe('the locked closing carries every component', () => {
 
 describe('what approval and rejection each do', () => {
   it('approval snapshots the ORIGINAL line cost into the reversal', () => {
-    expect(service).toMatch(/lineCost: num\(request\.saleItem\.cost\) \* request\.saleItem\.quantity/);
+    expect(service).toMatch(/lineCost: request\.saleItem\.cost === null \? null : num\(request\.saleItem\.cost\) \* request\.saleItem\.quantity/);
   });
 
   /**

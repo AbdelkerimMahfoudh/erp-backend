@@ -1,4 +1,5 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
+import { catalogueCovers } from './device-catalogue';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { DeviceCatalogueService } from './device-catalogue.service';
 
@@ -27,7 +28,14 @@ export class DeviceCatalogueController {
     description:
       'Includes `Other brand`, which is an ordinary row rather than a client-side special case. `manufacturerKey` records that Redmi and POCO are Xiaomi’s without hiding them under it.',
   })
-  brands(@Query('q') q?: string) {
+  /*
+   * `category`: the built-in key of the category being filled in (its own, or
+   * its parent's for a shop subcategory). Outside the Phones family the answer
+   * is empty — this catalogue only knows phones (`catalogueCovers`). Omitted,
+   * the answer is unchanged for an older client.
+   */
+  brands(@Query('q') q?: string, @Query('category') category?: string) {
+    if (category !== undefined && !catalogueCovers(category)) return [];
     return this.catalogue.brands(q);
   }
 
@@ -37,7 +45,8 @@ export class DeviceCatalogueController {
     description:
       'Commercial names only. Storage, colour and condition are product and unit attributes and are never folded into a model name. An unknown brand returns an empty list rather than an error, because typing the model by hand is a supported outcome.',
   })
-  models(@Param('brandKey') brandKey: string, @Query('q') q?: string) {
+  models(@Param('brandKey') brandKey: string, @Query('q') q?: string, @Query('category') category?: string) {
+    if (category !== undefined && !catalogueCovers(category)) return [];
     return this.catalogue.models(brandKey, q);
   }
 

@@ -37,6 +37,7 @@ const NET_SUM = {
   returnsRevenue: true,
   returnsAdjustments: true,
   returnsGrossProfit: true,
+  missingCostLines: true,
 } as const;
 
 type NetSum = { [K in keyof typeof NET_SUM]?: Prisma.Decimal | number | null };
@@ -56,6 +57,8 @@ function netOf(s: NetSum) {
     netProfit: round2(num(s.netProfit ?? null)),
     salesCount: num(s.salesCount ?? null) - num(s.cancelledCount ?? null),
     qtySold: num(s.qtySold ?? null) - num(s.cancelledQty ?? null),
+    /** Sold lines of unknown cost (0107): while above 0, gross and net profit cover only the others. */
+    missingCostLines: num(s.missingCostLines ?? null),
   };
 }
 
@@ -313,8 +316,8 @@ export class DashboardService {
 
     // Net of returns and cancellations on their approval days (docs/53), as Results reads the same rollup.
     return {
-      today: { revenue: t.revenue, grossProfit: t.grossProfit, netProfit: t.netProfit, salesCount: t.salesCount, qtySold: t.qtySold },
-      month: { revenue: m.revenue, grossProfit: m.grossProfit, netProfit: m.netProfit },
+      today: { revenue: t.revenue, grossProfit: t.grossProfit, netProfit: t.netProfit, salesCount: t.salesCount, qtySold: t.qtySold, missingCostLines: t.missingCostLines },
+      month: { revenue: m.revenue, grossProfit: m.grossProfit, netProfit: m.netProfit, missingCostLines: m.missingCostLines },
       inventory: {
         inventoryValue: inventory.totals.inventoryValue,
         expectedProfit: inventory.totals.expectedProfit,
@@ -431,6 +434,8 @@ export class DashboardService {
           revenue: n.revenue,
           grossProfit: n.grossProfit,
           netProfit: n.netProfit,
+          // Sold lines of unknown cost in the window (0107): the profit beside it covers the others.
+          missingCostLines: n.missingCostLines,
         };
       })
       .sort((a, b) => b.revenue - a.revenue);

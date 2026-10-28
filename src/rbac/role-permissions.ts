@@ -77,6 +77,12 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    * with a reason, and decide a seller's request to do so. Not delegatable.
    */
   { key: 'sale.below_cost',     label: 'Sell below cost after a warning, and approve a seller\'s request' },
+  /**
+   * 0107 (2026-10-28): stock may be received without its buying cost; it is
+   * then unknown, never zero. Its holders — the Owner and Store Managers, by
+   * role — enter it later, audited. Requires `cost.view` too, at the route.
+   */
+  { key: 'cost.complete',       label: 'Enter a buying cost that was not known when the stock was received' },
   { key: 'unit.add',            label: 'Add inventory units' },
   { key: 'unit.transfer',       label: 'Transfer stock between branches' },
   { key: 'import.run',          label: 'Run Excel/CSV inventory import' },
@@ -230,6 +236,7 @@ const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
     k !== 'cost.view' &&
     k !== 'discount.override' &&
     k !== 'sale.below_cost' &&
+    k !== 'cost.complete' &&
     k !== 'price.edit' &&
     k !== 'import.run' &&
     // 0076: starting a shop's day early is the Owner's call alone.
@@ -270,6 +277,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'sale.create', 'sale.return', 'cost.view', 'discount.apply',
     // D223: a manager may sell at a loss after the warning, and approve a seller's request.
     'sale.below_cost',
+    // 0107: and enters a buying cost that was not known when the stock was received.
+    'cost.complete',
     /**
      * I1: reading sale history, and changing the return policy AT SALE TIME.
      * Overriding an EXPIRED deadline after the fact is a different, Owner-only

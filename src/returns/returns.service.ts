@@ -571,8 +571,9 @@ export class ReturnsService {
           unitId: request.unitId,
           returnRequestId: request.id,
           lineRevenue: gross,
-          lineCost: num(request.saleItem.cost) * request.saleItem.quantity,
-          lineMargin: gross - num(request.saleItem.cost) * request.saleItem.quantity,
+          // An unknown cost (0107) stays unknown: nothing is credited back, and the line had no profit to reverse.
+          lineCost: request.saleItem.cost === null ? null : num(request.saleItem.cost) * request.saleItem.quantity,
+          lineMargin: request.saleItem.cost === null ? 0 : gross - num(request.saleItem.cost) * request.saleItem.quantity,
           grossRefund: gross,
           adjustmentTotal,
           netRefundDue,
@@ -1395,7 +1396,7 @@ export class ReturnsService {
         netRefundDue: Math.round((gross - adjustmentTotal) * 100) / 100,
         // The line's cost and margin ride the standard gating: named so the
         // interceptor strips them without `cost.view`.
-        cost: num(r.saleItem.cost) * r.saleItem.quantity,
+        cost: r.saleItem.cost === null ? null : num(r.saleItem.cost) * r.saleItem.quantity,
       },
       adjustments: adjustments.map((a) => ({
         id: binToUuid(a.id),

@@ -375,3 +375,23 @@ describe('the device catalogue', () => {
     });
   });
 });
+
+describe('the catalogue answers only under Phones (D223, 2026-10-28)', () => {
+  it('is a phone catalogue: no tablet, watch, laptop, earbud or accessory model is in it', () => {
+    const notAPhone = /\b(ipad|tab\b|galaxy tab|watch|macbook|laptop|notebook|buds|airpods|earbuds|band|chromebook|monitor|charger|cable|case)\b/i;
+    expect(MODELS.filter((m) => notAPhone.test(m.name)).map((m) => m.name)).toEqual([]);
+  });
+
+  it('covers Phones, its subcategories and nothing else — Apple alone never means an iPhone', async () => {
+    const { catalogueCovers } = await import('./device-catalogue');
+    expect(['phones', 'phones.smartphones', 'phones.feature'].every(catalogueCovers)).toBe(true);
+    for (const key of ['tablets', 'tablets.cellular', 'computers.laptops', 'audio', 'audio.earbuds', 'chargers', 'cables', 'cases', 'protection', 'wearables.smartwatches', 'other', null, undefined]) {
+      expect(catalogueCovers(key)).toBe(false);
+    }
+  });
+
+  it('the endpoints return nothing for a category outside Phones, and are unchanged without one', () => {
+    const controller = readFileSync(join(__dirname, 'device-catalogue.controller.ts'), 'utf8');
+    expect(controller.match(/if \(category !== undefined && !catalogueCovers\(category\)\) return \[\];/g)).toHaveLength(2);
+  });
+});

@@ -65,8 +65,12 @@ export interface ReceiveQuantityArgs {
   branchId: Buffer;
   /** How many arrived. Must be positive — receiving nothing is not an event. */
   received: number;
-  /** What these ones cost, per unit. The actual price paid, never a default. */
-  unitCost: Prisma.Decimal | number;
+  /**
+   * What these ones cost, per unit. The actual price paid, never a default —
+   * and `null` when it is not known (0107): the pieces are counted in
+   * `missing_cost_quantity` and the average of the known ones is left alone.
+   */
+  unitCost: Prisma.Decimal | number | null;
   /**
    * Selling price for a row that does not exist yet. `null` leaves it unpriced,
    * which the price ladder already models. Ignored when the row exists.
@@ -88,18 +92,32 @@ export async function receiveQuantityAtCost(
     throw new Error(`receiveQuantityAtCost: received must be a positive integer, got ${args.received}`);
   }
 
+  const missing = args.unitCost === null ? args.received : 0;
+  /*
+   * The average covers the pieces whose cost is KNOWN: (quantity − missing) of
+   * them on hand. An unknown-cost receipt adds to `missing_cost_quantity` and
+   * leaves the average alone; a known one averages against the known pieces
+   * only, and stands alone when there are none. Every row before 0107 has no
+   * missing pieces, so its average is computed exactly as before.
+   */
   await tx.$executeRaw(Prisma.sql`
     INSERT INTO stock_items
       (id, company_id, product_id, branch_id, quantity, cost, price,
-       reserved_quantity, version, created_at, updated_at)
+       reserved_quantity, missing_cost_quantity, version, created_at, updated_at)
     VALUES
       (${newUuidV7Bin()}, ${args.companyId}, ${args.productId}, ${args.branchId},
        ${args.received}, ${args.unitCost}, ${args.priceIfNew ?? null},
-       0, 0, NOW(6), NOW(6)) AS incoming
+       0, ${missing}, 0, NOW(6), NOW(6)) AS incoming
     ON DUPLICATE KEY UPDATE
-      cost     = (stock_items.quantity * stock_items.cost
-                  + incoming.quantity * incoming.cost)
-                 / (stock_items.quantity + incoming.quantity),
+      cost     = CASE
+                   WHEN incoming.cost IS NULL THEN stock_items.cost
+                   WHEN stock_items.cost IS NULL
+                        OR stock_items.quantity - stock_items.missing_cost_quantity <= 0 THEN incoming.cost
+                   ELSE ((stock_items.quantity - stock_items.missing_cost_quantity) * stock_items.cost
+                         + incoming.quantity * incoming.cost)
+                        / (stock_items.quantity - stock_items.missing_cost_quantity + incoming.quantity)
+                 END,
+      missing_cost_quantity = stock_items.missing_cost_quantity + incoming.missing_cost_quantity,
       quantity = stock_items.quantity + incoming.quantity,
       updated_at = NOW(6)`);
 }

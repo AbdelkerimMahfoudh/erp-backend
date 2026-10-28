@@ -61,7 +61,8 @@ describe('the weighted average is computed in the database, not in JavaScript', 
   it('averages against the row’s own committed quantity and cost', async () => {
     const { sql } = await receive();
     expect(flat(sql)).toContain(
-      'cost = (stock_items.quantity * stock_items.cost + incoming.quantity * incoming.cost) / (stock_items.quantity + incoming.quantity)',
+      // 0107: the average covers the pieces of KNOWN cost; with none missing this is the H1.4.1 average exactly.
+      'ELSE ((stock_items.quantity - stock_items.missing_cost_quantity) * stock_items.cost + incoming.quantity * incoming.cost) / (stock_items.quantity - stock_items.missing_cost_quantity + incoming.quantity)',
     );
   });
 
@@ -108,8 +109,9 @@ describe('the weighted average is computed in the database, not in JavaScript', 
 
   it('creates an unpriced row when the branch has no price, rather than a free one', async () => {
     const { values } = await receive({ priceIfNew: null });
-    expect(values).toContain(null);
-    expect(values).not.toContain(0);
+    // The price parameter (after quantity and cost) is null — unpriced, never 0.
+    expect(values[6]).toBeNull();
+    expect(values[6]).not.toBe(0);
   });
 
   it('refuses a non-positive or fractional receipt instead of writing nonsense', async () => {

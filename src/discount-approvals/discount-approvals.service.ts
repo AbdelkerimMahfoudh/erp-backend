@@ -128,10 +128,11 @@ export class DiscountApprovalsService {
      * price when nothing is set) and no longer decides anything.
      */
     const configuredPrice = resolved.price ?? input.requestedPrice;
-    const cost = Number(unit.cost);
     const requested = input.requestedPrice;
+    // An unknown cost (0107) has nothing to be below: the sale needs no approval.
+    const cost = unit.cost === null ? null : Number(unit.cost);
 
-    if (requested >= cost) {
+    if (cost === null || requested >= cost) {
       throw new BadRequestException({
         code: 'approval_not_needed',
         message: 'That price is not below cost, so no approval is needed',

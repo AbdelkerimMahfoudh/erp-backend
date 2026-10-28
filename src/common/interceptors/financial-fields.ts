@@ -7,6 +7,9 @@
 export const FINANCIAL_FIELDS: ReadonlySet<string> = new Set([
   // cost
   'cost',
+  // Whether a cost is known, and how much stock lacks one (0107): cost information too.
+  'costMissing',
+  'missingCostQuantity',
   'unitCost',
   'defaultCost',
   'purchaseCost',

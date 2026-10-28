@@ -49,7 +49,7 @@ describe('no price floor; a loss is guarded (D223)', () => {
 
   it('warns the Owner or a Manager before a loss, and refuses anyone else without an approval', () => {
     expect(SALES).toMatch(/mayAcceptLoss \? this\.lossWarnings\(/);
-    expect(SALES).toMatch(/!mayAcceptLoss && line\.unitId && line\.price < line\.cost/);
+    expect(SALES).toMatch(/!mayAcceptLoss && line\.unitId && line\.cost !== null && line\.price < line\.cost/);
   });
 
   it('checks per line, never on the sale total', () => {

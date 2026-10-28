@@ -59,8 +59,13 @@ export interface HeldValueRow {
   tracking_type: 'imei' | 'serial' | 'quantity';
   units_count: unknown;
   quantity: unknown;
+  /** What the holdings of KNOWN cost cost (0107): an unknown cost is left out, never valued at zero. */
   inv_value: unknown;
   exp_rev: unknown;
+  /** Expected revenue of the holdings whose cost is known — the side expected profit is measured on. */
+  exp_rev_known: unknown;
+  /** Units or pieces held whose buying cost is not known. */
+  missing_cost: unknown;
 }
 
 export interface RawQueryable {
@@ -87,7 +92,9 @@ export async function heldValueRows(
              COUNT(*)                          AS units_count,
              0                                 AS quantity,
              SUM(u.cost)                       AS inv_value,
-             SUM(COALESCE(p.default_price, 0)) AS exp_rev
+             SUM(COALESCE(p.default_price, 0)) AS exp_rev,
+             SUM(CASE WHEN u.cost IS NOT NULL THEN COALESCE(p.default_price, 0) ELSE 0 END) AS exp_rev_known,
+             SUM(u.cost IS NULL)               AS missing_cost
         FROM units u
         JOIN products p ON p.id = u.product_id
        WHERE u.company_id = ${args.companyId} AND u.status = 'in_stock' ${unitBranch}
@@ -96,8 +103,10 @@ export async function heldValueRows(
       SELECT 'stock' AS kind, p.id AS product_id, p.category_id, p.tracking_type,
              0                                                   AS units_count,
              SUM(si.quantity)                                    AS quantity,
-             SUM(si.quantity * si.cost)                          AS inv_value,
-             SUM(si.quantity * COALESCE(si.price, p.default_price, 0)) AS exp_rev
+             SUM((si.quantity - si.missing_cost_quantity) * si.cost) AS inv_value,
+             SUM(si.quantity * COALESCE(si.price, p.default_price, 0)) AS exp_rev,
+             SUM((si.quantity - si.missing_cost_quantity) * COALESCE(si.price, p.default_price, 0)) AS exp_rev_known,
+             SUM(si.missing_cost_quantity)                       AS missing_cost
         FROM stock_items si
         JOIN products p ON p.id = si.product_id
        WHERE si.company_id = ${args.companyId} AND si.quantity > 0 ${stockBranch}

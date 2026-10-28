@@ -39,6 +39,7 @@ import { MagnitudeReads, MagnitudeService, SALE_PRICE_MIN_SAMPLE } from '../comm
 import { magnitudeWarning } from '../common/warnings/magnitude';
 import { WarningGate } from '../common/warnings/warning-gate.service';
 import { Warning, WarningResponse, messageKeyFor } from '../common/warnings/warning.types';
+import { knownMargin } from './known-margin';
 
 /** Every value the filters accept, kept next to the enums they mirror. */
 const PAY_STATUSES = ['paid', 'partial', 'credit'] as const satisfies readonly SalePayStatus[];
@@ -50,7 +51,10 @@ interface PreparedLine {
   quantity: number;
   price: number;
   discount: number;
-  cost: number;
+  /** NULL when the buying cost is not known (0107): no below-cost check, and no profit for this line. */
+  cost: number | null;
+  /** Pieces of unknown cost this line takes off the shelf (0107), decremented with the quantity. */
+  missingTaken?: number;
   /**
    * What the price ladder says this sells for — the FLOOR (A2).
    *
@@ -199,7 +203,7 @@ export class SalesService {
               quantity: 1,
               price,
               discount,
-              cost: Number(unit.cost),
+              cost: unit.cost === null ? null : Number(unit.cost),
               // The ladder's answer — the FLOOR this line is measured against.
               configuredPrice: resolved.price,
             });
@@ -253,7 +257,15 @@ export class SalesService {
               quantity,
               price,
               discount,
-              cost: Number(stock.cost),
+              /*
+               * Stock holding pieces of unknown cost (0107) sells at an unknown
+               * cost: nobody can say which pieces left, and the known pieces'
+               * average would invent a cost for the others. Profit for the line
+               * is incomplete rather than guessed; the unknown pieces are taken
+               * first, so the count of what is left stays an upper bound.
+               */
+              cost: stock.cost === null || stock.missingCostQuantity > 0 ? null : Number(stock.cost),
+              missingTaken: Math.min(stock.missingCostQuantity, quantity),
               configuredPrice: resolved.price,
             });
           }
@@ -292,8 +304,8 @@ export class SalesService {
         );
         const total = this.policy.round(subtotal - discountTotal);
         if (total < 0) throw new BadRequestException('Discount exceeds subtotal');
-        const totalCost = this.policy.round(prepared.reduce((s, p) => s + p.cost * p.quantity, 0));
-        const margin = this.policy.round(total - totalCost);
+        const totalCost = this.policy.round(prepared.reduce((s, p) => s + (p.cost ?? 0) * p.quantity, 0));
+        const margin = this.policy.round(knownMargin(prepared, subtotal, dto.saleDiscount ?? 0, total, totalCost));
 
         /*
          * The sale's identity is minted before the floor check, because
@@ -318,7 +330,7 @@ export class SalesService {
            * wins. Checking first and writing after would let both through.
            */
           const approval =
-            !mayAcceptLoss && line.unitId && line.price < line.cost
+            !mayAcceptLoss && line.unitId && line.cost !== null && line.price < line.cost
               ? await this.approvals.consume(tx as unknown as Prisma.TransactionClient, {
                   unitId: line.unitId,
                   requestedPrice: line.price,
@@ -514,8 +526,13 @@ export class SalesService {
                 productId: p.productId,
                 branchId,
                 quantity: { gte: p.quantity },
+                // The unknown-cost pieces counted when this line was priced are still there.
+                ...(p.missingTaken ? { missingCostQuantity: { gte: p.missingTaken } } : {}),
               },
-              data: { quantity: { decrement: p.quantity } },
+              data: {
+                quantity: { decrement: p.quantity },
+                ...(p.missingTaken ? { missingCostQuantity: { decrement: p.missingTaken } } : {}),
+              },
             });
             if (taken.count === 0) {
               throw new ConflictException('That stock was taken while you were selling');
@@ -1332,7 +1349,8 @@ export class SalesService {
         price: Number(i.price),
         discount: Number(i.discount),
         taxAmount: Number(i.taxAmount),
-        cost: Number(i.cost),
+        cost: i.cost === null ? null : Number(i.cost),
+        costMissing: i.cost === null,
         voided: i.voided,
       })),
       // Every payment, at the sale and after it, with the account label as it
@@ -1382,7 +1400,7 @@ export class SalesService {
     const out: Warning[] = [];
     for (const [index, line] of prepared.entries()) {
       const sold = line.price * line.quantity - line.discount;
-      if (sold < line.cost * line.quantity - 0.005) {
+      if (line.cost !== null && sold < line.cost * line.quantity - 0.005) {
         out.push({
           code: 'loss.below_cost',
           severity: 'caution',
@@ -1395,9 +1413,10 @@ export class SalesService {
       }
     }
     if (out.length === 0 && saleDiscount > 0) {
+      // Only when every cost is known: an unknown one cannot be compared (0107).
       const sold = prepared.reduce((s, l) => s + l.price * l.quantity - l.discount, 0) - saleDiscount;
-      const cost = prepared.reduce((s, l) => s + l.cost * l.quantity, 0);
-      if (sold < cost - 0.005) {
+      const cost = prepared.reduce((s, l) => s + (l.cost ?? 0) * l.quantity, 0);
+      if (prepared.every((l) => l.cost !== null) && sold < cost - 0.005) {
         out.push({
           code: 'loss.below_cost',
           severity: 'caution',

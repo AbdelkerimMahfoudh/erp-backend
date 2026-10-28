@@ -22,7 +22,7 @@ import { buildChannels } from '../closing/channels';
  *   D4  the refund of 9 500 confirmed — money only
  */
 
-const zero = () => ({ count: 0, value: 0, units: 0, phones: 0, cost: 0, margin: 0 });
+const zero = () => ({ count: 0, value: 0, units: 0, phones: 0, cost: 0, margin: 0, missingCostLines: 0 });
 const noReturn = () => ({ count: 0, value: 0, grossRefund: 0, adjustments: 0, costCredited: 0, profitEffect: 0, phones: 0 });
 const day = (over: Partial<Omit<PeriodFigures, 'net'>>): PeriodFigures =>
   sumFigures([
@@ -37,12 +37,12 @@ const day = (over: Partial<Omit<PeriodFigures, 'net'>>): PeriodFigures =>
   ]);
 
 const D1 = day({
-  invoices: { count: 2, value: 30_000, units: 3, phones: 3, cost: 18_000, margin: 12_000 },
+  invoices: { count: 2, value: 30_000, units: 3, phones: 3, cost: 18_000, margin: 12_000, missingCostLines: 0 },
   expenses: { recorded: 800, recordedCount: 1, reversed: 0, reversedCount: 0, net: 800 },
 });
 const D2 = day({ returns: { count: 1, value: 9_500, grossRefund: 10_000, adjustments: 500, costCredited: 6_000, profitEffect: 3_500, phones: 1 } });
 const D3 = day({
-  cancellations: { count: 1, value: 10_000, units: 1, phones: 1, cost: 6_000, margin: 4_000 },
+  cancellations: { count: 1, value: 10_000, units: 1, phones: 1, cost: 6_000, margin: 4_000, missingCostLines: 0 },
   expenses: { recorded: 0, recordedCount: 0, reversed: 300, reversedCount: 1, net: -300 },
 });
 const D4 = day({});

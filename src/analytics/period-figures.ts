@@ -35,8 +35,13 @@ export interface InvoiceFigures {
   phones: number;
   /** Σ sales.total_cost. */
   cost: number;
-  /** Σ sales.margin. */
+  /**
+   * Σ sales.margin — the margin of the lines whose buying cost is KNOWN (0107).
+   * Incomplete whenever `missingCostLines` > 0: say so, never present it whole.
+   */
   margin: number;
+  /** Sold lines whose buying cost is not known (NULL, or about zero from before 0107). */
+  missingCostLines: number;
 }
 
 /** Whole sales cancelled on the dates (approval date), whatever day they were sold. */
@@ -76,7 +81,7 @@ export interface PeriodFigures {
   net: { salesValue: number; salesCount: number; units: number; phones: number };
 }
 
-export const emptyInvoices = (): InvoiceFigures => ({ count: 0, value: 0, units: 0, phones: 0, cost: 0, margin: 0 });
+export const emptyInvoices = (): InvoiceFigures => ({ count: 0, value: 0, units: 0, phones: 0, cost: 0, margin: 0, missingCostLines: 0 });
 export const emptyReturns = (): ReturnedFigures => ({ count: 0, value: 0, grossRefund: 0, adjustments: 0, costCredited: 0, profitEffect: 0, phones: 0 });
 const emptyExpenses = (): ExpenseFigures => ({ recorded: 0, recordedCount: 0, reversed: 0, reversedCount: 0, net: 0 });
 
@@ -84,14 +89,17 @@ const emptyExpenses = (): ExpenseFigures => ({ recorded: 0, recordedCount: 0, re
 const UNITS_OF_SALE = Prisma.sql`(SELECT COALESCE(SUM(si.quantity), 0) FROM sale_items si WHERE si.sale_id = s.id AND si.voided = 0)`;
 const PHONES_OF_SALE = Prisma.sql`(SELECT COUNT(*) FROM sale_items si JOIN units u ON u.id = si.unit_id JOIN products p ON p.id = u.product_id
                                      WHERE si.sale_id = s.id AND si.voided = 0 AND p.tracking_type = 'imei')`;
+/** The sale's lines whose buying cost is not known (0107), with the closing report's ≈ 0 rule for older rows. */
+const MISSING_COST_LINES_OF_SALE = Prisma.sql`(SELECT COUNT(*) FROM sale_items si
+                                     WHERE si.sale_id = s.id AND si.voided = 0 AND (si.cost IS NULL OR si.cost <= 0.005))`;
 
-type InvoiceRow = { day: string; n: bigint; value: unknown; cost: unknown; margin: unknown; units: unknown; phones: unknown };
+type InvoiceRow = { day: string; n: bigint; value: unknown; cost: unknown; margin: unknown; units: unknown; phones: unknown; missing: unknown };
 type ReturnRow = { day: string; n: bigint; value: unknown; gross: unknown; adj: unknown; cost: unknown; effect: unknown; phones: unknown };
 type ExpenseRow = { day: string; amount: unknown; n: bigint };
 
 const invoiceOf = (r: InvoiceRow | undefined): InvoiceFigures =>
   r
-    ? { count: Number(r.n), value: round2(num(r.value)), units: num(r.units), phones: num(r.phones), cost: round2(num(r.cost)), margin: round2(num(r.margin)) }
+    ? { count: Number(r.n), value: round2(num(r.value)), units: num(r.units), phones: num(r.phones), cost: round2(num(r.cost)), margin: round2(num(r.margin)), missingCostLines: num(r.missing) }
     : emptyInvoices();
 const returnOf = (r: ReturnRow | undefined): ReturnedFigures =>
   r
@@ -120,7 +128,8 @@ export async function figuresByDay(
     db.$queryRaw<InvoiceRow[]>(Prisma.sql`
       SELECT DATE_FORMAT(s.business_date, '%Y-%m-%d') AS day, COUNT(*) AS n,
              COALESCE(SUM(s.total), 0) AS value, COALESCE(SUM(s.total_cost), 0) AS cost, COALESCE(SUM(s.margin), 0) AS margin,
-             COALESCE(SUM(${UNITS_OF_SALE}), 0) AS units, COALESCE(SUM(${PHONES_OF_SALE}), 0) AS phones
+             COALESCE(SUM(${UNITS_OF_SALE}), 0) AS units, COALESCE(SUM(${PHONES_OF_SALE}), 0) AS phones,
+             COALESCE(SUM(${MISSING_COST_LINES_OF_SALE}), 0) AS missing
         FROM sales s
        WHERE s.company_id = ${companyId} ${branch('s.branch_id')} AND s.is_reversed = 0
          AND s.business_date BETWEEN ${from} AND ${to}
@@ -128,7 +137,8 @@ export async function figuresByDay(
     db.$queryRaw<InvoiceRow[]>(Prisma.sql`
       SELECT DATE_FORMAT(fc.correction_date, '%Y-%m-%d') AS day, COUNT(*) AS n,
              COALESCE(SUM(s.total), 0) AS value, COALESCE(SUM(s.total_cost), 0) AS cost, COALESCE(SUM(s.margin), 0) AS margin,
-             COALESCE(SUM(${UNITS_OF_SALE}), 0) AS units, COALESCE(SUM(${PHONES_OF_SALE}), 0) AS phones
+             COALESCE(SUM(${UNITS_OF_SALE}), 0) AS units, COALESCE(SUM(${PHONES_OF_SALE}), 0) AS phones,
+             COALESCE(SUM(${MISSING_COST_LINES_OF_SALE}), 0) AS missing
         FROM financial_corrections fc
         JOIN sales s ON s.id = fc.target_sale_id
        WHERE fc.company_id = ${companyId} ${branch('fc.branch_id')}
@@ -201,6 +211,7 @@ export function sumFigures(days: PeriodFigures[]): PeriodFigures {
       a.phones += b.phones;
       a.cost += b.cost;
       a.margin += b.margin;
+      a.missingCostLines += b.missingCostLines;
     }
     ret.count += d.returns.count;
     ret.value += d.returns.value;
@@ -254,6 +265,12 @@ export interface ProductAdjustment {
   returnedRevenue: number;
   /** Σ line cost credited back by the returns. */
   returnedCostCredited: number;
+  /**
+   * What the cancellations and returns take off PROFIT (0107): over the lines of
+   * known cost only, since a line of unknown cost put no profit on when it sold.
+   * With every cost known it is (cancelled revenue − cogs) + (returned revenue − cost credited).
+   */
+  profitEffect: number;
 }
 
 export async function productAdjustments(db: RawRunner, companyId: Buffer, branchId: Buffer | null, from: string): Promise<ProductAdjustment[]> {
@@ -270,9 +287,10 @@ export async function productAdjustments(db: RawRunner, companyId: Buffer, branc
         LEFT JOIN products p ON p.id = COALESCE(si.product_id, u.product_id)
        WHERE fc.company_id = ${companyId} ${branch('fc.branch_id')}
          AND fc.target_kind = 'sale' AND fc.status = 'approved' AND fc.correction_date >= ${from}`),
-    db.$queryRaw<{ product_id: Buffer; category_id: Buffer | null; n: bigint; revenue: unknown; cost: unknown }[]>(Prisma.sql`
+    db.$queryRaw<{ product_id: Buffer; category_id: Buffer | null; n: bigint; revenue: unknown; cost: unknown; effect_known: unknown }[]>(Prisma.sql`
       SELECT u.product_id AS product_id, p.category_id AS category_id,
-             COUNT(*) AS n, SUM(rr.net_refund_due) AS revenue, SUM(rr.line_cost) AS cost
+             COUNT(*) AS n, SUM(rr.net_refund_due) AS revenue, SUM(rr.line_cost) AS cost,
+             COALESCE(SUM(CASE WHEN rr.line_cost IS NOT NULL THEN rr.net_refund_due - rr.line_cost END), 0) AS effect_known
         FROM return_reversals rr
         JOIN units u ON u.id = rr.unit_id
         JOIN products p ON p.id = u.product_id
@@ -284,7 +302,7 @@ export async function productAdjustments(db: RawRunner, companyId: Buffer, branc
     const key = productId.toString('hex');
     const found = byProduct.get(key);
     if (found) return found;
-    const fresh: ProductAdjustment = { productId, categoryId, cancelledUnits: 0, cancelledRevenue: 0, cancelledCogs: 0, returnedUnits: 0, returnedRevenue: 0, returnedCostCredited: 0 };
+    const fresh: ProductAdjustment = { productId, categoryId, cancelledUnits: 0, cancelledRevenue: 0, cancelledCogs: 0, returnedUnits: 0, returnedRevenue: 0, returnedCostCredited: 0, profitEffect: 0 };
     byProduct.set(key, fresh);
     return fresh;
   };
@@ -295,14 +313,21 @@ export async function productAdjustments(db: RawRunner, companyId: Buffer, branc
     if (!l.product_id) continue;
     const e = entry(l.product_id, l.category_id);
     e.cancelledUnits += Number(l.quantity);
-    e.cancelledRevenue = round2(e.cancelledRevenue + fromCents(shares.get(l.id.toString('hex')) ?? 0n));
-    e.cancelledCogs = round2(e.cancelledCogs + fromCents(toCents(String(l.cost)) * BigInt(Number(l.quantity))));
+    const share = fromCents(shares.get(l.id.toString('hex')) ?? 0n);
+    e.cancelledRevenue = round2(e.cancelledRevenue + share);
+    // An unknown cost (0107) credits nothing back and takes no profit off: none was counted when it sold.
+    if (l.cost !== null) {
+      const cogs = fromCents(toCents(String(l.cost)) * BigInt(Number(l.quantity)));
+      e.cancelledCogs = round2(e.cancelledCogs + cogs);
+      e.profitEffect = round2(e.profitEffect + share - cogs);
+    }
   }
   for (const r of returned) {
     const e = entry(r.product_id, r.category_id);
     e.returnedUnits += Number(r.n);
     e.returnedRevenue = round2(e.returnedRevenue + num(r.revenue));
     e.returnedCostCredited = round2(e.returnedCostCredited + num(r.cost));
+    e.profitEffect = round2(e.profitEffect + num(r.effect_known));
   }
   return [...byProduct.values()];
 }

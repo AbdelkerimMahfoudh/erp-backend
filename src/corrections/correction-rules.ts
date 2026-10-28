@@ -396,6 +396,12 @@ export interface PurchaseCancellationState {
   units: { status: string; atBranch: boolean }[];
   /** Each quantity line, against the branch's stock of that product now. */
   stock: { onHand: number; reserved: number; bought: number; averageCost: number; unitCost: number }[];
+  /**
+   * A quantity line bought without its buying cost, or stock holding pieces of
+   * unknown cost (0107): the average to take back cannot be computed, and a
+   * zero would invent one. The cost is entered first.
+   */
+  costMissing?: boolean;
 }
 
 /**
@@ -431,6 +437,9 @@ export function assertPurchaseCancellable(s: PurchaseCancellationState): void {
   const moved = s.units.filter((u) => u.status !== 'in_stock' || !u.atBranch).length;
   if (moved > 0) {
     throw new ConflictException({ code: 'goods_moved', message: 'Some of what this purchase brought has been sold, moved or reserved. Correct that first.', count: moved });
+  }
+  if (s.costMissing) {
+    throw new ConflictException({ code: 'cost_missing', message: 'Some of this purchase has no buying cost yet. Enter it before cancelling.' });
   }
   for (const line of s.stock) {
     if (line.onHand - line.reserved < line.bought) {

@@ -144,13 +144,15 @@ interface PreparedUnit {
   imeiPrimary: string | null;
   imeiSecondary: string | null;
   serialNo: string | null;
-  cost: number;
+  /** NULL: received without its buying cost (0107). */
+  cost: number | null;
 }
 
 interface PreparedStock {
   productId: Buffer;
   quantity: number;
-  cost: number;
+  /** NULL: received without its buying cost (0107). */
+  cost: number | null;
   /**
    * Selling price for a branch that has never priced this product. `null` means
    * genuinely unpriced — Sell then asks. It used to fall back to `0`, which
@@ -324,7 +326,7 @@ export class PurchasingService {
               identifier: normalized,
               ...this.identifierColumns(product, normalized),
               imeiSecondary: secondary,
-              cost: item.unitCost,
+              cost: item.unitCost ?? null,
             });
           }
         }
@@ -337,7 +339,7 @@ export class PurchasingService {
         preparedStock.push({
           productId: product.id,
           quantity,
-          cost: item.unitCost,
+          cost: item.unitCost ?? null,
           price: item.price ?? (product.defaultPrice === null ? null : Number(product.defaultPrice)),
         });
       }
@@ -408,8 +410,13 @@ export class PurchasingService {
     const teach = learnPlans.filter((plan) => !notCreated.has(plan.productId.toString('hex')));
 
     // 3. Totals.
-    const unitsCost = committableUnits.reduce((s, u) => s + u.cost, 0);
-    const stockCost = preparedStock.reduce((s, l) => s + l.cost * l.quantity, 0);
+    /*
+     * The KNOWN cost. A line received without its cost (0107) adds nothing: what
+     * was paid for it is not known, so nothing is recorded as paid — entering the
+     * cost later corrects valuation and profit, and moves no money.
+     */
+    const unitsCost = committableUnits.reduce((s, u) => s + (u.cost ?? 0), 0);
+    const stockCost = preparedStock.reduce((s, l) => s + (l.cost ?? 0) * l.quantity, 0);
     const total = Number((unitsCost + stockCost).toFixed(2));
     /**
      * Paid in full, by the server.

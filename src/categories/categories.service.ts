@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ProductCategory } from '@prisma/client';
+import { Prisma, ProductCategory, TrackingType } from '@prisma/client';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
@@ -22,13 +22,21 @@ export class CategoriesService {
     private readonly attributes: ProductAttributesService,
   ) {}
 
-  /** Active only by default; pickers never show retired categories. */
-  list(includeInactive = false): Promise<ProductCategory[]> {
-    return this.db.productCategory.findMany({
+  /**
+   * Active only by default; pickers never show retired categories.
+   *
+   * Each row carries the tracking modes it allows (D223), from the same rule the
+   * server enforces, so the product form offers exactly those and a correction
+   * it offers is never refused.
+   */
+  async list(includeInactive = false): Promise<(ProductCategory & { allowedTrackingTypes: readonly TrackingType[] })[]> {
+    const rows = await this.db.productCategory.findMany({
       where: includeInactive ? {} : { isActive: true },
       orderBy: { name: 'asc' },
       take: 200,
+      include: { parent: { select: { key: true } } },
     });
+    return rows.map(({ parent, ...row }) => ({ ...row, allowedTrackingTypes: allowedTrackingTypes({ ...row, parent }) }));
   }
 
   async getById(idStr: string): Promise<ProductCategory> {

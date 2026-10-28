@@ -631,3 +631,23 @@ export function byDisplayRank(a: RankedCatalogueModel, b: RankedCatalogueModel):
 export function modelsForBrand(brandKey: string): RankedCatalogueModel[] {
   return MODELS.filter((m) => m.brandKey === brandKey).sort(byDisplayRank);
 }
+
+/**
+ * Which categories this catalogue answers for (D223, 2026-10-28).
+ *
+ * Every brand and model here is a PHONE: the curated manufacturer lists are
+ * handsets, from feature phones to the newest iPhone, and nothing else. So the
+ * catalogue is offered only under the built-in Phones category, its
+ * subcategories, and a shop's own subcategory filed under one of them. Under
+ * any other category — tablets, laptops, audio, chargers, cables, cases — it is
+ * not consulted at all and the model is typed by hand or taken from the shop's
+ * own products: Apple without Phones never means an iPhone. No tablet, laptop
+ * or accessory model is invented to fill the gap.
+ */
+export const DEVICE_CATALOGUE_CATEGORY_ROOT = 'phones';
+
+/** True when a category, by its built-in key or its parent's, may use this catalogue. */
+export function catalogueCovers(categoryKey: string | null | undefined): boolean {
+  if (!categoryKey) return false;
+  return categoryKey === DEVICE_CATALOGUE_CATEGORY_ROOT || categoryKey.startsWith(`${DEVICE_CATALOGUE_CATEGORY_ROOT}.`);
+}

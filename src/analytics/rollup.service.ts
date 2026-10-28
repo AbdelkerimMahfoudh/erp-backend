@@ -27,6 +27,8 @@ interface ReturnTotalsRow {
   gross: unknown;
   adjustments: unknown;
   cogs_credited: unknown;
+  /** Σ (gross − adjustments − cost) over the returns whose cost is KNOWN (0107). */
+  effect_known: unknown;
   returns_count: unknown;
 }
 
@@ -51,17 +53,32 @@ interface DayLineRow extends SaleLineRow {
 const shareLines = (rows: readonly SaleLineRow[]) =>
   rows.map((r) => ({ id: r.id, saleId: r.sale_id, price: String(r.price), quantity: Number(r.quantity), discount: String(r.discount), saleTotal: String(r.sale_total) }));
 
-/** Σ share, Σ cost, Σ units of some lines, the shares taken from the invoice totals. */
+/**
+ * Σ share, Σ cost, Σ units of some lines, the shares taken from the invoice totals.
+ *
+ * A line whose buying cost is not known (0107) counts in revenue and units, and
+ * in neither cost nor `profitRevenue`: profit is the known lines' revenue less
+ * their cost, never a price less zero, and `missingCostLines` says how many a
+ * figure leaves out. With every cost known, `profitRevenue` is `revenue`.
+ */
 function lineTotals(rows: readonly SaleLineRow[], shares: Map<string, bigint>) {
   let revenue = 0n;
+  let profitRevenue = 0n;
   let cogs = 0n;
   let qty = 0;
+  let missingCostLines = 0;
   for (const r of rows) {
-    revenue += shares.get(r.id.toString('hex')) ?? 0n;
-    cogs += toCents(String(r.cost)) * BigInt(Number(r.quantity));
+    const share = shares.get(r.id.toString('hex')) ?? 0n;
+    revenue += share;
     qty += Number(r.quantity);
+    if (r.cost === null) {
+      missingCostLines += 1;
+      continue;
+    }
+    profitRevenue += share;
+    cogs += toCents(String(r.cost)) * BigInt(Number(r.quantity));
   }
-  return { revenue: fromCents(revenue), cogs: fromCents(cogs), qty };
+  return { revenue: fromCents(revenue), profitRevenue: fromCents(profitRevenue), cogs: fromCents(cogs), qty, missingCostLines };
 }
 
 interface ValuationSourceRow {
@@ -73,6 +90,7 @@ interface ValuationSourceRow {
   quantity?: unknown;
   inv_value: unknown;
   exp_rev: unknown;
+  exp_rev_known: unknown;
 }
 
 interface ValuationAcc {
@@ -82,6 +100,8 @@ interface ValuationAcc {
   quantity: number;
   inventoryValue: number;
   expectedRevenue: number;
+  /** Of the holdings whose cost is known (0107). */
+  expectedRevenueKnown: number;
 }
 
 /**
@@ -245,6 +265,7 @@ export class RollupService {
       SELECT COALESCE(SUM(gross_refund), 0)     AS gross,
              COALESCE(SUM(adjustment_total), 0) AS adjustments,
              COALESCE(SUM(line_cost), 0)        AS cogs_credited,
+             COALESCE(SUM(CASE WHEN line_cost IS NOT NULL THEN gross_refund - adjustment_total - line_cost END), 0) AS effect_known,
              COUNT(*)                           AS returns_count
       FROM return_reversals
       WHERE company_id = ${companyId}
@@ -275,7 +296,8 @@ export class RollupService {
      * would be a full impairment decided before anyone inspected the phone —
      * which is the LATER milestone's call, not this one's.
      */
-    const returnsGrossProfit = round2(returnsRevenue - returnsAdjustments - returnsCogs);
+    // Over the returns of KNOWN cost (0107): a line whose sale counted no profit takes none back.
+    const returnsGrossProfit = round2(toNum(returnRows[0].effect_known));
 
     /**
      * Refunds CONFIRMED on this day (I3) — money leaving the till.
@@ -359,6 +381,8 @@ export class RollupService {
     const cancelled = lineTotals(cancelledLines, sharesBySale(shareLines(cancelledLines)));
     const cancelledRevenue = cancelled.revenue;
     const cancelledCogs = cancelled.cogs;
+    // What the cancelled sales had put on profit: their known lines only (0107).
+    const cancelledProfitRevenue = cancelled.profitRevenue;
     const cancelledCount = new Set(cancelledLines.map((l) => l.correction_id.toString('hex'))).size;
     const cancelledQty = cancelled.qty;
 
@@ -388,11 +412,11 @@ export class RollupService {
 
     const revenue = totals.revenue;
     const cogs = totals.cogs;
-    const grossProfit = round2(revenue - cogs);
+    const grossProfit = round2(totals.profitRevenue - cogs);
     const expenses = round2(toNum(expRows[0].expenses) - expenseReversals);
     // Positive magnitudes, subtracted explicitly. A negative stored revenue
     // would leave every reader guessing whether the sign was already applied.
-    const netProfit = round2(grossProfit - returnsGrossProfit - (cancelledRevenue - cancelledCogs) - expenses);
+    const netProfit = round2(grossProfit - returnsGrossProfit - (cancelledProfitRevenue - cancelledCogs) - expenses);
 
     /**
      * Two recomputes of the same branch-day at the same moment — a close and a
@@ -415,6 +439,7 @@ export class RollupService {
           grossProfit,
           salesCount,
           qtySold: totals.qty,
+          missingCostLines: totals.missingCostLines,
           expenses,
           netProfit,
           returnsRevenue,
@@ -447,6 +472,7 @@ export class RollupService {
           grossProfit,
           salesCount,
           qtySold: totals.qty,
+          missingCostLines: totals.missingCostLines,
           expenses,
           netProfit,
           returnsRevenue,
@@ -509,7 +535,7 @@ export class RollupService {
           qtySold: r.qty,
           revenue: r.revenue,
           cogs: r.cogs,
-          grossProfit: round2(r.revenue - r.cogs),
+          grossProfit: round2(r.profitRevenue - r.cogs),
           refreshedAt: now,
         })),
       });
@@ -545,11 +571,13 @@ export class RollupService {
           quantity: 0,
           inventoryValue: 0,
           expectedRevenue: 0,
+          expectedRevenueKnown: 0,
         };
       if (isUnit) acc.unitsCount += toNum(r.units_count);
       else acc.quantity += toNum(r.quantity);
       acc.inventoryValue += toNum(r.inv_value);
       acc.expectedRevenue += toNum(r.exp_rev);
+      acc.expectedRevenueKnown += toNum(r.exp_rev_known);
       byProduct.set(key, acc);
     };
     rows.forEach((r) => merge(r, r.kind === 'unit'));
@@ -571,7 +599,8 @@ export class RollupService {
             quantity: a.quantity,
             inventoryValue,
             expectedRevenue,
-            expectedProfit: round2(expectedRevenue - inventoryValue),
+            // Over the holdings of known cost only (0107), as inventory value is.
+            expectedProfit: round2(a.expectedRevenueKnown - inventoryValue),
             refreshedAt: now,
           };
         }),
