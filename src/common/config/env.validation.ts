@@ -155,6 +155,8 @@ export const envValidationSchema = Joi.object({
   // businesses only. "open": for every business. Unset: closed when NODE_ENV=production, open otherwise. The production
   // preflight refuses "open": real customers are activated only once their release requirements are met.
   CUSTOMER_ACTIVATION: Joi.string().valid('closed', 'open').optional(),
+  /** D224: deferred WhatsApp verification for test businesses' accounts. Off unless exactly `on`. */
+  PHONE_VERIFICATION_DEFERRAL: Joi.string().valid('off', 'on').optional(),
 
   // File upload foundation.
   UPLOAD_MAX_BYTES: Joi.number().integer().min(1).default(10 * 1024 * 1024),

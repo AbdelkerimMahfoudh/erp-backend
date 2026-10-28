@@ -278,7 +278,7 @@ describe('the controller, from the platform’s side', () => {
     function controllerWith(registration: unknown, delivery: unknown) {
       const records = new WhatsAppRecords(fakeMessagingPrisma() as never, { hash: (n: string) => `h:${n}` } as never);
       const flow = new RegistrationFlowService(registration as never, stub, delivery as never, records);
-      return new PlatformController(stub, stub, stub, stub, registration as never, stub, stub, stub, stub, stub, flow, stub);
+      return new PlatformController(stub, stub, stub, stub, registration as never, stub, stub, stub, stub, stub, flow, stub, stub);
     }
     const attempt = {
       idempotencyKey: 'k-1',

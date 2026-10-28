@@ -60,6 +60,8 @@ function world(opts: { activation?: 'open' | 'closed'; connections?: number; cou
     subscriptionPayment: { count: async () => opts.payments ?? 0 },
     subscription: { findFirst: async () => ({ status: opts.status ?? 'pending_activation', isComplimentary: false, complimentaryUntil: null }) },
     ownerInvitation: { count: async () => opts.accepted ?? 0, findFirst: async () => null },
+    // 0109: no platform-provisioned person has spent a setup code in these businesses.
+    accountSetupCode: { count: async () => 0 },
     registrationAttempt: { findFirst: async () => null },
     user: { findFirst: async () => null },
   };

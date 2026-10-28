@@ -44,7 +44,7 @@ export interface ProvisioningStatus {
     name: string;
     /** True, false, or null when it cannot be known (a business a script made). Never the password. */
     passwordSet: boolean | null;
-    phone: { present: boolean; verified: boolean; whatsappConsent: ConsentState | null };
+    phone: { present: boolean; verified: boolean; verification: 'required' | 'deferred_by_platform' | 'verified'; whatsappConsent: ConsentState | null };
     email: { present: boolean; verified: boolean };
     lastLoginAt: string | null;
   } | null;
@@ -238,7 +238,9 @@ export class ProvisioningService {
             tx.subscription.findFirst({ where: { companyId }, select: { status: true } }),
             tx.ownerInvitation.count({ where: { companyId, acceptedAt: { not: null } } }),
           ]);
-          if ((sub && sub.status !== 'pending_activation') || accepted > 0) {
+          // A platform-provisioned person who chose their password (0109) has used the business as surely.
+          const setUp = await tx.accountSetupCode.count({ where: { companyId, usedAt: { not: null } } });
+          if ((sub && sub.status !== 'pending_activation') || accepted > 0 || setUp > 0) {
             throw new ConflictException({
               code: 'test_status_in_use',
               message: 'This test business has been used, so it stays a test business. Create the customer’s business separately.',
@@ -249,7 +251,8 @@ export class ProvisioningService {
         const now = new Date();
         await tx.company.update({
           where: { id: companyId },
-          data: { isTest: input.isTest, testMarkedAt: now, testMarkedBy: ctx.admin.email.slice(0, 160) },
+          // The pilot sub-mark (0109) exists only on a test business.
+          data: { isTest: input.isTest, ...(input.isTest ? {} : { isPilot: false }), testMarkedAt: now, testMarkedBy: ctx.admin.email.slice(0, 160) },
         });
         await this.audit.record(
           {
@@ -332,7 +335,7 @@ export class ProvisioningService {
       this.prisma.user.findFirst({
         where: { companyId, deletedAt: null },
         orderBy: { createdAt: 'asc' },
-        select: { id: true, name: true, email: true, phone: true, emailVerifiedAt: true, phoneVerifiedAt: true, lastLoginAt: true },
+        select: { id: true, name: true, email: true, phone: true, emailVerifiedAt: true, phoneVerifiedAt: true, phoneVerification: true, lastLoginAt: true },
       }),
       this.prisma.ownerInvitation.findFirst({
         where: { companyId },
@@ -343,7 +346,11 @@ export class ProvisioningService {
     ]);
 
     const createdBy: CreatedBy = !attempt ? 'other' : attempt.idempotencyKey.startsWith(CONSOLE_KEY_PREFIX) ? 'console' : 'self_service';
-    const accepted = owner ? (await this.prisma.ownerInvitation.count({ where: { companyId, userId: owner.id, acceptedAt: { not: null } } })) > 0 : false;
+    const accepted = owner
+      ? (await this.prisma.ownerInvitation.count({ where: { companyId, userId: owner.id, acceptedAt: { not: null } } })) +
+          (await this.prisma.accountSetupCode.count({ where: { companyId, userId: owner.id, usedAt: { not: null } } })) >
+        0
+      : false;
     const passwordSet = createdBy === 'console' ? accepted : createdBy === 'self_service' ? true : accepted ? true : null;
 
     const now = Date.now();
@@ -370,7 +377,13 @@ export class ProvisioningService {
         ? {
             name: owner.name,
             passwordSet,
-            phone: { present: owner.phone !== null, verified: owner.phoneVerifiedAt !== null, whatsappConsent: consent },
+            phone: {
+              present: owner.phone !== null,
+              verified: owner.phoneVerifiedAt !== null,
+              /** D224: `deferred_by_platform` is NOT verified — the number was never proved. */
+              verification: owner.phoneVerification as 'required' | 'deferred_by_platform' | 'verified',
+              whatsappConsent: consent,
+            },
             email: { present: owner.email !== null, verified: owner.emailVerifiedAt !== null },
             lastLoginAt: owner.lastLoginAt?.toISOString() ?? null,
           }

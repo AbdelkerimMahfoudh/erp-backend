@@ -112,6 +112,10 @@ echo "== 9. the 0102 real-MySQL spec (test businesses, the console's stores and 
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/platform/provisioning.mysql.spec.ts
 
+echo "== 9b. the 0109 real-MySQL spec (deferred WhatsApp verification, setup codes), on the same disposable schema"
+PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/platform/deferred-verification.mysql.spec.ts
+
 echo "== 10. the 0103 real-MySQL spec (promoter codes, attribution, user invitations), on the same disposable schema"
 ACQUISITION_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ACQUISITION_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/acquisition/acquisition.mysql.spec.ts

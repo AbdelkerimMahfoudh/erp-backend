@@ -202,6 +202,15 @@ export class AppConfigService {
     return value ? value === 'open' : !this.isProduction;
   }
 
+  /**
+   * The kill switch for deferred WhatsApp verification (D224, docs/109): `on` lets a platform administrator provision a
+   * test business's account whose number is NOT verified. Off unless set — in every environment. Turning it off refuses
+   * new deferrals only; existing deferred accounts stay as they are, identifiable.
+   */
+  get phoneVerificationDeferralEnabled(): boolean {
+    return (this.config.get<string>('PHONE_VERIFICATION_DEFERRAL') ?? '').trim() === 'on';
+  }
+
   get whatsappApiBaseUrl(): string {
     return this.get('WHATSAPP_API_BASE_URL');
   }

@@ -25,6 +25,7 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { Public } from '../common/decorators/public.decorator';
@@ -57,6 +58,9 @@ import { ContinueConfirmDto, ContinueStartDto, RegisterDto } from './registratio
 import { IsIdempotencyKey } from '../common/decorators/idempotency-key.decorator';
 import { trialFactsOf, trialSummaryOf, type TrialClaimFacts } from './trial/trial-rules';
 import { ProvisioningService } from './provisioning.service';
+import { TestProvisioningService } from './test-provisioning.service';
+import { DeferralDto } from './test-provisioning.controller';
+import { Type } from 'class-transformer';
 
 /**
  * The platform-control API.
@@ -220,6 +224,13 @@ export class CreateBusinessDto {
   @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
   /** A persistent test business (D217), marked in the same transaction that creates it. */
   @IsOptional() @IsBoolean() isTest?: boolean;
+  /**
+   * The Owner's WhatsApp verification (D224): `required` unless said. `deferred_by_platform` only for a test business,
+   * by an administrator with MFA and a fresh step-up, while the server's kill switch allows it — all checked by the
+   * server ({@link TestProvisioningService.assertMayDefer}).
+   */
+  @IsOptional() @IsIn(['required', 'deferred_by_platform']) verification?: 'required' | 'deferred_by_platform';
+  @IsOptional() @ValidateNested() @Type(() => DeferralDto) deferral?: DeferralDto;
   @IsString() @MinLength(1) @MaxLength(500) reason: string;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
@@ -294,6 +305,7 @@ export class PlatformController {
     private readonly invitations: OwnerInvitationService,
     private readonly flow: RegistrationFlowService,
     private readonly provisioning: ProvisioningService,
+    private readonly testProvisioning: TestProvisioningService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -515,6 +527,7 @@ export class PlatformController {
     @Query('q') q?: string,
     @Query('state') state?: string,
     @Query('page') page?: string,
+    @Query('verification') verification?: string,
   ) {
     const take = 25;
     const skip = Math.max(0, (Number(page) || 1) - 1) * take;
@@ -530,6 +543,8 @@ export class PlatformController {
           ],
         }
       : {};
+    // D224: the businesses with at least one account whose WhatsApp verification is deferred.
+    if (verification === 'deferred') where.users = { some: { phoneVerification: 'deferred_by_platform', deletedAt: null } };
 
     /*
      * A state is derived from dates, so it cannot be a SQL predicate. With a
@@ -551,6 +566,7 @@ export class PlatformController {
           createdAt: true,
           timezone: true,
           isTest: true,
+          isPilot: true,
           subscription: true,
           ...TRIAL_FACTS,
           _count: { select: { branches: true, users: true } },
@@ -574,6 +590,7 @@ export class PlatformController {
         createdAt: c.createdAt.toISOString(),
         /** A persistent test business (D217): shown as one wherever it is listed. */
         isTest: c.isTest,
+        isPilot: c.isPilot,
         branches: c._count.branches,
         users: c._count.users,
         state: listed.state,
@@ -625,6 +642,7 @@ export class PlatformController {
         createdAt: true,
         timezone: true,
         isTest: true,
+        isPilot: true,
         subscription: true,
         branches: { select: { id: true, name: true, type: true, activity: true, activityNext: true } },
         // The free trial as recorded (0095): the eligibility and the claim, for the console to show — never to change.
@@ -647,10 +665,12 @@ export class PlatformController {
             phone: true,
             emailVerifiedAt: true,
             phoneVerifiedAt: true,
+            phoneVerification: true,
             isActive: true,
             lastLoginAt: true,
             invitedAt: true,
             activatedAt: true,
+            userBranches: { select: { branchId: true, role: { select: { key: true } } } },
           },
           take: 50,
         },
@@ -674,6 +694,7 @@ export class PlatformController {
       city: company.city,
       createdAt: company.createdAt.toISOString(),
       isTest: company.isTest,
+      isPilot: company.isPilot,
       setup,
       branches: company.branches.map((b) => ({
         id: binToUuid(b.id),
@@ -690,6 +711,10 @@ export class PlatformController {
         phone: u.phone,
         emailVerified: u.emailVerifiedAt !== null,
         phoneVerified: u.phoneVerifiedAt !== null,
+        /** D224: `required`, `deferred_by_platform` (NOT verified) or `verified` — the database's own state. */
+        phoneVerification: u.phoneVerification,
+        role: u.userBranches[0]?.role.key ?? null,
+        branchIds: u.userBranches.map((ub) => binToUuid(ub.branchId)),
         isActive: u.isActive,
         /** `pending`: created from Team and not yet activated by the server (0086). */
         status: !u.isActive ? (u.invitedAt && !u.activatedAt ? 'pending' : 'inactive') : 'active',
@@ -806,6 +831,11 @@ export class PlatformController {
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
     const isTest = dto.isTest === true;
     await this.provisioning.assertMayCreate(isTest, { admin, ip: req.ip }, dto.businessName);
+    const deferOwner = dto.verification === 'deferred_by_platform';
+    const actor = { admin, sessionId: req.platformSessionId, ip: req.ip ?? null };
+    // Every condition before anything is written: a refused deferral creates no business.
+    const deferral = deferOwner ? this.testProvisioning.parseDeferral(dto.deferral) : null;
+    if (deferOwner) await this.testProvisioning.assertMayDefer(actor, { id: null, name: dto.businessName, isTest }, 'phone_verification.defer');
 
     const result = await this.registration.register({
       idempotencyKey: `${ADMIN_KEY_PREFIX}${dto.idempotencyKey}`,
@@ -846,9 +876,22 @@ export class PlatformController {
         activity: result.activity,
         status: result.status,
         isTest,
+        ownerPhoneVerification: deferOwner ? 'deferred_by_platform' : 'required',
       },
       ip: req.ip ?? null,
     });
+
+    if (deferral) {
+      // The deferred Owner's setup code replaces the setup invitation: one way in, never two.
+      const deferred = await this.testProvisioning.deferOwner(result.companyId, deferral, actor);
+      return {
+        ...result,
+        invitation: null,
+        setupCode: deferred.setupCode,
+        ownerPhoneVerification: 'deferred_by_platform' as const,
+        setup: await this.provisioning.status(uuidToBin(result.companyId)),
+      };
+    }
 
     let invitation;
     try {

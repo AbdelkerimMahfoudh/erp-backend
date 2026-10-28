@@ -75,6 +75,7 @@ const platformWith = (over: Partial<Record<string, unknown>> = {}) =>
     (over.invitations ?? stub) as never,
     (over.flow ?? stub) as never,
     (over.provisioning ?? stub) as never,
+    stub,
   );
 
 const ATTEMPT = {

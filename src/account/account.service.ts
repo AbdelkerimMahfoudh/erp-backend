@@ -36,6 +36,8 @@ export interface AccountView {
   personalId: string;
   phone: string | null;
   phoneVerifiedAt: string | null;
+  /** D224: required | deferred_by_platform | verified. `deferred_by_platform` is NOT verified. */
+  phoneVerification: 'required' | 'deferred_by_platform' | 'verified';
   email: string | null;
   emailVerifiedAt: string | null;
   /** Whether a deletion code can be sent at all. */
@@ -104,6 +106,7 @@ export class AccountService {
         personalId: true,
         phone: true,
         phoneVerifiedAt: true,
+        phoneVerification: true,
         email: true,
         emailVerifiedAt: true,
       },
@@ -121,6 +124,7 @@ export class AccountService {
       personalId: user.personalId,
       phone: user.phone,
       phoneVerifiedAt: user.phoneVerifiedAt?.toISOString() ?? null,
+      phoneVerification: user.phoneVerification as AccountView['phoneVerification'],
       email: user.email,
       emailVerifiedAt: user.emailVerifiedAt?.toISOString() ?? null,
       whatsappVerified: Boolean(user.phone && user.phoneVerifiedAt),

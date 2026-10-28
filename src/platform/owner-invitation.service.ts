@@ -1,10 +1,11 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { HashingService } from '../common/security/hashing.service';
 import { SessionsService } from '../auth/sessions.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { PlatformAuditService } from './platform-audit.service';
+import { AccountSetupCodeService } from './account-setup-code.service';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
 /**
@@ -62,6 +63,7 @@ export class OwnerInvitationService {
     private readonly hashing: HashingService,
     private readonly sessions: SessionsService,
     private readonly audit: PlatformAuditService,
+    @Optional() private readonly setupCodes?: AccountSetupCodeService,
   ) {}
 
   private hashToken(token: string): string {
@@ -174,7 +176,13 @@ export class OwnerInvitationService {
         company: { select: { name: true, publicStoreId: true } },
       },
     });
-    if (!invitation || !invitation.user.isActive || invitation.user.deletedAt) throw refuse();
+    if (!invitation) {
+      // Not an Owner's invitation: perhaps a platform-provisioned account's setup code (0109). Same refusal either way.
+      const spent = this.setupCodes ? await this.setupCodes.spend(token, password, { ip: meta.ip ?? null }, now) : { spent: false as const };
+      if (!spent.spent) throw refuse();
+      return { publicStoreId: spent.publicStoreId, businessName: spent.business };
+    }
+    if (!invitation.user.isActive || invitation.user.deletedAt) throw refuse();
     if (meta.mayAccept && !(await meta.mayAccept(invitation.companyId))) throw refuse();
 
     const passwordHash = await this.hashing.hash(password);

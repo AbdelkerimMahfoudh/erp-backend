@@ -1254,6 +1254,7 @@ describe('the scheduled requests as the website and the console read them', () =
       unused,
       unused,
       { status: async () => null } as never,
+      unused,
     );
   };
 

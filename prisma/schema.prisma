@@ -350,6 +350,8 @@ model Company {
   /// When, and by which administrator, the test status was last set or cleared. Null for a business never marked.
   testMarkedAt DateTime? @map("test_marked_at") @db.DateTime(6)
   testMarkedBy String?   @map("test_marked_by") @db.VarChar(160)
+  /// 0109: a test business running a controlled store pilot (the owner's decision, 2026-10-28). Only while `isTest`.
+  isPilot      Boolean   @default(false) @map("is_pilot")
   createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
 
@@ -358,6 +360,8 @@ model Company {
   users                          User[]
   ownerInvitations               OwnerInvitation[]
   staffInvitations               StaffInvitation[]
+  phoneVerificationDeferrals     PhoneVerificationDeferral[]
+  accountSetupCodes              AccountSetupCode[]
   referralInvitations            ReferralInvitation[]
   acquisition                    BusinessAcquisition?           @relation("AcquiredCompany")
   invitedAcquisitions            BusinessAcquisition[]          @relation("InviterCompany")
@@ -589,6 +593,8 @@ model User {
   consignmentLedgerEntries ConsignmentLedgerEntry[]
   ownerInvitations         OwnerInvitation[]
   staffInvitations         StaffInvitation[]
+  phoneVerificationDeferrals PhoneVerificationDeferral[]
+  accountSetupCodes        AccountSetupCode[]
   referralInvitations      ReferralInvitation[]     @relation("ReferralInvitationCreator")
   revokedReferrals         ReferralInvitation[]     @relation("ReferralInvitationRevoker")
   invitedAcquisitions      BusinessAcquisition[]
@@ -617,6 +623,9 @@ model User {
   /// changes. Never set it to fake "verified" — there is no verification
   /// mechanism in Stage 1, so this stays null until Stage 4 delivers OTP.
   phoneVerifiedAt DateTime? @map("phone_verified_at") @db.DateTime(6)
+  /// 0109 (D224): required | deferred_by_platform | verified. `verified` exactly when `phoneVerifiedAt` is set — the
+  /// database derives it (triggers) and enforces it (CHECK). `deferred_by_platform` is never verification.
+  phoneVerification String @default("required") @map("phone_verification") @db.VarChar(24)
   /// A sign-in identifier, not just recovery, as of `0055`. Unique per company
   /// — the same rule `phone` already had — so one address used at two shops
   /// still reaches the password-first account chooser rather than colliding.
@@ -707,6 +716,7 @@ model User {
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
   @@unique([companyId, email], map: "ux_users_company_email") // 0055: email is a login identifier; same per-company rule as phone
+  @@index([companyId, phoneVerification], map: "ix_users_phone_verification")
   @@map("users")
 }
 
@@ -6240,4 +6250,53 @@ model SubscriptionNotice {
   @@index([state, nextAttemptAt], map: "ix_subscription_notices_queue")
   @@index([companyId, createdAt], map: "ix_subscription_notices_company")
   @@map("subscription_notices")
+}
+
+/// 0109 (D224): a platform administrator's exception — this person's WhatsApp number is NOT verified, and they may
+/// work anyway in a test business. Never a verification. At most one live per person (a UNIQUE generated column in the
+/// migration). Ended by: an administrator requiring verification, the person's own verification (a trigger), or the
+/// account's cancellation.
+model PhoneVerificationDeferral {
+  id          Bytes     @id @db.Binary(16)
+  companyId   Bytes     @map("company_id") @db.Binary(16)
+  userId      Bytes     @map("user_id") @db.Binary(16)
+  grantedById Bytes?    @map("granted_by_id") @db.Binary(16)
+  grantedBy   String    @map("granted_by") @db.VarChar(160)
+  reason      String    @db.VarChar(500)
+  reviewAt    DateTime? @map("review_at") @db.DateTime(6)
+  grantedAt   DateTime  @default(now()) @map("granted_at") @db.DateTime(6)
+  endedAt     DateTime? @map("ended_at") @db.DateTime(6)
+  endedBy     String?   @map("ended_by") @db.VarChar(160)
+  /// required | verified | cancelled
+  endReason   String?   @map("end_reason") @db.VarChar(20)
+
+  company Company @relation(fields: [companyId], references: [id], map: "fk_phone_verification_deferrals_company")
+  user    User    @relation(fields: [userId], references: [id], map: "fk_phone_verification_deferrals_user")
+
+  @@index([companyId, grantedAt], map: "ix_phone_verification_deferrals_company")
+  @@index([userId, grantedAt], map: "ix_phone_verification_deferrals_user")
+  @@map("phone_verification_deferrals")
+}
+
+/// 0109 (D224): a one-time code with which a platform-provisioned person chooses their own password. Only its HMAC
+/// under STAFF_INVITATION_KEY (its own purpose domain) is kept; 72 hours; single use; one live per person.
+model AccountSetupCode {
+  id            Bytes     @id @db.Binary(16)
+  companyId     Bytes     @map("company_id") @db.Binary(16)
+  userId        Bytes     @map("user_id") @db.Binary(16)
+  tokenHash     String    @unique(map: "ux_account_setup_codes_token") @map("token_hash") @db.Char(64)
+  issuedBy      String    @map("issued_by") @db.VarChar(160)
+  expiresAt     DateTime  @map("expires_at") @db.DateTime(6)
+  usedAt        DateTime? @map("used_at") @db.DateTime(6)
+  revokedAt     DateTime? @map("revoked_at") @db.DateTime(6)
+  /// reissued | revoked | cancelled
+  revokedReason String?   @map("revoked_reason") @db.VarChar(20)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id], map: "fk_account_setup_codes_company")
+  user    User    @relation(fields: [userId], references: [id], map: "fk_account_setup_codes_user")
+
+  @@index([companyId, createdAt], map: "ix_account_setup_codes_company")
+  @@index([userId, createdAt], map: "ix_account_setup_codes_user")
+  @@map("account_setup_codes")
 }

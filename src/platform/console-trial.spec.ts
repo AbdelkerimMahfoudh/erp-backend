@@ -30,6 +30,7 @@ const platformWith = (over: Partial<Record<string, unknown>> = {}) =>
     stub,
     stub,
     (over.provisioning ?? { status: async () => null }) as never,
+    stub,
   );
 
 describe('the console sees each business’s trial by the shop’s own rules', () => {

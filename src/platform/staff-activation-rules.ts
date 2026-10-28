@@ -37,6 +37,7 @@ const SELECT = {
   phone: true,
   emailVerifiedAt: true,
   phoneVerifiedAt: true,
+  phoneVerification: true,
   invitedAt: true,
   activatedAt: true,
   isActive: true,
@@ -106,7 +107,10 @@ export async function evaluateActivation(db: ActivationDb, userId: Buffer): Prom
   // The WhatsApp number is every employee's required contact, proved by the employee from their invitation (D214); an
   // email address is optional and verified later, if ever — it never stands in for the number, nor holds activation back.
   const pending: PendingReason[] = [];
-  if (!row.phone || !row.phoneVerifiedAt) pending.push('phone_verification');
+  // A platform administrator's deferral (D224, a test business only) stands in for the proof — never as a proof: the
+  // number stays unverified, and everything WhatsApp-dependent stays unavailable.
+  const deferred = row.phoneVerification === 'deferred_by_platform';
+  if (!deferred && (!row.phone || !row.phoneVerifiedAt)) pending.push('phone_verification');
 
   const storesWithoutSeat: Buffer[] = [];
   const coveredStores: Buffer[] = [];
@@ -233,7 +237,7 @@ export async function activateIfReadyTx(tx: ActivationDb, userId: Buffer, now: D
         companyId,
         subscriptionId: sub.id,
         kind: 'staff_activated',
-        note: `${again.row!.name} activated${stores ? ` at ${stores}` : ''}: the WhatsApp number verified, a seat held.`.slice(
+        note: `${again.row!.name} activated${stores ? ` at ${stores}` : ''}: ${again.row!.phoneVerification === 'deferred_by_platform' ? 'WhatsApp verification deferred for testing' : 'the WhatsApp number verified'}, a seat held.`.slice(
           0,
           255,
         ),
