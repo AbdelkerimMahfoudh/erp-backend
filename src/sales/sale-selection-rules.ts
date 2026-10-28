@@ -18,7 +18,9 @@ export type Availability =
   | 'available'
   | 'sold'
   | 'faulty'
+  | 'returned'
   | 'reserved'
+  | 'in_transit'
   | 'other_branch'
   | 'unavailable';
 
@@ -74,10 +76,18 @@ export function assertLookupIdentifier(identifier: string): void {
  */
 export function availabilityOf(status: string, unitBranchId: Buffer, activeBranchId: Buffer): Availability {
   if (status === 'sold') return 'sold';
-  if (status === 'faulty' || status === 'returned') return 'faulty';
+  /*
+   * Each reason said as itself (the owner's device test, 2026-10-28): a phone
+   * held after a return is not "faulty", and one on its way between branches
+   * is not merely "reserved". The Sale scanner states it instead of a generic
+   * refusal.
+   */
+  if (status === 'faulty') return 'faulty';
+  if (status === 'returned') return 'returned';
+  if (status === 'in_transit') return 'in_transit';
   if (!unitBranchId.equals(activeBranchId)) return 'other_branch';
   if (status === 'in_stock') return 'available';
-  if (status === 'reserved' || status === 'in_transit') return 'reserved';
+  if (status === 'reserved') return 'reserved';
   return 'unavailable';
 }
 

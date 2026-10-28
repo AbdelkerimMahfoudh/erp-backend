@@ -83,6 +83,13 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    * role — enter it later, audited. Requires `cost.view` too, at the route.
    */
   { key: 'cost.complete',       label: 'Enter a buying cost that was not known when the stock was received' },
+  /**
+   * 0108 (2026-10-28): the branch's return policy and its written conditions.
+   * The owner's decision: an Owner, a Store Manager or a Store Employee may
+   * change it for a branch they are assigned to (the assignment is checked by
+   * the service), audited, for future sales only.
+   */
+  { key: 'return.policy.edit',  label: 'Edit the return policy of a branch you work in' },
   { key: 'unit.add',            label: 'Add inventory units' },
   { key: 'unit.transfer',       label: 'Transfer stock between branches' },
   { key: 'import.run',          label: 'Run Excel/CSV inventory import' },
@@ -237,6 +244,7 @@ const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
     k !== 'discount.override' &&
     k !== 'sale.below_cost' &&
     k !== 'cost.complete' &&
+    k !== 'return.policy.edit' &&
     k !== 'price.edit' &&
     k !== 'import.run' &&
     // 0076: starting a shop's day early is the Owner's call alone.
@@ -279,6 +287,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     'sale.below_cost',
     // 0107: and enters a buying cost that was not known when the stock was received.
     'cost.complete',
+    // 0108: and edits the return policy of the branches they are assigned to.
+    'return.policy.edit',
     /**
      * I1: reading sale history, and changing the return policy AT SALE TIME.
      * Overriding an EXPIRED deadline after the fact is a different, Owner-only
@@ -387,6 +397,8 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
    */
   store_employee: [
     'sale.create', 'cost.view', 'discount.apply',
+    // 0108 (the owner's decision): the return policy of the branches they are assigned to.
+    'return.policy.edit',
     'unit.add', 'purchase.manage',
     /**
      * J1: the person at the counter who hands the money over is the one who

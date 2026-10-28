@@ -104,6 +104,7 @@ export const PUBLISHED_AFTER_CATALOGUE: ReadonlyMap<string, string> = new Map([
   // 0105 (D223): selling at a loss after a warning, and approving a seller's request.
   ['sale.below_cost', '0105_sale_below_cost_permission'],
   ['cost.complete', '0107_unknown_cost'],
+  ['return.policy.edit', '0108_branch_return_policy'],
 ]);
 
 function committedSql(): string {

@@ -31,6 +31,8 @@ function saleHarness(approval: { approvedPrice: number; belowCost: boolean } | n
       updateMany: async () => ({ count: 1 }),
     },
     companySettings: { findUnique: async () => ({ returnWindowHours: 0 }) },
+    // 0108: the branch has no policy of its own, so the company's window applies.
+    branchReturnPolicy: { findFirst: async () => null },
     sale: { create: jest.fn(async () => ({})) },
     saleItem: { create: async () => ({}) },
     payment: { create: jest.fn(async () => ({})) },

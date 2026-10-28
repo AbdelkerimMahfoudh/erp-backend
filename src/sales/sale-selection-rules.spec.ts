@@ -76,11 +76,11 @@ describe('whether the phone can be sold here, now', () => {
   });
   it('faulty or returned is not for sale', () => {
     expect(availabilityOf('faulty', here, here)).toBe('faulty');
-    expect(availabilityOf('returned', here, here)).toBe('faulty');
+    expect(availabilityOf('returned', here, here)).toBe('returned');
   });
   it('reserved or in transit is promised elsewhere', () => {
     expect(availabilityOf('reserved', here, here)).toBe('reserved');
-    expect(availabilityOf('in_transit', here, here)).toBe('reserved');
+    expect(availabilityOf('in_transit', here, here)).toBe('in_transit');
   });
   it('in stock at another branch is not sellable here', () => {
     expect(availabilityOf('in_stock', there, here)).toBe('other_branch');

@@ -36,6 +36,7 @@ interface ErrorBody {
   acknowledgement?: unknown;
   businessDate?: unknown;
   closedReason?: unknown;
+  policyField?: unknown;
   attemptsRemaining?: unknown;
   resendAvailableAt?: unknown;
   delivery?: unknown;
@@ -102,6 +103,8 @@ const DETAIL_KEYS = [
   /* `store_closed`: a closed day (`closed`) or one nobody opened yet (`not_opened`, docs/63) — the screen offers the
    * reopen or the opening. Its own name, not `reason`, for the reason given above. */
   'closedReason',
+  /* 0108: which written return condition was refused (`textEn`, `textFr`, `textAr`) — a field name, never the text. */
+  'policyField',
   /*
    * Codes and account deletion (docs/64). `invalid_code` says how many attempts
    * are left, `too_many_codes` says when a resend is allowed, and a refused

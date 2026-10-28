@@ -38,19 +38,22 @@ describe('the canonical catalogue', () => {
     // 64 → 73 in 0090 — the nine keys of the Money Services Agent activity (docs/73 §7).
     // 73 → 74 in 0105 — `sale.below_cost`, selling at a loss (D223).
     // 74 → 75 in 0107 — `cost.complete`, entering a buying cost that was not known.
-    expect(PERMISSIONS).toHaveLength(75);
-    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(75);
+    // 75 → 76 in 0108 — `return.policy.edit`, a branch's written return policy.
+    expect(PERMISSIONS).toHaveLength(76);
+    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(76);
   });
 
   it('gives Owner 62, Manager 44 and Employee 20', () => {
-    expect(ROLE_PERMISSIONS.owner).toHaveLength(75);
+    expect(ROLE_PERMISSIONS.owner).toHaveLength(76);
     // 43 → 42 in 0076: a manager signs the day off only as a named delegate.
     // 49 → 50 in 0105: a manager may sell at a loss after the warning (D223).
     // 50 → 51 in 0107: and enters a buying cost that was not known.
-    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(51);
+    // 51 → 52 in 0108: and edits the return policy of their branches.
+    expect(ROLE_PERMISSIONS.store_manager).toHaveLength(52);
     // The Employee is deliberately unchanged: they attribute a sale to an
     // existing customer, and do not create one.
-    expect(ROLE_PERMISSIONS.store_employee).toHaveLength(23);
+    // 23 → 24 in 0108: the return policy of their branches (the owner's decision).
+    expect(ROLE_PERMISSIONS.store_employee).toHaveLength(24);
   });
 
   it('grants no role a key the catalogue does not define', () => {
@@ -109,7 +112,7 @@ describe(`migration ${CATALOGUE_MIGRATION}`, () => {
      * Each entry here is a single additive insert, guarded by NOT EXISTS on the
      * key. Adding to this list is part of writing such a migration.
      */
-    const additive = ['0068_customer_manage_permission', '0076_business_day_and_reopen', '0082_money_anchors', '0090_agent_permissions', '0105_sale_below_cost_permission', '0107_unknown_cost'];
+    const additive = ['0068_customer_manage_permission', '0076_business_day_and_reopen', '0082_money_anchors', '0090_agent_permissions', '0105_sale_below_cost_permission', '0107_unknown_cost', '0108_branch_return_policy'];
     expect(touching).toEqual(additive);
 
     for (const name of additive) {

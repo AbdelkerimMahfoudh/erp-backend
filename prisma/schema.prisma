@@ -316,25 +316,26 @@ enum SyncStatus {
 // ------------------------- Tenancy & Access --------------------------------
 
 model Company {
-  discountApprovals DiscountApproval[]
-  id                Bytes              @id @db.Binary(16)
-  name              String             @db.VarChar(160)
+  branchReturnPolicies BranchReturnPolicy[]
+  discountApprovals    DiscountApproval[]
+  id                   Bytes                @id @db.Binary(16)
+  name                 String               @db.VarChar(160)
   /// Public Store Account ID (F1 Stage 3.2): the human-typable, NON-secret code
   /// that selects this company before login. Canonical = 10 uppercase hex chars.
   /// Not the binary `id`, a branch id, a device id or a subscription id.
   /// Generated on create, unique, immutable through store-facing APIs.
-  publicStoreId     String             @unique @map("public_store_id") @db.VarChar(16)
+  publicStoreId        String               @unique @map("public_store_id") @db.VarChar(16)
   /// Discovery (0049). Off until the Owner turns it on: a shop that never
   /// heard of consignment must not be searchable by every other shop by
   /// default. Publication is a decision, not a default.
-  isDiscoverable    Boolean            @default(false) @map("is_discoverable")
+  isDiscoverable       Boolean              @default(false) @map("is_discoverable")
   /// Coarse location only. Never an address — a city narrows a search, an
   /// address identifies a building full of stock.
-  city              String?            @db.VarChar(120)
-  logoRef           String?            @map("logo_ref") @db.VarChar(512)
+  city                 String?              @db.VarChar(120)
+  logoRef              String?              @map("logo_ref") @db.VarChar(512)
   /// Shown only AFTER a connection is accepted, so a connection request cannot
   /// be used to harvest phone numbers.
-  publicPhone       String?            @map("public_phone") @db.VarChar(40)
+  publicPhone          String?              @map("public_phone") @db.VarChar(40)
 
   currency     String    @default("USD") @db.Char(3)
   timezone     String    @default("UTC") @db.VarChar(64)
@@ -467,22 +468,23 @@ model Company {
 }
 
 model Branch {
+  returnPolicy      BranchReturnPolicy?
   discountApprovals DiscountApproval[]
-  id                Bytes              @id @db.Binary(16)
-  companyId         Bytes              @map("company_id") @db.Binary(16)
-  name              String             @db.VarChar(160)
-  type              BranchType         @default(store)
+  id                Bytes               @id @db.Binary(16)
+  companyId         Bytes               @map("company_id") @db.Binary(16)
+  name              String              @db.VarChar(160)
+  type              BranchType          @default(store)
   /// D154: the activity the branch is subscribed to; every branch before 0088 is `electronics`.
-  activity          BranchActivity     @default(electronics)
+  activity          BranchActivity      @default(electronics)
   /// D154: a downgrade waiting for the next renewal; NULL when none is scheduled.
-  activityNext      BranchActivity?    @map("activity_next")
-  activityChangedAt DateTime?          @map("activity_changed_at") @db.DateTime(6)
-  address           String?            @db.VarChar(255)
-  phone             String?            @db.VarChar(40)
-  isActive          Boolean            @default(true) @map("is_active")
-  createdAt         DateTime           @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt         DateTime           @updatedAt @map("updated_at") @db.DateTime(6)
-  deletedAt         DateTime?          @map("deleted_at") @db.DateTime(6)
+  activityNext      BranchActivity?     @map("activity_next")
+  activityChangedAt DateTime?           @map("activity_changed_at") @db.DateTime(6)
+  address           String?             @db.VarChar(255)
+  phone             String?             @db.VarChar(40)
+  isActive          Boolean             @default(true) @map("is_active")
+  createdAt         DateTime            @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt         DateTime?           @map("deleted_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
 
@@ -1492,6 +1494,17 @@ model Sale {
   /// Set only when a Manager or Owner changed the policy at sale time.
   returnPolicyOverriddenById Bytes?    @map("return_policy_overridden_by") @db.Binary(16)
   returnPolicyOverrideReason String?   @map("return_policy_override_reason") @db.VarChar(255)
+  /// The written return conditions as they were when this sale was confirmed (0108), in each
+  /// language the branch wrote. NULL for every sale before 0108: those keep their window and the
+  /// neutral wording. Never read back from the branch's current policy.
+  returnPolicyTextEn         String?   @map("return_policy_text_en") @db.VarChar(1000)
+  returnPolicyTextFr         String?   @map("return_policy_text_fr") @db.VarChar(1000)
+  returnPolicyTextAr         String?   @map("return_policy_text_ar") @db.VarChar(1000)
+  returnPolicyLanguage       String?   @map("return_policy_language") @db.VarChar(2)
+  returnPolicyVersion        Int?      @map("return_policy_version")
+  /// The customer as named at confirmation (0108): a later profile edit never rewrites a receipt.
+  customerNameSnapshot       String?   @map("customer_name_snapshot") @db.VarChar(160)
+  customerPhoneSnapshot      String?   @map("customer_phone_snapshot") @db.VarChar(40)
 
   clientUuid Bytes?   @map("client_uuid") @db.Binary(16)
   createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(6)
@@ -2518,6 +2531,33 @@ model CompanySettings {
   company Company @relation(fields: [companyId], references: [id])
 
   @@map("company_settings")
+}
+
+/// A branch's own return policy (0108, the owner's brief of 2026-10-28). One row per branch that has
+/// set one; a branch without a row sells under `CompanySettings.returnWindowHours` with no written
+/// conditions. Edited by an Owner, Store Manager or Store Employee assigned to the branch
+/// (`return.policy.edit`), audited. Sales snapshot it at confirmation and never read it again.
+model BranchReturnPolicy {
+  branchId        Bytes    @id @map("branch_id") @db.Binary(16)
+  companyId       Bytes    @map("company_id") @db.Binary(16)
+  /// `0`: no returns. Otherwise the window in hours, at most a year (CHECK in 0108).
+  windowHours     Int      @default(0) @map("window_hours")
+  textEn          String?  @map("text_en") @db.VarChar(1000)
+  textFr          String?  @map("text_fr") @db.VarChar(1000)
+  textAr          String?  @map("text_ar") @db.VarChar(1000)
+  /// The language whose text a receipt falls back to when its own is not written.
+  defaultLanguage String   @default("en") @map("default_language") @db.VarChar(2)
+  /// Bumped on every change; a sale records the version it was sold under.
+  version         Int      @default(1)
+  updatedById     Bytes?   @map("updated_by") @db.Binary(16)
+  createdAt       DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.DateTime(6)
+
+  branch  Branch  @relation(fields: [branchId], references: [id])
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([companyId], map: "ix_branch_return_policies_company")
+  @@map("branch_return_policies")
 }
 
 /// A shop account customers can send money to.

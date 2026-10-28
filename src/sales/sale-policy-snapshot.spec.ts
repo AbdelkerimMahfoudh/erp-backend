@@ -43,16 +43,22 @@ describe('one set of window bounds, not two', () => {
     expect(dto).toMatch(/@Max\(RETURN_WINDOW_MAX_HOURS\)/);
   });
 
-  it('accepts a per-sale window and the reason for it', () => {
+  /*
+   * The sale screen no longer chooses a policy (the owner's brief of
+   * 2026-10-28). An older app may still send a window: it is still validated,
+   * accepted, and IGNORED — the branch's configured policy decides.
+   */
+  it('keeps the legacy per-sale fields only as ignored, validated input', () => {
     expect(dto).toMatch(/returnWindowHours\?: number;/);
-    expect(dto).toMatch(/returnPolicyReason\?: string;/);
+    expect(dto).toMatch(/LEGACY — accepted and IGNORED/);
+    expect(service).not.toMatch(/dto\.returnWindowHours|dto\.returnPolicyReason/);
   });
 });
 
 describe('the sale and its deadline come from one server clock', () => {
   it('takes a single soldAt and writes it, rather than calling new Date() twice', () => {
     expect(service).toMatch(/const soldAt = new Date\(\);/);
-    expect(service).toMatch(/snapshotPolicy\(soldAt, resolvedPolicy\.windowHours\)/);
+    expect(service).toMatch(/snapshotPolicy\(soldAt, policy\.windowHours\)/);
     // The old code built the row with an inline `soldAt: new Date()`. Two
     // instants a few milliseconds apart would put the deadline out of step with
     // the sale it was measured from.
@@ -65,40 +71,21 @@ describe('the sale and its deadline come from one server clock', () => {
   });
 });
 
-describe('the company default is read inside the transaction', () => {
-  it('reads settings from the transaction client, not the ambient one', () => {
-    expect(service).toMatch(/tx\.companySettings\.findUnique/);
+describe('the configured policy is resolved by the server, inside the transaction (0108)', () => {
+  it('reads the branch policy, else the company window, from the transaction client', () => {
+    expect(service).toMatch(/const policy = await effectivePolicy\(tx as never, companyId, branchId\);/);
     expect(service).not.toMatch(/this\.db\.companySettings/);
   });
 
-  /**
-   * A company with no settings row has never chosen a policy. Defaulting to
-   * anything other than "no returns" would invent a promise the shop never
-   * made — the same reasoning that made migration 0035 backfill 0/NULL.
-   */
-  it('treats a missing settings row as "no returns", not as an unset value', () => {
-    expect(service).toMatch(/settings\?\.returnWindowHours \?\? NO_RETURNS/);
-  });
-});
-
-describe('the override is recorded only when there was one', () => {
-  it('stamps the overriding user only for a real change', () => {
-    expect(service).toMatch(/returnPolicyOverriddenById: resolvedPolicy\.overridden \? userId : null/);
+  it('records no override: the screen cannot depart from the policy any more', () => {
+    expect(service).toMatch(/returnPolicyOverriddenById: null,/);
+    expect(service).not.toMatch(/resolvedPolicy|return\.policy\.override/);
   });
 
-  it('writes its own audit row, in the same transaction as the sale', () => {
-    const block = service.slice(service.indexOf('if (resolvedPolicy.overridden)'));
-    expect(block).toMatch(/this\.audit\.recordTx\(tx, \{/);
-    expect(block).toMatch(/reason: resolvedPolicy\.overrideReason/);
-    // Distinguishable from the below-cost override, which shares the action.
-    expect(block).toMatch(/field: 'returnPolicy'/);
-    // Both sides, so the row answers what it was and what it became.
-    expect(block).toMatch(/before: \{ field: 'returnPolicy', returnWindowHours/);
-  });
-
-  it('asks the caller’s permissions rather than trusting a flag in the request', () => {
-    expect(service).toMatch(/canOverride: this\.cls\.get\('permissions'\)\?\.has\('return\.policy\.override'\)/);
-    expect(service).not.toMatch(/dto\.canOverride/);
+  it('snapshots the written conditions, their language and version, and the customer as named', () => {
+    for (const field of ['returnPolicyTextEn: policy.textEn', 'returnPolicyTextFr: policy.textFr', 'returnPolicyTextAr: policy.textAr', 'returnPolicyLanguage: policy.defaultLanguage', 'returnPolicyVersion: policy.version', 'customerNameSnapshot: named?.name?.trim() || null']) {
+      expect(service).toContain(field);
+    }
   });
 });
 
@@ -116,6 +103,8 @@ describe('the response carries the policy the customer was sold', () => {
     const replay = service.slice(service.indexOf('private toResponse'));
     expect(replay).toMatch(/windowHours: sale\.returnWindowHours/);
     expect(replay).toMatch(/deadlineAt: sale\.returnDeadlineAt/);
-    expect(replay).not.toMatch(/companySettings/);
+    expect(replay).toMatch(/\.\.\.policyTexts\(sale\)/);
+    expect(replay).toMatch(/customer: sale\.customerNameSnapshot/);
+    expect(replay).not.toMatch(/companySettings|branchReturnPolicy/);
   });
 });

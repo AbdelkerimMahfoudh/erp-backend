@@ -208,19 +208,19 @@ export class CreateSaleDto {
   overrideReason?: string;
 
   /**
-   * The return window THIS sale is sold under, in hours.
+   * LEGACY — accepted and IGNORED (the owner's brief of 2026-10-28).
    *
-   * Omitted, or equal to the shop's default, means the ordinary policy — the
-   * Sell screen echoes what it displayed, and that must not count as an
-   * override. Anything else requires `return.policy.override` (no reason is
-   * asked since `docs/59` D82), and is refused rather than quietly downgraded:
-   * an employee must never be told a sale succeeded under a policy it does not
-   * have.
+   * The sale screen no longer chooses a return policy: the server resolves the
+   * branch's configured policy at confirmation and snapshots it on the sale. An
+   * older app that still sends a window is not refused — it sells, under the
+   * configured policy, and can no longer override it. Still validated, so a
+   * malformed value is not silently passed around.
    */
   @ApiPropertyOptional({
     minimum: RETURN_WINDOW_NONE,
     maximum: RETURN_WINDOW_MAX_HOURS,
-    description: 'Return window in hours for this sale. 0 = no returns. Manager/Owner only when it differs from the shop default.',
+    deprecated: true,
+    description: 'Ignored: the branch policy is authoritative.',
   })
   @IsOptional()
   @IsInt()
@@ -228,7 +228,7 @@ export class CreateSaleDto {
   @Max(RETURN_WINDOW_MAX_HOURS)
   returnWindowHours?: number;
 
-  @ApiPropertyOptional({ maxLength: 255, description: 'Why this sale has a different return policy' })
+  @ApiPropertyOptional({ maxLength: 255, deprecated: true, description: 'Ignored, with returnWindowHours.' })
   @IsOptional()
   @IsString()
   @MaxLength(255)

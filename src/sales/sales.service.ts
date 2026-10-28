@@ -27,7 +27,8 @@ import { PricingService } from '../pricing/pricing.service';
 import { SalesPolicyService } from './sales-policy.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
 import { ListSalesDto } from './dto/list-sales.dto';
-import { evaluateEligibility, NO_RETURNS, resolveWindowForSale, snapshotPolicy } from './return-policy';
+import { evaluateEligibility, snapshotPolicy } from './return-policy';
+import { effectivePolicy, type EffectivePolicy } from '../settings/return-policy.service';
 import { assertDebtorForBalance, assertPaymentParts, chooseDebtor, type DebtorChoice, STORE_KINDS } from './sale-payment-rules';
 import { assertPayerNumbers, payerNumberFor } from './payer-number';
 import { debtDueDays, dueDateFor, parseCustomerPhone, phoneRefusal } from './customer-debt';
@@ -154,6 +155,8 @@ export class SalesService {
       dueDate: string | null;
       returnWindowHours: number;
       returnDeadlineAt: Date | null;
+      policy: EffectivePolicy;
+      customer: { name: string; phone: string | null } | null;
     };
     try {
       result = await this.db.$transaction(async (tx) => {
@@ -413,21 +416,23 @@ export class SalesService {
          * election and the sale cannot straddle each other.
          */
         const businessDate = await this.businessDay.assign(branchId, soldAt, tx as unknown as Prisma.TransactionClient);
-        const settings = await tx.companySettings.findUnique({
-          where: { companyId },
-          select: { returnWindowHours: true },
-        });
-        const resolvedPolicy = resolveWindowForSale({
-          // A company with no settings row has never chosen a policy, and
-          // "no returns" is the schema default rather than an invented promise.
-          companyDefaultHours: settings?.returnWindowHours ?? NO_RETURNS,
-          requested:
-            dto.returnWindowHours === undefined
-              ? undefined
-              : { windowHours: dto.returnWindowHours, reason: dto.returnPolicyReason },
-          canOverride: this.cls.get('permissions')?.has('return.policy.override') ?? false,
-        });
-        const policySnapshot = snapshotPolicy(soldAt, resolvedPolicy.windowHours);
+        /*
+         * The branch's own policy, else the company's window — resolved by the
+         * SERVER, never chosen by the sale screen (the owner's brief of
+         * 2026-10-28). A `returnWindowHours` an older app still sends is
+         * ignored: the configured policy is authoritative, and the sale records
+         * exactly what it was sold under, written conditions included.
+         */
+        const policy = await effectivePolicy(tx as never, companyId, branchId);
+        const policySnapshot = snapshotPolicy(soldAt, policy.windowHours);
+        /*
+         * The customer as named NOW (0108): a later profile edit never rewrites
+         * this sale's receipt. No customer, no name — the receipt then says
+         * "cash customer", as before.
+         */
+        const named = debtor.customerId
+          ? await tx.customer.findFirst({ where: { id: debtor.customerId }, select: { name: true, phone: true } })
+          : null;
 
         await tx.sale.create({
           data: {
@@ -456,8 +461,16 @@ export class SalesService {
             // Recorded only for a real change, so the column answers "who
             // decided this sale was different?" rather than naming whoever
             // happened to serve an ordinary customer.
-            returnPolicyOverriddenById: resolvedPolicy.overridden ? userId : null,
-            returnPolicyOverrideReason: resolvedPolicy.overrideReason,
+            // The sale screen no longer overrides the policy (2026-10-28); legacy rows keep theirs.
+            returnPolicyOverriddenById: null,
+            returnPolicyOverrideReason: null,
+            returnPolicyTextEn: policy.textEn,
+            returnPolicyTextFr: policy.textFr,
+            returnPolicyTextAr: policy.textAr,
+            returnPolicyLanguage: policy.defaultLanguage,
+            returnPolicyVersion: policy.version,
+            customerNameSnapshot: named?.name?.trim() || null,
+            customerPhoneSnapshot: named?.phone?.trim() || null,
             clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
           },
         });
@@ -657,35 +670,6 @@ export class SalesService {
             branchId,
           });
         }
-        if (resolvedPolicy.overridden) {
-          /**
-           * A row of its own, not merged into the below-cost override above:
-           * they are different decisions, possibly by different people, and one
-           * row could answer "why was this sale different?" in only one of the
-           * two senses.
-           *
-           * `action` stays `override` — the existing enum value means exactly
-           * this, someone with authority departing from a default and saying
-           * why. Adding an enum member would be a schema change for a label,
-           * outside what this phase is authorised to migrate; `field` carries
-           * the distinction instead, explicitly rather than left to be inferred
-           * from the shape of the payload.
-           */
-          await this.audit.recordTx(tx, {
-            entityType: 'Sale',
-            entityId: saleId,
-            action: 'override',
-            reason: resolvedPolicy.overrideReason ?? undefined,
-            before: { field: 'returnPolicy', returnWindowHours: settings?.returnWindowHours ?? NO_RETURNS },
-            after: {
-              field: 'returnPolicy',
-              returnWindowHours: policySnapshot.windowHours,
-              returnDeadlineAt: policySnapshot.deadlineAt,
-            },
-            branchId,
-          });
-        }
-
         /**
          * The day this sale belongs to must still be open, decided on the row a
          * close locks: a close that committed after the check above makes this
@@ -729,6 +713,8 @@ export class SalesService {
           dueDate: dueDays === null ? null : dueDateFor(businessDate, dueDays),
           returnWindowHours: policySnapshot.windowHours,
           returnDeadlineAt: policySnapshot.deadlineAt,
+          policy,
+          customer: named?.name?.trim() ? { name: named.name.trim(), phone: named.phone?.trim() || null } : null,
         };
       });
     } catch (e) {
@@ -794,7 +780,16 @@ export class SalesService {
       returnPolicy: {
         windowHours: result.returnWindowHours,
         deadlineAt: result.returnDeadlineAt,
+        ...policyTexts({
+          returnPolicyTextEn: result.policy.textEn,
+          returnPolicyTextFr: result.policy.textFr,
+          returnPolicyTextAr: result.policy.textAr,
+          returnPolicyLanguage: result.policy.defaultLanguage,
+          returnPolicyVersion: result.policy.version,
+        }),
       },
+      // The customer as the receipt names them, snapshotted at confirmation (0108).
+      customer: result.customer,
     };
   }
 
@@ -1313,6 +1308,16 @@ export class SalesService {
       customer: sale.customer
         ? { id: binToUuid(sale.customer.id), name: sale.customer.name, phone: sale.customer.phone }
         : null,
+      /*
+       * Who the receipt names: the customer as they were at confirmation (0108).
+       * A sale before 0108 has no snapshot, and names the customer record, as
+       * its receipt always did.
+       */
+      receiptCustomer: sale.customerNameSnapshot
+        ? { name: sale.customerNameSnapshot, phone: sale.customerPhoneSnapshot }
+        : sale.customer?.name
+          ? { name: sale.customer.name, phone: sale.customer.phone }
+          : null,
       /**
        * Who owes the balance, as ONE field whichever kind it is (0074). A
        * screen answering "who do I chase?" should not have to know there are
@@ -1358,6 +1363,7 @@ export class SalesService {
       payments: sale.payments.map(toPaymentView),
       returnPolicy: {
         ...this.policySummary(sale, live, new Date(), sale.returns.length > 0),
+        ...policyTexts(sale),
         // Recorded only when a manager or owner actually changed it, so the
         // question "why was this sale different?" has an answer on the screen
         // rather than in an audit table nobody opens.
@@ -1586,7 +1592,30 @@ export class SalesService {
       returnPolicy: {
         windowHours: sale.returnWindowHours,
         deadlineAt: sale.returnDeadlineAt,
+        ...policyTexts(sale),
       },
+      customer: sale.customerNameSnapshot ? { name: sale.customerNameSnapshot, phone: sale.customerPhoneSnapshot } : null,
     };
   }
+}
+
+/**
+ * The written conditions a sale was sold under, as its receipt prints them (0108).
+ *
+ * From the sale's own snapshot, never the branch's current policy: a policy
+ * changed after the sale must not change what its receipt says. All null for a
+ * sale before 0108 — that receipt keeps its window and the neutral wording.
+ */
+function policyTexts(sale: {
+  returnPolicyTextEn: string | null;
+  returnPolicyTextFr: string | null;
+  returnPolicyTextAr: string | null;
+  returnPolicyLanguage: string | null;
+  returnPolicyVersion: number | null;
+}) {
+  return {
+    texts: { en: sale.returnPolicyTextEn, fr: sale.returnPolicyTextFr, ar: sale.returnPolicyTextAr },
+    textLanguage: sale.returnPolicyLanguage,
+    policyVersion: sale.returnPolicyVersion,
+  };
 }
