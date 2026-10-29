@@ -1,7 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsBoolean, IsString, MaxLength } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { Optional } from '../../settings/dto/optional.decorator';
+import { IsArabicName, IsLatinNameOrLegacy, NAME_MAX, NormalizeName } from '../../common/bilingual-name';
 
 const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
 const trimLower = ({ value }: { value: unknown }) =>
@@ -17,17 +18,24 @@ const trimLower = ({ value }: { value: unknown }) =>
  * store-facing Owner from assigning `administrator` (Platform Administrator)
  * through this API: the field to do it does not exist here.
  *
+ * D225: `name` is the Latin-alphabet name and `nameAr` the Arabic one. Each is
+ * edited on its own: sending one never touches the other.
+ *
  * Phone and email accept an empty string to clear the value. A changed contact
  * always resets its verification timestamp in the service.
  */
 export class UpdateUserDto {
-  @ApiPropertyOptional({ maxLength: 160 })
+  @ApiPropertyOptional({ maxLength: NAME_MAX, description: 'The name in the Latin alphabet (French and English screens).' })
   @Optional()
-  @Transform(trim)
-  @IsString()
-  @MinLength(1, { message: 'A name cannot be blank' })
-  @MaxLength(160)
+  @NormalizeName()
+  @IsLatinNameOrLegacy('nameAr')
   name?: string;
+
+  @ApiPropertyOptional({ maxLength: NAME_MAX, description: 'الاسم بالعربية — the name the Arabic screens show.' })
+  @Optional()
+  @NormalizeName()
+  @IsArabicName()
+  nameAr?: string;
 
   @ApiPropertyOptional({
     maxLength: 24,

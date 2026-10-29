@@ -307,6 +307,7 @@ export async function activateDueAddOnsTx(
         companyId,
         subscriptionId: sub.id,
         name,
+        nameAr: row.labelAr,
         activity,
         actor,
         note: `Store "${name}" (${activity}) opened with its first paid period: paid for during the free trial, payment ${reference}.`,

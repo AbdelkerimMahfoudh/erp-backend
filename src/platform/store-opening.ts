@@ -9,6 +9,8 @@ export interface StoreOpening {
   companyId: Buffer;
   subscriptionId: Buffer;
   name: string;
+  /** D225: the Arabic name; null when none was given (a request from before 0111). */
+  nameAr?: string | null;
   activity: Activity;
   actor: string;
   note: string;
@@ -46,6 +48,7 @@ export async function openStoreTx(tx: BillingDb, input: StoreOpening): Promise<B
         id: newUuidV7Bin(),
         companyId: input.companyId,
         name: input.name,
+        nameAr: input.nameAr ?? null,
         type: 'store',
         activity: input.activity,
       },

@@ -434,6 +434,13 @@ export class SalesService {
         const named = debtor.customerId
           ? await tx.customer.findFirst({ where: { id: debtor.customerId }, select: { name: true, phone: true } })
           : null;
+        // The business, the store and the seller as named NOW, in both scripts (0111, D225): a rename never
+        // rewrites this sale's receipt.
+        const [business, store, seller] = await Promise.all([
+          tx.company.findUnique({ where: { id: companyId }, select: { name: true, nameAr: true } }),
+          tx.branch.findUnique({ where: { id: branchId }, select: { name: true, nameAr: true } }),
+          tx.user.findUnique({ where: { id: userId }, select: { name: true, nameAr: true } }),
+        ]);
 
         await tx.sale.create({
           data: {
@@ -472,6 +479,12 @@ export class SalesService {
             returnPolicyVersion: policy.version,
             customerNameSnapshot: named?.name?.trim() || null,
             customerPhoneSnapshot: named?.phone?.trim() || null,
+            businessNameSnapshot: business?.name ?? null,
+            businessNameArSnapshot: business?.nameAr ?? null,
+            branchNameSnapshot: store?.name ?? null,
+            branchNameArSnapshot: store?.nameAr ?? null,
+            sellerNameSnapshot: seller?.name ?? null,
+            sellerNameArSnapshot: seller?.nameAr ?? null,
             clientUuid: dto.clientUuid ? uuidToBin(dto.clientUuid) : null,
           },
         });
@@ -1240,10 +1253,11 @@ export class SalesService {
     const sale = await this.db.sale.findUnique({
       where: { id: uuidToBin(idStr) },
       include: {
-        user: { select: { name: true } },
+        user: { select: { name: true, nameAr: true } },
+        company: { select: { name: true, nameAr: true } },
         customer: { select: { id: true, name: true, phone: true } },
         counterparty: { select: { id: true, name: true, phone: true, kind: true } },
-        branch: { select: { id: true, name: true } },
+        branch: { select: { id: true, name: true, nameAr: true } },
         payments: { orderBy: { paidAt: 'asc' }, select: paymentSelect },
         returns: { select: { id: true } },
         returnPolicyOverriddenBy: { select: { name: true } },
@@ -1306,8 +1320,15 @@ export class SalesService {
         : requestedCancel
           ? { status: 'requested' as const, reason: requestedCancel.reason, requestedBy: requestedCancel.requestedBy?.name ?? null, requestedAt: requestedCancel.requestedAt }
           : null,
-      branch: { id: binToUuid(sale.branch.id), name: sale.branch.name },
+      branch: { id: binToUuid(sale.branch.id), name: sale.branch.name, nameAr: sale.branch.nameAr },
       soldBy: sale.user?.name ?? null,
+      soldByAr: sale.user?.nameAr ?? null,
+      /*
+       * Who the receipt says issued it (0111, D225): the business, the store and the seller as named when the sale
+       * was confirmed, in both scripts. A sale before 0111 has no snapshot and names the live records, as its
+       * receipt always did.
+       */
+      receiptNames: receiptNamesOf(sale),
       customer: sale.customer
         ? { id: binToUuid(sale.customer.id), name: sale.customer.name, phone: sale.customer.phone }
         : null,
@@ -1602,6 +1623,34 @@ export class SalesService {
       customer: sale.customerNameSnapshot ? { name: sale.customerNameSnapshot, phone: sale.customerPhoneSnapshot } : null,
     };
   }
+}
+
+type NamedLive = { name: string; nameAr: string | null } | null;
+
+/**
+ * The names a sale's receipt prints (0111): its snapshot when it has one, the live record otherwise. Snapshotted
+ * as a whole, so a sale confirmed before the Arabic name was given keeps printing the Latin one in Arabic, as it was
+ * issued — it does not borrow an Arabic name given later.
+ */
+export function receiptNamesOf(sale: {
+  businessNameSnapshot: string | null;
+  businessNameArSnapshot: string | null;
+  branchNameSnapshot: string | null;
+  branchNameArSnapshot: string | null;
+  sellerNameSnapshot: string | null;
+  sellerNameArSnapshot: string | null;
+  company?: NamedLive;
+  branch?: NamedLive;
+  user?: NamedLive;
+}) {
+  const of = (name: string | null, nameAr: string | null, live: NamedLive | undefined) =>
+    name !== null ? { name, nameAr } : live ? { name: live.name, nameAr: live.nameAr } : null;
+  return {
+    business: of(sale.businessNameSnapshot, sale.businessNameArSnapshot, sale.company),
+    branch: of(sale.branchNameSnapshot, sale.branchNameArSnapshot, sale.branch),
+    seller: of(sale.sellerNameSnapshot, sale.sellerNameArSnapshot, sale.user),
+    snapshot: sale.businessNameSnapshot !== null,
+  };
 }
 
 /**

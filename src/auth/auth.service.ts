@@ -19,6 +19,8 @@ export interface AuthTokenResponse {
   user: {
     id: string;
     name: string;
+    /** D225: the Arabic name; null until given. */
+    nameAr: string | null;
     login: string;
     /** How this person signs in when they have no phone. Shown in Settings. */
     personalId: string;
@@ -47,7 +49,7 @@ export interface AccountChoiceResponse {
    */
   continuationToken: string;
   expiresIn: number;
-  accounts: { accountRef: string; companyName: string; userName: string }[];
+  accounts: { accountRef: string; companyName: string; companyNameAr: string | null; userName: string; userNameAr: string | null }[];
 }
 
 export type LoginResult = AuthTokenResponse | AccountChoiceResponse;
@@ -314,6 +316,7 @@ export class AuthService {
       user: {
         id: binToUuid(user.id),
         name: user.name,
+        nameAr: user.nameAr,
         login: user.login,
         personalId: user.personalId,
         companyId: binToUuid(user.companyId),
@@ -336,12 +339,15 @@ export class AuthService {
    * `accountRef` is an opaque index rather than a user id: the client needs to
    * say "the second one", not to learn anybody's internal identifier.
    */
-  private async accountChoice(matches: { id: Buffer; name: string; companyId: Buffer }[]): Promise<AccountChoiceResponse> {
+  private async accountChoice(
+    matches: { id: Buffer; name: string; nameAr: string | null; companyId: Buffer }[],
+  ): Promise<AccountChoiceResponse> {
     const companies = await this.prisma.company.findMany({
       where: { id: { in: matches.map((m) => m.companyId) }, isActive: true },
-      select: { id: true, name: true },
+      select: { id: true, name: true, nameAr: true },
     });
     const nameOf = new Map(companies.map((c) => [c.id.toString('hex'), c.name]));
+    const nameArOf = new Map(companies.map((c) => [c.id.toString('hex'), c.nameAr]));
 
     // A company that has since been deactivated is dropped rather than named.
     const usable = matches.filter((m) => nameOf.has(m.companyId.toString('hex')));
@@ -359,7 +365,10 @@ export class AuthService {
       accounts: usable.map((m, index) => ({
         accountRef: String(index),
         companyName: nameOf.get(m.companyId.toString('hex'))!,
+        // D225: the shop and the person in Arabic too, for an Arabic sign-in screen. Null until given.
+        companyNameAr: nameArOf.get(m.companyId.toString('hex')) ?? null,
         userName: m.name,
+        userNameAr: m.nameAr,
       })),
     };
   }

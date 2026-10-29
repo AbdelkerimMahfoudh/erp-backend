@@ -285,7 +285,7 @@ export class ProvisioningService {
    */
   async openStore(
     companyUuid: string,
-    input: { name: string; activity?: Activity | null; reason: string },
+    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string },
     ctx: ProvisioningActor,
   ): Promise<{ mode: 'granted' | 'requested'; allocation: SeatAllocationView; created: boolean }> {
     const companyId = this.companyIdOf(companyUuid);
@@ -298,8 +298,8 @@ export class ProvisioningService {
       const by = ctx.admin.email;
       const mode = company.isTest ? ('granted' as const) : ('requested' as const);
       const result = company.isTest
-        ? await this.seats.grantStore(companyId, { name: input.name, activity: input.activity, reason, by })
-        : await this.seats.requestStore(companyId, { name: input.name, activity: input.activity, requestedBy: by });
+        ? await this.seats.grantStore(companyId, { name: input.name, nameAr: input.nameAr, activity: input.activity, reason, by })
+        : await this.seats.requestStore(companyId, { name: input.name, nameAr: input.nameAr, activity: input.activity, requestedBy: by });
       if (result.created) {
         await this.audit.record({
           admin: ctx.admin,

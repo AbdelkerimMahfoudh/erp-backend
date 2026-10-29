@@ -467,12 +467,14 @@ export class SeatAllocationService {
    */
   async requestStore(
     companyId: Buffer,
-    input: { name: string; activity?: Activity | null; requestedBy: string },
+    input: { name: string; nameAr?: string | null; activity?: Activity | null; requestedBy: string },
   ): Promise<{ allocation: SeatAllocationView; created: boolean }> {
     const sub = await this.subscriptionOf(companyId);
     const name = (input.name ?? '').trim();
     if (!name) throw new BadRequestException('Name the store.');
     if (name.length > 160) throw new BadRequestException('A store name is at most 160 characters.');
+    // D225: the Arabic name travels with the request and opens with the store.
+    const nameAr = input.nameAr?.trim().slice(0, 160) || null;
     const activity: Activity = input.activity ?? 'electronics';
     const actor = input.requestedBy.slice(0, 160);
     // A renewal that fell due at the end of a prepaid period comes first: the slots and the prices are then the
@@ -498,6 +500,7 @@ export class SeatAllocationService {
           companyId,
           kind: 'store',
           label: name,
+          labelAr: nameAr,
           status: { in: ['pending_payment', 'scheduled'] },
         },
         select: { id: true },
@@ -520,6 +523,7 @@ export class SeatAllocationService {
             kind: 'store',
             status: 'pending_payment',
             label: name,
+            labelAr: nameAr,
             activityTo: activity,
             monthlyAmount: fee,
             requestedBy: actor,
@@ -556,6 +560,7 @@ export class SeatAllocationService {
             kind: 'store',
             status: 'pending_payment',
             label: name,
+            labelAr: nameAr,
             activityTo: activity,
             monthlyAmount: due,
             requestedBy: actor,
@@ -587,6 +592,7 @@ export class SeatAllocationService {
           kind: 'store',
           status: 'granted',
           label: name,
+          labelAr: nameAr,
           activityTo: activity,
           monthlyAmount: 0,
           requestedBy: actor,
@@ -611,6 +617,7 @@ export class SeatAllocationService {
         companyId,
         subscriptionId: sub.id,
         name,
+        nameAr,
         activity,
         actor,
         note: `Store "${name}" (${activity}) opened at once as the replacement of "${slot.name}"; nothing to pay.`,
@@ -675,12 +682,14 @@ export class SeatAllocationService {
    */
   async grantStore(
     companyId: Buffer,
-    input: { name: string; activity?: Activity | null; reason: string; by: string },
+    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string; by: string },
   ): Promise<{ allocation: SeatAllocationView; created: boolean }> {
     const sub = await this.subscriptionOf(companyId);
     const name = (input.name ?? '').trim();
     if (!name) throw new BadRequestException('Name the store.');
     if (name.length > 160) throw new BadRequestException('A store name is at most 160 characters.');
+    // D225: the Arabic name travels with the request and opens with the store.
+    const nameAr = input.nameAr?.trim().slice(0, 160) || null;
     const reason = (input.reason ?? '').trim();
     if (!reason) throw new BadRequestException('A store opened under a grant needs a reason — it is the whole record.');
     const activity: Activity = input.activity ?? 'electronics';
@@ -733,6 +742,7 @@ export class SeatAllocationService {
           kind: 'store',
           status: 'granted',
           label: name,
+          labelAr: nameAr,
           activityTo: activity,
           monthlyAmount: 0,
           requestedBy: actor,
@@ -745,6 +755,7 @@ export class SeatAllocationService {
         companyId,
         subscriptionId: sub.id,
         name,
+        nameAr,
         activity,
         actor,
         note: `Store "${name}" (${activity}) opened at no charge under the administrative grant: ${reason}`,
@@ -1362,6 +1373,7 @@ export class SeatAllocationService {
         companyId: before.companyId,
         subscriptionId: sub.id,
         name: storeName,
+        nameAr: before.labelAr,
         activity,
         actor: p.by,
         note: `Store "${storeName}" (${activity}) opened after payment ${p.reference}.`,

@@ -219,6 +219,7 @@ export class StaffInvitationService {
             id: userId,
             companyId,
             name: name.slice(0, 160),
+            nameAr: dto.nameAr?.slice(0, 160) || null,
             // An internal handle only. Never typed to sign in, never shown. The
             // RANDOM half of the id: the first characters of a UUIDv7 are the
             // clock, and two accounts created in the same hour would share them.

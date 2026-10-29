@@ -11,6 +11,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsArabicName, IsLatinNameOrLegacy, NAME_MAX, NormalizeName } from '../../common/bilingual-name';
 
 export const STAFF_ROLES = ['store_manager', 'store_employee'] as const;
 export type StaffRole = (typeof STAFF_ROLES)[number];
@@ -19,11 +20,19 @@ export const STAFF_PASSWORD_MIN_LENGTH = 8;
 
 /** An Owner creates an employee account from Team (docs/21, 2026-10-05). */
 export class CreateStaffDto {
-  @ApiProperty({ maxLength: 160 })
+  /** D225: the name in the Latin alphabet. Held to the Latin rule when the Arabic twin is sent too. */
+  @ApiProperty({ maxLength: NAME_MAX })
   @IsString()
-  @MinLength(1)
-  @MaxLength(160)
+  @NormalizeName()
+  @IsLatinNameOrLegacy('nameAr')
   name: string;
+
+  /** D225: الاسم بالعربية. Optional only because the released app (1.0.0 (1)) sends one name. */
+  @ApiPropertyOptional({ maxLength: NAME_MAX })
+  @IsOptional()
+  @NormalizeName()
+  @IsArabicName()
+  nameAr?: string;
 
   @ApiPropertyOptional({
     maxLength: 160,

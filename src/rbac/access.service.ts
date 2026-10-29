@@ -68,11 +68,11 @@ export class AccessService {
   }
 
   /** Branches the user is assigned to (for the app's branch picker / X-Branch-Id). */
-  async getUserBranches(userId: Buffer): Promise<{ id: string; name: string; type: string; role: string }[]> {
+  async getUserBranches(userId: Buffer): Promise<{ id: string; name: string; nameAr: string | null; type: string; role: string }[]> {
     const assignments = await this.db.userBranch.findMany({
       where: { userId },
       select: {
-        branch: { select: { id: true, name: true, type: true } },
+        branch: { select: { id: true, name: true, nameAr: true, type: true } },
         role: { select: { key: true } },
       },
       orderBy: { branch: { name: 'asc' } },
@@ -80,6 +80,8 @@ export class AccessService {
     return assignments.map((a) => ({
       id: binToUuid(a.branch.id),
       name: a.branch.name,
+      // D225: the store's Arabic name, for the Arabic store switcher; null until given.
+      nameAr: a.branch.nameAr,
       type: a.branch.type,
       role: a.role.key,
     }));

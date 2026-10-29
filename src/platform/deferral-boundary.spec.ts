@@ -43,7 +43,7 @@ describe('no route but the console can ask for a deferral', () => {
   }
 
   it('the console’s business creation accepts it, and only its two values', async () => {
-    const base = { idempotencyKey: 'console-key-1', ownerName: 'O', businessName: 'B', phone: '+22243210987', language: 'en', isTest: true, reason: 'pilot', confirmPassword: 'p' };
+    const base = { idempotencyKey: 'console-key-1', ownerName: 'O', ownerNameAr: 'ع', businessName: 'B', businessNameAr: 'ب', phone: '+22243210987', language: 'en', isTest: true, reason: 'pilot', confirmPassword: 'p' };
     const ok = await pipe.transform({ ...base, verification: 'deferred_by_platform', deferral: { reason: 'r', confirmUnverified: true } }, { type: 'body', metatype: CreateBusinessDto });
     expect(ok).toMatchObject({ verification: 'deferred_by_platform' });
     await expect(pipe.transform({ ...base, verification: 'verified' }, { type: 'body', metatype: CreateBusinessDto })).rejects.toBeInstanceOf(BadRequestException);

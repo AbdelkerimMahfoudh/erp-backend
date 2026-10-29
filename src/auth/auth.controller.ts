@@ -105,6 +105,8 @@ export class AuthController {
     return {
       id: binToUuid(found.id),
       name: found.name,
+      // D225: both names; the app shows the Arabic one in Arabic, and `name` until it is given.
+      nameAr: found.nameAr,
       login: found.login,
       // Shown in Settings so somebody can find their own sign-in identifier
       // without contacting support (CP3). Not a secret, and not a password.
@@ -116,6 +118,7 @@ export class AuthController {
       // The business's name, so the customer's invoice can carry the store
       // identity rather than only the branch. Not a secret.
       companyName: found.company.name,
+      companyNameAr: found.company.nameAr,
       // A persistent test business (D217): the app says so on every screen, so nobody mistakes it for a real shop.
       isTestBusiness: found.company.isTest,
       // D224: required | deferred_by_platform | verified. Deferred is never verified.

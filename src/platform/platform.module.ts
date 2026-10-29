@@ -1,4 +1,6 @@
 import { Module, OnModuleInit } from '@nestjs/common';
+import { PlatformNamesController } from './platform-names.controller';
+import { PlatformNamesService } from './platform-names.service';
 import { PlatformMfaService } from './platform-mfa.service';
 import { PlatformMfaController } from './platform-mfa.controller';
 import { PrismaModule } from '../prisma/prisma.module';
@@ -109,6 +111,8 @@ export function selectContactDelivery(
   controllers: [
     PlatformController,
     AccountProvisioningController,
+    // D225: the console's edit of a business's, a store's and a person's two names.
+    PlatformNamesController,
     SeatRequestsController,
     PlatformMfaController,
     AppRegistrationController,
@@ -132,6 +136,7 @@ export function selectContactDelivery(
     HashingService,
     AccountSetupCodeService,
     AccountProvisioningService,
+    PlatformNamesService,
     PlatformAdminService,
     PlatformMfaService,
     PlatformAdminGuard,

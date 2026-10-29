@@ -11,6 +11,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { IsArabicName, IsLatinNameOrLegacy, NormalizeName } from '../common/bilingual-name';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import {
@@ -65,7 +66,9 @@ export class SeatRequestDto {
 }
 
 export class StoreRequestDto {
-  @IsString() @MinLength(1) @MaxLength(160) name: string;
+  /** D225: the Arabic twin is optional only because the released app (1.0.0 (1)) sends one name. */
+  @IsString() @NormalizeName() @IsLatinNameOrLegacy('nameAr') name: string;
+  @IsOptional() @NormalizeName() @IsArabicName() nameAr?: string;
   /** The new store's activity (D154). Electronics when not said. */
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
 }
@@ -177,6 +180,7 @@ export class SeatRequestsController {
     const companyId = this.tenant.companyId();
     return this.allocations.requestStore(companyId, {
       name: dto.name,
+      nameAr: dto.nameAr ?? null,
       activity: dto.activity ?? null,
       requestedBy: await this.actorLabel(),
     });

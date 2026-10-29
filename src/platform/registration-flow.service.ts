@@ -87,8 +87,11 @@ export class RegistrationFlowService {
     const result = await this.registration.register({
       idempotencyKey: dto.idempotencyKey,
       ownerName: dto.ownerName,
+      ownerNameAr: dto.ownerNameAr,
       businessName: dto.businessName,
+      businessNameAr: dto.businessNameAr,
       branchName: dto.branchName,
+      branchNameAr: dto.branchNameAr,
       activity: dto.activity,
       city: dto.city,
       email: dto.email,

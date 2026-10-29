@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, Optional } from '@nestjs/common';
+import { DEFAULT_STORE_NAME, DEFAULT_STORE_NAME_AR } from '../common/bilingual-name';
 import { Prisma, type TrialRegistrationMethod } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -51,6 +52,10 @@ export interface RegistrationInput {
   ownerName: string;
   businessName: string;
   branchName: string;
+  /** D225: the Arabic names. Absent from the released app (1.0.0 (1)): the record is then marked for completion. */
+  ownerNameAr?: string;
+  businessNameAr?: string;
+  branchNameAr?: string;
   /**
    * What the first branch does (D154): the electronics store, the money
    * services agent counter, or both. Electronics when not said — the default
@@ -215,6 +220,7 @@ export class RegistrationService {
           data: {
             id: companyId,
             name: input.businessName.slice(0, 160),
+            nameAr: input.businessNameAr?.slice(0, 160) || null,
             publicStoreId: newPublicStoreId(),
             city: input.city?.slice(0, 120) ?? null,
             currency: 'MRU',
@@ -235,7 +241,9 @@ export class RegistrationService {
             companyId,
             // Localised "Main Store" by default, but the shopkeeper may rename
             // it — a business with one shop still knows what to call it.
-            name: input.branchName?.trim()?.slice(0, 160) || 'Main Store',
+            name: input.branchName?.trim()?.slice(0, 160) || DEFAULT_STORE_NAME,
+            // D225: the default name comes in both scripts; a name the shop chose has its own twin, or none yet.
+            nameAr: input.branchNameAr?.trim()?.slice(0, 160) || (input.branchName?.trim() ? null : DEFAULT_STORE_NAME_AR),
             type: 'store',
             activity: input.activity ?? 'electronics',
           },
@@ -264,6 +272,7 @@ export class RegistrationService {
             id: userId,
             companyId,
             name: input.ownerName.slice(0, 160),
+            nameAr: input.ownerNameAr?.slice(0, 160) || null,
             // An internal handle only. Never typed to sign in, never shown.
             login: `owner-${binToUuid(companyId).slice(0, 8)}`,
             email,

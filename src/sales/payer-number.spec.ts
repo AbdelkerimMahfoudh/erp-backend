@@ -126,6 +126,10 @@ function saleHarness() {
     companySettings: { findUnique: async () => ({ returnWindowHours: 0 }) },
     // 0108: the branch has no policy of its own, so the company's window applies.
     branchReturnPolicy: { findFirst: async () => null },
+    // 0111: the names the receipt is issued under.
+    company: { findUnique: async () => ({ name: 'Boutique Kiffa', nameAr: null }) },
+    branch: { findUnique: async () => ({ name: 'Centre', nameAr: 'المركز' }) },
+    user: { findUnique: async () => ({ name: 'Aminetou', nameAr: 'أمينتو' }) },
     sale: { create: jest.fn(async (args: any) => { saleRows.push(args.data); return {}; }) },
     saleItem: { create: async () => ({}) },
     payment: { create: jest.fn(async (args: any) => { created.push(args.data); return {}; }) },

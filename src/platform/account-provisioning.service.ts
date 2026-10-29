@@ -195,7 +195,7 @@ export class AccountProvisioningService {
    */
   async createStaff(
     companyUuid: string,
-    input: { name: string; phone: string; email?: string | null; role: StaffRoleKey; branchIds: string[]; verification: VerificationPolicy; deferral?: DeferralInput },
+    input: { name: string; nameAr?: string | null; phone: string; email?: string | null; role: StaffRoleKey; branchIds: string[]; verification: VerificationPolicy; deferral?: DeferralInput },
     ctx: ProvisioningActor,
   ) {
     if (!isUuid(companyUuid)) throw new NotFoundException('Unknown business');
@@ -271,6 +271,7 @@ export class AccountProvisioningService {
             id: userId,
             companyId,
             name,
+            nameAr: input.nameAr?.trim().slice(0, 160) || null,
             login: `staff-${binToUuid(userId).slice(-12)}`,
             email,
             phone,

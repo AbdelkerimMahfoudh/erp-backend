@@ -25,8 +25,10 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
+import { IsArabicName, IsLatinName, NormalizeName } from '../common/bilingual-name';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
@@ -212,9 +214,14 @@ export class CreateBusinessDto {
    * enough that the key stored with its prefix still fits its column, whole.
    */
   @IsString() @IsIdempotencyKey(ADMIN_KEY_PREFIX) idempotencyKey: string;
-  @IsString() @MinLength(1) @MaxLength(160) ownerName: string;
-  @IsString() @MinLength(1) @MaxLength(160) businessName: string;
-  @IsOptional() @IsString() @MaxLength(160) branchName?: string;
+  /** D225: every name in both scripts. The console ships with this API, so here both are required. */
+  @IsString() @NormalizeName() @IsLatinName() ownerName: string;
+  @IsString() @NormalizeName() @IsArabicName() ownerNameAr: string;
+  @IsString() @NormalizeName() @IsLatinName() businessName: string;
+  @IsString() @NormalizeName() @IsArabicName() businessNameAr: string;
+  /** The first store's names. Both or neither: neither is "Main Store" / "المتجر الرئيسي". */
+  @IsOptional() @NormalizeName() @IsLatinName() branchName?: string;
+  @ValidateIf((o: CreateBusinessDto) => o.branchName !== undefined) @NormalizeName() @IsArabicName() branchNameAr?: string;
   /** What the first branch does (D154): electronics when not said. */
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
   @IsOptional() @IsString() @MaxLength(120) city?: string;
@@ -244,7 +251,9 @@ class TestStatusDto {
 
 /** A store from the console: granted under a test business's grant, or a customer's priced request (D217). */
 class ConsoleStoreDto {
-  @IsString() @MinLength(1) @MaxLength(160) name: string;
+  /** D225: both names, required. */
+  @IsString() @NormalizeName() @IsLatinName() name: string;
+  @IsString() @NormalizeName() @IsArabicName() nameAr: string;
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
   @IsString() @MinLength(1) @MaxLength(500) reason: string;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
@@ -536,8 +545,11 @@ export class PlatformController {
     const where: Record<string, unknown> = term
       ? {
           OR: [
+            // D225: either of the business's names, and either of its people's.
             { name: { contains: term } },
+            { nameAr: { contains: term } },
             { publicStoreId: { contains: term } },
+            { users: { some: { OR: [{ name: { contains: term } }, { nameAr: { contains: term } }] } } },
             { users: { some: { email: { contains: term } } } },
             { users: { some: { phone: { contains: term } } } },
           ],
@@ -561,6 +573,7 @@ export class PlatformController {
         select: {
           id: true,
           name: true,
+          nameAr: true,
           publicStoreId: true,
           city: true,
           createdAt: true,
@@ -584,6 +597,7 @@ export class PlatformController {
       return {
         id: binToUuid(c.id),
         name: c.name,
+        nameAr: c.nameAr,
         publicStoreId: c.publicStoreId,
         city: c.city,
         createdAt: c.createdAt.toISOString(),
@@ -635,13 +649,14 @@ export class PlatformController {
       select: {
         id: true,
         name: true,
+        nameAr: true,
         publicStoreId: true,
         city: true,
         createdAt: true,
         timezone: true,
         isTest: true,
         subscription: true,
-        branches: { select: { id: true, name: true, type: true, activity: true, activityNext: true } },
+        branches: { select: { id: true, name: true, nameAr: true, type: true, activity: true, activityNext: true } },
         // The free trial as recorded (0095): the eligibility and the claim, for the console to show — never to change.
         trialEligibility: { select: { registrationMethod: true, createdAt: true, closedAt: true, closedReason: true } },
         trialClaim: { select: { claimedAt: true, startedAt: true, endsAt: true, expiryRecordedAt: true } },
@@ -658,6 +673,7 @@ export class PlatformController {
           select: {
             id: true,
             name: true,
+            nameAr: true,
             email: true,
             phone: true,
             emailVerifiedAt: true,
@@ -687,6 +703,7 @@ export class PlatformController {
     return {
       id: binToUuid(company.id),
       name: company.name,
+      nameAr: company.nameAr,
       publicStoreId: company.publicStoreId,
       city: company.city,
       createdAt: company.createdAt.toISOString(),
@@ -695,6 +712,7 @@ export class PlatformController {
       branches: company.branches.map((b) => ({
         id: binToUuid(b.id),
         name: b.name,
+        nameAr: b.nameAr,
         type: b.type,
         activity: b.activity,
         /** A downgrade waiting for the next renewal (D154), or null. */
@@ -703,6 +721,7 @@ export class PlatformController {
       people: company.users.map((u) => ({
         id: binToUuid(u.id),
         name: u.name,
+        nameAr: u.nameAr,
         email: u.email,
         phone: u.phone,
         emailVerified: u.emailVerifiedAt !== null,
@@ -836,8 +855,11 @@ export class PlatformController {
     const result = await this.registration.register({
       idempotencyKey: `${ADMIN_KEY_PREFIX}${dto.idempotencyKey}`,
       ownerName: dto.ownerName,
+      ownerNameAr: dto.ownerNameAr,
       businessName: dto.businessName,
+      businessNameAr: dto.businessNameAr,
       branchName: dto.branchName ?? '',
+      branchNameAr: dto.branchNameAr,
       activity: dto.activity,
       city: dto.city,
       email: dto.email,
@@ -867,6 +889,8 @@ export class PlatformController {
       after: {
         publicStoreId: result.publicStoreId,
         ownerName: dto.ownerName,
+        ownerNameAr: dto.ownerNameAr,
+        businessNameAr: dto.businessNameAr,
         city: dto.city ?? null,
         language: dto.language,
         activity: result.activity,
@@ -943,7 +967,11 @@ export class PlatformController {
   async consoleStore(@Param('id') id: string, @Body() dto: ConsoleStoreDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
-    return this.provisioning.openStore(id, { name: dto.name, activity: dto.activity, reason: dto.reason }, { admin, ip: req.ip });
+    return this.provisioning.openStore(
+      id,
+      { name: dto.name, nameAr: dto.nameAr, activity: dto.activity, reason: dto.reason },
+      { admin, ip: req.ip },
+    );
   }
 
   /** A fresh invitation for the Owner. Every unspent one is revoked by it. */

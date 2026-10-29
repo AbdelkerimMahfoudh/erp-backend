@@ -320,6 +320,8 @@ model Company {
   discountApprovals    DiscountApproval[]
   id                   Bytes                @id @db.Binary(16)
   name                 String               @db.VarChar(160)
+  /// D225 (0111): the Arabic name, read by the Arabic interface. NULL until given: `name` is shown meanwhile.
+  nameAr               String?              @map("name_ar") @db.VarChar(160)
   /// Public Store Account ID (F1 Stage 3.2): the human-typable, NON-secret code
   /// that selects this company before login. Canonical = 10 uppercase hex chars.
   /// Not the binary `id`, a branch id, a device id or a subscription id.
@@ -475,6 +477,8 @@ model Branch {
   id                Bytes               @id @db.Binary(16)
   companyId         Bytes               @map("company_id") @db.Binary(16)
   name              String              @db.VarChar(160)
+  /// D225 (0111): the Arabic name, read by the Arabic interface. NULL until given: `name` is shown meanwhile.
+  nameAr            String?             @map("name_ar") @db.VarChar(160)
   type              BranchType          @default(store)
   /// D154: the activity the branch is subscribed to; every branch before 0088 is `electronics`.
   activity          BranchActivity      @default(electronics)
@@ -607,6 +611,8 @@ model User {
   id              Bytes     @id @db.Binary(16)
   companyId       Bytes     @map("company_id") @db.Binary(16)
   name            String    @db.VarChar(160)
+  /// D225 (0111): the Arabic name, read by the Arabic interface. NULL until given: `name` is shown meanwhile.
+  nameAr          String?   @map("name_ar") @db.VarChar(160)
   login           String    @db.VarChar(120)
   /// The identifier somebody signs in with when they have no phone, or
   /// prefer not to type one. Generated, globally unique, and NOT the binary id:
@@ -1516,6 +1522,14 @@ model Sale {
   /// The customer as named at confirmation (0108): a later profile edit never rewrites a receipt.
   customerNameSnapshot       String?   @map("customer_name_snapshot") @db.VarChar(160)
   customerPhoneSnapshot      String?   @map("customer_phone_snapshot") @db.VarChar(40)
+  /// The business, the store and the seller as named at confirmation (0111, D225), in both scripts: a
+  /// later rename never rewrites a receipt. NULL on every sale before 0111, which names the live records.
+  businessNameSnapshot       String?   @map("business_name_snapshot") @db.VarChar(160)
+  businessNameArSnapshot     String?   @map("business_name_ar_snapshot") @db.VarChar(160)
+  branchNameSnapshot         String?   @map("branch_name_snapshot") @db.VarChar(160)
+  branchNameArSnapshot       String?   @map("branch_name_ar_snapshot") @db.VarChar(160)
+  sellerNameSnapshot         String?   @map("seller_name_snapshot") @db.VarChar(160)
+  sellerNameArSnapshot       String?   @map("seller_name_ar_snapshot") @db.VarChar(160)
 
   clientUuid Bytes?   @map("client_uuid") @db.Binary(16)
   createdAt  DateTime @default(now()) @map("created_at") @db.DateTime(6)
@@ -4715,6 +4729,8 @@ model SeatAllocation {
 
   /// The requested store's name, for a store request. Null for a seat.
   label String? @db.VarChar(160)
+  /// D225 (0111): the requested store's Arabic name, opened with it. NULL on every request before 0111.
+  labelAr String? @map("label_ar") @db.VarChar(160)
 
   /// D154: kind `activity` — the branch's activity change; a store request records the new
   /// store's activity in `activityTo`.

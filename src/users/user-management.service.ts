@@ -66,6 +66,8 @@ export interface PendingView {
 export interface UserBranchView {
   branchId: string;
   branchName: string;
+  /** D225: the store's Arabic name; null until the Owner gives it. */
+  branchNameAr: string | null;
   role: string;
   /** Whether this assignment may receive delegated permissions (store_manager). */
   canDelegate: boolean;
@@ -83,6 +85,10 @@ export interface UserBranchView {
 export interface UserView {
   id: string;
   name: string;
+  /** D225: the Arabic name; null until given, and then `name` is shown meanwhile. */
+  nameAr: string | null;
+  /** D225: no Arabic name yet — shown, never blocked, marked for the Owner to complete. */
+  nameIncomplete: boolean;
   login: string;
   phone: string | null;
   email: string | null;
@@ -107,6 +113,7 @@ export interface UserView {
 const USER_SELECT = {
   id: true,
   name: true,
+  nameAr: true,
   login: true,
   phone: true,
   email: true,
@@ -130,7 +137,7 @@ const USER_SELECT = {
   },
   userBranches: {
     select: {
-      branch: { select: { id: true, name: true } },
+      branch: { select: { id: true, name: true, nameAr: true } },
       role: { select: { key: true } },
       permissions: { select: { permission: { select: { key: true } } } },
     },
@@ -224,6 +231,11 @@ export class UserManagementService {
     if (dto.name !== undefined && dto.name !== before.name) {
       data.name = dto.name;
       changed.push('name');
+    }
+    // D225: the Arabic name on its own — the Latin one is untouched unless it was sent too.
+    if (dto.nameAr !== undefined && dto.nameAr !== before.nameAr) {
+      data.nameAr = dto.nameAr;
+      changed.push('nameAr');
     }
 
     // A changed contact must never keep a stale "verified" mark. Clearing (empty
@@ -658,6 +670,8 @@ export class UserManagementService {
     return {
       id: binToUuid(row.id),
       name: row.name,
+      nameAr: row.nameAr,
+      nameIncomplete: !row.nameAr,
       login: row.login,
       phone: row.phone,
       email: row.email,
@@ -672,6 +686,7 @@ export class UserManagementService {
       branches: row.userBranches.map((ub) => ({
         branchId: binToUuid(ub.branch.id),
         branchName: ub.branch.name,
+        branchNameAr: ub.branch.nameAr,
         role: ub.role.key,
         canDelegate: ub.role.key === DELEGATION_ELIGIBLE_ROLE,
         canDelegateClosing: mayHoldDelegated(CLOSING_PERMISSION, ub.role.key),
@@ -688,6 +703,7 @@ export class UserManagementService {
   private auditable(row: UserRow, changed: string[]): Prisma.InputJsonValue {
     const all: Record<string, unknown> = {
       name: row.name,
+      nameAr: row.nameAr,
       // Whether a contact is held, never the contact: the audit outlives a deletion (audit-contact.ts).
       phone: contactPresence(row.phone),
       email: contactPresence(row.email),
