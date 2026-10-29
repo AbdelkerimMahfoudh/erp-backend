@@ -810,7 +810,8 @@ export class InventoryService {
         ],
       },
       include: {
-        product: true,
+        // D225: with the category its picture is drawn from (key, chosen icon, parent's).
+        product: { include: { category: CATEGORY_VISUAL_SELECT } },
         branch: { select: { id: true, name: true } },
         // The purchase reference and date only. First release: no supplier name
         // is sent: ordinary purchases are anonymous, and historical supplier

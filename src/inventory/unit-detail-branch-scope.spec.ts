@@ -80,3 +80,16 @@ describe('unit detail is confined to the caller’s branches', () => {
     expect(unit.branchId).toEqual(THEIRS);
   });
 });
+
+describe('the unit detail carries what its picture is drawn from (D225)', () => {
+  it('reads the product with its category key, chosen icon and parent', async () => {
+    const { service, db } = makeService([MINE]);
+    const findFirst = jest.spyOn(db.unit, 'findFirst');
+
+    await service.findByIdentifierWithTimeline('356888000000011');
+
+    expect(findFirst.mock.calls[0][0].include.product).toEqual({
+      include: { category: { select: { id: true, key: true, icon: true, parent: { select: { key: true, icon: true } } } } },
+    });
+  });
+});
