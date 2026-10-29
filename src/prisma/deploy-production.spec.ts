@@ -330,6 +330,19 @@ describe('the production package', () => {
     expect(teardown).toMatch(/\[ "\$DEPLOY_PROFILE" = rehearsal \] && \[ "\$PROJECT" = erp-rehearsal \] && \[ "\$BASE" = \/srv\/erp-rehearsal \]/);
   });
 
+  it('refuses a code rollback below 0107 while any buying cost is unknown (the rollback test of 2026-10-29)', () => {
+    const rollback = script('rollback.sh');
+    expect(rollback).toContain("test -d /app/prisma/migrations/0107_unknown_cost");
+    // Every column 0107 made nullable is counted: code built before it fails on a NULL in any of them.
+    const nullable = [...read('prisma', 'migrations', '0107_unknown_cost', 'migration.sql').matchAll(/ALTER TABLE `(\w+)` MODIFY `(\w+)` [^;]* NULL;/g)];
+    expect(nullable.map(([, t]) => t).sort()).toEqual(['purchase_items', 'return_reversals', 'sale_items', 'stock_items', 'stock_receipts', 'units']);
+    for (const [, table, column] of nullable) expect({ table, counted: rollback.includes(`phonestore.${table} WHERE ${column} IS NULL`) }).toEqual({ table, counted: true });
+    expect(rollback).toContain('missing_cost_quantity > 0');
+    expect(rollback).toMatch(/\[ "\$unknown" = 0 \] \|\| die /);
+    // Decided before the API's image is switched.
+    expect(rollback.indexOf('0107_unknown_cost')).toBeLessThan(rollback.indexOf('compose up -d --no-deps api'));
+  });
+
   it('asks for --confirm <host> on every command that changes the stack', () => {
     for (const name of ['deploy.sh', 'migrate.sh', 'rollback.sh', 'teardown-rehearsal.sh']) {
       expect({ name, confirm: /^require_confirm "\$@"$/m.test(script(name)) }).toEqual({ name, confirm: true });
