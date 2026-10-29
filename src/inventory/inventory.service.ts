@@ -1025,6 +1025,8 @@ export class InventoryService {
           trackingType: true,
           specifications: true,
           defaultPrice: true,
+          // D225: what the product's picture is drawn from.
+          category: { select: { id: true, key: true, icon: true, parent: { select: { key: true, icon: true } } } },
         },
       }),
       units.length

@@ -851,6 +851,9 @@ model ProductCategory {
   /// One level of depth: a subcategory's top-level category.
   parentId            Bytes?       @map("parent_id") @db.Binary(16)
   name                String       @db.VarChar(80)
+  /// The illustration a shop's own category wears (D225, `src/categories/category-icons.ts`); NULL for a
+  /// built-in (drawn by its key) and for a shop's category with none chosen (drawn as its parent or generic).
+  icon                String?      @db.VarChar(32)
   defaultTrackingType TrackingType @map("default_tracking_type")
   attributeSchema     Json?        @map("attribute_schema") @db.Json
   isActive            Boolean      @default(true) @map("is_active")

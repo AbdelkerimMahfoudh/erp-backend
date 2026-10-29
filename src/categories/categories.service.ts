@@ -65,6 +65,7 @@ export class CategoriesService {
           defaultTrackingType: dto.defaultTrackingType,
           attributeSchema: schema as unknown as Prisma.InputJsonValue,
           parentId: parent?.id ?? null,
+          icon: dto.icon ?? null,
         },
       })
       .catch((e) => {
@@ -74,7 +75,12 @@ export class CategoriesService {
       entityType: 'ProductCategory',
       entityId: category.id,
       action: 'create',
-      after: { name: category.name, defaultTrackingType: category.defaultTrackingType, parentId: dto.parentId ?? null },
+      after: {
+        name: category.name,
+        defaultTrackingType: category.defaultTrackingType,
+        parentId: dto.parentId ?? null,
+        icon: category.icon,
+      },
     });
     return category;
   }
@@ -122,7 +128,7 @@ export class CategoriesService {
      * it (and show it again); anything else is a subcategory of their own.
      */
     if (existing.key) {
-      const other = (['name', 'defaultTrackingType', 'attributeSchema', 'parentId'] as const).filter(
+      const other = (['name', 'defaultTrackingType', 'attributeSchema', 'parentId', 'icon'] as const).filter(
         (field) => dto[field] !== undefined,
       );
       if (other.length) {
@@ -136,6 +142,8 @@ export class CategoriesService {
     const data: Prisma.ProductCategoryUpdateInput = {};
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
+    // D225: the illustration of a shop's own category. A built-in's picture is the product's, by its key.
+    if (dto.icon !== undefined) data.icon = dto.icon;
 
     /**
      * Changing a category's mode is the real misconfiguration risk.
@@ -200,12 +208,14 @@ export class CategoriesService {
         isActive: existing.isActive,
         defaultTrackingType: existing.defaultTrackingType,
         parentId: existing.parentId ? binToUuid(existing.parentId) : null,
+        icon: existing.icon,
       },
       after: {
         name: category.name,
         isActive: category.isActive,
         defaultTrackingType: category.defaultTrackingType,
         parentId: category.parentId ? binToUuid(category.parentId) : null,
+        icon: category.icon,
       },
     });
     return category;

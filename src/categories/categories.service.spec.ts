@@ -243,3 +243,53 @@ describe('built-in categories and subcategories (D223)', () => {
     });
   });
 });
+
+/**
+ * D225: a shop's own category may wear one of the supported illustrations; a built-in is drawn by its key, so its
+ * picture is not the shop's to change. The DTO accepts only the library's names.
+ */
+describe('the illustration a category wears (D225)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { validate } = require('class-validator') as typeof import('class-validator');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { plainToInstance } = require('class-transformer') as typeof import('class-transformer');
+
+  it("stores the icon chosen for a shop's own category, and records it", async () => {
+    const { service, categories, audits } = makeService();
+    await service.create(createDto({ name: 'Televisions', defaultTrackingType: TrackingType.serial, icon: 'tv' }));
+    expect(categories[0].icon).toBe('tv');
+    expect(audits[0].after.icon).toBe('tv');
+  });
+
+  it('stores nothing when none is chosen: the app draws the parent’s picture or a neutral one', async () => {
+    const { service, categories } = makeService();
+    await service.create(createDto({ name: 'Misc' }));
+    expect(categories[0].icon).toBeNull();
+  });
+
+  it('changes and clears the icon of a shop category, audited before and after', async () => {
+    const { service, categories, audits } = makeService({ categories: [category({ key: null, icon: 'accessory' })] });
+    await service.update('09090909-0909-0909-0909-090909090909', { icon: 'printer' } as UpdateCategoryDto);
+    expect(categories[0].icon).toBe('printer');
+    expect(audits[0].before.icon).toBe('accessory');
+    expect(audits[0].after.icon).toBe('printer');
+    await service.update('09090909-0909-0909-0909-090909090909', { icon: null } as UpdateCategoryDto);
+    expect(categories[0].icon).toBeNull();
+  });
+
+  it("refuses to change a built-in's picture: a console stays a console in every shop", async () => {
+    const { service } = makeService({ categories: [category({ key: 'gaming.consoles', icon: null })] });
+    await expect(service.update('09090909-0909-0909-0909-090909090909', { icon: 'desktop' } as UpdateCategoryDto)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  it('accepts only the names of the library', async () => {
+    const ok = await validate(plainToInstance(CreateCategoryDto, { name: 'TV', defaultTrackingType: 'serial', icon: 'tv' }));
+    expect(ok).toHaveLength(0);
+    const bad = await validate(plainToInstance(CreateCategoryDto, { name: 'TV', defaultTrackingType: 'serial', icon: 'rocket' }));
+    expect(bad.map((e) => e.property)).toContain('icon');
+    const cleared = await validate(plainToInstance(UpdateCategoryDto, { icon: null }));
+    expect(cleared).toHaveLength(0);
+  });
+});

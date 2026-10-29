@@ -1,7 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { TrackingType } from '@prisma/client';
-import { IsArray, IsEnum, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsArray, IsEnum, IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 import { AttributeDef } from '../../tracking/attribute-def';
+import { CATEGORY_ICONS, type CategoryIcon } from '../category-icons';
 
 export class CreateCategoryDto {
   @ApiProperty({ maxLength: 80, example: 'Laptops' })
@@ -32,4 +33,12 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsUUID()
   parentId?: string;
+
+  @ApiPropertyOptional({
+    enum: CATEGORY_ICONS,
+    description: 'The illustration this category wears (D225). Absent: its built-in parent\'s, or a neutral generic one.',
+  })
+  @IsOptional()
+  @IsIn(CATEGORY_ICONS)
+  icon?: CategoryIcon;
 }

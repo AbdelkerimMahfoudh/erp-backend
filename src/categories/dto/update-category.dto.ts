@@ -1,7 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { TrackingType } from '@prisma/client';
-import { IsArray, IsBoolean, IsEnum, IsOptional, IsString, IsUUID, MaxLength, ValidateIf } from 'class-validator';
+import { IsArray, IsBoolean, IsEnum, IsIn, IsOptional, IsString, IsUUID, MaxLength, ValidateIf } from 'class-validator';
 import { AttributeDef } from '../../tracking/attribute-def';
+import { CATEGORY_ICONS, type CategoryIcon } from '../category-icons';
 
 export class UpdateCategoryDto {
   @ApiPropertyOptional({ maxLength: 80 })
@@ -30,4 +31,10 @@ export class UpdateCategoryDto {
   @ValidateIf((_, v) => v !== null)
   @IsUUID()
   parentId?: string | null;
+
+  @ApiPropertyOptional({ enum: CATEGORY_ICONS, nullable: true, description: 'The illustration (D225); null clears it.' })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsIn(CATEGORY_ICONS)
+  icon?: CategoryIcon | null;
 }

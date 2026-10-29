@@ -38,6 +38,21 @@ export interface SummaryProduct {
   trackingType: TrackingType;
   specifications: Prisma.JsonValue;
   defaultPrice: number | null;
+  /** The category the product is filed under, for its illustration (D225). */
+  category?: { id: Buffer; key: string | null; icon: string | null; parent: { key: string | null; icon: string | null } | null } | null;
+}
+
+/**
+ * What the app draws a product's picture from (D225): its category's built-in key or chosen icon, and
+ * its parent's. Never a guess from the tracking type — a PlayStation is serial-tracked, and that does
+ * not make it a computer.
+ */
+export interface CategoryVisual {
+  categoryId: string;
+  key: string | null;
+  icon: string | null;
+  parentKey: string | null;
+  parentIcon: string | null;
 }
 
 export interface SummaryInputs {
@@ -64,8 +79,13 @@ export interface StockSummaryRow {
   barcode: string | null;
   trackingType: TrackingType;
   specifications: Prisma.JsonValue;
-  /** Derived from tracking type: IMEI-tracked is a phone, quantity is an accessory. */
+  /**
+   * Derived from tracking type: IMEI-tracked is a phone, quantity is an accessory. Kept for builds before
+   * D225; the illustration now comes from `categoryVisual`.
+   */
   category: StockCategory;
+  /** The product's category, for its illustration (D225); null for a product filed under none. */
+  categoryVisual: CategoryVisual | null;
   /**
    * Sellable now. Serialized: `in_stock` units. Quantity: physical minus what is
    * promised to an open transfer — reserved goods are not free to sell.
@@ -192,5 +212,17 @@ function identity(product: SummaryProduct) {
     trackingType: product.trackingType,
     specifications: product.specifications,
     category: categoryOf(product.trackingType),
+    categoryVisual: categoryVisualOf(product.category ?? null),
+  };
+}
+
+export function categoryVisualOf(category: SummaryProduct['category']): CategoryVisual | null {
+  if (!category) return null;
+  return {
+    categoryId: binToUuid(category.id),
+    key: category.key,
+    icon: category.icon,
+    parentKey: category.parent?.key ?? null,
+    parentIcon: category.parent?.icon ?? null,
   };
 }

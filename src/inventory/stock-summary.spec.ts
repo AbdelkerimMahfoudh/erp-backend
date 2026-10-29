@@ -176,8 +176,36 @@ describe('what the row never carries', () => {
   it('carries no unit ids or identifiers — those stay on the unit list', () => {
     const rows = buildStockSummary(inputs({ units: [unit(1, IPHONE_BLACK)] }));
     expect(Object.keys(rows[0]).sort()).toEqual(
-      ['available', 'barcode', 'brand', 'category', 'model', 'onHand', 'price', 'productId', 'reserved', 'specifications', 'trackingType', 'variant'].sort(),
+      ['available', 'barcode', 'brand', 'category', 'categoryVisual', 'model', 'onHand', 'price', 'productId', 'reserved', 'specifications', 'trackingType', 'variant'].sort(),
     );
+  });
+});
+
+/**
+ * D225: a product's picture is drawn from its category, never guessed from its tracking type — a PlayStation 5 is
+ * serial-tracked like a laptop, and the old `category: 'other'` drew both as a desktop computer.
+ */
+describe('the category a row is drawn from', () => {
+  const consoles = { id: Buffer.alloc(16, 7), key: 'gaming.consoles', icon: null, parent: { key: 'gaming', icon: null } };
+
+  it('carries the category key and its parent key, so a console is drawn as a console', () => {
+    const base = inputs({ units: [unit(1, IPHONE_BLACK)] });
+    const rows = buildStockSummary({ ...base, products: base.products.map((p) => ({ ...p, category: consoles })) });
+    expect(rows[0].categoryVisual).toEqual({
+      categoryId: consoles.id.toString('hex').replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5'),
+      key: 'gaming.consoles',
+      icon: null,
+      parentKey: 'gaming',
+      parentIcon: null,
+    });
+  });
+
+  it("carries a shop's own icon, and nothing for a product filed under no category", () => {
+    const own = { id: Buffer.alloc(16, 8), key: null, icon: 'tv', parent: null };
+    const base = inputs({ units: [unit(1, IPHONE_BLACK)] });
+    const withOwn = buildStockSummary({ ...base, products: base.products.map((p) => ({ ...p, category: own })) });
+    expect(withOwn[0].categoryVisual).toMatchObject({ key: null, icon: 'tv', parentKey: null });
+    expect(buildStockSummary(base)[0].categoryVisual).toBeNull();
   });
 });
 
