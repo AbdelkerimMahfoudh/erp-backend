@@ -1,3 +1,4 @@
+import { CATEGORY_VISUAL_SELECT, categoryVisualOf } from '../categories/category-visual';
 import {
   BadRequestException,
   ConflictException,
@@ -1268,10 +1269,12 @@ export class SalesService {
                 imeiPrimary: true,
                 imeiSecondary: true,
                 serialNo: true,
-                product: { select: { brand: true, model: true, variant: true, trackingType: true } },
+                product: { select: { brand: true, model: true, variant: true, trackingType: true, category: CATEGORY_VISUAL_SELECT } },
               },
             },
-            product: { select: { brand: true, model: true, variant: true, barcode: true, trackingType: true } },
+            product: {
+              select: { brand: true, model: true, variant: true, barcode: true, trackingType: true, category: CATEGORY_VISUAL_SELECT },
+            },
           },
         },
       },
@@ -1350,6 +1353,8 @@ export class SalesService {
         product: describeProduct(i.unit?.product ?? i.product),
         barcode: i.product?.barcode ?? null,
         trackingType: i.unit?.product?.trackingType ?? i.product?.trackingType ?? null,
+        // D225: the line's picture, from its product's category.
+        categoryVisual: categoryVisualOf(i.unit?.product?.category ?? i.product?.category ?? null),
         quantity: i.quantity,
         price: Number(i.price),
         discount: Number(i.discount),

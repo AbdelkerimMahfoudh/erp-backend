@@ -29,6 +29,7 @@ import { isValidImei } from './imei.util';
 import { receiveQuantityAtCost } from './stock-cost';
 import { assertAssignedToBranch } from '../rbac/active-branch';
 import { buildStockSummary, type StockSummaryRow } from './stock-summary';
+import { CATEGORY_VISUAL_SELECT } from '../categories/category-visual';
 import { referencedIds, shapeUnitTimeline } from './unit-timeline';
 import { QuickAddUnitDto } from './dto/quick-add-unit.dto';
 import { CorrectUnitDto } from './dto/correct-unit.dto';
@@ -1026,7 +1027,7 @@ export class InventoryService {
           specifications: true,
           defaultPrice: true,
           // D225: what the product's picture is drawn from.
-          category: { select: { id: true, key: true, icon: true, parent: { select: { key: true, icon: true } } } },
+          category: CATEGORY_VISUAL_SELECT,
         },
       }),
       units.length

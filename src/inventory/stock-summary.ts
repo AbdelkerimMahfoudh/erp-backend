@@ -1,6 +1,7 @@
 import type { Prisma, TrackingType } from '@prisma/client';
 import { resolveQuantity, resolveSerialized } from '../pricing/price-resolution';
 import { binToUuid } from '../common/utils/uuid.util';
+import { categoryVisualOf, type CategoryVisual, type CategoryVisualSource } from '../categories/category-visual';
 
 /**
  * The shelf, one row per exact product variant, for the Stock screen.
@@ -39,21 +40,9 @@ export interface SummaryProduct {
   specifications: Prisma.JsonValue;
   defaultPrice: number | null;
   /** The category the product is filed under, for its illustration (D225). */
-  category?: { id: Buffer; key: string | null; icon: string | null; parent: { key: string | null; icon: string | null } | null } | null;
+  category?: CategoryVisualSource;
 }
 
-/**
- * What the app draws a product's picture from (D225): its category's built-in key or chosen icon, and
- * its parent's. Never a guess from the tracking type — a PlayStation is serial-tracked, and that does
- * not make it a computer.
- */
-export interface CategoryVisual {
-  categoryId: string;
-  key: string | null;
-  icon: string | null;
-  parentKey: string | null;
-  parentIcon: string | null;
-}
 
 export interface SummaryInputs {
   activeBranchId: Buffer;
@@ -213,16 +202,5 @@ function identity(product: SummaryProduct) {
     specifications: product.specifications,
     category: categoryOf(product.trackingType),
     categoryVisual: categoryVisualOf(product.category ?? null),
-  };
-}
-
-export function categoryVisualOf(category: SummaryProduct['category']): CategoryVisual | null {
-  if (!category) return null;
-  return {
-    categoryId: binToUuid(category.id),
-    key: category.key,
-    icon: category.icon,
-    parentKey: category.parent?.key ?? null,
-    parentIcon: category.parent?.icon ?? null,
   };
 }

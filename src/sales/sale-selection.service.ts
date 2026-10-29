@@ -1,3 +1,4 @@
+import { CATEGORY_VISUAL_SELECT, categoryVisualOf } from '../categories/category-visual';
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { ClsService } from 'nestjs-cls';
 import { AppClsStore } from '../common/context/request-context';
@@ -61,7 +62,9 @@ export class SaleSelectionService {
         imeiPrimary: true,
         imeiSecondary: true,
         serialNo: true,
-        product: { select: { brand: true, model: true, variant: true, specifications: true, trackingType: true } },
+        product: {
+          select: { brand: true, model: true, variant: true, specifications: true, trackingType: true, category: CATEGORY_VISUAL_SELECT },
+        },
       },
     });
     const canViewBranches = this.may('branch.manage');
@@ -106,6 +109,8 @@ export class SaleSelectionService {
         storage,
         colour,
         trackingType: unit.product.trackingType,
+        // D225: what the scanned item is drawn as, from its category.
+        categoryVisual: categoryVisualOf(unit.product.category),
       },
       price,
       /** Only for a caller with branch.manage, and only when the phone is elsewhere. */
@@ -136,7 +141,7 @@ export class SaleSelectionService {
   private async selectByBarcode(identifier: string, branchId: Buffer) {
     const product = await this.db.product.findFirst({
       where: { barcode: identifier, deletedAt: null },
-      select: { id: true, brand: true, model: true, variant: true, specifications: true, trackingType: true },
+      select: { id: true, brand: true, model: true, variant: true, specifications: true, trackingType: true, category: CATEGORY_VISUAL_SELECT },
     });
     if (!product || product.trackingType !== 'quantity') return null;
 
@@ -171,6 +176,7 @@ export class SaleSelectionService {
         storage,
         colour,
         trackingType: product.trackingType,
+        categoryVisual: categoryVisualOf(product.category),
       },
       price,
       otherBranch: null,
