@@ -251,8 +251,7 @@ export class ProvisioningService {
         const now = new Date();
         await tx.company.update({
           where: { id: companyId },
-          // The pilot sub-mark (0109) exists only on a test business.
-          data: { isTest: input.isTest, ...(input.isTest ? {} : { isPilot: false }), testMarkedAt: now, testMarkedBy: ctx.admin.email.slice(0, 160) },
+          data: { isTest: input.isTest, testMarkedAt: now, testMarkedBy: ctx.admin.email.slice(0, 160) },
         });
         await this.audit.record(
           {

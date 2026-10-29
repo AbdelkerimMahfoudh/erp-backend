@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { BillingService } from '../billing/billing.service';
 import { HashingService } from '../common/security/hashing.service';
@@ -12,7 +12,7 @@ import { RegistrationService } from './registration.service';
 import { SeatAllocationService } from './seat-allocation.service';
 import { StaffActivationService } from './staff-activation.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
-import { TestProvisioningService, type TestActor } from './test-provisioning.service';
+import { AccountProvisioningService, type ProvisioningActor } from './account-provisioning.service';
 
 /**
  * Deferred WhatsApp verification for platform-provisioned test accounts (0109, D224, docs/109) on REAL MySQL — what an
@@ -65,7 +65,7 @@ function processOn(client: PrismaClient, deferral: { on: boolean }) {
     lifecycle: new SubscriptionLifecycleService(db, audit, billing, clock),
     codes,
     invitations: new OwnerInvitationService(db, hashing, sessions, audit, codes),
-    provisioning: new TestProvisioningService(db, config, hashing, audit, mfa, entitlement, sessions, codes),
+    provisioning: new AccountProvisioningService(db, config, hashing, audit, mfa, entitlement, sessions, codes),
     hashing,
   };
 }
@@ -83,30 +83,31 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
   const flag = { on: true };
   let a: ReturnType<typeof processOn>;
   let b: ReturnType<typeof processOn>;
-  let actor: TestActor;
+  let actor: ProvisioningActor;
 
-  async function business(isTest: boolean) {
+  /**
+   * An ordinary paying business (the owner's decision, 2026-10-29): activated, its period running, with `extraSeats`
+   * pooled seats bought on top of the one each store includes. Nothing about it is a test business.
+   */
+  async function business(extraSeats = 10) {
     const key = tag();
     const made = await a.registration.register({
       idempotencyKey: `admin:${key}`,
-      ownerName: 'Pilot Owner',
-      businessName: `${isTest ? 'Pilot' : 'Shop'} ${key}`,
+      ownerName: 'Store Owner',
+      businessName: `Store ${key}`,
       branchName: '',
       city: 'Nouakchott',
       phone: phone(),
       password: 'unusable-password-for-the-spec',
       language: 'en',
       actor: ADMIN.email,
-      isTest,
-      testMarkedBy: isTest ? ADMIN.email : undefined,
     });
-    // A test business's access is an administrative grant; it carries seats for its stores.
-    if (isTest) await a.lifecycle.activateByGrant(made.companyId, { days: 30, reason: 'pilot access' }, { admin: ADMIN, ip: '127.0.0.1' } as never);
+    await root.$executeRaw`UPDATE subscriptions SET status = 'activated', additional_seats = ${extraSeats}, current_period_end = NOW(6) + INTERVAL 30 DAY WHERE company_id = ${hex(made.companyId)}`;
     const branch = await root.branch.findFirstOrThrow({ where: { companyId: hex(made.companyId) }, select: { id: true } });
     return { ...made, branchId: binToUuid(branch.id) };
   }
 
-  const deferral = { reason: 'Store pilot: WhatsApp Business API not live yet', confirmControlledTest: true, reviewAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };
+  const deferral = { reason: 'WhatsApp Business API not live yet', confirmUnverified: true, reviewAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };
 
   beforeAll(async () => {
     const name = new URL(ROOT_URL).pathname.slice(1);
@@ -129,7 +130,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
   });
 
   it('the database will not store a deferred or required account as verified, and derives verified from the timestamp', async () => {
-    const lab = await business(true);
+    const lab = await business();
     const id = newUuidV7Bin();
     const t = tag();
     await root.$executeRaw`INSERT INTO users (id, company_id, name, login, personal_id, password_hash, phone, phone_verification, updated_at)
@@ -147,7 +148,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
   });
 
   it('defaults to Required: a staff account provisioned without a deferral waits for its number to be verified', async () => {
-    const lab = await business(true);
+    const lab = await business();
     const made = await a.provisioning.createStaff(lab.companyId, { name: 'Manager R', phone: phone(), role: 'store_manager', branchIds: [lab.branchId], verification: 'required' }, actor);
     expect(made.user.phoneVerification).toBe('required');
     const spent = await a.codes.spend(made.setupCode.token, 'a-new-password-1', {});
@@ -157,7 +158,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
   });
 
   it('a deferred employee: no verified timestamp, no consent, no message, a single-use code, then a usable account', async () => {
-    const lab = await business(true);
+    const lab = await business();
     const number = phone();
     const made = await a.provisioning.createStaff(lab.companyId, { name: 'Employee D', phone: number, role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor);
     expect(made.setupCode.delivery).toBe('manual');
@@ -173,8 +174,8 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
 
     // Spent twice at the same instant across two pools: one winner.
     const [one, two] = await Promise.all([
-      a.invitations.accept(made.setupCode.token, 'pilot-password-1', {}).then(() => 'ok', () => 'refused'),
-      b.invitations.accept(made.setupCode.token, 'pilot-password-2', {}).then(() => 'ok', () => 'refused'),
+      a.invitations.accept(made.setupCode.token, 'own-password-1', {}).then(() => 'ok', () => 'refused'),
+      b.invitations.accept(made.setupCode.token, 'own-password-2', {}).then(() => 'ok', () => 'refused'),
     ]);
     expect([one, two].sort()).toEqual(['ok', 'refused']);
     const after = await root.user.findUniqueOrThrow({ where: { id }, select: { passwordHash: true, isActive: true, activatedAt: true, phoneVerification: true, phoneVerifiedAt: true } });
@@ -182,10 +183,10 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
     expect(after.activatedAt).toBeInstanceOf(Date);
     expect(after.phoneVerification).toBe('deferred_by_platform');
     expect(after.phoneVerifiedAt).toBeNull();
-    const winner = one === 'ok' ? 'pilot-password-1' : 'pilot-password-2';
+    const winner = one === 'ok' ? 'own-password-1' : 'own-password-2';
     expect(await a.hashing.verify(after.passwordHash, winner)).toBe(true);
     // Used: refused with the one answer, whatever happened to it.
-    await expect(a.invitations.accept(made.setupCode.token, 'pilot-password-3', {})).rejects.toThrow('That invitation cannot be used.');
+    await expect(a.invitations.accept(made.setupCode.token, 'own-password-3', {})).rejects.toThrow('That invitation cannot be used.');
     // The role and stores are the ones chosen, and still the business's own.
     const ub = await root.userBranch.findMany({ where: { userId: id }, select: { branchId: true, role: { select: { key: true } } } });
     expect(ub.map((u) => [binToUuid(u.branchId), u.role.key])).toEqual([[lab.branchId, 'store_employee']]);
@@ -195,19 +196,13 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
     expect(event.note).not.toContain('number verified');
   });
 
-  it('refuses a deferral for a customer business, with the flag off, without MFA, and without a fresh step-up — each audited', async () => {
-    const shop = await business(false);
-    const lab = await business(true);
+  it('refuses a deferral with the switch off, without MFA, and without a fresh step-up — each audited', async () => {
+    const lab = await business();
     const input = (n: string) => ({ name: n, phone: phone(), role: 'store_employee' as const, branchIds: [lab.branchId], verification: 'deferred_by_platform' as const, deferral });
-
-    const customer = await a.provisioning.createStaff(shop.companyId, { ...input('C'), branchIds: [shop.branchId] }, actor).catch((e: unknown) => e);
-    expect(customer).toBeInstanceOf(ForbiddenException);
-    expect(codeOf(customer)).toBe('test_business_only');
-    // The business-creation door asks the same question of a customer business.
-    expect(codeOf(await a.provisioning.assertMayDefer(actor, { id: null, name: 'Customer', isTest: false }, 'phone_verification.defer').catch((e: unknown) => e))).toBe('deferral_test_business_only');
 
     flag.on = false;
     expect(codeOf(await a.provisioning.createStaff(lab.companyId, input('F'), actor).catch((e: unknown) => e))).toBe('deferral_disabled');
+    expect(codeOf(await a.provisioning.assertMayDefer(actor, { id: null, name: 'New business' }, 'phone_verification.defer').catch((e: unknown) => e))).toBe('deferral_disabled');
     flag.on = true;
 
     const noMfa = { admin: NO_MFA, sessionId: await session(NO_MFA.id, 0), ip: '127.0.0.1' };
@@ -220,44 +215,55 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
 
     // Nobody was created by any of them, and every refusal is a row naming its condition.
     expect(await root.user.count({ where: { companyId: hex(lab.companyId), name: { in: ['F', 'M', 'S', 'N'] } } })).toBe(0);
-    const refusals = await root.platformAuditEvent.findMany({ where: { action: { endsWith: '.refused' }, targetId: { in: [hex(lab.companyId), hex(shop.companyId)] } }, select: { action: true, afterJson: true } });
-    const conditions = refusals.map((r) => (r.afterJson as { condition?: string }).condition ?? (r.afterJson as { refusal?: string }).refusal).sort();
-    expect(conditions).toEqual(expect.arrayContaining(['kill_switch', 'mfa', 'step_up', 'step_up', 'test_business_only']));
+    const refusals = await root.platformAuditEvent.findMany({ where: { action: { endsWith: '.refused' }, targetId: hex(lab.companyId) }, select: { afterJson: true } });
+    const conditions = refusals.map((r) => (r.afterJson as { condition?: string }).condition).sort();
+    expect(conditions).toEqual(expect.arrayContaining(['kill_switch', 'mfa', 'step_up', 'step_up']));
   });
 
-  it('preserves the rules: no Owner from the console, unique numbers, the business’s own stores; a full store’s seat is granted, never priced', async () => {
-    const lab = await business(true);
-    const other = await business(true);
+  it('a deferral is per account in an ordinary business: nothing about the business changes', async () => {
+    const lab = await business();
+    const before = await root.company.findUniqueOrThrow({ where: { id: hex(lab.companyId) }, select: { isTest: true } });
+    const sub = await root.subscription.findFirstOrThrow({ where: { companyId: hex(lab.companyId) }, select: { status: true, additionalSeats: true, isComplimentary: true } });
+    await a.provisioning.createStaff(lab.companyId, { name: 'Deferred one', phone: phone(), role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor);
+    await a.provisioning.createStaff(lab.companyId, { name: 'Required one', phone: phone(), role: 'store_employee', branchIds: [lab.branchId], verification: 'required' }, actor);
+    expect(before.isTest).toBe(false);
+    expect(await root.company.findUniqueOrThrow({ where: { id: hex(lab.companyId) }, select: { isTest: true } })).toEqual(before);
+    expect(await root.subscription.findFirstOrThrow({ where: { companyId: hex(lab.companyId) }, select: { status: true, additionalSeats: true, isComplimentary: true } })).toEqual(sub);
+    const states = await root.user.findMany({ where: { companyId: hex(lab.companyId), name: { in: ['Deferred one', 'Required one'] } }, select: { name: true, phoneVerification: true }, orderBy: { name: 'asc' } });
+    expect(states).toEqual([
+      { name: 'Deferred one', phoneVerification: 'deferred_by_platform' },
+      { name: 'Required one', phoneVerification: 'required' },
+    ]);
+    // No seat is ever created by provisioning.
+    expect(await root.seatAllocation.count({ where: { companyId: hex(lab.companyId) } })).toBe(0);
+  });
+
+  it('preserves the rules: no Owner from the console, unique numbers, the business’s own stores, the business’s own seats', async () => {
+    const lab = await business();
+    const other = await business();
     const number = phone();
     await a.provisioning.createStaff(lab.companyId, { name: 'First', phone: number, role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor);
     expect(codeOf(await a.provisioning.createStaff(lab.companyId, { name: 'Again', phone: number, role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor).catch((e: unknown) => e))).toBe('contact_in_use');
     expect(codeOf(await a.provisioning.createStaff(lab.companyId, { name: 'Owner2', phone: phone(), role: 'owner' as never, branchIds: [lab.branchId], verification: 'required' }, actor).catch((e: unknown) => e))).toBe('role_not_allowed');
     // Another business's store is no store of this one.
     expect(await a.provisioning.createStaff(lab.companyId, { name: 'Cross', phone: phone(), role: 'store_employee', branchIds: [other.branchId], verification: 'required' }, actor).catch((e: unknown) => e)).toBeInstanceOf(NotFoundException);
-    // A full store (the owner's decision, 2026-10-28): each further person is GRANTED a seat there, held for them, at
-    // no charge — never a priced request — and every one of them becomes usable with their own code.
-    const many = [];
-    for (let i = 0; i < 4; i++) {
-      many.push(await a.provisioning.createStaff(lab.companyId, { name: `Crew ${i}`, phone: phone(), role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor));
-    }
-    for (const [i, m] of many.entries()) expect(await a.codes.spend(m.setupCode.token, `crew-password-${i}`, {})).toMatchObject({ spent: true, activated: true });
-    const held = await root.seatAllocation.findMany({ where: { companyId: hex(lab.companyId), kind: 'seat' }, select: { status: true, monthlyAmount: true, userId: true } });
-    expect(held.length).toBeGreaterThanOrEqual(3);
-    expect(held.every((h) => h.status === 'granted' && h.monthlyAmount === 0 && h.userId !== null)).toBe(true);
-    expect(await root.seatAllocation.count({ where: { companyId: hex(lab.companyId), status: 'pending_payment' } })).toBe(0);
-    // Without the administrative grant in force, nobody is seated from the console.
-    const bare = await a.registration.register({ idempotencyKey: `admin:${tag()}`, ownerName: 'No Grant', businessName: `Bare ${tag()}`, branchName: '', city: 'Nouakchott', phone: phone(), password: 'unusable-password-for-the-spec', language: 'en', actor: ADMIN.email, isTest: true, testMarkedBy: ADMIN.email });
-    const bareBranch = await root.branch.findFirstOrThrow({ where: { companyId: hex(bare.companyId) }, select: { id: true } });
-    expect(codeOf(await a.provisioning.createStaff(bare.companyId, { name: 'N', phone: phone(), role: 'store_employee', branchIds: [binToUuid(bareBranch.id)], verification: 'required' }, actor).catch((e: unknown) => e))).toBe('grant_required');
+    // A full store: refused, clearly — never a seat granted, never one priced (the owner's decision, 2026-10-29).
+    const tight = await business(0);
+    await a.provisioning.createStaff(tight.companyId, { name: 'Takes the seat', phone: phone(), role: 'store_employee', branchIds: [tight.branchId], verification: 'deferred_by_platform', deferral }, actor);
+    const full = await a.provisioning.createStaff(tight.companyId, { name: 'One too many', phone: phone(), role: 'store_employee', branchIds: [tight.branchId], verification: 'deferred_by_platform', deferral }, actor).catch((e: unknown) => e);
+    expect(full).toBeInstanceOf(ConflictException);
+    expect(codeOf(full)).toBe('seat_unavailable');
+    expect(await root.user.count({ where: { companyId: hex(tight.companyId), name: 'One too many' } })).toBe(0);
+    expect(await root.seatAllocation.count({ where: { companyId: hex(tight.companyId) } })).toBe(0);
   });
 
-  it('a deferred Owner of a new test business, its code instead of the setup invitation, and a deferred account never reads verified', async () => {
-    const lab = await business(true);
+  it('a deferred Owner of a new business, its code instead of the setup invitation, and a deferred account never reads verified', async () => {
+    const lab = await business();
     const out = await a.provisioning.deferOwner(lab.companyId, { reason: deferral.reason, reviewAt: null }, actor);
     const owner = await root.user.findUniqueOrThrow({ where: { id: hex(out.ownerId) }, select: { phoneVerification: true, phoneVerifiedAt: true } });
     expect(owner).toEqual({ phoneVerification: 'deferred_by_platform', phoneVerifiedAt: null });
     expect(await root.ownerInvitation.count({ where: { companyId: hex(lab.companyId) } })).toBe(0);
-    await a.invitations.accept(out.setupCode.token, 'owner-pilot-password', {});
+    await a.invitations.accept(out.setupCode.token, 'owner-own-password', {});
     const listed = await a.provisioning.listDeferred(lab.companyId);
     expect(listed).toHaveLength(1);
     expect(listed[0]).toMatchObject({ userId: out.ownerId, phoneVerification: 'deferred_by_platform', grantedBy: ADMIN.email, reason: deferral.reason, setupCode: 'used' });
@@ -265,7 +271,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
   });
 
   it('deferred → required sends nothing, and the person’s own verification later ends the deferral as verified', async () => {
-    const lab = await business(true);
+    const lab = await business();
     const number = phone();
     const made = await a.provisioning.createStaff(lab.companyId, { name: 'Later', phone: number, role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor);
     const id = hex(made.user.id);
@@ -286,8 +292,8 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
   });
 
   it('reissue revokes the old code; revoke and cancel end it; another business’s person is nobody here', async () => {
-    const lab = await business(true);
-    const other = await business(true);
+    const lab = await business();
+    const other = await business();
     const made = await a.provisioning.createStaff(lab.companyId, { name: 'Codes', phone: phone(), role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor);
     const again = await a.provisioning.reissueCode(lab.companyId, made.user.id, actor);
     await expect(a.invitations.accept(made.setupCode.token, 'old-code-password', {})).rejects.toThrow('That invitation cannot be used.');
@@ -297,7 +303,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
     await expect(a.provisioning.requireVerification(other.companyId, made.user.id, 'cross', actor)).rejects.toBeInstanceOf(NotFoundException);
     await expect(a.provisioning.cancelAccount(other.companyId, made.user.id, 'cross', actor)).rejects.toBeInstanceOf(NotFoundException);
 
-    await a.provisioning.cancelAccount(lab.companyId, made.user.id, 'Left the pilot', actor);
+    await a.provisioning.cancelAccount(lab.companyId, made.user.id, 'Left the business', actor);
     const row = await root.user.findUniqueOrThrow({ where: { id: hex(made.user.id) }, select: { deletedAt: true, isActive: true, phone: true } });
     expect(row.deletedAt).toBeInstanceOf(Date);
     expect(row).toMatchObject({ isActive: false, phone: null });
@@ -308,7 +314,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
   });
 
   it('the kill switch off refuses new deferrals and leaves existing ones identifiable, unverified and undeleted', async () => {
-    const lab = await business(true);
+    const lab = await business();
     const made = await a.provisioning.createStaff(lab.companyId, { name: 'Kept', phone: phone(), role: 'store_employee', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor);
     flag.on = false;
     expect(a.provisioning.deferralAvailable).toBe(false);
@@ -319,7 +325,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
   });
 
   it('the audit holds every outcome with actor, business, role, stores and reason — and never a code or password', async () => {
-    const lab = await business(true);
+    const lab = await business();
     const made = await a.provisioning.createStaff(lab.companyId, { name: 'Audited', phone: phone(), role: 'store_manager', branchIds: [lab.branchId], verification: 'deferred_by_platform', deferral }, actor);
     await a.invitations.accept(made.setupCode.token, 'audited-password-1', {});
     const rows = await root.platformAuditEvent.findMany({ where: { targetId: hex(lab.companyId) }, orderBy: { createdAt: 'asc' } });

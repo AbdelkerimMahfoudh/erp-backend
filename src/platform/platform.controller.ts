@@ -58,8 +58,8 @@ import { ContinueConfirmDto, ContinueStartDto, RegisterDto } from './registratio
 import { IsIdempotencyKey } from '../common/decorators/idempotency-key.decorator';
 import { trialFactsOf, trialSummaryOf, type TrialClaimFacts } from './trial/trial-rules';
 import { ProvisioningService } from './provisioning.service';
-import { TestProvisioningService } from './test-provisioning.service';
-import { DeferralDto } from './test-provisioning.controller';
+import { AccountProvisioningService } from './account-provisioning.service';
+import { DeferralDto } from './account-provisioning.controller';
 import { Type } from 'class-transformer';
 
 /**
@@ -225,9 +225,9 @@ export class CreateBusinessDto {
   /** A persistent test business (D217), marked in the same transaction that creates it. */
   @IsOptional() @IsBoolean() isTest?: boolean;
   /**
-   * The Owner's WhatsApp verification (D224): `required` unless said. `deferred_by_platform` only for a test business,
-   * by an administrator with MFA and a fresh step-up, while the server's kill switch allows it — all checked by the
-   * server ({@link TestProvisioningService.assertMayDefer}).
+   * The Owner's WhatsApp verification (D224): `required` unless said. `deferred_by_platform` only by a superadmin with
+   * MFA and a fresh step-up, while the server's switch allows it — checked by the server
+   * ({@link AccountProvisioningService.assertMayDefer}). Per account: the business is an ordinary one.
    */
   @IsOptional() @IsIn(['required', 'deferred_by_platform']) verification?: 'required' | 'deferred_by_platform';
   @IsOptional() @ValidateNested() @Type(() => DeferralDto) deferral?: DeferralDto;
@@ -305,7 +305,7 @@ export class PlatformController {
     private readonly invitations: OwnerInvitationService,
     private readonly flow: RegistrationFlowService,
     private readonly provisioning: ProvisioningService,
-    private readonly testProvisioning: TestProvisioningService,
+    private readonly testProvisioning: AccountProvisioningService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -566,7 +566,6 @@ export class PlatformController {
           createdAt: true,
           timezone: true,
           isTest: true,
-          isPilot: true,
           subscription: true,
           ...TRIAL_FACTS,
           _count: { select: { branches: true, users: true } },
@@ -590,7 +589,6 @@ export class PlatformController {
         createdAt: c.createdAt.toISOString(),
         /** A persistent test business (D217): shown as one wherever it is listed. */
         isTest: c.isTest,
-        isPilot: c.isPilot,
         branches: c._count.branches,
         users: c._count.users,
         state: listed.state,
@@ -642,7 +640,6 @@ export class PlatformController {
         createdAt: true,
         timezone: true,
         isTest: true,
-        isPilot: true,
         subscription: true,
         branches: { select: { id: true, name: true, type: true, activity: true, activityNext: true } },
         // The free trial as recorded (0095): the eligibility and the claim, for the console to show — never to change.
@@ -694,7 +691,6 @@ export class PlatformController {
       city: company.city,
       createdAt: company.createdAt.toISOString(),
       isTest: company.isTest,
-      isPilot: company.isPilot,
       setup,
       branches: company.branches.map((b) => ({
         id: binToUuid(b.id),
@@ -835,7 +831,7 @@ export class PlatformController {
     const actor = { admin, sessionId: req.platformSessionId, ip: req.ip ?? null };
     // Every condition before anything is written: a refused deferral creates no business.
     const deferral = deferOwner ? this.testProvisioning.parseDeferral(dto.deferral) : null;
-    if (deferOwner) await this.testProvisioning.assertMayDefer(actor, { id: null, name: dto.businessName, isTest }, 'phone_verification.defer');
+    if (deferOwner) await this.testProvisioning.assertMayDefer(actor, { id: null, name: dto.businessName }, 'phone_verification.defer');
 
     const result = await this.registration.register({
       idempotencyKey: `${ADMIN_KEY_PREFIX}${dto.idempotencyKey}`,

@@ -13,7 +13,7 @@ import { AcceptInvitationDto, CreateBusinessDto } from './platform.controller';
  * and no tenant code path writes the state.
  */
 const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true, transformOptions: { enableImplicitConversion: false } });
-const SPOOF = { verification: 'deferred_by_platform', phoneVerification: 'deferred_by_platform', deferral: { reason: 'x', confirmControlledTest: true } };
+const SPOOF = { verification: 'deferred_by_platform', phoneVerification: 'deferred_by_platform', deferral: { reason: 'x', confirmUnverified: true } };
 
 async function refused(metatype: new () => object, body: object) {
   return pipe.transform({ ...body, ...SPOOF }, { type: 'body', metatype }).then(
@@ -44,11 +44,11 @@ describe('no route but the console can ask for a deferral', () => {
 
   it('the console’s business creation accepts it, and only its two values', async () => {
     const base = { idempotencyKey: 'console-key-1', ownerName: 'O', businessName: 'B', phone: '+22243210987', language: 'en', isTest: true, reason: 'pilot', confirmPassword: 'p' };
-    const ok = await pipe.transform({ ...base, verification: 'deferred_by_platform', deferral: { reason: 'r', confirmControlledTest: true } }, { type: 'body', metatype: CreateBusinessDto });
+    const ok = await pipe.transform({ ...base, verification: 'deferred_by_platform', deferral: { reason: 'r', confirmUnverified: true } }, { type: 'body', metatype: CreateBusinessDto });
     expect(ok).toMatchObject({ verification: 'deferred_by_platform' });
     await expect(pipe.transform({ ...base, verification: 'verified' }, { type: 'body', metatype: CreateBusinessDto })).rejects.toBeInstanceOf(BadRequestException);
     // The confirmation is a real `true`, never assumed.
-    await expect(pipe.transform({ ...base, verification: 'deferred_by_platform', deferral: { reason: 'r', confirmControlledTest: false } }, { type: 'body', metatype: CreateBusinessDto })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(pipe.transform({ ...base, verification: 'deferred_by_platform', deferral: { reason: 'r', confirmUnverified: false } }, { type: 'body', metatype: CreateBusinessDto })).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('no tenant or public code writes the deferred state: only the console’s provisioning does', () => {
@@ -62,6 +62,6 @@ describe('no route but the console can ask for a deferral', () => {
     };
     walk(join(__dirname, '..'));
     const writers = files.filter((p) => /phoneVerification:\s*'deferred_by_platform'/.test(readFileSync(p, 'utf8')) && /\b(create|update|updateMany)\(/.test(readFileSync(p, 'utf8')));
-    expect(writers.map((p) => p.slice(p.lastIndexOf('src')).replace(/\\/g, '/')).sort()).toEqual(['src/platform/test-provisioning.service.ts']);
+    expect(writers.map((p) => p.slice(p.lastIndexOf('src')).replace(/\\/g, '/')).sort()).toEqual(['src/platform/account-provisioning.service.ts']);
   });
 });

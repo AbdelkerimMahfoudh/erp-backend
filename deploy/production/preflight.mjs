@@ -122,9 +122,9 @@ if (profile === 'rehearsal') {
   // The rehearsal never lets the API send: the SMTP proof is a separate one-message command (email-proof.sh).
   check(email === 'disabled', 'A rehearsal keeps EMAIL_CHANNEL=disabled: the delivery proof is email-proof.sh, never the API.');
 }
-// The console activates test businesses only (D217): a real customer is activated once the release requirements are
-// met, by a reviewed change to this line — never by an environment edit on the host.
-check((val('CUSTOMER_ACTIVATION') || 'closed') === 'closed', 'CUSTOMER_ACTIVATION must be "closed" (or unset): real customer activation opens only by a reviewed change, once its release requirements are met (D217).');
+// Customer activation (D217, then D224): the console activated test businesses only until the owner opened it for the
+// first real-store customer (2026-10-29, the reviewed change to this line). Any other value is refused.
+check(['closed', 'open'].includes(val('CUSTOMER_ACTIVATION') || 'closed'), 'CUSTOMER_ACTIVATION must be "closed" or "open" (D224: opened by a reviewed decision of 2026-10-29).');
 // A channel that verifies contacts is what lets a business sign up, so it is what lets customer data in: it opens
 // only after an encrypted backup has been copied off the host AND restored from that copy (restore-drill.sh --offsite).
 if (email !== 'disabled' || whatsapp !== 'disabled') {

@@ -56,8 +56,8 @@ import {
 } from '../acquisition/acquisition.controllers';
 import { EMAIL_CHANNEL, EmailChannel } from '../messaging/email-channel';
 import { AccountSetupCodeService } from './account-setup-code.service';
-import { TestProvisioningService } from './test-provisioning.service';
-import { TestProvisioningController } from './test-provisioning.controller';
+import { AccountProvisioningService } from './account-provisioning.service';
+import { AccountProvisioningController } from './account-provisioning.controller';
 
 /**
  * Which delivery provider is real is an environment decision, and the unsafe
@@ -108,7 +108,7 @@ export function selectContactDelivery(
   imports: [PrismaModule, EntitlementModule, AuthModule],
   controllers: [
     PlatformController,
-    TestProvisioningController,
+    AccountProvisioningController,
     SeatRequestsController,
     PlatformMfaController,
     AppRegistrationController,
@@ -131,7 +131,7 @@ export function selectContactDelivery(
   providers: [
     HashingService,
     AccountSetupCodeService,
-    TestProvisioningService,
+    AccountProvisioningService,
     PlatformAdminService,
     PlatformMfaService,
     PlatformAdminGuard,

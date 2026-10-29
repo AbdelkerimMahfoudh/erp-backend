@@ -26,8 +26,6 @@ export interface AuthTokenResponse {
     publicStoreId: string;
     /** A persistent test business (D217): the app says so from the first screen, as `/auth/me` does. */
     isTestBusiness: boolean;
-    /** A test business running a controlled store pilot (D224). */
-    isPilotBusiness: boolean;
   };
   /** Present ONLY when this login enrolled a new device. The secret appears here and nowhere else. */
   device?: DeviceEnrollment;
@@ -149,7 +147,7 @@ export class AuthService {
   ): Promise<AuthTokenResponse> {
     const company = await this.prisma.company.findUnique({
       where: { id: user.companyId },
-      select: { id: true, isActive: true, publicStoreId: true, isTest: true, isPilot: true },
+      select: { id: true, isActive: true, publicStoreId: true, isTest: true },
     });
 
     // A dormant company is refused with the same generic message: whether a
@@ -257,7 +255,7 @@ export class AuthService {
 
     const company = await this.prisma.company.findUnique({
       where: { id: user.companyId },
-      select: { publicStoreId: true, isTest: true, isPilot: true },
+      select: { publicStoreId: true, isTest: true },
     });
     if (!company) {
       throw new UnauthorizedException('Invalid credentials');
@@ -301,7 +299,7 @@ export class AuthService {
     user: User,
     sessionId: Buffer,
     secret: string,
-    company: { publicStoreId: string; isTest: boolean; isPilot: boolean },
+    company: { publicStoreId: string; isTest: boolean },
   ): AuthTokenResponse {
     const access = this.tokens.signAccessToken(
       binToUuid(user.id),
@@ -323,7 +321,6 @@ export class AuthService {
         // credential by (Stage 3.2). Not a secret.
         publicStoreId: company.publicStoreId,
         isTestBusiness: company.isTest,
-        isPilotBusiness: company.isPilot,
       },
     };
   }

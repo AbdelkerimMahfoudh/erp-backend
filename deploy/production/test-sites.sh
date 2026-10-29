@@ -60,7 +60,8 @@ check_names() {
   [[ ",$cors," == *",https://$host,"* ]] \
     || die "the API's CORS_ORIGINS does not name https://$host — add it to $API_ENV_FILE and redeploy the API first."
   activation=$(sed -n 's/^CUSTOMER_ACTIVATION=//p' "$API_ENV_FILE" | tr -d "\"' ")
-  [ -z "$activation" ] || [ "$activation" = closed ] || die "CUSTOMER_ACTIVATION is \"$activation\": the test sites run only while customer activation is closed (D217)."
+  # D224 (2026-10-29): the owner opened customer activation; the console on its test site serves real customers too.
+  [ -z "$activation" ] || [ "$activation" = closed ] || [ "$activation" = open ] || die "CUSTOMER_ACTIVATION is \"$activation\": closed or open only (D224)."
 }
 
 check_release() {

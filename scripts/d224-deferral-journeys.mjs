@@ -1,5 +1,5 @@
-// D224 (deferred WhatsApp verification, 0109) over HTTP against a DISPOSABLE API (port 3998, erp_dv_e2e) with
-// PHONE_VERIFICATION_DEFERRAL=on: a real administrator session with its second factor and step-up, the console's
+// D224 (deferred WhatsApp verification, 0109, per account in an ordinary business) over HTTP against a DISPOSABLE API
+// (port 3998, erp_dv_e2e) with PHONE_VERIFICATION_DEFERRAL=on and CUSTOMER_ACTIVATION=open: a real administrator session with its second factor and step-up, the console's
 // provisioning, setup codes spent through the app's door, the staff signing in, and what their roles, stores and
 // unverified numbers allow. Fictional data only. Prints outcomes, never a password, code or token.
 //
@@ -101,39 +101,39 @@ const admin = await adminSession();
 await stepUp(admin);
 
 if (PHASE === 'on') {
-  const deferral = { reason: 'Controlled store pilot: WhatsApp Business API not live yet', confirmControlledTest: true, reviewAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };
+  const deferral = { reason: 'WhatsApp Business API not live yet', confirmUnverified: true, reviewAt: new Date(Date.now() + 7 * 86_400_000).toISOString() };
   const caps = await call(admin, 'GET', '/platform/capabilities');
   check('the console is told deferral is available (switch on)', caps.body?.phoneVerificationDeferral === true);
 
-  // ── 1. A Test business with a deferred Owner ──
+  // ── 1. An ordinary customer business with a deferred Owner (customer activation open, D224) ──
   const key = randomUUID();
   const created = await call(admin, 'POST', '/platform/businesses', {
     idempotencyKey: key,
-    ownerName: 'Pilot Owner',
-    businessName: `Pilot Electronics ${Date.now().toString(36)}`,
+    ownerName: 'Store Owner',
+    businessName: `Dar Electronics ${Date.now().toString(36)}`,
     phone: `+2224${String(Date.now() % 10_000_000).padStart(7, '0')}`,
     language: 'fr',
-    isTest: true,
+    isTest: false,
     reason: 'D224 journey',
     verification: 'deferred_by_platform',
     deferral,
     confirmPassword: confirmPassword(),
   });
-  check('creates a Test business with a deferred Owner: a setup code, no setup invitation', created.status === 201 && created.body?.setupCode?.delivery === 'manual' && created.body?.invitation === null, `${created.status} ${created.body?.code ?? ''}`);
+  check('creates an ordinary business with a deferred Owner: a setup code, no setup invitation', created.status === 201 && created.body?.setupCode?.delivery === 'manual' && created.body?.invitation === null, `${created.status} ${created.body?.code ?? ''}`);
   const companyId = created.body.companyId;
+  check('the business is not a test business', sql(`SELECT is_test FROM companies WHERE id = UNHEX('${hex(companyId)}')`) === '0');
   check('the Owner is deferred in the database: no verified timestamp', sql(`SELECT CONCAT(phone_verification,'|',IFNULL(phone_verified_at,'null')) FROM users WHERE company_id = UNHEX('${hex(companyId)}')`) === 'deferred_by_platform|null');
 
-  const grant = await call(admin, 'POST', `/platform/businesses/${companyId}/activate-grant`, { days: 30, reason: 'Pilot access', confirmPassword: confirmPassword() });
-  check('the Test business is given access by grant', grant.status === 200, `${grant.status} ${grant.body?.code ?? ''}`);
-  const annex = await call(admin, 'POST', `/platform/businesses/${companyId}/stores`, { name: 'Annex', reason: 'Second pilot store', confirmPassword: confirmPassword() });
-  check('a second store is opened under the grant', annex.status === 200 || annex.status === 201, `${annex.status} ${annex.body?.code ?? ''}`);
+  // Its paid access, as a payment would leave it: activated, two stores, three seats bought on top of the included ones.
+  sql(`INSERT INTO branches (id, company_id, name, updated_at) VALUES (UUID_TO_BIN(UUID()), UNHEX('${hex(companyId)}'), 'Annex', NOW(6))`);
+  sql(`UPDATE subscriptions SET status = 'activated', subscribed_branch_count = 2, additional_seats = 3, current_period_end = NOW(6) + INTERVAL 30 DAY WHERE company_id = UNHEX('${hex(companyId)}')`);
   const detail = await call(admin, 'GET', `/platform/businesses/${companyId}`);
   const main = detail.body.branches.find((b) => b.name !== 'Annex').id;
   const second = detail.body.branches.find((b) => b.name === 'Annex').id;
 
-  // ── 2. Test staff ──
+  // ── 2. Staff ──
   const staff = async (name, role, branchIds, deferred) =>
-    call(admin, 'POST', `/platform/businesses/${companyId}/test-staff`, {
+    call(admin, 'POST', `/platform/businesses/${companyId}/provisioned-staff`, {
       name,
       phone: `+2223${String((Date.now() + name.length * 7919) % 10_000_000).padStart(7, '0')}`,
       role,
@@ -142,23 +142,26 @@ if (PHASE === 'on') {
       ...(deferred ? { deferral } : {}),
       confirmPassword: confirmPassword(),
     });
-  const manager = await staff('Pilot Manager', 'store_manager', [main, second], true);
-  const employee = await staff('Pilot Employee', 'store_employee', [main], true);
-  const waiting = await staff('Pilot Required', 'store_employee', [main], false);
+  const manager = await staff('Store Manager', 'store_manager', [main, second], true);
+  const employee = await staff('Store Employee', 'store_employee', [main], true);
+  const waiting = await staff('Store Required', 'store_employee', [main], false);
   check('provisions a deferred Manager (both stores) and a deferred Employee (main store)', manager.status === 201 && employee.status === 201, `${manager.status} ${employee.status} ${manager.body?.code ?? ''} ${employee.body?.code ?? ''}`);
   check('provisions a Required Employee', waiting.status === 201 && waiting.body?.user?.phoneVerification === 'required');
-  const noConfirm = await call(admin, 'POST', `/platform/businesses/${companyId}/test-staff`, { name: 'X', phone: '+22239999999', role: 'store_employee', branchIds: [main], verification: 'deferred_by_platform', deferral });
+  const noConfirm = await call(admin, 'POST', `/platform/businesses/${companyId}/provisioned-staff`, { name: 'X', phone: '+22239999999', role: 'store_employee', branchIds: [main], verification: 'deferred_by_platform', deferral });
   check('refuses without the password confirmation (step-up)', noConfirm.status === 403, `${noConfirm.status}`);
-  const noReason = await call(admin, 'POST', `/platform/businesses/${companyId}/test-staff`, { name: 'Y', phone: '+22239999998', role: 'store_employee', branchIds: [main], verification: 'deferred_by_platform', deferral: { reason: '', confirmControlledTest: true }, confirmPassword: confirmPassword() });
+  const noReason = await call(admin, 'POST', `/platform/businesses/${companyId}/provisioned-staff`, { name: 'Y', phone: '+22239999998', role: 'store_employee', branchIds: [main], verification: 'deferred_by_platform', deferral: { reason: '', confirmUnverified: true }, confirmPassword: confirmPassword() });
   check('refuses a deferral without a written reason', noReason.status === 400, `${noReason.status}`);
-  const spoof = await call(admin, 'POST', `/platform/businesses/${companyId}/test-staff`, { name: 'Z', phone: '+22239999997', role: 'store_employee', branchIds: [main], verification: 'verified', confirmPassword: confirmPassword() });
+  const spoof = await call(admin, 'POST', `/platform/businesses/${companyId}/provisioned-staff`, { name: 'Z', phone: '+22239999997', role: 'store_employee', branchIds: [main], verification: 'verified', confirmPassword: confirmPassword() });
   check('a console request cannot ask for "verified"', spoof.status === 400, `${spoof.status}`);
 
-  // A customer business (not Test): deferral refused.
+  // Capacity is the business's: the seats bought are used up, and one more is refused — never granted, never priced.
+  const filler = await staff('Fills the last seat', 'store_employee', [second], false);
+  const tooMany = await staff('One too many', 'store_employee', [second], true);
+  check('a business without a free seat is refused clearly; no seat is created', filler.status === 201 && tooMany.status === 409 && tooMany.body?.code === 'seat_unavailable' && sql(`SELECT COUNT(*) FROM seat_allocations WHERE company_id = UNHEX('${hex(companyId)}')`) === '0', `${filler.status} ${tooMany.status} ${tooMany.body?.code}`);
+
+  // Another business, for the cross-business address check below.
   const customerId = randomUUID();
-  sql(`INSERT INTO companies (id, name, settings, updated_at, public_store_id) VALUES (UNHEX('${hex(customerId)}'), 'Customer Shop D224', JSON_OBJECT(), NOW(6), 'CU${Date.now().toString(36).toUpperCase().slice(-8)}')`);
-  const customer = await call(admin, 'POST', `/platform/businesses/${customerId}/test-staff`, { name: 'C', phone: '+22239999996', role: 'store_employee', branchIds: [main], verification: 'deferred_by_platform', deferral, confirmPassword: confirmPassword() });
-  check('refuses for a customer (non-Test) business', customer.status === 403 && customer.body?.code === 'test_business_only', `${customer.status} ${customer.body?.code}`);
+  sql(`INSERT INTO companies (id, name, settings, updated_at, public_store_id) VALUES (UNHEX('${hex(customerId)}'), 'Other Shop D224', JSON_OBJECT(), NOW(6), 'CU${Date.now().toString(36).toUpperCase().slice(-8)}')`);
 
   // Public registration cannot carry the field.
   const pub = await call(null, 'POST', '/auth/register', { verification: 'deferred_by_platform', phoneVerification: 'deferred_by_platform' });
@@ -195,7 +198,7 @@ if (PHASE === 'on') {
   const ET = e.body.accessToken;
   const MT = m.body.accessToken;
   const meE = await call(ET, 'GET', '/auth/me');
-  check('/auth/me says deferred_by_platform, a test business', meE.body?.phoneVerification === 'deferred_by_platform' && meE.body?.isTestBusiness === true);
+  check('/auth/me says deferred_by_platform, an ordinary business, no pilot', meE.body?.phoneVerification === 'deferred_by_platform' && meE.body?.isTestBusiness === false && !('isPilotBusiness' in (meE.body ?? {})));
   const accE = await call(ET, 'GET', '/account');
   check('the account says not verified, deferred', accE.body?.whatsappVerified === false && accE.body?.phoneVerification === 'deferred_by_platform' && accE.body?.phoneVerifiedAt === null);
 
@@ -222,12 +225,9 @@ if (PHASE === 'on') {
   const meM = await call(MT, 'GET', '/auth/me');
   check('each session is its own person', meM.body?.id === manager.body.user.id && meE.body?.id === employee.body.user.id);
 
-  // ── 9. The pilot mark ──
-  const pilot = await call(admin, 'POST', `/platform/businesses/${companyId}/pilot-status`, { isPilot: true, reason: 'Store pilot', confirmPassword: confirmPassword() });
-  const meP = await call(MT, 'GET', '/auth/me');
-  check('the pilot mark reaches the app', pilot.status === 200 && meP.body?.isPilotBusiness === true, `${pilot.status}`);
-  const pilotCustomer = await call(admin, 'POST', `/platform/businesses/${customerId}/pilot-status`, { isPilot: true, reason: 'x', confirmPassword: confirmPassword() });
-  check('a customer business cannot be a pilot', pilotCustomer.status === 403, `${pilotCustomer.status}`);
+  // ── 9. No pilot mark exists ──
+  const pilot = await call(admin, 'POST', `/platform/businesses/${companyId}/pilot-status`, { isPilot: true, reason: 'x', confirmPassword: confirmPassword() });
+  check('there is no pilot-mark route', pilot.status === 404, `${pilot.status}`);
 
   // ── 10. Lifecycle ──
   const list = await call(admin, 'GET', `/platform/phone-verification/deferred?businessId=${companyId}`);
@@ -244,10 +244,10 @@ if (PHASE === 'on') {
 
   // ── 11. The audit ──
   const actions = sql(`SELECT GROUP_CONCAT(DISTINCT action ORDER BY action) FROM platform_audit_events WHERE target_id = UNHEX('${hex(companyId)}')`);
-  for (const a of ['account.create', 'account.cancel', 'account_setup_code.issue', 'account_setup_code.use', 'account_setup_code.refused', 'phone_verification.defer', 'phone_verification.require', 'business.pilot_status']) {
+  for (const a of ['account.create', 'account.cancel', 'account_setup_code.issue', 'account_setup_code.use', 'account_setup_code.refused', 'phone_verification.defer', 'phone_verification.require']) {
     check(`audited: ${a}`, actions.split(',').includes(a), actions);
   }
-  check('refusals are audited too', sql(`SELECT COUNT(*) FROM platform_audit_events WHERE target_id = UNHEX('${hex(customerId)}') AND action LIKE '%.refused'`) !== '0');
+  check('refusals are audited too', sql(`SELECT COUNT(*) FROM platform_audit_events WHERE target_id = UNHEX('${hex(companyId)}') AND action LIKE '%.refused'`) !== '0');
   const leak = sql(`SELECT COUNT(*) FROM platform_audit_events WHERE target_id = UNHEX('${hex(companyId)}') AND (after_state LIKE '%${created.body.setupCode.token}%' OR after_state LIKE '%${PW.employee}%')`);
   check('no code or password in the audit', leak === '0');
 
@@ -258,19 +258,19 @@ if (PHASE === 'on') {
   const st = JSON.parse(readFileSync(statePath, 'utf8'));
   const caps = await call(admin, 'GET', '/platform/capabilities');
   check('switch off: the console is told deferral is unavailable', caps.body?.phoneVerificationDeferral === false);
-  const refused = await call(admin, 'POST', `/platform/businesses/${st.companyId}/test-staff`, {
+  const refused = await call(admin, 'POST', `/platform/businesses/${st.companyId}/provisioned-staff`, {
     name: 'After switch-off',
     phone: '+22238888888',
     role: 'store_employee',
     branchIds: [st.main],
     verification: 'deferred_by_platform',
-    deferral: { reason: 'x', confirmControlledTest: true },
+    deferral: { reason: 'x', confirmUnverified: true },
     confirmPassword: confirmPassword(),
   });
   check('switch off: a new deferral is refused at the API', refused.status === 403 && refused.body?.code === 'deferral_disabled', `${refused.status} ${refused.body?.code}`);
   const list = await call(admin, 'GET', `/platform/phone-verification/deferred?businessId=${st.companyId}`);
   check('switch off: existing deferred accounts stay listed, unverified, undeleted', list.body?.accounts?.some((x) => x.userId === st.kept) && sql(`SELECT CONCAT(phone_verification,'|',deleted_at IS NULL) FROM users WHERE id = UNHEX('${hex(st.kept)}')`) === 'deferred_by_platform|1');
-  const required = await call(admin, 'POST', `/platform/businesses/${st.companyId}/test-staff`, { name: 'Still Required', phone: '+22238888887', role: 'store_employee', branchIds: [st.main], verification: 'required', confirmPassword: confirmPassword() });
+  const required = await call(admin, 'POST', `/platform/businesses/${st.companyId}/provisioned-staff`, { name: 'Still Required', phone: '+22238888887', role: 'store_employee', branchIds: [st.main], verification: 'required', confirmPassword: confirmPassword() });
   check('switch off: Required provisioning still works', required.status === 201, `${required.status} ${required.body?.code ?? ''}`);
 }
 

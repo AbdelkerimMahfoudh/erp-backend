@@ -1,5 +1,4 @@
--- 0109: deferred WhatsApp verification for accounts a platform administrator provisions in a test business (D224,
--- docs/109). Additive: no existing value changes except the new state column, backfilled from `phone_verified_at`.
+-- 0109: deferred WhatsApp verification, per account, for accounts a platform superadmin provisions (D224, docs/109). Additive: no existing value changes except the new state column, backfilled from `phone_verified_at`.
 
 -- ── The number's verification state ───────────────────────────────────────────
 -- `verified` exactly when `phone_verified_at` is set: enforced by the CHECK, kept by the triggers, so every existing
@@ -101,8 +100,3 @@ CREATE TABLE `account_setup_codes` (
   CONSTRAINT `ck_account_setup_code_revoked` CHECK ((`revoked_at` IS NULL) = (`revoked_reason` IS NULL)),
   CONSTRAINT `ck_account_setup_code_reason` CHECK (`revoked_reason` IS NULL OR `revoked_reason` IN ('reissued', 'revoked', 'cancelled'))
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
-
--- ── The pilot sub-mark on a test business (the owner's decision, 2026-10-28) ──
-ALTER TABLE `companies`
-  ADD COLUMN `is_pilot` TINYINT(1) NOT NULL DEFAULT 0 AFTER `test_marked_by`,
-  ADD CONSTRAINT `ck_companies_pilot_is_test` CHECK (`is_pilot` = 0 OR `is_test` = 1);

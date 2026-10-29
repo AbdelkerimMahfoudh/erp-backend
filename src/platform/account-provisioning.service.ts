@@ -21,11 +21,12 @@ export type StaffRoleKey = 'store_manager' | 'store_employee';
 /** What a deferral needs, besides its account: the administrator's written reason and their confirmation. */
 export interface DeferralInput {
   reason: string;
-  confirmControlledTest: boolean;
+  /** The administrator confirms, in this request, that the number stays unverified and nothing WhatsApp works. */
+  confirmUnverified: boolean;
   reviewAt?: string | null;
 }
 
-export interface TestActor {
+export interface ProvisioningActor {
   admin: PlatformAdminIdentity;
   /** The session the request authenticated with: a deferral needs ITS step-up, fresh. */
   sessionId: Buffer | undefined;
@@ -51,21 +52,24 @@ export interface DeferralView {
 }
 
 /**
- * Accounts a platform superadmin provisions in a TEST business, and the deferred-verification exception (D224,
- * docs/109). Every condition is the server's (§2.3); the portal hiding a control decides nothing:
+ * Accounts a platform superadmin provisions from the console, and the deferred-verification exception (D224, docs/109;
+ * amended by the owner 2026-10-29: per ACCOUNT, in an ordinary business). Every condition is the server's; the portal
+ * hiding a control decides nothing:
  *
  *  1. a superadmin — every platform administrator is one — whose MFA is enabled;
  *  2. a fresh step-up on THIS session (password and an authenticator code, five minutes);
- *  3. the protected platform routes — tenants and public registration have no such field, and the whitelist pipe
- *     rejects one sent anyway;
- *  4. a business marked Test;
- *  5. the kill switch `PHONE_VERIFICATION_DEFERRAL=on`.
+ *  3. the protected platform routes — tenants, ordinary staff invitations and public registration have no such field,
+ *     and the whitelist pipe rejects one sent anyway;
+ *  4. the switch `PHONE_VERIFICATION_DEFERRAL=on` (off unless set).
+ *
+ * The business is an ordinary one: its access, subscription, seats, reports and relationships are untouched. A
+ * provisioned person takes a seat like anyone; a store without one is refused, never given one.
  *
  * A deferral never verifies anything: `phone_verified_at` stays null, no WhatsApp consent is recorded, nothing is sent.
  * Every grant, change and refusal is audited, never with a password, code or secret.
  */
 @Injectable()
-export class TestProvisioningService {
+export class AccountProvisioningService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: AppConfigService,
@@ -84,7 +88,7 @@ export class TestProvisioningService {
 
   // ── the conditions ──────────────────────────────────────────────────────
 
-  private async refuse(error: HttpException, ctx: TestActor, attempted: string, target: { id: Buffer | null; label: string | null }, detail: Record<string, unknown> = {}): Promise<never> {
+  private async refuse(error: HttpException, ctx: ProvisioningActor, attempted: string, target: { id: Buffer | null; label: string | null }, detail: Record<string, unknown> = {}): Promise<never> {
     const body = error.getResponse();
     const code = typeof body === 'object' && body !== null && 'code' in body ? String((body as { code: unknown }).code) : String(error.getStatus());
     await this.audit.record({
@@ -105,8 +109,8 @@ export class TestProvisioningService {
     const reason = (input?.reason ?? '').trim();
     if (!reason) throw new BadRequestException({ code: 'deferral_reason_required', message: 'Write why this account’s WhatsApp verification is deferred.' });
     if (reason.length > 500) throw new BadRequestException({ code: 'deferral_reason_too_long', message: 'The reason is at most 500 characters.' });
-    if (input?.confirmControlledTest !== true) {
-      throw new BadRequestException({ code: 'deferral_confirmation_required', message: 'Confirm that this account is for controlled testing.' });
+    if (input?.confirmUnverified !== true) {
+      throw new BadRequestException({ code: 'deferral_confirmation_required', message: 'Confirm that the number stays unverified.' });
     }
     let reviewAt: Date | null = null;
     if (input.reviewAt) {
@@ -120,10 +124,9 @@ export class TestProvisioningService {
   }
 
   /**
-   * Every condition of a deferral, the server's (docs/109 §2.3). Refused and audited unless all hold. `isTest` is read
-   * by the caller inside its own transaction as well, so a business un-marked meanwhile cannot slip through.
+   * Every condition of a deferral, the server's (docs/109 §2.3). Refused and audited unless all hold.
    */
-  async assertMayDefer(ctx: TestActor, company: { id: Buffer | null; name: string; isTest: boolean }, attempted: string): Promise<void> {
+  async assertMayDefer(ctx: ProvisioningActor, company: { id: Buffer | null; name: string }, attempted: string): Promise<void> {
     const target = { id: company.id, label: company.name };
     if (!this.config.phoneVerificationDeferralEnabled) {
       await this.refuse(new ForbiddenException({ code: 'deferral_disabled', message: 'Deferred WhatsApp verification is switched off on this server.' }), ctx, attempted, target, { condition: 'kill_switch' });
@@ -138,23 +141,19 @@ export class TestProvisioningService {
       if (e instanceof HttpException) await this.refuse(e, ctx, attempted, target, { condition: 'step_up' });
       throw e;
     }
-    if (!company.isTest) {
-      await this.refuse(new ForbiddenException({ code: 'deferral_test_business_only', message: 'WhatsApp verification can be deferred only for a test business.' }), ctx, attempted, target, { condition: 'test_business' });
-    }
   }
 
   // ── an Owner created deferred ───────────────────────────────────────────
 
   /**
-   * The Owner of a test business the console just created, deferred: the state, the exception's record and a setup code
+   * The Owner of a business the console just created, deferred: the state, the exception's record and a setup code
    * in one transaction. The Owner's setup invitation (0075) is not issued: this code replaces it.
    */
-  async deferOwner(companyUuid: string, deferral: { reason: string; reviewAt: Date | null }, ctx: TestActor): Promise<{ setupCode: IssuedSetupCode; ownerId: string }> {
+  async deferOwner(companyUuid: string, deferral: { reason: string; reviewAt: Date | null }, ctx: ProvisioningActor): Promise<{ setupCode: IssuedSetupCode; ownerId: string }> {
     const companyId = uuidToBin(companyUuid);
     const now = new Date();
     const out = await this.prisma.$transaction(async (tx) => {
-      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true, isTest: true } });
-      if (!company.isTest) throw new ForbiddenException({ code: 'deferral_test_business_only', message: 'WhatsApp verification can be deferred only for a test business.' });
+      const company = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { name: true } });
       const owner = await tx.user.findFirstOrThrow({ where: { companyId, deletedAt: null }, orderBy: { createdAt: 'asc' }, select: { id: true, name: true, phoneVerifiedAt: true } });
       if (owner.phoneVerifiedAt) throw new ConflictException({ code: 'already_verified', message: 'This number is already verified.' });
       await tx.user.update({ where: { id: owner.id }, data: { phoneVerification: 'deferred_by_platform' } });
@@ -182,31 +181,28 @@ export class TestProvisioningService {
     return { setupCode, ownerId: binToUuid(out.ownerId) };
   }
 
-  // ── test staff ──────────────────────────────────────────────────────────
+  // ── staff ───────────────────────────────────────────────────────────────
 
   /**
-   * A Manager or an Employee of a TEST business, provisioned by the administrator (docs/109 §2.4). Not a replacement for
-   * the Owner's Team screen: only a test business, never an Owner, and the business's rules all hold — one Owner, a
-   * number and an email unique in the business, roles only from the business, stores only its own and active, a seat
-   * free at each store (a test business's seats are granted; none is priced here).
+   * A Manager or an Employee, provisioned by the administrator (docs/109 §2.4) — a provisioning mechanism, not a
+   * replacement for the Owner's Team screen. The business's rules all hold: one Owner (never made here), a number and an
+   * email unique in the business, roles only from the business, stores only its own and active, and a free seat at each
+   * chosen store — counting the people already provisioned there and still waiting. A store without one is REFUSED:
+   * capacity is the business's subscription's to give, never the console's.
    *
-   * `required`: the account waits, like any invited employee, for the person to verify their number — the code is a
-   * setup code all the same, but the account is not usable until then. `deferred_by_platform`: usable once the person
-   * spends the code.
+   * `required`: the account waits, like any invited employee, for the person to verify their number.
+   * `deferred_by_platform`: usable once the person spends their setup code.
    */
   async createStaff(
     companyUuid: string,
     input: { name: string; phone: string; email?: string | null; role: StaffRoleKey; branchIds: string[]; verification: VerificationPolicy; deferral?: DeferralInput },
-    ctx: TestActor,
+    ctx: ProvisioningActor,
   ) {
     if (!isUuid(companyUuid)) throw new NotFoundException('Unknown business');
     const companyId = uuidToBin(companyUuid);
-    const company = await this.prisma.company.findUnique({ where: { id: companyId }, select: { id: true, name: true, isTest: true, isActive: true, closedAt: true } });
+    const company = await this.prisma.company.findUnique({ where: { id: companyId }, select: { id: true, name: true, isActive: true, closedAt: true } });
     if (!company) throw new NotFoundException('Unknown business');
     const target = { id: company.id, label: company.name };
-    if (!company.isTest) {
-      await this.refuse(new ForbiddenException({ code: 'test_business_only', message: 'Staff are provisioned from the console only for a test business.' }), ctx, 'account.create', target);
-    }
     if (!company.isActive || company.closedAt) {
       await this.refuse(new ConflictException({ code: 'business_closed', message: 'This business is closed.' }), ctx, 'account.create', target);
     }
@@ -233,33 +229,33 @@ export class TestProvisioningService {
     const role = await this.prisma.role.findFirst({ where: { companyId, key: input.role }, select: { id: true } });
     if (!role) throw new BadRequestException('That role does not exist in this business.');
 
-    // Seats (the owner's decision, 2026-10-28): a test business is never paid for, so where a chosen store has no free
-    // seat — counting the people already provisioned there and still waiting — this person is GRANTED a seat there, at
-    // no charge, held for them and audited, exactly as a test business's stores are granted. Never priced; the seat
-    // census counts it like any held seat. Only under the business's administrative grant in force.
-    const sub = await this.prisma.subscription.findFirst({ where: { companyId }, select: { id: true, status: true, isComplimentary: true, complimentaryUntil: true } });
-    const granted = sub?.status === 'activated' && sub.isComplimentary && sub.complimentaryUntil !== null && sub.complimentaryUntil.getTime() > Date.now();
-    if (!sub || !granted) {
-      await this.refuse(new ConflictException({ code: 'grant_required', message: 'Give this test business an administrative grant first: its staff are seated under that grant.' }), ctx, 'account.create', target);
-    }
+    // Seats: the business's own, counted as the activation counts them, with everyone provisioned there and still waiting.
     const seats = await this.entitlement.maySeat(companyId, branchIds);
     const waiting = await this.prisma.userBranch.groupBy({
       by: ['branchId'],
-      where: {
-        companyId,
-        branchId: { in: branchIds },
-        role: { key: { not: 'owner' } },
-        // Every person still waiting there: a seat granted to one of them raises the store's limit, and is theirs.
-        user: { invitedAt: { not: null }, activatedAt: null, deletedAt: null },
-      },
+      where: { companyId, branchId: { in: branchIds }, role: { key: { not: 'owner' } }, user: { invitedAt: { not: null }, activatedAt: null, deletedAt: null } },
       _count: { _all: true },
     });
-    const toGrant = branches.filter((b) => {
+    // The business's whole capacity (each store's included seats and the pooled ones) less the people using or waiting
+    // for a seat, and each store's own rule (`maySeat`): a store's seat is never taken from a full store.
+    // One seat per person per store, as the census counts them: a Manager waiting at two stores waits for two.
+    const pendingTotal = await this.prisma.userBranch.count({ where: { companyId, role: { key: { not: 'owner' } }, branch: { isActive: true, deletedAt: null }, user: { invitedAt: { not: null }, activatedAt: null, deletedAt: null } } });
+    const businessFull = seats.seatLimit - seats.seatsUsed - pendingTotal <= 0;
+    const full = branches.filter((b) => {
       const line = seats.stores.find((s) => s.branchId === binToUuid(b.id));
       const pending = waiting.find((w) => w.branchId.equals(b.id))?._count._all ?? 0;
-      const room = line ? line.seatLimit - line.seatsUsed - pending : 0;
-      return room <= 0 || seats.full.includes(binToUuid(b.id));
+      const storeRoom = line ? line.seatLimit - line.seatsUsed - pending : 0;
+      return businessFull || seats.full.includes(binToUuid(b.id)) || (storeRoom <= 0 && seats.seatLimit - seats.seatsUsed - pendingTotal <= 0);
     });
+    if (full.length > 0) {
+      await this.refuse(
+        new ConflictException({ code: 'seat_unavailable', message: `No free seat at ${full.map((b) => b.name).join(', ')}. The business adds a seat first.`, stores: full.map((b) => b.name) }),
+        ctx,
+        'account.create',
+        target,
+        { stores: full.map((b) => b.name) },
+      );
+    }
 
     const userId = newUuidV7Bin();
     const now = new Date();
@@ -267,9 +263,9 @@ export class TestProvisioningService {
     let code: (IssuedSetupCode & { replaced: number }) | null = null;
     try {
       code = await this.prisma.$transaction(async (tx) => {
-        // Read again inside the write: a business un-marked meanwhile is refused here as well.
-        const still = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { isTest: true } });
-        if (!still.isTest) throw new ForbiddenException({ code: 'test_business_only', message: 'Staff are provisioned from the console only for a test business.' });
+        // Read again inside the write: a business closed meanwhile is refused here as well.
+        const still = await tx.company.findUniqueOrThrow({ where: { id: companyId }, select: { isActive: true, closedAt: true } });
+        if (!still.isActive || still.closedAt) throw new ConflictException({ code: 'business_closed', message: 'This business is closed.' });
         await tx.user.create({
           data: {
             id: userId,
@@ -290,25 +286,6 @@ export class TestProvisioningService {
         for (const branch of branches) {
           await tx.userBranch.create({ data: { id: newUuidV7Bin(), companyId, userId, branchId: branch.id, roleId: role.id } });
         }
-        for (const branch of toGrant) {
-          await tx.seatAllocation.create({
-            data: {
-              id: newUuidV7Bin(),
-              companyId,
-              subscriptionId: sub!.id,
-              branchId: branch.id,
-              userId,
-              kind: 'seat',
-              status: 'granted',
-              label: name,
-              monthlyAmount: 0,
-              requestedBy: `platform:${ctx.admin.email}`.slice(0, 160),
-              confirmedBy: `platform:${ctx.admin.email}`.slice(0, 160),
-              confirmedAt: now,
-              reason: `Seat granted at no charge under the test business's administrative grant, for ${name}`.slice(0, 500),
-            },
-          });
-        }
         if (deferral) {
           await tx.phoneVerificationDeferral.create({
             data: { id: newUuidV7Bin(), companyId, userId, grantedById: ctx.admin.id, grantedBy: ctx.admin.email.slice(0, 160), reason: deferral.reason, reviewAt: deferral.reviewAt, grantedAt: now },
@@ -322,7 +299,7 @@ export class TestProvisioningService {
             entityId: userId,
             action: 'create',
             after: { name, email: contactPresence(email), phone: contactPresence(phone), role: input.role, stores, status: 'pending', invitedBy: `platform:${ctx.admin.email}`, phoneVerification: deferred ? 'deferred_by_platform' : 'required' },
-            reason: deferred ? `Provisioned by the platform for controlled testing; WhatsApp verification deferred: ${deferral!.reason}` : 'Provisioned by the platform; WhatsApp verification required',
+            reason: deferred ? `Provisioned by the platform; WhatsApp verification deferred: ${deferral!.reason}` : 'Provisioned by the platform; WhatsApp verification required',
           },
         });
         const issued = await this.codes.issueTx(tx, { companyId, userId, issuedBy: ctx.admin.email, now });
@@ -338,7 +315,6 @@ export class TestProvisioningService {
               person: actorRef(binToUuid(userId)),
               role: input.role,
               stores,
-              seatsGranted: toGrant.map((b) => b.name),
               phoneVerification: deferred ? 'deferred_by_platform' : 'required',
               reviewAt: deferral?.reviewAt?.toISOString() ?? null,
               outcome: 'created',
@@ -370,7 +346,7 @@ export class TestProvisioningService {
     if (!isUuid(userUuid) || !isUuid(companyUuid)) throw new NotFoundException('Unknown account');
     const user = await this.prisma.user.findFirst({
       where: { id: uuidToBin(userUuid), companyId: uuidToBin(companyUuid), deletedAt: null },
-      select: { id: true, companyId: true, name: true, phoneVerification: true, activatedAt: true, invitedAt: true, company: { select: { name: true, isTest: true } }, userBranches: { select: { role: { select: { key: true } } } } },
+      select: { id: true, companyId: true, name: true, phoneVerification: true, activatedAt: true, invitedAt: true, company: { select: { name: true } }, userBranches: { select: { role: { select: { key: true } } } } },
     });
     // Another business's person reads exactly like nobody: the business is part of the address.
     if (!user) throw new NotFoundException('Unknown account');
@@ -382,7 +358,7 @@ export class TestProvisioningService {
    * normal flow, which is theirs to begin. An account already in use stays signed in; its WhatsApp-dependent actions
    * were never available and still are not.
    */
-  async requireVerification(companyUuid: string, userUuid: string, reason: string, ctx: TestActor) {
+  async requireVerification(companyUuid: string, userUuid: string, reason: string, ctx: ProvisioningActor) {
     const user = await this.personOf(userUuid, companyUuid);
     const why = (reason ?? '').trim();
     if (!why) throw new BadRequestException('Give a reason.');
@@ -411,11 +387,11 @@ export class TestProvisioningService {
   }
 
   /** The reason or the review date of a live deferral. Never the state itself. */
-  async updateDeferral(companyUuid: string, userUuid: string, input: { reason?: string; reviewAt?: string | null }, ctx: TestActor) {
+  async updateDeferral(companyUuid: string, userUuid: string, input: { reason?: string; reviewAt?: string | null }, ctx: ProvisioningActor) {
     const user = await this.personOf(userUuid, companyUuid);
     const live = await this.prisma.phoneVerificationDeferral.findFirst({ where: { userId: user.id, endedAt: null } });
     if (!live) throw new ConflictException({ code: 'not_deferred', message: 'This account’s verification is not deferred.' });
-    const next = this.parseDeferral({ reason: input.reason ?? live.reason, confirmControlledTest: true, reviewAt: input.reviewAt === undefined ? live.reviewAt?.toISOString() ?? null : input.reviewAt });
+    const next = this.parseDeferral({ reason: input.reason ?? live.reason, confirmUnverified: true, reviewAt: input.reviewAt === undefined ? live.reviewAt?.toISOString() ?? null : input.reviewAt });
     await this.prisma.$transaction(async (tx) => {
       await tx.phoneVerificationDeferral.update({ where: { id: live.id }, data: { reason: next.reason, reviewAt: next.reviewAt } });
       await this.audit.record(
@@ -437,9 +413,8 @@ export class TestProvisioningService {
   }
 
   /** A new setup code for a person who has not spent theirs — the old one revoked in the same transaction. */
-  async reissueCode(companyUuid: string, userUuid: string, ctx: TestActor) {
+  async reissueCode(companyUuid: string, userUuid: string, ctx: ProvisioningActor) {
     const user = await this.personOf(userUuid, companyUuid);
-    if (!user.company.isTest) throw new ForbiddenException({ code: 'test_business_only', message: 'Setup codes are issued from here only for a test business.' });
     const used = await this.prisma.accountSetupCode.findFirst({ where: { userId: user.id, usedAt: { not: null } }, select: { id: true } });
     if (used) throw new ConflictException({ code: 'already_set_up', message: 'This person already chose their password.' });
     const now = new Date();
@@ -449,7 +424,7 @@ export class TestProvisioningService {
     return { userId: binToUuid(user.id), setupCode };
   }
 
-  async revokeCode(companyUuid: string, userUuid: string, ctx: TestActor) {
+  async revokeCode(companyUuid: string, userUuid: string, ctx: ProvisioningActor) {
     const user = await this.personOf(userUuid, companyUuid);
     const revoked = await this.prisma.$transaction((tx) => this.codes.revokeTx(tx, user.id, 'revoked', new Date()));
     await this.audit.record({
@@ -465,15 +440,14 @@ export class TestProvisioningService {
   }
 
   /**
-   * Cancel a provisioned account of a test business: deactivated and soft-deleted like any cancelled account, its
+   * Cancel a provisioned account: deactivated and soft-deleted like any cancelled account, its
    * contacts released, its sessions and setup code revoked, its deferral ended `cancelled`. Nothing is hard-deleted;
    * whatever it recorded stays, attributed. The Owner is never cancelled here.
    */
-  async cancelAccount(companyUuid: string, userUuid: string, reason: string, ctx: TestActor) {
+  async cancelAccount(companyUuid: string, userUuid: string, reason: string, ctx: ProvisioningActor) {
     const user = await this.personOf(userUuid, companyUuid);
     const why = (reason ?? '').trim();
     if (!why) throw new BadRequestException('Give a reason.');
-    if (!user.company.isTest) throw new ForbiddenException({ code: 'test_business_only', message: 'Accounts are cancelled from here only for a test business.' });
     if (user.userBranches.some((ub) => ub.role.key === 'owner') || !user.invitedAt) {
       throw new ForbiddenException({ code: 'owner_not_cancellable', message: 'The Owner’s account is not cancelled from here.' });
     }
@@ -499,31 +473,6 @@ export class TestProvisioningService {
     });
     await this.sessions.revokeAll(user.id);
     return { userId: binToUuid(user.id), cancelled: true as const };
-  }
-
-  /**
-   * The pilot sub-mark on a test business (the owner's decision, 2026-10-28): its banner then reads "Pilot business —
-   * controlled test of Dukan ERP". It changes no other rule; only a test business carries it (a CHECK as well).
-   */
-  async setPilot(companyUuid: string, isPilot: boolean, reason: string, ctx: TestActor) {
-    if (!isUuid(companyUuid)) throw new NotFoundException('Unknown business');
-    const companyId = uuidToBin(companyUuid);
-    const why = (reason ?? '').trim();
-    if (!why) throw new BadRequestException('Say why — the reason is the whole record.');
-    const company = await this.prisma.company.findUnique({ where: { id: companyId }, select: { id: true, name: true, isTest: true, isPilot: true } });
-    if (!company) throw new NotFoundException('Unknown business');
-    if (isPilot && !company.isTest) {
-      await this.refuse(new ForbiddenException({ code: 'pilot_test_business_only', message: 'Only a test business is marked as a pilot.' }), ctx, 'business.pilot_status', { id: company.id, label: company.name });
-    }
-    if (company.isPilot === isPilot) return { applied: false, isPilot };
-    await this.prisma.$transaction(async (tx) => {
-      await tx.company.update({ where: { id: companyId }, data: { isPilot } });
-      await this.audit.record(
-        { admin: ctx.admin, action: 'business.pilot_status', targetType: 'Company', targetId: companyId, targetLabel: company.name, reason: why, before: { isPilot: company.isPilot }, after: { isPilot, outcome: 'applied' }, ip: ctx.ip ?? null },
-        tx,
-      );
-    });
-    return { applied: true, isPilot };
   }
 
   // ── reading ─────────────────────────────────────────────────────────────

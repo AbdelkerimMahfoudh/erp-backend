@@ -118,8 +118,6 @@ export class AuthController {
       companyName: found.company.name,
       // A persistent test business (D217): the app says so on every screen, so nobody mistakes it for a real shop.
       isTestBusiness: found.company.isTest,
-      // A test business running a controlled store pilot (D224): the banner says "Pilot business" instead.
-      isPilotBusiness: found.company.isPilot,
       // D224: required | deferred_by_platform | verified. Deferred is never verified.
       phoneVerification: found.phoneVerification,
       isActive: found.isActive,

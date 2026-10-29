@@ -350,8 +350,6 @@ model Company {
   /// When, and by which administrator, the test status was last set or cleared. Null for a business never marked.
   testMarkedAt DateTime? @map("test_marked_at") @db.DateTime(6)
   testMarkedBy String?   @map("test_marked_by") @db.VarChar(160)
-  /// 0109: a test business running a controlled store pilot (the owner's decision, 2026-10-28). Only while `isTest`.
-  isPilot      Boolean   @default(false) @map("is_pilot")
   createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(6)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
 
@@ -6252,8 +6250,8 @@ model SubscriptionNotice {
   @@map("subscription_notices")
 }
 
-/// 0109 (D224): a platform administrator's exception — this person's WhatsApp number is NOT verified, and they may
-/// work anyway in a test business. Never a verification. At most one live per person (a UNIQUE generated column in the
+/// 0109 (D224): a platform superadmin's exception for ONE account — this person's WhatsApp number is NOT verified, and
+/// they may work anyway, under their business's ordinary access and seats. Never a verification. At most one live per person (a UNIQUE generated column in the
 /// migration). Ended by: an administrator requiring verification, the person's own verification (a trigger), or the
 /// account's cancellation.
 model PhoneVerificationDeferral {
