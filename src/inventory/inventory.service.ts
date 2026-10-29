@@ -86,6 +86,8 @@ const INVENTORY_PRODUCT_SELECT = {
   barcode: true,
   trackingType: true,
   specifications: true,
+  // D225: what the unit's picture is drawn from (key, chosen icon, parent's).
+  category: CATEGORY_VISUAL_SELECT,
 } as const;
 
 const DEFAULT_PAGE_SIZE = 50;
