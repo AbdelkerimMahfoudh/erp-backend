@@ -1,9 +1,11 @@
 import {
   businessDateOf,
+  calendarWeekOf,
   datesBetween,
   dayWindow,
   isBeforeDayStart,
   isDateString,
+  isoWeekday,
   isValidTimezone,
   localDateOf,
   localInstant,
@@ -94,10 +96,12 @@ describe('dates and periods', () => {
     expect(isDateString(20260923)).toBe(false);
   });
 
-  it('Today, 7 days and This month are exact business-date ranges ending today', () => {
+  it('Today, This week and This month are exact business-date ranges ending today', () => {
     expect(periodRange('today', '2026-09-23')).toEqual({ from: '2026-09-23', to: '2026-09-23' });
-    expect(periodRange('week', '2026-09-23')).toEqual({ from: '2026-09-17', to: '2026-09-23' });
-    expect(periodRange('week', '2026-10-03')).toEqual({ from: '2026-09-27', to: '2026-10-03' });
+    // D225: the calendar week so far — 2026-09-23 is a Wednesday, its Monday the 21st.
+    expect(periodRange('week', '2026-09-23')).toEqual({ from: '2026-09-21', to: '2026-09-23' });
+    // 2026-10-03 is a Saturday: from Monday 28 September, across the month boundary.
+    expect(periodRange('week', '2026-10-03')).toEqual({ from: '2026-09-28', to: '2026-10-03' });
     expect(periodRange('month', '2026-09-23')).toEqual({ from: '2026-09-01', to: '2026-09-23' });
     expect(periodRange('month', '2026-09-01')).toEqual({ from: '2026-09-01', to: '2026-09-01' });
     expect(datesBetween('2026-09-29', '2026-10-02')).toEqual(['2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02']);
@@ -117,5 +121,62 @@ describe('localTimeOf', () => {
     expect(localTimeOf(new Date('2026-09-24T07:25:00Z'), 'UTC')).toBe('07:25');
     expect(localTimeOf(new Date('2026-09-24T03:05:00Z'), 'Asia/Dubai')).toBe('07:05');
     expect(localTimeOf(new Date('2026-09-24T23:59:30Z'), 'UTC')).toBe('23:59');
+  });
+});
+
+/**
+ * The calendar week (D225, the owner's TestFlight feedback of 2026-10-29): Monday through Sunday, never the last
+ * seven rolling days, in business dates — each the 06:00-to-06:00 day of the company's zone, Africa/Nouakchott for
+ * the first market — so a week's total is the sum of its closings.
+ */
+describe('calendarWeekOf', () => {
+  it('names Monday as day 1 and Sunday as day 7', () => {
+    expect(isoWeekday('2026-10-26')).toBe(1); // Monday
+    expect(isoWeekday('2026-10-29')).toBe(4); // Thursday
+    expect(isoWeekday('2026-11-01')).toBe(7); // Sunday
+  });
+
+  it('runs Monday to Sunday for every day of the week, Sunday included', () => {
+    for (const day of ['2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31', '2026-11-01']) {
+      expect(calendarWeekOf(day)).toEqual({ from: '2026-10-26', to: '2026-11-01' });
+    }
+  });
+
+  it('Sunday to Monday is the boundary: Sunday closes one week, Monday opens the next', () => {
+    expect(calendarWeekOf('2026-11-01')).toEqual({ from: '2026-10-26', to: '2026-11-01' });
+    expect(calendarWeekOf('2026-11-02')).toEqual({ from: '2026-11-02', to: '2026-11-08' });
+    expect(periodRange('week', '2026-11-02')).toEqual({ from: '2026-11-02', to: '2026-11-02' });
+    expect(periodRange('week', '2026-11-01')).toEqual({ from: '2026-10-26', to: '2026-11-01' });
+  });
+
+  it('crosses month and year boundaries', () => {
+    // Thursday 1 October 2026: the week began on Monday 28 September.
+    expect(calendarWeekOf('2026-10-01')).toEqual({ from: '2026-09-28', to: '2026-10-04' });
+    // Thursday 1 January 2026: the week began on Monday 29 December 2025.
+    expect(calendarWeekOf('2026-01-01')).toEqual({ from: '2025-12-29', to: '2026-01-04' });
+    // Thursday 31 December 2026: the week ends on Sunday 3 January 2027.
+    expect(calendarWeekOf('2026-12-31')).toEqual({ from: '2026-12-28', to: '2027-01-03' });
+    // A leap day.
+    expect(calendarWeekOf('2028-02-29')).toEqual({ from: '2028-02-28', to: '2028-03-05' });
+  });
+
+  it('in Africa/Nouakchott, Monday 05:59 is still Sunday\'s day and last week; Monday 06:00 starts the new week', () => {
+    const tz = 'Africa/Nouakchott';
+    const before = businessDateOf(new Date('2026-11-02T05:59:59.999Z'), tz);
+    const after = businessDateOf(new Date('2026-11-02T06:00:00.000Z'), tz);
+    expect(before).toBe('2026-11-01');
+    expect(calendarWeekOf(before)).toEqual({ from: '2026-10-26', to: '2026-11-01' });
+    expect(after).toBe('2026-11-02');
+    expect(calendarWeekOf(after)).toEqual({ from: '2026-11-02', to: '2026-11-08' });
+    // Sunday 23:59:59.999 local is inside the week that ends that Sunday.
+    expect(calendarWeekOf(businessDateOf(new Date('2026-11-01T23:59:59.999Z'), tz))).toEqual({ from: '2026-10-26', to: '2026-11-01' });
+  });
+
+  it('is the same week the agent reports use', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { periodRangeOf } = require('../agent/agent-report-rules') as typeof import('../agent/agent-report-rules');
+    for (const day of ['2026-10-26', '2026-10-29', '2026-11-01', '2026-01-01', '2026-12-31']) {
+      expect(periodRangeOf('week', day)).toEqual(calendarWeekOf(day));
+    }
   });
 });

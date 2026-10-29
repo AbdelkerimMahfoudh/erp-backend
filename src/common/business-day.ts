@@ -153,14 +153,37 @@ export interface DateRange {
   to: string;
 }
 
+/** The ISO weekday of a YYYY-MM-DD: 1 = Monday … 7 = Sunday. Calendar arithmetic, no timezone involved. */
+export function isoWeekday(date: string): number {
+  if (!DATE_RE.test(date)) throw new Error(`Not a date: ${date}`);
+  const day = new Date(`${date}T00:00:00.000Z`).getUTCDay(); // 0 = Sunday
+  return day === 0 ? 7 : day;
+}
+
+/**
+ * The calendar week a business date belongs to: its Monday through its Sunday (D225).
+ *
+ * "This week" is a calendar week, never the last seven rolling days. It is counted in BUSINESS
+ * dates, the way every rollup, closing and period endpoint is keyed: a business date runs from
+ * 06:00 to 06:00 in the company's zone (`Africa/Nouakchott` for the first market), so the week runs
+ * from Monday's business day to Sunday's, and its total is always the sum of its daily closings —
+ * a sale at 01:30 on a Monday belongs to Sunday's day and therefore to the week before. The one rule
+ * lives here; the agent reports and Home read it.
+ */
+export function calendarWeekOf(date: string): DateRange {
+  const from = shiftDate(date, 1 - isoWeekday(date));
+  return { from, to: shiftDate(from, 6) };
+}
+
 /**
  * The exact business dates a Home period covers, ending on the current one.
- * "7 days" is the current business date and the six before it; "This month"
- * runs from the first of the current business date's month.
+ * "This week" runs from the Monday of the current business date's calendar week to the current
+ * business date (D225: the rest of the week has not happened yet); "This month" runs from the first
+ * of the current business date's month.
  */
 export function periodRange(period: HomePeriod, businessDate: string): DateRange {
   if (period === 'today') return { from: businessDate, to: businessDate };
-  if (period === 'week') return { from: shiftDate(businessDate, -6), to: businessDate };
+  if (period === 'week') return { from: calendarWeekOf(businessDate).from, to: businessDate };
   return { from: `${businessDate.slice(0, 7)}-01`, to: businessDate };
 }
 

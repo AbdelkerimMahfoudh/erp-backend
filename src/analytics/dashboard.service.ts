@@ -145,8 +145,15 @@ export class DashboardService {
   ) {
     const companyId = this.tenant.companyId();
     const saleWhere = { branchId, isReversed: false, businessDate: dateRange };
-    /** The window of equal length just before this one — what the sales value is compared with (docs/56). */
-    const preceding = precedingPeriod(range.from, range.to);
+    /**
+     * What the sales value is compared with (docs/56): the window of equal length just before this one,
+     * except for the calendar week (D225), compared day for day with the same weekdays of the week
+     * before — Monday to Wednesday against last Monday to Wednesday, never against last Friday to Sunday.
+     */
+    const preceding =
+      period === 'week'
+        ? { from: shiftDate(range.from, -7), to: shiftDate(range.to, -7) }
+        : precedingPeriod(range.from, range.to);
 
     const [sales, collected, dated, before] = await Promise.all([
       /**

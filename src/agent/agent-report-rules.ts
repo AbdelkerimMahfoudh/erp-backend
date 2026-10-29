@@ -1,4 +1,4 @@
-import { shiftDate } from '../common/business-day';
+import { calendarWeekOf, shiftDate } from '../common/business-day';
 import type { AgentDirection, LegAccount, LegDirection } from './agent-rules';
 
 /**
@@ -23,11 +23,7 @@ export const REPORT_PERIODS: readonly ReportPeriod[] = ['day', 'week', 'month', 
 /** The business dates a period covers: the week is Monday to Sunday of the date; the year groups by month. */
 export function periodRangeOf(period: ReportPeriod, date: string): { from: string; to: string } {
   if (period === 'day') return { from: date, to: date };
-  if (period === 'week') {
-    const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay(); // 0 = Sunday
-    const from = shiftDate(date, -((weekday + 6) % 7));
-    return { from, to: shiftDate(from, 6) };
-  }
+  if (period === 'week') return calendarWeekOf(date);
   if (period === 'month') {
     const from = `${date.slice(0, 7)}-01`;
     return { from, to: shiftDate(`${nextMonth(date.slice(0, 7))}-01`, -1) };
