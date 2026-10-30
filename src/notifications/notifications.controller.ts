@@ -11,13 +11,14 @@ import {
   Put,
   Query,
 } from '@nestjs/common';
-import { IsIn, IsString, Matches, MaxLength } from 'class-validator';
+import { IsIn, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuthUser } from '../common/types/auth-user';
 import { isUuid, uuidToBin } from '../common/utils/uuid.util';
 import { NOTIFICATION_FILTERS, NotificationsService, type NotificationFilter } from './notifications.service';
 import { NOTIFICATION_LEVELS, type NotificationLevel } from './notification-catalog';
+import { PushDevicesService } from './push-devices.service';
 
 class PreferenceDto {
   @IsIn(NOTIFICATION_LEVELS)
@@ -36,6 +37,12 @@ class DeviceDto {
 
   @IsIn(['en', 'fr', 'ar'])
   locale: 'en' | 'fr' | 'ar';
+
+  /** The token this phone had before the provider rotated it, revoked in the same call. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  replaces?: string;
 }
 
 class DeviceTokenDto {
@@ -48,7 +55,10 @@ class DeviceTokenDto {
 @ApiBearerAuth()
 @Controller({ path: 'notifications', version: '1' })
 export class NotificationsController {
-  constructor(private readonly notifications: NotificationsService) {}
+  constructor(
+    private readonly notifications: NotificationsService,
+    private readonly devices: PushDevicesService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: "List the current user's notifications (own + broadcast)" })
@@ -96,13 +106,13 @@ export class NotificationsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Register this phone for push, with the language it reads' })
   registerDevice(@CurrentUser() user: AuthUser, @Body() dto: DeviceDto) {
-    return this.notifications.registerDevice(uuidToBin(user.userId), dto);
+    return this.devices.register(uuidToBin(user.userId), uuidToBin(user.companyId), dto);
   }
 
   @Delete('devices')
   @ApiOperation({ summary: 'Stop pushing to this phone' })
   revokeDevice(@CurrentUser() user: AuthUser, @Body() dto: DeviceTokenDto) {
-    return this.notifications.revokeDevice(uuidToBin(user.userId), dto.token);
+    return this.devices.revoke(uuidToBin(user.userId), dto.token);
   }
 
   @Post(':id/read')

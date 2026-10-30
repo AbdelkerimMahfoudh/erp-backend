@@ -143,33 +143,10 @@ export class NotificationsService {
     return this.preferenceOf(userId);
   }
 
-  /** A phone's push token and the language it reads (0113). A token moved to another person is theirs from now on. */
-  async registerDevice(userId: Buffer, input: { token: string; platform: 'ios' | 'android'; locale: 'en' | 'fr' | 'ar' }) {
-    const now = new Date();
-    const existing = await this.db.pushDevice.findFirst({ where: { token: input.token }, select: { id: true } });
-    if (existing) {
-      await this.db.pushDevice.update({
-        where: { id: existing.id },
-        data: { userId, platform: input.platform, locale: input.locale, lastSeenAt: now, revokedAt: null },
-      });
-      return { deviceId: binToUuid(existing.id) };
-    }
-    const id = newUuidV7Bin();
-    const companyId = await this.companyOf(userId);
-    await this.db.pushDevice.create({ data: { id, userId, companyId, token: input.token, platform: input.platform, locale: input.locale } });
-    return { deviceId: binToUuid(id) };
-  }
-
   /** The person's own business: every row written for them carries it, whichever client writes it. */
   private async companyOf(userId: Buffer): Promise<Buffer> {
     const user = await this.db.user.findUnique({ where: { id: userId }, select: { companyId: true } });
     if (!user) throw new NotFoundException('User not found');
     return user.companyId;
-  }
-
-  /** Signed out, or notifications turned off on this phone: nothing more is pushed to it. */
-  async revokeDevice(userId: Buffer, token: string) {
-    const { count } = await this.db.pushDevice.updateMany({ where: { token, userId, revokedAt: null }, data: { revokedAt: new Date() } });
-    return { revoked: count };
   }
 }

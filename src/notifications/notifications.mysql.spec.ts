@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
 import { provisionDefaultRoles } from '../rbac/role-provisioning';
 import { NotificationsService } from './notifications.service';
+import { PushDevicesService } from './push-devices.service';
 import { PushDispatcher, type PushMessage, type PushProvider } from './push-dispatcher';
 
 /**
@@ -10,7 +11,8 @@ import { PushDispatcher, type PushMessage, type PushProvider } from './push-disp
  *  - a store's broadcast reaches only that store's members; nobody else's phone is touched;
  *  - read state is per person: one member reading a store broadcast leaves it unread for the others;
  *  - the level holds: an Approvals-only member is not pushed an Important event, an All-activity member is;
- *  - the actor is never pushed their own action.
+ *  - the actor is never pushed their own action;
+ *  - a phone that changes hands, even to another business, moves to the newcomer and is pushed only their events.
  *
  * Env-gated: NOTIFY_ROOT_URL (root: fixtures) and NOTIFY_APP_URL (phonestore_app: the services) on a DISPOSABLE
  * database at 0113 or later. Run in the database gates (`deploy/ci-database-gates.sh`).
@@ -127,5 +129,22 @@ run('notifications on real MySQL', () => {
     expect(await service.preferenceOf(w.seller)).toMatchObject({ level: 'approvals', isDefault: true });
     await service.setPreference(w.seller, 'important');
     expect(await new NotificationsService([] as never, app() as never).preferenceOf(w.seller)).toMatchObject({ level: 'important', isDefault: false });
+  });
+
+  it('a phone that changes hands across businesses is the newcomer’s: one row, and the previous business stops reaching it', async () => {
+    const first = await world();
+    const second = await world();
+    const token = (await root.pushDevice.findFirstOrThrow({ where: { userId: first.manager } })).token;
+    const devices = new PushDevicesService(app() as never);
+    await devices.revoke(first.manager, token);
+    await devices.register(second.manager, second.companyId, { token, platform: 'ios', locale: 'fr' });
+    await devices.register(second.manager, second.companyId, { token, platform: 'ios', locale: 'fr' });
+    const rows = await root.pushDevice.findMany({ where: { token } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].companyId.equals(second.companyId)).toBe(true);
+    // The first business's sale reaches no phone that is now the second's.
+    const provider = new RecordingProvider();
+    await dispatcherOn(app(), provider).dispatch(await first.notification('sale.recorded', first.a, null));
+    expect(provider.sent.map((m) => m.token)).not.toContain(token);
   });
 });
