@@ -92,6 +92,13 @@ export class NotificationsService {
     };
   }
 
+  /** One notification, if this person may see it. */
+  visibleOne(userId: Buffer, id: Buffer) {
+    return this.visibleTo(userId).then((scope) =>
+      this.db.notification.findFirst({ where: { id, ...scope }, select: { id: true, actionLink: true, branchId: true, type: true } }),
+    );
+  }
+
   /**
    * Read, by this person only (0113): a broadcast read by one member of the store stays unread for the others. The
    * mark follows the person to every device. Only a notification they may see can be marked.

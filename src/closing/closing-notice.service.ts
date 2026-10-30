@@ -5,6 +5,7 @@ import { newUuidV7Bin } from '../common/utils/uuid.util';
 import { WHATSAPP_CHANNEL, type WhatsAppChannel } from '../messaging/whatsapp-channel';
 import { assertLanguageSupported, getTemplate, validateTemplateVariables } from '../messaging/templates';
 import type { Notice, NoticeContext } from './closing-notices';
+import { links } from '../notifications/notification-target';
 
 export interface NoticeOutcome {
   /** Owners who received a NEW in-app notification (a retry counts as 0). */
@@ -91,7 +92,7 @@ export class ClosingNoticeService {
               type: notice.template,
               title: notice.title,
               body: notice.body,
-              actionLink: '/closing',
+              actionLink: typeof notice.payload.date === 'string' ? links.closingDay(notice.payload.date) : '/closing',
               dedupeKey: notice.dedupeKey,
               payload: notice.payload as Prisma.InputJsonValue,
             },

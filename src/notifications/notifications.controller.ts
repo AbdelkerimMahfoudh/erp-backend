@@ -19,6 +19,7 @@ import { isUuid, uuidToBin } from '../common/utils/uuid.util';
 import { NOTIFICATION_FILTERS, NotificationsService, type NotificationFilter } from './notifications.service';
 import { NOTIFICATION_LEVELS, type NotificationLevel } from './notification-catalog';
 import { PushDevicesService } from './push-devices.service';
+import { NotificationTargetService } from './notification-target.service';
 
 class PreferenceDto {
   @IsIn(NOTIFICATION_LEVELS)
@@ -58,6 +59,7 @@ export class NotificationsController {
   constructor(
     private readonly notifications: NotificationsService,
     private readonly devices: PushDevicesService,
+    private readonly targets: NotificationTargetService,
   ) {}
 
   @Get()
@@ -113,6 +115,13 @@ export class NotificationsController {
   @ApiOperation({ summary: 'Stop pushing to this phone' })
   revokeDevice(@CurrentUser() user: AuthUser, @Body() dto: DeviceTokenDto) {
     return this.devices.revoke(uuidToBin(user.userId), dto.token);
+  }
+
+  @Get(':id/open')
+  @ApiOperation({ summary: 'Where a notification leads, re-authorised now: the destination, or why it cannot be opened' })
+  open(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    if (!isUuid(id)) return { status: 'unavailable' as const };
+    return this.targets.open(uuidToBin(user.userId), uuidToBin(user.companyId), uuidToBin(id));
   }
 
   @Post(':id/read')

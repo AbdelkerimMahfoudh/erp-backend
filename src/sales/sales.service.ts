@@ -18,6 +18,7 @@ import { SpineEventBus } from '../common/events/spine-event-bus';
 import { requestRollupTx } from '../analytics/rollup-queue';
 import { figuresByDay } from '../analytics/period-figures';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
+import { links } from '../notifications/notification-target';
 import { contactPresence } from '../common/privacy/audit-contact';
 import { dayKey } from '../common/utils/date.util';
 import { isDateString } from '../common/business-day';
@@ -703,6 +704,8 @@ export class SalesService {
             actorUserId: userId,
             title: `Sale ${invoiceNo} — ${total}`,
             body: `${prepared.length} item(s)`,
+            actionLink: links.sale(binToUuid(saleId)),
+            payload: { event: 'recorded', invoiceNo, total, items: prepared.reduce((s, p) => s + p.quantity, 0) },
             isRead: false,
           },
         });

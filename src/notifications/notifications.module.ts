@@ -4,6 +4,7 @@ import { NotificationsService } from './notifications.service';
 import { InAppChannel } from './in-app.channel';
 import { NOTIFICATION_CHANNELS } from './notification-channel';
 import { PushDevicesService } from './push-devices.service';
+import { NotificationTargetService } from './notification-target.service';
 import { ExpoPushProvider, PUSH_PROVIDER, PushDispatcher } from './push-dispatcher';
 
 @Module({
@@ -12,6 +13,7 @@ import { ExpoPushProvider, PUSH_PROVIDER, PushDispatcher } from './push-dispatch
     InAppChannel,
     NotificationsService,
     PushDevicesService,
+    NotificationTargetService,
     // Registered delivery channels (in-app now; add FCM/WhatsApp providers here).
     { provide: NOTIFICATION_CHANNELS, inject: [InAppChannel], useFactory: (inApp: InAppChannel) => [inApp] },
     // D225: push, off unless PUSH_CHANNEL=expo.

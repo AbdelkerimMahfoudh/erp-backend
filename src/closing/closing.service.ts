@@ -124,6 +124,7 @@ import {
   returnFigures,
   salesFigures,
 } from './closing-report.queries';
+import { links } from '../notifications/notification-target';
 
 /** The client inside one of this service's transactions: the tenant-scoped one. */
 type TenantTx = Parameters<Parameters<TenantPrisma['$transaction']>[0]>[0];
@@ -1019,6 +1020,8 @@ export class ClosingService {
               ? 'Closed on the closer’s word that the balances were checked; amounts not recorded'
               : 'Closed with every balance counted',
         branchId,
+        actionLink: links.closingDay(day),
+        payload: { event: 'completed', date: day, check: unverified.length > 0 ? 'unverified' : attested.length > 0 ? 'attested' : 'counted' },
       });
     } else {
       // After commit, never before: a delivery problem is not the close's problem.
@@ -2371,6 +2374,8 @@ export class ClosingService {
       const ctx = { ...(await this.notices.context(companyId, branchId)), businessDate };
       const notice = build(ctx);
       notice.payload.language = ctx.language;
+      // The day it is about, so the notification opens that day (D225).
+      notice.payload.date ??= businessDate;
       const outcome = await this.notices.deliver(companyId, branchId, notice);
       if (eventId) {
         const row = await this.db.closingEvent.findUnique({ where: { id: eventId }, select: { payload: true } });

@@ -23,6 +23,7 @@ import { ClosingService } from '../closing/closing.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { CatalogService, PreparedProduct } from '../catalog/catalog.service';
 import { CreatePurchaseDto, NewProductDto, ReceiveItemDto } from './dto/create-purchase.dto';
+import { links } from '../notifications/notification-target';
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
@@ -643,6 +644,10 @@ export class PurchasingService {
       await this.notifications.emit({
         type: 'stock.received',
         title: `Received ${received} item(s)`,
+        // The store that received it (it was a business-wide broadcast); the count only — never the cost.
+        branchId,
+        actionLink: links.stock(),
+        payload: { event: 'received', items: received },
       });
       // Intake changed inventory: work the branch refresh requested with the purchase.
       void this.rollups.processNow();

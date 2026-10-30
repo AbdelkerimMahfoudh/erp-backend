@@ -51,6 +51,7 @@ import {
   type LedgerKind,
 } from './consignment-money';
 import { dayKey } from '../common/utils/date.util';
+import { links } from '../notifications/notification-target';
 
 const num = (d: { toString(): string } | number | null): number => (d == null ? 0 : Number(d));
 
@@ -215,10 +216,15 @@ export class ConsignmentsService {
     });
 
     if (counterparty.connectedCompanyId) {
+      // To the business asked to receive the stock, not the sender's own (D225).
+      const from = await this.prisma.company.findUnique({ where: { id: me }, select: { name: true, nameAr: true } });
       await this.notifications.emit({
+        companyId: counterparty.connectedCompanyId,
         type: 'consignment.requested',
         title: 'A store wants to send you stock',
         body: `${created} phone(s) offered at ${dto.proposedAmount}`,
+        actionLink: links.consignment(binToUuid(consignmentId)),
+        payload: { event: 'requested', units: created, amount: dto.proposedAmount, from: from?.name ?? null, fromAr: from?.nameAr ?? null },
       });
     }
     return this.get(binToUuid(consignmentId));

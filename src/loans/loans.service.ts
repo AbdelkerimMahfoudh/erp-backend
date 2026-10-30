@@ -35,6 +35,7 @@ import {
   type LoanStatus,
 } from './loan-rules';
 import { CreateLoanDto, DecideLoanDto, ForgiveLoanDto, LoanPaymentDto } from './dto/loan.dto';
+import { links } from '../notifications/notification-target';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 
@@ -133,10 +134,16 @@ export class LoansService {
     });
 
     if (counterparty.connectedCompanyId) {
+      // To the other business — the one asked to accept — not the proposer's own (D225).
+      const from = await this.prisma.company.findUnique({ where: { id: me }, select: { name: true, nameAr: true } });
       await this.notifications.emit({
+        companyId: counterparty.connectedCompanyId,
         type: 'loan.proposed',
         title: 'A store proposed a debt',
         body: `${dto.amount} — you can accept, counter or dispute it`,
+        actionLink: links.loan(binToUuid(id)),
+        payload: { event: 'proposed', amount: dto.amount, direction: dto.direction, from: from?.name ?? null, fromAr: from?.nameAr ?? null },
+        actorUserId: userId,
       });
     }
     return this.get(binToUuid(id));

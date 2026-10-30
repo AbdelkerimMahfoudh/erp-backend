@@ -8,6 +8,7 @@ import { EntitlementService } from '../entitlement/entitlement.service';
 import { SEAT_LIMIT_REACHED } from '../entitlement/entitlement-rules';
 import { pruneGrantsForRole } from '../rbac/delegation-lifecycle';
 import type { ChangeRoleDto } from './dto/change-role.dto';
+import { links } from '../notifications/notification-target';
 
 type Assignment = { id: Buffer; branchId: Buffer; role: string };
 
@@ -132,6 +133,7 @@ export class RoleChangeService {
           targetUserId: userId,
           type: 'staff.role_changed',
           actorUserId: actorId,
+          actionLink: links.staff(binToUuid(userId)),
           title: dto.role === 'store_manager' ? 'You are now a Manager' : 'You are now an Employee',
           // No dedupe key needed: a retried change finds the role already set and is refused before this.
           payload: { role: dto.role, branchIds: now.filter((a) => a.role === dto.role).map((a) => a.branchId), actorId: binToUuid(actorId) },

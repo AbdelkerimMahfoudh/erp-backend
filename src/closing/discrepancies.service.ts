@@ -10,6 +10,7 @@ import { dayKey } from '../common/utils/date.util';
 import { assertEntryAllowed, balanceOf, planResolution, RuleViolation } from './debt-rules';
 import { ResolveDiscrepancyDto } from './dto/resolve-discrepancy.dto';
 import { CreateDebtEntryDto } from './dto/create-debt-entry.dto';
+import { links } from '../notifications/notification-target';
 
 const num = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Number(d));
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -168,6 +169,8 @@ export class DiscrepanciesService {
         title: 'A shortage was assigned',
         body: `${round2(Math.abs(num(found.amount)))} recorded against a team member`,
         branchId,
+        actionLink: links.discrepancy(id),
+        payload: { event: 'charged', amount: round2(Math.abs(num(found.amount))) },
       });
     }
     return this.get(id);
