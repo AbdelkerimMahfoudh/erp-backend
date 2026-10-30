@@ -48,6 +48,10 @@ export class AppConfigService {
       .map((o) => o.trim())
       .filter(Boolean);
   }
+  /** D225: where pushes go — `disabled` (the default) or Expo's push service. */
+  get pushChannel(): 'disabled' | 'expo' {
+    return this.get('PUSH_CHANNEL');
+  }
   get swaggerEnabled(): boolean {
     return this.get('SWAGGER_ENABLED');
   }

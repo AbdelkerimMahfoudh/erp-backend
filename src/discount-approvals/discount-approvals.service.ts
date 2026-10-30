@@ -6,6 +6,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { actingOwnersHolding } from '../acting-owner/acting-owner-rules';
 import { DiscountApprovalStatus, Prisma } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -525,7 +526,10 @@ export class DiscountApprovalsService {
       select: { userId: true },
       distinct: ['userId'],
     });
-    return assignments.map((a) => a.userId);
+    // D225: an Acting Owner may approve too, through the appointment rather than the role.
+    const acting = await actingOwnersHolding(this.db as never, this.tenant.companyId(), null, 'sale.below_cost');
+    const all = new Map([...assignments.map((a) => a.userId), ...acting].map((id) => [id.toString('hex'), id]));
+    return [...all.values()];
   }
 
   /**
@@ -573,6 +577,8 @@ export class DiscountApprovalsService {
             branchId: params.branchId,
             targetUserId: userId,
             type: `discount_approval.${params.event}`,
+            // D225: never pushed to the person who did it.
+            actorUserId: this.tenant.userId() ?? null,
             title: params.title,
             body: params.body,
             actionLink,

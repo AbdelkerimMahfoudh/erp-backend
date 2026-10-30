@@ -166,6 +166,8 @@ export class ActingOwnerService {
           branchId: null,
           targetUserId,
           type,
+          // D225: the Owner who did it is not pushed; the person appointed is.
+          actorUserId: ownerId,
           title: type === 'acting_owner.appointed' ? 'Acting Owner appointed' : 'Acting Owner removed',
           dedupeKey: `${type}:${payload.delegationId}`,
           payload: { ...payload, delegateId: binToUuid(delegateId), ownerId: binToUuid(ownerId) },

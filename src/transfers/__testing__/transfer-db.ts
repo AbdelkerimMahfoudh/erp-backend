@@ -38,6 +38,8 @@ export interface Db {
   setting: Row[];
   /** Durable recompute requests (0081), written inside the shipment or receipt. */
   rollupRequest: Row[];
+  /** D225: Acting Owner appointments; empty unless a test makes one. */
+  actingOwnerDelegation: Row[];
 }
 
 export const emptyDb = (): Db => ({
@@ -52,6 +54,7 @@ export const emptyDb = (): Db => ({
   auditLog: [],
   setting: [],
   rollupRequest: [],
+  actingOwnerDelegation: [],
 });
 
 const eq = (a: unknown, b: unknown): boolean =>

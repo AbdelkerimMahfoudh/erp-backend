@@ -1,4 +1,4 @@
-import { NotificationsService } from './notifications.service';
+import { memoryNotifications, type MemoryRow } from './__testing__/memory-notifications';
 import { newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 
 /**
@@ -16,54 +16,18 @@ const ME = uuidToBin('018f0000-0000-7000-8000-00000000a001');
 const MINE = uuidToBin('018f0000-0000-7000-8000-0000000000b1');
 const THEIRS = uuidToBin('018f0000-0000-7000-8000-0000000000b2');
 
-interface Row {
-  id: Buffer;
-  targetUserId: Buffer | null;
-  branchId: Buffer | null;
-  isRead: boolean;
-  title: string;
+function makeService(rows: MemoryRow[]) {
+  return memoryNotifications(rows, (userId) => (userId.equals(ME) ? [MINE] : []));
 }
 
-const eq = (a: Buffer | null, b: unknown) => (b === null ? a === null : a !== null && Buffer.isBuffer(b) && a.equals(b));
-
-/** Evaluates the where shapes the service builds: equality, `in`, nested OR. */
-function matches(r: Row, where: Record<string, unknown>): boolean {
-  return Object.entries(where).every(([key, cond]) => {
-    if (key === 'OR') return (cond as Record<string, unknown>[]).some((c) => matches(r, c));
-    if (key === 'isRead') return r.isRead === cond;
-    const value = (r as unknown as Record<string, Buffer | null>)[key];
-    if (cond && typeof cond === 'object' && !Buffer.isBuffer(cond) && 'in' in cond) {
-      return (cond as { in: Buffer[] }).in.some((b) => eq(value, b));
-    }
-    return eq(value, cond);
-  });
-}
-
-function makeService(rows: Row[]) {
-  const db = {
-    userBranch: {
-      findMany: async ({ where }: any) => (where.userId.equals(ME) ? [{ branchId: MINE }] : []),
-    },
-    notification: {
-      findMany: async ({ where, take }: any) =>
-        rows.filter((r) => matches(r, where)).sort((a, b) => Buffer.compare(b.id, a.id)).slice(0, take),
-      count: async ({ where }: any) => rows.filter((r) => matches(r, where)).length,
-      updateMany: async ({ where, data }: any) => {
-        const hits = rows.filter((r) => matches(r, where));
-        for (const r of hits) Object.assign(r, data);
-        return { count: hits.length };
-      },
-    },
-  };
-  return new NotificationsService([] as never, db as never);
-}
-
-const row = (branchId: Buffer | null, title: string, targetUserId: Buffer | null = null): Row => ({
+const row = (branchId: Buffer | null, title: string, targetUserId: Buffer | null = null): MemoryRow => ({
   id: newUuidV7Bin(),
   targetUserId,
   branchId,
   isRead: false,
+  type: 'sale.recorded',
   title,
+  readBy: [],
 });
 
 describe('branch broadcasts stay in their branch', () => {
@@ -88,6 +52,6 @@ describe('branch broadcasts stay in their branch', () => {
     const service = makeService([theirs]);
 
     await expect(service.markRead(ME, theirs.id)).resolves.toEqual({ updated: 0 });
-    expect(theirs.isRead).toBe(false);
+    expect(theirs.readBy).toEqual([]);
   });
 });

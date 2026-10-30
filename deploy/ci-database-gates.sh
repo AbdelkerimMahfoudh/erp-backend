@@ -121,6 +121,10 @@ echo "== 9d. the D225 real-MySQL spec (the Acting Owner: one at a time, on time 
 ACTING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ACTING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/acting-owner/acting-owner.mysql.spec.ts
 
+echo "== 9e. the D225 real-MySQL spec (notifications: one push per device on retry, store-scoped audience, per-person reads, levels), on the same disposable schema"
+NOTIFY_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) NOTIFY_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/notifications/notifications.mysql.spec.ts
+
 echo "== 9b. the 0109 real-MySQL spec (deferred WhatsApp verification, setup codes), on the same disposable schema"
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/platform/deferred-verification.mysql.spec.ts

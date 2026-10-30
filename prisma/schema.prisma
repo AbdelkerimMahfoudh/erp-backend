@@ -316,6 +316,10 @@ enum SyncStatus {
 // ------------------------- Tenancy & Access --------------------------------
 
 model Company {
+  notificationPreferences NotificationPreference[]
+  notificationReads       NotificationRead[]
+  pushDevices             PushDevice[]
+  pushDeliveries          PushDelivery[]
   actingOwnerDelegations ActingOwnerDelegation[]
   branchReturnPolicies BranchReturnPolicy[]
   discountApprovals    DiscountApproval[]
@@ -545,6 +549,9 @@ model Branch {
 }
 
 model User {
+  notificationPreference  NotificationPreference?
+  notificationReads       NotificationRead[]
+  pushDevices             PushDevice[]
   actingOwnerDelegations  ActingOwnerDelegation[] @relation("ActingOwnerDelegate")
   actingOwnerGranted      ActingOwnerDelegation[] @relation("ActingOwnerGrantedBy")
   actingOwnerRevoked      ActingOwnerDelegation[] @relation("ActingOwnerRevokedBy")
@@ -2327,11 +2334,15 @@ model Notification {
   /// notification is read outside the request that authorized it.
   payload      Json?    @db.Json
   isRead       Boolean  @default(false) @map("is_read")
+  /// D225 (0113): who did it, where known — never pushed their own action. NULL when unknown.
+  actorUserId  Bytes?   @map("actor_user_id") @db.Binary(16)
   createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
   company    Company @relation(fields: [companyId], references: [id])
   branch     Branch? @relation(fields: [branchId], references: [id])
   targetUser User?   @relation(fields: [targetUserId], references: [id])
+  reads      NotificationRead[]
+  deliveries PushDelivery[]
 
   @@unique([companyId, targetUserId, dedupeKey], map: "notifications_company_target_dedupe_key")
   @@index([companyId, targetUserId, isRead, createdAt])
@@ -6343,4 +6354,74 @@ model ActingOwnerDelegation {
   @@index([companyId, revokedAt, startsAt], map: "acting_owner_company_window")
   @@index([delegateUserId, revokedAt], map: "acting_owner_delegate")
   @@map("acting_owner_delegations")
+}
+
+/// D225 (0113): a person's push level, synced across their devices. No row: the default for their role.
+model NotificationPreference {
+  userId    Bytes    @id @map("user_id") @db.Binary(16)
+  companyId Bytes    @map("company_id") @db.Binary(16)
+  level     String   @db.VarChar(16)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(6)
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade, map: "notification_preferences_user_fk")
+  company Company @relation(fields: [companyId], references: [id], map: "notification_preferences_company_fk")
+
+  @@index([companyId], map: "notification_preferences_company")
+  @@map("notification_preferences")
+}
+
+/// D225 (0113): who has read which notification — per person, across devices.
+model NotificationRead {
+  notificationId Bytes    @map("notification_id") @db.Binary(16)
+  userId         Bytes    @map("user_id") @db.Binary(16)
+  companyId      Bytes    @map("company_id") @db.Binary(16)
+  readAt         DateTime @default(now()) @map("read_at") @db.DateTime(6)
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade, map: "notification_reads_notification_fk")
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade, map: "notification_reads_user_fk")
+  company      Company      @relation(fields: [companyId], references: [id], map: "notification_reads_company_fk")
+
+  @@id([notificationId, userId])
+  @@index([userId, companyId], map: "notification_reads_user")
+  @@map("notification_reads")
+}
+
+/// D225 (0113): a phone's push token and the language it reads. Revoked, never deleted.
+model PushDevice {
+  id         Bytes     @id @db.Binary(16)
+  companyId  Bytes     @map("company_id") @db.Binary(16)
+  userId     Bytes     @map("user_id") @db.Binary(16)
+  token      String    @unique(map: "push_devices_token") @db.VarChar(255)
+  platform   String    @db.VarChar(16)
+  locale     String    @db.VarChar(5)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at") @db.DateTime(6)
+  revokedAt  DateTime? @map("revoked_at") @db.DateTime(6)
+
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade, map: "push_devices_user_fk")
+  company    Company        @relation(fields: [companyId], references: [id], map: "push_devices_company_fk")
+  deliveries PushDelivery[]
+
+  @@index([userId, revokedAt], map: "push_devices_user")
+  @@map("push_devices")
+}
+
+/// D225 (0113): one push of one notification to one device — UNIQUE, so a retry never pushes twice. No message text.
+model PushDelivery {
+  id             Bytes    @id @db.Binary(16)
+  companyId      Bytes    @map("company_id") @db.Binary(16)
+  notificationId Bytes    @map("notification_id") @db.Binary(16)
+  deviceId       Bytes    @map("device_id") @db.Binary(16)
+  status         String   @db.VarChar(16)
+  errorCode      String?  @map("error_code") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.DateTime(6)
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade, map: "push_deliveries_notification_fk")
+  device       PushDevice   @relation(fields: [deviceId], references: [id], onDelete: Cascade, map: "push_deliveries_device_fk")
+  company      Company      @relation(fields: [companyId], references: [id], map: "push_deliveries_company_fk")
+
+  @@unique([notificationId, deviceId], map: "push_deliveries_once")
+  @@index([companyId, status, createdAt], map: "push_deliveries_status")
+  @@map("push_deliveries")
 }

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { actingOwnersHolding } from '../acting-owner/acting-owner-rules';
 import { Prisma, StockTransfer } from '@prisma/client';
 import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 
@@ -155,6 +156,8 @@ export class TransferNotifier {
             branchId: event === 'received' || event === 'shipped' ? transfer.toBranchId : transfer.fromBranchId,
             targetUserId: userId,
             type: `transfer.${event}`,
+            // D225: never pushed to the person who did it.
+            actorUserId: ctx.actorId,
             title,
             body,
             actionLink,
@@ -265,6 +268,7 @@ export class TransferNotifier {
       },
       select: { userId: true },
     });
-    return assignments.map((a) => a.userId);
+    // D225: an Acting Owner holds the Owner's permissions through the appointment, not the role.
+    return [...assignments.map((a) => a.userId), ...(await actingOwnersHolding(tx as never, companyId, branchId, permission))];
   }
 }

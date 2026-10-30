@@ -1,4 +1,4 @@
-import { NotificationsService } from './notifications.service';
+import { memoryNotifications, type MemoryRow } from './__testing__/memory-notifications';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 
 /**
@@ -12,54 +12,17 @@ import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 const ME = uuidToBin('018f0000-0000-7000-8000-00000000a001');
 const SOMEONE_ELSE = uuidToBin('018f0000-0000-7000-8000-00000000a002');
 
-interface Row {
-  id: Buffer;
-  targetUserId: Buffer | null;
-  isRead: boolean;
-}
-
-function makeService(rows: Row[]) {
-  const matches = (r: Row, where: Record<string, unknown>): boolean => {
-    const or = where.OR as { targetUserId: Buffer | null }[] | undefined;
-    if (or && !or.some((c) => (c.targetUserId === null ? r.targetUserId === null : r.targetUserId?.equals(c.targetUserId)))) {
-      return false;
-    }
-    if ('isRead' in where && r.isRead !== where.isRead) return false;
-    return true;
-  };
-
-  const db = {
-    userBranch: { findMany: async () => [] },
-    notification: {
-      findMany: async ({ where, cursor, skip, take }: never) => {
-        const w = where as unknown as Record<string, unknown>;
-        let hits = rows.filter((r) => matches(r, w));
-        hits = [...hits].sort((a, b) => Buffer.compare(b.id, a.id)); // id desc
-        const c = cursor as unknown as { id: Buffer } | undefined;
-        if (c) {
-          const at = hits.findIndex((r) => r.id.equals(c.id));
-          hits = hits.slice(at + (skip ? Number(skip) : 0));
-        }
-        return hits.slice(0, take as unknown as number);
-      },
-      count: async ({ where }: never) =>
-        rows.filter((r) => matches(r, where as unknown as Record<string, unknown>)).length,
-      updateMany: async ({ where, data }: never) => {
-        const w = where as unknown as { id: Buffer; OR: { targetUserId: Buffer | null }[] };
-        const hits = rows.filter((r) => r.id.equals(w.id) && matches(r, w as unknown as Record<string, unknown>));
-        for (const r of hits) Object.assign(r, data);
-        return { count: hits.length };
-      },
-    },
-  };
-  return new NotificationsService([] as never, db as never);
-}
-
-const row = (targetUserId: Buffer | null, isRead = false): Row => ({
+const row = (targetUserId: Buffer | null, isRead = false): MemoryRow => ({
   id: newUuidV7Bin(),
   targetUserId,
+  branchId: null,
   isRead,
+  type: 'sale.recorded',
+  title: 'x',
+  readBy: [],
 });
+
+const makeService = (rows: MemoryRow[]) => memoryNotifications(rows);
 
 describe('listing notifications', () => {
   it('returns the user’s own and company broadcasts', async () => {
@@ -116,13 +79,44 @@ describe('marking read', () => {
     const mine = row(ME);
     const service = makeService([mine]);
     await expect(service.markRead(ME, mine.id)).resolves.toEqual({ updated: 1 });
-    expect(mine.isRead).toBe(true);
+    expect(mine.readBy.map((u) => u.equals(ME))).toEqual([true]);
+    expect((await service.listForUser(ME)).rows[0].isRead).toBe(true);
   });
 
   it('cannot mark someone else’s as read', async () => {
     const theirs = row(SOMEONE_ELSE);
     const service = makeService([theirs]);
     await expect(service.markRead(ME, theirs.id)).resolves.toEqual({ updated: 0 });
-    expect(theirs.isRead).toBe(false);
+    expect(theirs.readBy).toEqual([]);
+  });
+});
+
+describe('read state is per person (D225, 0113)', () => {
+  it('one member reading a store broadcast does not read it for another', async () => {
+    const broadcast = row(null);
+    const service = makeService([broadcast]);
+    await service.markRead(ME, broadcast.id);
+    expect((await service.listForUser(ME)).unreadCount).toBe(0);
+    expect((await service.listForUser(SOMEONE_ELSE)).unreadCount).toBe(1);
+  });
+
+  it('marks everything I can see as read, and nothing of anyone else', async () => {
+    const mine = row(ME);
+    const broadcast = row(null);
+    const theirs = row(SOMEONE_ELSE);
+    const service = makeService([mine, broadcast, theirs]);
+    await expect(service.markAllRead(ME)).resolves.toEqual({ updated: 2 });
+    expect((await service.listForUser(ME)).unreadCount).toBe(0);
+    expect(theirs.readBy).toEqual([]);
+  });
+
+  it('filters the centre by category, from the catalogue', async () => {
+    const sale = row(ME);
+    const approval = { ...row(ME), type: 'discount_approval.requested' };
+    const service = makeService([sale, approval]);
+    const page = await service.listForUser(ME, { filter: 'approvals' });
+    expect(page.rows.map((r) => r.type)).toEqual(['discount_approval.requested']);
+    expect(page.rows[0].category).toBe('approvals');
+    expect((await service.listForUser(ME, { filter: 'all' })).rows).toHaveLength(2);
   });
 });

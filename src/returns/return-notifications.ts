@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { actingOwnersHolding } from '../acting-owner/acting-owner-rules';
 import { Prisma } from '@prisma/client';
 import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 
@@ -126,6 +127,8 @@ export class ReturnNotifier {
             branchId: ctx.request.branchId,
             targetUserId,
             type: `return.${ctx.event}`,
+            // D225: never pushed to the person who did it.
+            actorUserId: ctx.actorId,
             title: copy.title,
             body: copy.body,
             // Where to go when tapped. The mobile route lands in CP5; the link
@@ -216,6 +219,7 @@ export class ReturnNotifier {
       },
       select: { userId: true },
     });
-    return rows.map((r) => r.userId);
+    // D225: an Acting Owner holds the Owner's permissions through the appointment, not the role.
+    return [...rows.map((r) => r.userId), ...(await actingOwnersHolding(tx as never, companyId, branchId, permission))];
   }
 }

@@ -43,3 +43,40 @@ export function overlaps(a: { startsAt: Date; endsAt: Date | null }, b: { starts
   const bEnd = b.endsAt?.getTime() ?? Number.POSITIVE_INFINITY;
   return a.startsAt.getTime() < bEnd && b.startsAt.getTime() < aEnd;
 }
+
+/** The client shape {@link actingOwnersHolding} reads: a transaction, the tenant client or a plain one. */
+export interface ActingOwnerLookupClient {
+  actingOwnerDelegation: {
+    findMany(args: {
+      where: Record<string, unknown>;
+      select: { delegateUserId: true };
+    }): Promise<{ delegateUserId: Buffer }[]>;
+  };
+}
+
+/**
+ * The Acting Owners who hold `permission` now in `branchId` (D225): approval requests and operational notifications
+ * that go to permission holders reach the delegate too — their authority comes from the appointment, not from
+ * `role_permissions`, so a lookup by role alone would pass them over. Only someone assigned to the store, active, and
+ * only for a delegated key.
+ */
+export async function actingOwnersHolding(
+  client: ActingOwnerLookupClient,
+  companyId: Buffer,
+  branchId: Buffer | null,
+  permission: string,
+  now = new Date(),
+): Promise<Buffer[]> {
+  if (!ACTING_OWNER_PERMISSIONS.includes(permission)) return [];
+  const rows = await client.actingOwnerDelegation.findMany({
+    where: {
+      companyId,
+      revokedAt: null,
+      startsAt: { lte: now },
+      OR: [{ endsAt: null }, { endsAt: { gt: now } }],
+      delegate: { isActive: true, deletedAt: null, ...(branchId ? { userBranches: { some: { branchId } } } : {}) },
+    },
+    select: { delegateUserId: true },
+  });
+  return rows.map((r) => r.delegateUserId);
+}

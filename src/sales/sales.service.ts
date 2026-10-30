@@ -699,6 +699,8 @@ export class SalesService {
             branchId,
             targetUserId: null,
             type: 'sale.recorded',
+            // D225: the seller is not pushed their own sale; it stays in their history.
+            actorUserId: userId,
             title: `Sale ${invoiceNo} — ${total}`,
             body: `${prepared.length} item(s)`,
             isRead: false,

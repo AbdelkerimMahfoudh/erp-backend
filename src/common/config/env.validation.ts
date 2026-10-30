@@ -44,6 +44,9 @@ export const envValidationSchema = Joi.object({
   // WHATSAPP_TEST_RECIPIENTS; "live" sends to real customers, and only once
   // WHATSAPP_LIVE_SENDS=enabled (production refuses to boot in live mode otherwise).
   WHATSAPP_MODE: Joi.string().valid('test', 'live').default('test'),
+  // D225: push delivery. Disabled until the iOS build carries the push entitlement and a provider is chosen: until
+  // then the notification centre holds everything and nothing is sent.
+  PUSH_CHANNEL: Joi.string().valid('disabled', 'expo').default('disabled'),
   WHATSAPP_TEST_RECIPIENTS: Joi.string().allow('').default(''),
   WHATSAPP_LIVE_SENDS: Joi.string().valid('disabled', 'enabled').default('disabled'),
   // The Meta app's id (not a secret): the live-mode credential check asks the provider about the token with it.
