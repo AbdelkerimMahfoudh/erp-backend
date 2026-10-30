@@ -9,12 +9,16 @@
  * category**, and a TAC never fills in a model.
  */
 
+import type { CategoryVisual } from '../categories/category-visual';
+
 export interface CatalogueProduct {
   id: string;
   brand: string;
   model: string;
   variant: string | null;
   trackingType: 'imei' | 'serial' | 'quantity';
+  /** What the candidate is drawn as (D225). Matching never reads it. */
+  categoryVisual?: CategoryVisual | null;
 }
 
 export interface MatchInput {

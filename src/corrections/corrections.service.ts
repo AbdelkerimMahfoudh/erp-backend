@@ -584,8 +584,8 @@ export class CorrectionsService {
 
   private includes() {
     return {
-      requestedBy: { select: { name: true } },
-      decidedBy: { select: { name: true } },
+      requestedBy: { select: { name: true, nameAr: true } },
+      decidedBy: { select: { name: true, nameAr: true } },
       legs: { select: { direction: true, method: true, accountLabelSnapshot: true, amount: true } },
     } as const;
   }
@@ -656,8 +656,8 @@ export class CorrectionsService {
     decidedAt: Date | null;
     correctionDate: Date | null;
     version: number;
-    requestedBy?: { name: string } | null;
-    decidedBy?: { name: string } | null;
+    requestedBy?: { name: string; nameAr?: string | null } | null;
+    decidedBy?: { name: string; nameAr?: string | null } | null;
     legs?: { direction: string; method: string; accountLabelSnapshot: string | null; amount: Prisma.Decimal }[];
   }) {
     const target =
@@ -676,8 +676,11 @@ export class CorrectionsService {
       method: r.method,
       accountLabel: r.accountLabelSnapshot,
       requestedBy: r.requestedBy?.name ?? null,
+      /** D225: the same people in Arabic, null until each has an Arabic name. */
+      requestedByAr: r.requestedBy?.nameAr ?? null,
       requestedAt: r.requestedAt.toISOString(),
       decidedBy: r.decidedBy?.name ?? null,
+      decidedByAr: r.decidedBy?.nameAr ?? null,
       decidedAt: r.decidedAt?.toISOString() ?? null,
       /** The business day everything posts to. */
       correctionDate: r.correctionDate ? dayKey(r.correctionDate) : null,

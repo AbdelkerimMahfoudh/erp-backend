@@ -376,13 +376,13 @@ export class ExpensesService {
 
   private includes() {
     return {
-      reportedBy: { select: { name: true } },
-      confirmedBy: { select: { name: true } },
+      reportedBy: { select: { name: true, nameAr: true } },
+      confirmedBy: { select: { name: true, nameAr: true } },
       // A reversal asked for or approved (0079). The expense itself is never edited.
       corrections: {
         where: { status: { in: ['requested', 'approved'] as ('requested' | 'approved')[] } },
         orderBy: { requestedAt: 'desc' as const },
-        select: { status: true, amount: true, reason: true, correctionDate: true, requestedBy: { select: { name: true } }, decidedBy: { select: { name: true } } },
+        select: { status: true, amount: true, reason: true, correctionDate: true, requestedBy: { select: { name: true, nameAr: true } }, decidedBy: { select: { name: true, nameAr: true } } },
       },
     } as const;
   }
@@ -474,9 +474,16 @@ export class ExpensesService {
     confirmedAt: Date | null;
     confirmationDate: Date | null;
     version: number;
-    reportedBy?: { name: string } | null;
-    confirmedBy?: { name: string } | null;
-    corrections?: { status: string; amount: Prisma.Decimal; reason: string; correctionDate: Date | null; requestedBy: { name: string } | null; decidedBy: { name: string } | null }[];
+    reportedBy?: { name: string; nameAr?: string | null } | null;
+    confirmedBy?: { name: string; nameAr?: string | null } | null;
+    corrections?: {
+      status: string;
+      amount: Prisma.Decimal;
+      reason: string;
+      correctionDate: Date | null;
+      requestedBy: { name: string; nameAr?: string | null } | null;
+      decidedBy: { name: string; nameAr?: string | null } | null;
+    }[];
   }) {
     const reversal = r.corrections?.find((c) => c.status === 'approved') ?? r.corrections?.find((c) => c.status === 'requested') ?? null;
     return {
@@ -496,8 +503,11 @@ export class ExpensesService {
       rejectedReason: r.rejectedReason,
       spentOn: dayKey(r.spentOn),
       reportedBy: r.reportedBy?.name ?? null,
+      // D225: each person's Arabic name beside the Latin one, null until given.
+      reportedByAr: r.reportedBy?.nameAr ?? null,
       reportedAt: r.reportedAt?.toISOString() ?? null,
       confirmedBy: r.confirmedBy?.name ?? null,
+      confirmedByAr: r.confirmedBy?.nameAr ?? null,
       confirmedAt: r.confirmedAt?.toISOString() ?? null,
       /** The business day the money is counted against. */
       confirmationDate: r.confirmationDate ? dayKey(r.confirmationDate) : null,
@@ -512,7 +522,9 @@ export class ExpensesService {
             reason: reversal.reason,
             correctionDate: reversal.correctionDate ? dayKey(reversal.correctionDate) : null,
             requestedBy: reversal.requestedBy?.name ?? null,
+            requestedByAr: reversal.requestedBy?.nameAr ?? null,
             decidedBy: reversal.decidedBy?.name ?? null,
+            decidedByAr: reversal.decidedBy?.nameAr ?? null,
           }
         : null,
       version: r.version,

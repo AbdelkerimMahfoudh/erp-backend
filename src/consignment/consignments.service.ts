@@ -237,8 +237,8 @@ export class ConsignmentsService {
       where: visibleToCompany(me),
       include: {
         lines: true,
-        counterparty: { select: { name: true, kind: true } },
-        sourceCompany: { select: { name: true } },
+        counterparty: { select: { name: true, kind: true, connectedCompany: { select: { nameAr: true } } } },
+        sourceCompany: { select: { name: true, nameAr: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
@@ -259,8 +259,8 @@ export class ConsignmentsService {
       where: { id: uuidToBin(id), ...visibleToCompany(me) },
       include: {
         lines: true,
-        counterparty: { select: { name: true, kind: true } },
-        sourceCompany: { select: { name: true } },
+        counterparty: { select: { name: true, kind: true, connectedCompany: { select: { nameAr: true } } } },
+        sourceCompany: { select: { name: true, nameAr: true } },
         ledger: { orderBy: { createdAt: 'asc' } },
       },
     });
@@ -1029,8 +1029,8 @@ export class ConsignmentsService {
       createdAt: Date;
       version: number;
       lines: { id: Buffer }[];
-      counterparty: { name: string; kind: string };
-      sourceCompany: { name: string };
+      counterparty: { name: string; kind: string; connectedCompany?: { nameAr: string | null } | null };
+      sourceCompany: { name: string; nameAr: string | null };
     },
     side: Side,
   ) {
@@ -1047,6 +1047,8 @@ export class ConsignmentsService {
        * distrust the whole screen.
        */
       otherParty: side === 'source' ? c.counterparty.name : c.sourceCompany.name,
+      /** D225: the other business's Arabic name when it is a connected business; a hand-typed party has one name. */
+      otherPartyAr: side === 'source' ? (c.counterparty.connectedCompany?.nameAr ?? null) : c.sourceCompany.nameAr,
       phones: c.lines.length,
       proposedAmount: c.proposedAmount == null ? null : num(c.proposedAmount as number),
       counterAmount: c.counterAmount == null ? null : num(c.counterAmount as number),

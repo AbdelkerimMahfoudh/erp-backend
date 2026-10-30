@@ -20,6 +20,7 @@ const company = {
   id: Buffer.from('ff'.repeat(16), 'hex'),
   publicStoreId: 'F62B8D1EEB',
   name: 'Nouakchott Phones',
+  nameAr: 'هواتف نواكشوط',
   city: 'Nouakchott',
   logoRef: '/logos/abc.png',
   publicPhone: '+22200000000',
@@ -28,10 +29,11 @@ const company = {
 };
 
 describe('what a stranger may see', () => {
-  it('is exactly four things', () => {
+  it('is exactly four things (the name in both scripts, D225)', () => {
     expect(toPublicPreview(company)).toEqual({
       publicStoreId: 'F62B8D1EEB',
       name: 'Nouakchott Phones',
+      nameAr: 'هواتف نواكشوط',
       city: 'Nouakchott',
       logoRef: '/logos/abc.png',
       verification: 'Verified badge coming soon',
@@ -64,8 +66,12 @@ describe('what a stranger may see', () => {
      */
     const preview = toPublicPreview(company);
     expect(Object.keys(preview).sort()).toEqual(
-      ['city', 'logoRef', 'name', 'publicStoreId', 'verification'].sort(),
+      ['city', 'logoRef', 'name', 'nameAr', 'publicStoreId', 'verification'].sort(),
     );
+  });
+
+  it('publishes no Arabic name the business has not given', () => {
+    expect(toPublicPreview({ ...company, nameAr: null }).nameAr).toBeNull();
   });
 
   it('says the badge is coming, and claims nothing', () => {
@@ -97,7 +103,7 @@ describe('the phone number is withheld until acceptance', () => {
      * business.
      */
     expect(Object.keys(toConnectedDetail(company, true)).sort()).toEqual(
-      ['city', 'logoRef', 'name', 'phone', 'publicStoreId', 'verification'].sort(),
+      ['city', 'logoRef', 'name', 'nameAr', 'phone', 'publicStoreId', 'verification'].sort(),
     );
   });
 });

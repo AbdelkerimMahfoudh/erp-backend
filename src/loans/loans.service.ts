@@ -162,8 +162,8 @@ export class LoansService {
     const rows = await this.prisma.loan.findMany({
       where: this.visible(me),
       include: {
-        counterparty: { select: { name: true, kind: true } },
-        company: { select: { name: true } },
+        counterparty: { select: { name: true, kind: true, connectedCompany: { select: { nameAr: true } } } },
+        company: { select: { name: true, nameAr: true } },
         ledger: { select: { kind: true, amount: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -181,8 +181,8 @@ export class LoansService {
     const loan = await this.prisma.loan.findFirst({
       where: { id: uuidToBin(id), ...this.visible(me) },
       include: {
-        counterparty: { select: { name: true, kind: true } },
-        company: { select: { name: true } },
+        counterparty: { select: { name: true, kind: true, connectedCompany: { select: { nameAr: true } } } },
+        company: { select: { name: true, nameAr: true } },
         ledger: { orderBy: { createdAt: 'asc' } },
       },
     });
@@ -700,8 +700,8 @@ export class LoansService {
       principal: Prisma.Decimal | null;
       createdAt: Date;
       version: number;
-      counterparty: { name: string; kind: string };
-      company: { name: string };
+      counterparty: { name: string; kind: string; connectedCompany?: { nameAr: string | null } | null };
+      company: { name: string; nameAr: string | null };
       ledger: { kind: string; amount: Prisma.Decimal }[];
     },
     me: Buffer,
@@ -723,6 +723,11 @@ export class LoansService {
       ),
       /** Always the OTHER party's name, whichever side you are on. */
       otherParty: iAmOwner ? loan.counterparty.name : loan.company.name,
+      /**
+       * D225: the other business's Arabic name when it is a connected business, null otherwise. A counterparty
+       * typed by hand has one name, the one the shop gave it.
+       */
+      otherPartyAr: iAmOwner ? (loan.counterparty.connectedCompany?.nameAr ?? null) : loan.company.nameAr,
       proposedAmount: num(loan.proposedAmount),
       counterAmount: loan.counterAmount == null ? null : num(loan.counterAmount),
       principal: loan.principal == null ? null : num(loan.principal),

@@ -2,6 +2,7 @@ import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { binToUuid } from '../common/utils/uuid.util';
+import { CATEGORY_VISUAL_SELECT, categoryVisualOf } from '../categories/category-visual';
 import { currencyInHeading, guessColumns, missingRequired, sheetScore, type ColumnGuess, type FileField } from './file-columns';
 import {
   buildEntry,
@@ -311,7 +312,8 @@ export class ReceivingFilesService {
     if (models.length === 0) return [];
     const rows = await this.db.product.findMany({
       where: { model: { in: models } },
-      select: { id: true, brand: true, model: true, variant: true, trackingType: true },
+      // D225: the category picture, so a candidate is drawn as what it is when the file is matched.
+      select: { id: true, brand: true, model: true, variant: true, trackingType: true, category: CATEGORY_VISUAL_SELECT },
       take: 2_000,
     });
     return rows.map((r) => ({
@@ -320,6 +322,7 @@ export class ReceivingFilesService {
       model: r.model,
       variant: r.variant,
       trackingType: r.trackingType as CatalogueProduct['trackingType'],
+      categoryVisual: categoryVisualOf(r.category),
     }));
   }
 }

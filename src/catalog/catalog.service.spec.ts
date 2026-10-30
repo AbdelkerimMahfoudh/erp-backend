@@ -59,6 +59,8 @@ interface CategoryRow {
   attributeSchema: unknown;
   isActive: boolean;
   key?: string | null;
+  icon?: string | null;
+  parentId?: Buffer | null;
 }
 
 function product(over: Partial<ProductRow> = {}): ProductRow {
@@ -138,6 +140,20 @@ function makeService(
     return true;
   };
 
+  // A product's category as the selects read it: its name, and the picture columns of it and its parent (D225).
+  const categoryOf = (p: ProductRow) => {
+    const cat = categories.find((c) => p.categoryId && c.id.equals(p.categoryId));
+    if (!cat) return null;
+    const parent = cat.parentId ? categories.find((c) => c.id.equals(cat.parentId!)) : undefined;
+    return {
+      id: cat.id,
+      name: cat.name,
+      key: cat.key ?? null,
+      icon: cat.icon ?? null,
+      parent: parent ? { key: parent.key ?? null, icon: parent.icon ?? null } : null,
+    };
+  };
+
   const db: any = {
     product: {
       create: jest.fn(async ({ data }: any) => {
@@ -154,15 +170,14 @@ function makeService(
       findFirst: jest.fn(async ({ where, include }: any = {}) => {
         const hit = products.find((p) => matchProduct(p, where));
         if (!hit) return null;
-        const cat = categories.find((c) => hit.categoryId && c.id.equals(hit.categoryId));
-        return include?.category ? { ...hit, category: cat ? { name: cat.name } : null } : { ...hit };
+        return include?.category ? { ...hit, category: categoryOf(hit) } : { ...hit };
       }),
       findUniqueOrThrow: jest.fn(async ({ where }: any) => {
         const hit = products.find((p) => p.id.equals(where.id));
         if (!hit) throw new Error('not found');
         return { ...hit };
       }),
-      findMany: jest.fn(async ({ where, orderBy, take, cursor, skip }: any = {}) => {
+      findMany: jest.fn(async ({ where, orderBy, take, cursor, skip, select }: any = {}) => {
         let hits = products.filter((p) => matchProduct(p, where));
         if (orderBy?.id === 'desc') {
           hits = [...hits].sort((a, b) => Buffer.compare(b.id, a.id));
@@ -171,7 +186,7 @@ function makeService(
           const at = hits.findIndex((p) => p.id.equals(cursor.id));
           hits = at >= 0 ? hits.slice(at + (skip ?? 0)) : [];
         }
-        return (take ? hits.slice(0, take) : hits).map((p) => ({ ...p }));
+        return (take ? hits.slice(0, take) : hits).map((p) => (select?.category ? { ...p, category: categoryOf(p) } : { ...p }));
       }),
       count: jest.fn(async ({ where }: any = {}) => products.filter((p) => matchProduct(p, where)).length),
       update: jest.fn(async ({ where, data }: any) => {
@@ -885,5 +900,64 @@ describe('a transfer counts as history', () => {
     await expect(
       service.update(binToUuid(p.id), { trackingType: 'quantity' } as UpdateProductDto),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+});
+
+/**
+ * The catalogue draws a product as what it is (D225): every read that shows a product — the list, its
+ * detail, and the confirm card the scanner opens — carries its category's picture columns and its parent's,
+ * so the app resolves the same illustration Stock and Sale already show.
+ */
+describe('the category picture travels with every product read (D225)', () => {
+  const cat = (name: string, over: Partial<CategoryRow> = {}): CategoryRow => ({
+    id: newUuidV7Bin(),
+    companyId: COMPANY,
+    name,
+    defaultTrackingType: 'serial',
+    attributeSchema: null,
+    isActive: true,
+    key: null,
+    icon: null,
+    parentId: null,
+    ...over,
+  });
+
+  it('the catalogue list sends each row its category visual, and null for an uncategorised product', async () => {
+    const consoles = cat('Consoles', { key: 'gaming.consoles' });
+    const ps5 = product({ brand: 'Sony', model: 'PlayStation 5', trackingType: 'serial', categoryId: consoles.id });
+    const loose = product({ model: 'Loose' });
+    const { service } = makeService({ products: [ps5, loose], categories: [consoles] });
+
+    const rows = (await service.listPage({} as never)).rows;
+    expect(rows.find((r) => r.model === 'PlayStation 5')!.categoryVisual).toEqual({
+      categoryId: binToUuid(consoles.id),
+      key: 'gaming.consoles',
+      icon: null,
+      parentKey: null,
+      parentIcon: null,
+    });
+    expect(rows.find((r) => r.model === 'Loose')!.categoryVisual).toBeNull();
+  });
+
+  it("the product detail carries a shop's own category's icon and its built-in parent", async () => {
+    const phones = cat('Phones', { key: 'phones' });
+    const refurb = cat('Refurbished', { icon: null, parentId: phones.id });
+    const p = product({ categoryId: refurb.id });
+    const { service } = makeService({ products: [p], categories: [phones, refurb] });
+
+    const detail = await service.getDetail(binToUuid(p.id));
+    expect(detail.categoryName).toBe('Refurbished');
+    expect(detail.categoryVisual).toMatchObject({ key: null, icon: null, parentKey: 'phones', parentIcon: null });
+  });
+
+  it('the confirm card a scan opens carries the visual, by product id and by barcode', async () => {
+    const tvs = cat('Screens', { icon: 'tv' });
+    const p = product({ brand: 'LG', model: 'OLED C3', trackingType: 'serial', barcode: '8806084', categoryId: tvs.id });
+    const { service } = makeService({ products: [p], categories: [tvs] });
+
+    const byId = await service.findOrSuggest({ productId: binToUuid(p.id) });
+    const byBarcode = await service.findOrSuggest({ barcode: '8806084' });
+    expect(byId!.categoryVisual).toMatchObject({ icon: 'tv', key: null });
+    expect(byBarcode!.categoryVisual).toEqual(byId!.categoryVisual);
   });
 });

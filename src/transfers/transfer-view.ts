@@ -43,6 +43,8 @@ export interface TransferAction {
   /** The branch this action must be performed from — what "Switch to…" needs. */
   branchId: string;
   branchName: string;
+  /** D225: that store's Arabic name, null until given. */
+  branchNameAr: string | null;
 }
 
 export type TransferActions = Record<'approve' | 'reject' | 'ship' | 'receive' | 'cancel', TransferAction>;
@@ -50,6 +52,7 @@ export type TransferActions = Record<'approve' | 'reject' | 'ship' | 'receive' |
 interface Branchish {
   id: Buffer;
   name: string;
+  nameAr?: string | null;
 }
 
 export interface ActionInputs {
@@ -77,7 +80,7 @@ function decide(
   activeBranchId: Buffer,
   extra?: { ok: boolean; reason: ActionReason },
 ): TransferAction {
-  const base = { branchId: binToUuid(requiredBranch.id), branchName: requiredBranch.name };
+  const base = { branchId: binToUuid(requiredBranch.id), branchName: requiredBranch.name, branchNameAr: requiredBranch.nameAr ?? null };
   if (!ok) return { allowed: false, reason: 'status', ...base };
   if (!permitted) return { allowed: false, reason: 'permission', ...base };
   if (extra && !extra.ok) return { allowed: false, reason: extra.reason, ...base };

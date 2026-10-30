@@ -361,7 +361,7 @@ export const paymentSelect = {
   accountLabelSnapshot: true,
   accountProviderSnapshot: true,
   payerNumber: true,
-  recordedBy: { select: { name: true } },
+  recordedBy: { select: { name: true, nameAr: true } },
 } satisfies Prisma.PaymentSelect;
 
 type PaymentRow = Prisma.PaymentGetPayload<{ select: typeof paymentSelect }>;
@@ -382,5 +382,7 @@ export function toPaymentView(p: PaymentRow) {
     // The number the money came from (D151), beside — never inside — the reference. Same visibility as the reference.
     payerNumber: p.payerNumber,
     recordedBy: p.recordedBy?.name ?? null,
+    /** D225: who recorded it, in Arabic, null until they have an Arabic name. */
+    recordedByAr: p.recordedBy?.nameAr ?? null,
   };
 }

@@ -215,6 +215,24 @@ describe('product matching', () => {
   });
 });
 
+describe('the candidates a file is matched against carry their picture (D225)', () => {
+  it('reads each product with its category visual, and null for an uncategorised one', async () => {
+    const consoles = { id: Buffer.alloc(16, 1), key: 'gaming.consoles', icon: null, parent: { key: 'gaming', icon: null } };
+    const findMany = jest.fn(async () => [
+      { id: Buffer.alloc(16, 2), brand: 'Sony', model: 'PlayStation 5', variant: null, trackingType: 'serial', category: consoles },
+      { id: Buffer.alloc(16, 3), brand: 'Sony', model: 'PlayStation 5', variant: 'Slim', trackingType: 'serial', category: null },
+    ]);
+    const service = new ReceivingFilesService({ product: { findMany } } as never);
+    const entry = { extracted: { model: 'PlayStation 5' } } as unknown as FileEntry;
+
+    const rows = await (service as unknown as { catalogue(e: FileEntry[]): Promise<{ categoryVisual: unknown }[]> }).catalogue([entry]);
+
+    expect((findMany.mock.calls[0] as unknown[])[0]).toMatchObject({ select: { category: expect.any(Object) } });
+    expect(rows[0].categoryVisual).toMatchObject({ key: 'gaming.consoles', icon: null, parentKey: 'gaming', parentIcon: null });
+    expect(rows[1].categoryVisual).toBeNull();
+  });
+});
+
 describe('counts', () => {
   it('counts phones, ready, needing attention and excluded, and prices only what is ready', () => {
     const ok = entryFrom(PHONE, 'a');

@@ -1043,7 +1043,7 @@ export class ReturnsService {
 
     const payout = await this.db.refundPayout.findFirst({
       where: { returnRequestId: request.id, status: 'confirmed' },
-      include: { confirmedBy: { select: { name: true } }, reportedBy: { select: { name: true } } },
+      include: { confirmedBy: { select: { name: true, nameAr: true } }, reportedBy: { select: { name: true, nameAr: true } } },
     });
     if (!payout) {
       throw new ConflictException({
@@ -1062,7 +1062,7 @@ export class ReturnsService {
        */
       this.db.branch.findFirst({
         where: { id: branchId },
-        select: { name: true, phone: true, company: { select: { name: true, currency: true } } },
+        select: { name: true, nameAr: true, phone: true, company: { select: { name: true, nameAr: true, currency: true } } },
       }),
       this.db.returnAdjustment.findMany({
         where: { returnRequestId: request.id },
@@ -1082,7 +1082,17 @@ export class ReturnsService {
     });
 
     return {
-      store: { name: branch?.company?.name ?? '', branch: branch?.name ?? '', phone: branch?.phone ?? null },
+      /**
+       * D225: the business and the store in both scripts, read live (a refund keeps no name snapshot); the receipt
+       * prints the ones of the language it is printed in.
+       */
+      store: {
+        name: branch?.company?.name ?? '',
+        nameAr: branch?.company?.nameAr ?? null,
+        branch: branch?.name ?? '',
+        branchAr: branch?.nameAr ?? null,
+        phone: branch?.phone ?? null,
+      },
       // Stable and meaningful to a customer: their original invoice, plus this
       // return's own reference.
       reference: `R-${request.sale.invoiceNo}-${binToUuid(request.id).slice(0, 8).toUpperCase()}`,
@@ -1104,7 +1114,9 @@ export class ReturnsService {
       transactionReference: payout.transactionReference,
       status: 'confirmed' as const,
       reportedBy: payout.reportedBy?.name ?? null,
+      reportedByAr: payout.reportedBy?.nameAr ?? null,
       confirmedBy: payout.confirmedBy?.name ?? null,
+      confirmedByAr: payout.confirmedBy?.nameAr ?? null,
       /**
        * Whether this refund was later corrected (Milestone B).
        *
@@ -1269,7 +1281,7 @@ export class ReturnsService {
       include: {
         sale: { select: { invoiceNo: true } },
         unit: { select: { imeiPrimary: true, serialNo: true, product: { select: { brand: true, model: true, variant: true } } } },
-        requestedBy: { select: { name: true } },
+        requestedBy: { select: { name: true, nameAr: true } },
         adjustments: { select: { totalAmount: true } },
       },
       ...(query.cursor ? { cursor: { id: uuidToBin(query.cursor) }, skip: 1 } : {}),
@@ -1294,6 +1306,7 @@ export class ReturnsService {
             .join(' '),
           identifier: r.unit.imeiPrimary ?? r.unit.serialNo,
           requestedBy: r.requestedBy?.name ?? null,
+          requestedByAr: r.requestedBy?.nameAr ?? null,
           requestedAt: r.createdAt,
           policyReason: r.policyReason,
           requiresException: r.requiresException,
@@ -1315,14 +1328,14 @@ export class ReturnsService {
     const adjustments = await this.db.returnAdjustment.findMany({
       where: { returnRequestId: r.id },
       orderBy: { id: 'asc' },
-      include: { createdBy: { select: { name: true } } },
+      include: { createdBy: { select: { name: true, nameAr: true } } },
     });
     const payout = await this.db.refundPayout.findFirst({
       where: { returnRequestId: r.id },
       include: {
         receivingAccount: { select: { label: true } },
-        reportedBy: { select: { name: true } },
-        confirmedBy: { select: { name: true } },
+        reportedBy: { select: { name: true, nameAr: true } },
+        confirmedBy: { select: { name: true, nameAr: true } },
       },
     });
     /**
@@ -1338,8 +1351,8 @@ export class ReturnsService {
           where: { targetRefundPayoutId: payout.id },
           orderBy: { id: 'desc' },
           include: {
-            requestedBy: { select: { name: true } },
-            decidedBy: { select: { name: true } },
+            requestedBy: { select: { name: true, nameAr: true } },
+            decidedBy: { select: { name: true, nameAr: true } },
           },
         })
       : null;
@@ -1406,15 +1419,18 @@ export class ReturnsService {
         unitAmount: num(a.unitAmount),
         totalAmount: num(a.totalAmount),
         addedBy: a.createdBy?.name ?? null,
+        addedByAr: a.createdBy?.nameAr ?? null,
         addedAt: a.createdAt,
       })),
       timeline: [
-        { at: r.createdAt, event: 'requested', by: r.requestedBy?.name ?? null },
-        ...(r.custodyReceivedAt ? [{ at: r.custodyReceivedAt, event: 'custody_received', by: null }] : []),
-        ...(r.reviewedAt ? [{ at: r.reviewedAt, event: 'under_review', by: r.reviewedBy?.name ?? null }] : []),
-        ...(r.decidedAt ? [{ at: r.decidedAt, event: r.status, by: r.decidedBy?.name ?? null }] : []),
+        // D225: `byAr` is the same person's Arabic name, null until given.
+        { at: r.createdAt, event: 'requested', by: r.requestedBy?.name ?? null, byAr: r.requestedBy?.nameAr ?? null },
+        ...(r.custodyReceivedAt ? [{ at: r.custodyReceivedAt, event: 'custody_received', by: null, byAr: null }] : []),
+        ...(r.reviewedAt ? [{ at: r.reviewedAt, event: 'under_review', by: r.reviewedBy?.name ?? null, byAr: r.reviewedBy?.nameAr ?? null }] : []),
+        ...(r.decidedAt ? [{ at: r.decidedAt, event: r.status, by: r.decidedBy?.name ?? null, byAr: r.decidedBy?.nameAr ?? null }] : []),
       ],
       requestedBy: r.requestedBy?.name ?? null,
+      requestedByAr: r.requestedBy?.nameAr ?? null,
       requestedAt: r.createdAt,
       /**
        * The settlement, when one exists. `null` means nobody has reported the
@@ -1438,8 +1454,10 @@ export class ReturnsService {
             transactionReference: payout.transactionReference,
             note: payout.note,
             reportedBy: payout.reportedBy?.name ?? null,
+            reportedByAr: payout.reportedBy?.nameAr ?? null,
             reportedAt: payout.reportedAt,
             confirmedBy: payout.confirmedBy?.name ?? null,
+            confirmedByAr: payout.confirmedBy?.nameAr ?? null,
             confirmedAt: payout.confirmedAt,
             /**
              * Any correction raised against this payout (Milestone B). `null`
@@ -1455,8 +1473,10 @@ export class ReturnsService {
                   status: correction.status,
                   reason: correction.reason,
                   requestedBy: correction.requestedBy?.name ?? null,
+                  requestedByAr: correction.requestedBy?.nameAr ?? null,
                   requestedAt: correction.requestedAt,
                   decidedBy: correction.decidedBy?.name ?? null,
+                  decidedByAr: correction.decidedBy?.nameAr ?? null,
                   correctionDate: correction.correctionDate
                     ? dayKey(correction.correctionDate)
                     : null,
@@ -1514,9 +1534,9 @@ export class ReturnsService {
             product: { select: { brand: true, model: true, variant: true } },
           },
         },
-        requestedBy: { select: { name: true } },
-        reviewedBy: { select: { name: true } },
-        decidedBy: { select: { name: true } },
+        requestedBy: { select: { name: true, nameAr: true } },
+        reviewedBy: { select: { name: true, nameAr: true } },
+        decidedBy: { select: { name: true, nameAr: true } },
       },
     });
     if (!r || !r.branchId.equals(branchId)) throw new NotFoundException('Return not found');

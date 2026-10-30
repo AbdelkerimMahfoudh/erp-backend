@@ -65,7 +65,7 @@ function harness(seed: { scoped?: SeedUnit[]; system?: SeedUnit[]; branches?: Bu
           imeiPrimary: u.imeiPrimary ?? null,
           imeiSecondary: u.imeiSecondary ?? null,
           branchId: u.branchId ?? MY_BRANCH,
-          branch: { name: 'Main Store' },
+          branch: { name: 'Main Store', nameAr: 'المتجر الرئيسي' },
           product: { brand: 'Apple', model: 'iPhone 15', variant: '256GB Black' },
         })),
       ),
@@ -101,7 +101,7 @@ describe('an identifier we hold ourselves', () => {
     expect(r.alreadyInInventory).toBe(true);
     expect(r.matchedIdentifierPosition).toBe('primary');
     expect(r.elsewhere).toBe(false);
-    expect(r.unit).toMatchObject({ productLabel: 'Apple iPhone 15 256GB Black', branchName: 'Main Store' });
+    expect(r.unit).toMatchObject({ productLabel: 'Apple iPhone 15 256GB Black', branchName: 'Main Store', branchNameAr: 'المتجر الرئيسي' });
   });
 
   it('is found through the SECOND IMEI too', async () => {
@@ -124,7 +124,7 @@ describe('an identifier we hold ourselves', () => {
     for (const forbidden of ['cost', 'margin', 'price', 'id"']) {
       expect(serialised).not.toContain(forbidden);
     }
-    expect(Object.keys(r.unit!).sort()).toEqual(['branchName', 'productLabel', 'status']);
+    expect(Object.keys(r.unit!).sort()).toEqual(['branchName', 'branchNameAr', 'productLabel', 'status']);
   });
 });
 
