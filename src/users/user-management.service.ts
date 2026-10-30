@@ -224,6 +224,7 @@ export class UserManagementService {
   async update(idStr: string, dto: UpdateUserDto): Promise<UserView> {
     const before = await this.findInCompany(idStr);
     const id = uuidToBin(idStr);
+    await this.assertMayManageTarget(before);
 
     const data: Prisma.UserUpdateInput = {};
     const changed: string[] = [];
@@ -613,6 +614,17 @@ export class UserManagementService {
   }
 
   // ------------------------------------------------------------- internals
+
+  /**
+   * The Owner's own record is the Owner's (D225): an Acting Owner holds `user.manage` and may run the team, but never
+   * edit the real Owner's name, contacts, access or role. Only somebody who holds the Owner role edits an Owner.
+   */
+  private async assertMayManageTarget(target: UserRow): Promise<void> {
+    if (!target.userBranches.some((ub) => ub.role.key === 'owner')) return;
+    const actorId = this.tenant.userId();
+    const actorIsOwner = actorId ? (await this.db.userBranch.count({ where: { userId: actorId, role: { key: 'owner' } } })) > 0 : false;
+    if (!actorIsOwner) throw new ForbiddenException({ code: 'owner_protected', message: 'Only the Owner changes the Owner’s account.' });
+  }
 
   private async findInCompany(idStr: string): Promise<UserRow> {
     if (!isUuid(idStr)) {

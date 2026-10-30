@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, UnauthorizedException } from '@nestjs/common';
+import { ActingOwnerService } from '../acting-owner/acting-owner.service';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Request } from 'express';
@@ -38,6 +39,7 @@ export class AuthController {
     private readonly auth: AuthService,
     private readonly users: UsersService,
     private readonly access: AccessService,
+    private readonly actingOwner: ActingOwnerService,
   ) {}
 
   @Public()
@@ -124,7 +126,14 @@ export class AuthController {
       // D224: required | deferred_by_platform | verified. Deferred is never verified.
       phoneVerification: found.phoneVerification,
       isActive: found.isActive,
+      // D225: "Acting as Owner until …" — the appointment in force now, if any. Null otherwise.
+      actingOwner: await this.actingOwnerOf(found.id),
     };
+  }
+
+  private async actingOwnerOf(userId: Buffer): Promise<{ delegationId: string; until: string | null } | null> {
+    const active = await this.actingOwner.activeFor(userId);
+    return active ? { delegationId: binToUuid(active.id), until: active.endsAt?.toISOString() ?? null } : null;
   }
 
   @ApiBearerAuth()

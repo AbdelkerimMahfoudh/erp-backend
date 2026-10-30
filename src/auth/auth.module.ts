@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ActingOwnerModule } from '../acting-owner/acting-owner.module';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -18,6 +19,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 @Module({
   imports: [
     UsersModule,
+    ActingOwnerModule,
     PassportModule,
     JwtModule.registerAsync({
       inject: [AppConfigService],

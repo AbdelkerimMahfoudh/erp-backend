@@ -117,6 +117,10 @@ echo "== 9c. the D225 real-MySQL spec (Employee <-> Manager: in force on the nex
 ROLE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ROLE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/users/role-change.mysql.spec.ts
 
+echo "== 9d. the D225 real-MySQL spec (the Acting Owner: one at a time, on time with nothing running, never rewritten), on the same disposable schema"
+ACTING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ACTING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/acting-owner/acting-owner.mysql.spec.ts
+
 echo "== 9b. the 0109 real-MySQL spec (deferred WhatsApp verification, setup codes), on the same disposable schema"
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/platform/deferred-verification.mysql.spec.ts

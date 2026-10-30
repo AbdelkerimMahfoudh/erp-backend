@@ -316,6 +316,7 @@ enum SyncStatus {
 // ------------------------- Tenancy & Access --------------------------------
 
 model Company {
+  actingOwnerDelegations ActingOwnerDelegation[]
   branchReturnPolicies BranchReturnPolicy[]
   discountApprovals    DiscountApproval[]
   id                   Bytes                @id @db.Binary(16)
@@ -544,6 +545,9 @@ model Branch {
 }
 
 model User {
+  actingOwnerDelegations  ActingOwnerDelegation[] @relation("ActingOwnerDelegate")
+  actingOwnerGranted      ActingOwnerDelegation[] @relation("ActingOwnerGrantedBy")
+  actingOwnerRevoked      ActingOwnerDelegation[] @relation("ActingOwnerRevokedBy")
   discountApprovalsRequested DiscountApproval[] @relation("DiscountApprovalRequester")
   discountApprovalsApproved  DiscountApproval[] @relation("DiscountApprovalApprover")
   expensesReported           Expense[]          @relation("ExpenseReportedBy")
@@ -6316,4 +6320,27 @@ model AccountSetupCode {
   @@index([companyId, createdAt], map: "ix_account_setup_codes_company")
   @@index([userId, createdAt], map: "ix_account_setup_codes_user")
   @@map("account_setup_codes")
+}
+
+/// D225 (0112): the temporary Acting Owner. One active per business; in force while starts_at <= now < ends_at (or no
+/// end) and not revoked — read on every request, so it begins and ends on time with no job. Never deleted.
+model ActingOwnerDelegation {
+  id              Bytes     @id @db.Binary(16)
+  companyId       Bytes     @map("company_id") @db.Binary(16)
+  delegateUserId  Bytes     @map("delegate_user_id") @db.Binary(16)
+  grantedByUserId Bytes     @map("granted_by_user_id") @db.Binary(16)
+  startsAt        DateTime  @map("starts_at") @db.DateTime(6)
+  endsAt          DateTime? @map("ends_at") @db.DateTime(6)
+  revokedAt       DateTime? @map("revoked_at") @db.DateTime(6)
+  revokedByUserId Bytes?    @map("revoked_by_user_id") @db.Binary(16)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  company   Company @relation(fields: [companyId], references: [id], map: "acting_owner_company_fk")
+  delegate  User    @relation("ActingOwnerDelegate", fields: [delegateUserId], references: [id], map: "acting_owner_delegate_fk")
+  grantedBy User    @relation("ActingOwnerGrantedBy", fields: [grantedByUserId], references: [id], map: "acting_owner_granted_by_fk")
+  revokedBy User?   @relation("ActingOwnerRevokedBy", fields: [revokedByUserId], references: [id], map: "acting_owner_revoked_by_fk")
+
+  @@index([companyId, revokedAt, startsAt], map: "acting_owner_company_window")
+  @@index([delegateUserId, revokedAt], map: "acting_owner_delegate")
+  @@map("acting_owner_delegations")
 }

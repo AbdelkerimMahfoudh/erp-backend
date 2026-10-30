@@ -4,6 +4,7 @@ import { TenantPrisma } from '../prisma/tenant.extension';
 import { binToUuid } from '../common/utils/uuid.util';
 import { isCompanyPermission, isDelegatable, mayHoldDelegated } from './permission-scope';
 import { branchAccessDenied } from './refusals';
+import { ACTING_OWNER_PERMISSIONS } from '../acting-owner/acting-owner-rules';
 
 /**
  * Resolves a user's effective permissions from `user_branches → role →
@@ -40,6 +41,17 @@ export class AccessService {
       select: { permission: { select: { key: true } } },
     });
     const keys = rolePermissions.map((rp) => rp.permission.key);
+
+    /*
+     * D225 (0112): a temporary Acting Owner holds the Owner's permissions on top of their own role, in the stores they
+     * work in, while the appointment is in force. Read here, on every request, so it starts and ends on time with no
+     * job, and a revocation takes effect on the very next request. What is never delegated is not in the list.
+     */
+    const now = new Date();
+    const acting = await this.db.actingOwnerDelegation.count({
+      where: { delegateUserId: userId, revokedAt: null, startsAt: { lte: now }, OR: [{ endsAt: null }, { endsAt: { gt: now } }] },
+    });
+    if (acting > 0) keys.push(...ACTING_OWNER_PERMISSIONS);
 
     // No branch context: only company-wide permissions survive the union, so
     // branch-scoped authority never leaks across branches (fail-closed).

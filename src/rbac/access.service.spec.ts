@@ -38,7 +38,7 @@ interface Grant {
   key: string;
 }
 
-function makeService(assignments: Assignment[], grants: Grant[] = []) {
+function makeService(assignments: Assignment[], grants: Grant[] = [], acting = false) {
   const db: any = {
     userBranch: {
       findMany: jest.fn(async ({ where }: any) =>
@@ -55,6 +55,8 @@ function makeService(assignments: Assignment[], grants: Grant[] = []) {
         }));
       }),
     },
+    // D225: an Acting Owner appointment is in force only when the test says so.
+    actingOwnerDelegation: { count: jest.fn(async () => (acting ? 1 : 0)) },
     userBranchPermission: {
       findMany: jest.fn(async ({ where }: any) => {
         const ids: Buffer[] = where.userBranchId.in;
@@ -180,6 +182,7 @@ describe('Owner', () => {
         ),
       },
       userBranchPermission: { findMany: jest.fn(async () => []) },
+      actingOwnerDelegation: { count: jest.fn(async () => 0) },
     };
     return new AccessService(db as never);
   }
@@ -218,6 +221,7 @@ describe('fail-closed scoping', () => {
         findMany: jest.fn(async () => [{ permission: { key: 'something.invented.later' } }]),
       },
       userBranchPermission: { findMany: jest.fn(async () => []) },
+      actingOwnerDelegation: { count: jest.fn(async () => 0) },
     };
     const svc = new AccessService(db as never);
 
@@ -243,5 +247,29 @@ describe('a grant takes effect on the NEXT request', () => {
     // And revoking is just as immediate.
     grants.length = 0;
     expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('price.edit')).toBe(false);
+  });
+});
+
+describe('a temporary Acting Owner (D225)', () => {
+  it('holds the Owner’s permissions on top of their own role while the appointment is in force', async () => {
+    const plain = await makeService([employeeInB]).getEffectivePermissions(USER, BRANCH_B);
+    const acting = await makeService([employeeInB], [], true).getEffectivePermissions(USER, BRANCH_B);
+    expect(plain.has('sale.below_cost')).toBe(false);
+    expect(acting.has('sale.below_cost')).toBe(true);
+    expect(acting.has('user.manage')).toBe(true);
+    // Their own role's permissions are kept.
+    for (const key of plain) expect(acting.has(key)).toBe(true);
+  });
+
+  it('never the business’s integration credentials', async () => {
+    const acting = await makeService([employeeInB], [], true).getEffectivePermissions(USER, BRANCH_B);
+    expect(acting.has('integrations.manage')).toBe(false);
+  });
+
+  it('only in the stores they work in, and only company-wide keys without a store', async () => {
+    await expect(makeService([employeeInB], [], true).getEffectivePermissions(USER, BRANCH_A)).rejects.toThrow();
+    const company = await makeService([employeeInB], [], true).getEffectivePermissions(USER);
+    expect(company.has('user.manage')).toBe(true);
+    expect(company.has('sale.below_cost')).toBe(false);
   });
 });

@@ -226,6 +226,13 @@ function makeService(
     // resolves them from the in-company users only — a cross-company user or
     // branch simply does not match, which is the fail-closed behaviour.
     userBranch: {
+      // D225: "does this person hold the Owner role?" — counted over their assignments.
+      count: jest.fn(async ({ where }: any = {}) =>
+        users
+          .filter((u) => where?.userId === undefined || u.id.equals(where.userId))
+          .flatMap((u) => u.userBranches)
+          .filter((b) => where?.role?.key === undefined || b.role.key === where.role.key).length,
+      ),
       findFirst: jest.fn(async ({ where }: any = {}) => {
         const w = scoped(where ?? {});
         for (const u of users) {
@@ -840,5 +847,14 @@ describe('changing a login contact is a security event (CP1)', () => {
     await service.update(binToUuid(u.id), { phone: '43 21 09 87', currentPassword: 'actor-password' });
 
     expect(users[0].phone).toBe('+22243210987');
+  });
+});
+
+describe('the Owner’s own record (D225)', () => {
+  it('is edited only by somebody who holds the Owner role — never by an Acting Owner', async () => {
+    const owner = user({ id: uuidToBin(OWNER_ID), name: 'Owner', userBranches: [assignment({ role: { key: 'owner' } } as never)] });
+    const delegate = user({ name: 'Mohamed', userBranches: [assignment({ role: { key: 'store_manager' } } as never)] });
+    const { service } = makeService({ users: [owner, delegate], selfId: binToUuid(delegate.id) });
+    await expect(service.update(OWNER_ID, { name: 'Somebody else' })).rejects.toMatchObject({ response: { code: 'owner_protected' } });
   });
 });

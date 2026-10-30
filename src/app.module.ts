@@ -59,6 +59,7 @@ import { BusinessDayModule } from './common/business-day/business-day.module';
 import { AccountModule } from './account/account.module';
 import { AgentModule } from './agent/agent.module';
 import { NamesModule } from './names/names.module';
+import { ActingOwnerModule } from './acting-owner/acting-owner.module';
 
 @Module({
   imports: [
@@ -145,6 +146,7 @@ import { NamesModule } from './names/names.module';
     // The Money Services Agent counter (docs/73): after the closing, whose drawer and open-first rule it shares.
     AgentModule,
     NamesModule,
+    ActingOwnerModule,
     GoalsModule,
     ImportsModule,
     ConsignmentModule,

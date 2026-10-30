@@ -98,6 +98,7 @@ describe('downgrade → re-promotion cannot revive a grant', () => {
       rolePermission: {
         findMany: jest.fn(async () => [{ permission: { key: 'sale.create' } }]),
       },
+      actingOwnerDelegation: { count: jest.fn(async () => 0) },
       userBranchPermission: {
         findMany: jest.fn(async () => state.grants.map((key) => ({ userBranchId: UB_A, permission: { key } }))),
         deleteMany: jest.fn(async () => {
