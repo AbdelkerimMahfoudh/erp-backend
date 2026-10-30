@@ -867,7 +867,7 @@ export class PricingService {
         where: { id: p.productId },
         select: { brand: true, model: true, variant: true },
       }),
-      tx.user.findFirst({ where: { id: p.actorId }, select: { name: true } }),
+      tx.user.findFirst({ where: { id: p.actorId }, select: { name: true, nameAr: true } }),
     ]);
 
     const label = [product?.brand, product?.model, product?.variant].filter(Boolean).join(' ');
@@ -889,6 +889,17 @@ export class PricingService {
           type: 'price.changed',
           title: `Price changed: ${label || 'product'}`,
           body: `${actor?.name ?? 'A manager'} ${change} for ${scopeText}.`,
+          actorUserId: p.actorId,
+          // The fields the app words it from, in the Owner's language (D225). A price, never a cost.
+          payload: {
+            event: 'changed',
+            product: label || null,
+            previous: p.previousPrice,
+            next: p.newPrice,
+            scope: p.scope,
+            actor: actor?.name ?? null,
+            actorAr: actor?.nameAr ?? null,
+          },
           actionLink: p.unitId
             ? `/catalog/${binToUuid(p.productId)}?unit=${binToUuid(p.unitId)}`
             : `/catalog/${binToUuid(p.productId)}`,

@@ -51,7 +51,8 @@ export class NotificationsService {
       ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
       orderBy: { id: 'desc' },
       take: limit + 1,
-      include: { reads: { where: { userId }, select: { readAt: true } } },
+      // The store each is about, in both names, so the centre says which store in the reader's language (D225).
+      include: { reads: { where: { userId }, select: { readAt: true } }, branch: { select: { name: true, nameAr: true } } },
     });
 
     const page = rows.slice(0, limit).map(({ reads, ...row }) => ({
