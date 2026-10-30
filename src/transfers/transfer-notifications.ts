@@ -30,8 +30,8 @@ import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 type Tx = {
   notification: { create(args: { data: Prisma.NotificationUncheckedCreateInput }): Promise<unknown> };
   userBranch: { findMany(args: unknown): Promise<{ userId: Buffer }[]> };
-  branch: { findMany(args: unknown): Promise<{ id: Buffer; name: string }[]> };
-  user: { findFirst(args: unknown): Promise<{ name: string } | null> };
+  branch: { findMany(args: unknown): Promise<{ id: Buffer; name: string; nameAr?: string | null }[]> };
+  user: { findFirst(args: unknown): Promise<{ name: string; nameAr?: string | null } | null> };
 };
 
 /** Every transfer event that notifies somebody. */
@@ -119,14 +119,16 @@ export class TransferNotifier {
     const [branches, actor] = await Promise.all([
       tx.branch.findMany({
         where: { id: { in: [transfer.fromBranchId, transfer.toBranchId] } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, nameAr: true },
       }),
       ctx.actorId
-        ? tx.user.findFirst({ where: { id: ctx.actorId }, select: { name: true } })
+        ? tx.user.findFirst({ where: { id: ctx.actorId }, select: { name: true, nameAr: true } })
         : Promise.resolve(null),
     ]);
     const nameOf = (id: Buffer) =>
       branches.find((b) => b.id.equals(id))?.name ?? 'another branch';
+    // D225: the Arabic names too, so an Arabic reader reads the stores and the person as they are named in Arabic.
+    const nameArOf = (id: Buffer) => branches.find((b) => b.id.equals(id))?.nameAr ?? null;
 
     const payload: Payload = {
       transferNo: transfer.transferNo ?? '',
@@ -162,7 +164,13 @@ export class TransferNotifier {
             body,
             actionLink,
             dedupeKey,
-            payload: { event, ...payload } as unknown as Prisma.InputJsonValue,
+            payload: {
+              event,
+              ...payload,
+              fromBranchAr: nameArOf(transfer.fromBranchId),
+              toBranchAr: nameArOf(transfer.toBranchId),
+              actorAr: actor?.nameAr ?? null,
+            } as unknown as Prisma.InputJsonValue,
           },
         });
         sent += 1;
