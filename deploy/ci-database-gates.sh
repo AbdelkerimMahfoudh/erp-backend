@@ -19,6 +19,7 @@
 #   7. the 0100 real-MySQL spec (the consent history) runs on that same disposable schema;
 #   8. the 0101 real-MySQL spec (employee invitations: locks, the one-live UNIQUE, triggers, CHECKs) runs there too;
 #   9. the 0102 real-MySQL spec (test businesses, the console's stores and invitations: locks and filters) runs there too;
+#  9c. the D225 real-MySQL spec (Employee <-> Manager role changes: immediate permissions, pruned grants, row lock);
 #  10. the 0103 real-MySQL spec (promoter codes, attribution, user invitations: locks, uniqueness, triggers, CHECKs) too.
 # Any failure exits non-zero.
 set -euo pipefail
@@ -111,6 +112,10 @@ INVITATION_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) INVITATION_APP_URL=$(url
 echo "== 9. the 0102 real-MySQL spec (test businesses, the console's stores and invitations), on the same disposable schema"
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/platform/provisioning.mysql.spec.ts
+
+echo "== 9c. the D225 real-MySQL spec (Employee <-> Manager: in force on the next request, grants pruned, one change at a time), on the same disposable schema"
+ROLE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ROLE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
+  npx jest --ci src/users/role-change.mysql.spec.ts
 
 echo "== 9b. the 0109 real-MySQL spec (deferred WhatsApp verification, setup codes), on the same disposable schema"
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \

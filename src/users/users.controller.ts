@@ -3,6 +3,8 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { UserManagementService } from './user-management.service';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { ChangeRoleDto } from './dto/change-role.dto';
+import { RoleChangeService } from './role-change.service';
 
 /**
  * Owner-only team management (F1 Stage 1). Every route requires `user.manage`,
@@ -18,7 +20,10 @@ import { UpdateUserDto } from './dto/update-user.dto';
 @ApiBearerAuth()
 @Controller({ path: 'users', version: '1' })
 export class UsersController {
-  constructor(private readonly users: UserManagementService) {}
+  constructor(
+    private readonly users: UserManagementService,
+    private readonly roles: RoleChangeService,
+  ) {}
 
   @Get()
   @RequirePermissions('user.manage')
@@ -32,6 +37,17 @@ export class UsersController {
   @ApiOperation({ summary: 'One user, with branch assignments and contact state' })
   getOne(@Param('id') id: string) {
     return this.users.getOne(id);
+  }
+
+  /**
+   * Employee ↔ Manager (D225). The Owner's (`user.manage`); never the Owner's own role, never one's own. In force on
+   * the person's next request in every session: authority is read from the assignments on each request.
+   */
+  @Put(':id/role')
+  @RequirePermissions('user.manage')
+  @ApiOperation({ summary: 'Make a staff member a Manager of chosen stores, or an Employee of the stores they keep' })
+  changeRole(@Param('id') id: string, @Body() dto: ChangeRoleDto) {
+    return this.roles.change(id, dto);
   }
 
   @Patch(':id')
