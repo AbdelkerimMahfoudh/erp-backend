@@ -19,6 +19,7 @@ import {
   type ReportKind,
 } from './report-catalogue';
 import { moneyHeader, t, type ReportLocale } from './report-i18n';
+import { localizedName } from '../common/bilingual-name';
 
 /**
  * The most rows one export may contain.
@@ -238,8 +239,9 @@ export class ReportsService {
     if (definition.kind === 'profit-by-branch') return t(locale, 'meta.companyWide');
     const branchId = this.tenant.branchId();
     if (!branchId) return t(locale, 'meta.allBranches');
-    const branch = await this.db.branch.findFirst({ where: { id: branchId }, select: { name: true } });
-    return branch?.name ?? t(locale, 'meta.allBranches');
+    const branch = await this.db.branch.findFirst({ where: { id: branchId }, select: { name: true, nameAr: true } });
+    // The store in the export's language: its Arabic name in an Arabic export (D225).
+    return branch ? localizedName(branch, locale) : t(locale, 'meta.allBranches');
   }
 
   /**

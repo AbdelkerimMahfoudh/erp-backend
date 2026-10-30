@@ -435,9 +435,9 @@ describe('reading it back', () => {
       accountLabelSnapshot: 'Bankily',
       accountProviderSnapshot: 'bankily',
       payerNumber: '36111111',
-      recordedBy: { name: 'Owner' },
+      recordedBy: { name: 'Owner', nameAr: 'المالك' },
     });
-    expect(view).toMatchObject({ reference: 'TX-1', payerNumber: '36111111', accountLabel: 'Bankily' });
+    expect(view).toMatchObject({ reference: 'TX-1', payerNumber: '36111111', accountLabel: 'Bankily', recordedBy: 'Owner', recordedByAr: 'المالك' });
   });
 
   it('a money correction keeps the payer number in what it recorded about the payment', () => {

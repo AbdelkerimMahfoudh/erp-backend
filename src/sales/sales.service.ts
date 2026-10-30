@@ -1086,7 +1086,7 @@ export class SalesService {
         ...this.searchWhere(query.search),
       },
       include: {
-        user: { select: { name: true } },
+        user: { select: { name: true, nameAr: true } },
         customer: { select: { name: true } },
         counterparty: { select: { name: true } },
         payments: { select: { method: true, accountLabelSnapshot: true } },
@@ -1098,8 +1098,8 @@ export class SalesService {
             voided: true,
             releasedByCorrectionId: true,
             // What was sold, as a row can say it without a second request.
-            unit: { select: { product: { select: { brand: true, model: true, variant: true, trackingType: true } } } },
-            product: { select: { brand: true, model: true, variant: true, trackingType: true } },
+            unit: { select: { product: { select: { brand: true, model: true, variant: true, trackingType: true, category: CATEGORY_VISUAL_SELECT } } } },
+            product: { select: { brand: true, model: true, variant: true, trackingType: true, category: CATEGORY_VISUAL_SELECT } },
           },
         },
         returns: { select: { id: true } },
@@ -1143,6 +1143,8 @@ export class SalesService {
           itemCount: (cancelled ? s.items.filter((i) => !i.voided) : live).reduce((n, i) => n + i.quantity, 0),
           serializedCount: (cancelled ? s.items.filter((i) => !i.voided) : live).filter((i) => i.unitId !== null).length,
           soldBy: s.user?.name ?? null,
+          /** D225: the seller's Arabic name, as the sale's detail sends it. */
+          soldByAr: s.user?.nameAr ?? null,
           customer: s.customer?.name ?? null,
           /** Who owes the balance, whichever kind (0074). Null when nothing is owed to anyone named. */
           debtor: s.customer
@@ -1152,6 +1154,16 @@ export class SalesService {
               : null,
           /** The first item, which is the whole sale in the common one-phone case. */
           product: s.items.find((i) => !i.voided) ? describeProduct(s.items.find((i) => !i.voided)!.unit?.product ?? s.items.find((i) => !i.voided)!.product) : null,
+          /**
+           * What each line is drawn as (D225), so the row wears the sale's picture the way its detail does:
+           * the one its lines share, or the generic when they differ.
+           */
+          lineVisuals: s.items
+            .filter((i) => !i.voided)
+            .map((i) => {
+              const product = i.unit?.product ?? i.product;
+              return { categoryVisual: categoryVisualOf(product?.category ?? null), trackingType: product?.trackingType ?? null };
+            }),
           // De-duplicated: a split payment of cash+cash is one method twice.
           paymentMethods: [...new Set(s.payments.map((p) => p.method))],
           /** The accounts money landed in, by the label frozen at the time. */
@@ -1265,7 +1277,7 @@ export class SalesService {
         branch: { select: { id: true, name: true, nameAr: true } },
         payments: { orderBy: { paidAt: 'asc' }, select: paymentSelect },
         returns: { select: { id: true } },
-        returnPolicyOverriddenBy: { select: { name: true } },
+        returnPolicyOverriddenBy: { select: { name: true, nameAr: true } },
         corrections: {
           where: { status: { in: ['requested', 'approved'] } },
           orderBy: { requestedAt: 'desc' },
@@ -1275,8 +1287,8 @@ export class SalesService {
             requestedAt: true,
             decidedAt: true,
             correctionDate: true,
-            requestedBy: { select: { name: true } },
-            decidedBy: { select: { name: true } },
+            requestedBy: { select: { name: true, nameAr: true } },
+            decidedBy: { select: { name: true, nameAr: true } },
             legs: { select: { method: true, accountLabelSnapshot: true, amount: true } },
           },
         },
@@ -1317,13 +1329,15 @@ export class SalesService {
             status: 'approved' as const,
             reason: approvedCancel.reason,
             requestedBy: approvedCancel.requestedBy?.name ?? null,
+            requestedByAr: approvedCancel.requestedBy?.nameAr ?? null,
             decidedBy: approvedCancel.decidedBy?.name ?? null,
+            decidedByAr: approvedCancel.decidedBy?.nameAr ?? null,
             decidedAt: approvedCancel.decidedAt,
             correctionDate: approvedCancel.correctionDate ? dayKey(approvedCancel.correctionDate) : null,
             moneyBack: approvedCancel.legs.map((l) => ({ method: l.method, accountLabel: l.accountLabelSnapshot, amount: Number(l.amount) })),
           }
         : requestedCancel
-          ? { status: 'requested' as const, reason: requestedCancel.reason, requestedBy: requestedCancel.requestedBy?.name ?? null, requestedAt: requestedCancel.requestedAt }
+          ? { status: 'requested' as const, reason: requestedCancel.reason, requestedBy: requestedCancel.requestedBy?.name ?? null, requestedByAr: requestedCancel.requestedBy?.nameAr ?? null, requestedAt: requestedCancel.requestedAt }
           : null,
       branch: { id: binToUuid(sale.branch.id), name: sale.branch.name, nameAr: sale.branch.nameAr },
       soldBy: sale.user?.name ?? null,
@@ -1399,6 +1413,7 @@ export class SalesService {
         // question "why was this sale different?" has an answer on the screen
         // rather than in an audit table nobody opens.
         overriddenBy: sale.returnPolicyOverriddenBy?.name ?? null,
+        overriddenByAr: sale.returnPolicyOverriddenBy?.nameAr ?? null,
         overrideReason: sale.returnPolicyOverrideReason,
       },
     };

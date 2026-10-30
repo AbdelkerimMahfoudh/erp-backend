@@ -56,7 +56,7 @@ export class SaleSelectionService {
         id: true,
         status: true,
         branchId: true,
-        branch: { select: { name: true } },
+        branch: { select: { name: true, nameAr: true } },
         cost: true,
         dateIn: true,
         imeiPrimary: true,
@@ -114,7 +114,7 @@ export class SaleSelectionService {
       },
       price,
       /** Only for a caller with branch.manage, and only when the phone is elsewhere. */
-      otherBranch: disclosure === 'shown' ? { name: unit.branch.name } : null,
+      otherBranch: disclosure === 'shown' ? { name: unit.branch.name, nameAr: unit.branch.nameAr } : null,
       /**
        * For the seller's private summary only. `cost` is removed by the global
        * financial-fields interceptor for any caller without `cost.view`, so a

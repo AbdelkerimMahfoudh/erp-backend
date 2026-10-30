@@ -6,6 +6,7 @@ import { WHATSAPP_CHANNEL, type WhatsAppChannel } from '../messaging/whatsapp-ch
 import { assertLanguageSupported, getTemplate, validateTemplateVariables } from '../messaging/templates';
 import type { Notice, NoticeContext } from './closing-notices';
 import { links } from '../notifications/notification-target';
+import { localizedName } from '../common/bilingual-name';
 
 export interface NoticeOutcome {
   /** Owners who received a NEW in-app notification (a retry counts as 0). */
@@ -41,7 +42,7 @@ export class ClosingNoticeService {
   /** Branch name, zone, currency and the Owner's WhatsApp preferences. */
   async context(companyId: Buffer, branchId: Buffer): Promise<NoticeContext & { businessDate: string }> {
     const [branch, company, settings] = await Promise.all([
-      this.prisma.branch.findUnique({ where: { id: branchId }, select: { name: true } }),
+      this.prisma.branch.findUnique({ where: { id: branchId }, select: { name: true, nameAr: true } }),
       this.prisma.company.findUnique({ where: { id: companyId }, select: { timezone: true, currency: true } }),
       this.prisma.companySettings.findUnique({
         where: { companyId },
@@ -49,7 +50,8 @@ export class ClosingNoticeService {
       }),
     ]);
     return {
-      branchName: branch?.name ?? '',
+      // The store as the Owner reads it: its Arabic name in an Arabic notice (D225).
+      branchName: branch ? localizedName(branch, settings?.whatsappLanguage ?? 'en') : '',
       timezone: company?.timezone || 'UTC',
       currency: company?.currency ?? '',
       language: settings?.whatsappLanguage ?? 'en',

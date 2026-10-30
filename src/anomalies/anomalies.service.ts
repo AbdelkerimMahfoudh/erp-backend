@@ -348,14 +348,16 @@ export class AnomaliesService {
 
     const users = await this.db.user.findMany({
       where: { id: { in: grouped.map((g) => g.requesterId) } },
-      select: { id: true, name: true },
+      select: { id: true, name: true, nameAr: true },
     });
     const nameByHex = new Map(users.map((u) => [u.id.toString('hex'), u.name]));
+    const nameArByHex = new Map(users.map((u) => [u.id.toString('hex'), u.nameAr]));
 
     return belowCostAnomalies(
       grouped.map((g) => ({
         userId: binToUuid(g.requesterId),
         name: nameByHex.get(g.requesterId.toString('hex')) ?? binToUuid(g.requesterId),
+        nameAr: nameArByHex.get(g.requesterId.toString('hex')) ?? null,
         count: g._count,
         latestAt: g._max.consumedAt ?? null,
       })),

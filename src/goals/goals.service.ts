@@ -161,7 +161,7 @@ export class GoalsService {
           },
         ],
       },
-      include: { targetUser: { select: { id: true, name: true } } },
+      include: { targetUser: { select: { id: true, name: true, nameAr: true } } },
       orderBy: [{ periodEnd: 'desc' }, { createdAt: 'desc' }],
       take: 100,
     });
@@ -175,7 +175,7 @@ export class GoalsService {
     const branchId = this.tenant.requireBranchId();
     const goal = await this.db.goal.findFirst({
       where: { id: uuidToBin(id), OR: [{ scope: 'company' }, { branchId }] },
-      include: { targetUser: { select: { id: true, name: true } } },
+      include: { targetUser: { select: { id: true, name: true, nameAr: true } } },
     });
     if (!goal) throw new NotFoundException('No such goal');
     if (goal.metric === 'gross_profit' && !(await this.seesCost())) throw new NotFoundException('No such goal');
@@ -279,7 +279,7 @@ export class GoalsService {
     archivedReason: string | null;
     note: string | null;
     version: number;
-    targetUser?: { id: Buffer; name: string } | null;
+    targetUser?: { id: Buffer; name: string; nameAr?: string | null } | null;
   }) {
     const metric = goal.metric as GoalMetricKey;
     const periodStart = dayKey(goal.periodStart);
@@ -291,7 +291,7 @@ export class GoalsService {
       scope: goal.scope,
       branchId: goal.branchId ? binToUuid(goal.branchId) : null,
       targetUser: goal.targetUser
-        ? { id: binToUuid(goal.targetUser.id), name: goal.targetUser.name }
+        ? { id: binToUuid(goal.targetUser.id), name: goal.targetUser.name, nameAr: goal.targetUser.nameAr ?? null }
         : null,
       metric,
       isMoney: isMoneyMetric(metric),

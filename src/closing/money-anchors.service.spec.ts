@@ -219,6 +219,7 @@ describe('recording what an account holds', () => {
         difference: null,
         note: 'Bankily app',
         byName: 'Owner',
+        byNameAr: null,
       },
       method: {
         key: `account:${BANKILY}`,
@@ -230,7 +231,7 @@ describe('recording what an account holds', () => {
         known: true,
         position: 2000,
         unknownReason: null,
-        anchor: { source: 'declared', amount: 2000, at: data.at.toISOString(), businessDate: '2026-09-26', byName: 'Owner' },
+        anchor: { source: 'declared', amount: 2000, at: data.at.toISOString(), businessDate: '2026-09-26', byName: 'Owner', byNameAr: null },
         sinceAnchorNet: 0,
         movement: { businessDate: '2026-09-26', inflows: 0, outflows: 0, net: 0 },
       },
@@ -496,7 +497,7 @@ describe('tracked money through the service', () => {
       [`account:${MASRVI}`, 1600],
     ]);
     expect(card).toMatchObject({ businessDate: DAY, basis: 'anchor_plus_recorded_movement', branchCount: 2, total: 7000, unknownKeys: [] });
-    expect(card.methods[0].anchor).toEqual({ source: 'counted_close', amount: 0, at: '2026-09-25T22:10:00.000Z', businessDate: '2026-09-25', byName: 'Aicha' });
+    expect(card.methods[0].anchor).toEqual({ source: 'counted_close', amount: 0, at: '2026-09-25T22:10:00.000Z', businessDate: '2026-09-25', byName: 'Aicha', byNameAr: null });
     expect(db.branch.count).toHaveBeenCalledWith({ where: { type: 'store', isActive: true, deletedAt: null } });
   });
 

@@ -321,3 +321,12 @@ describe('who may see what', () => {
     expect(SERVICE).toMatch(/this\.tenant\.branchId\(\)/);
   });
 });
+
+describe('below-cost cluster names the seller in both scripts (D225)', () => {
+  it('carries the Arabic name when the seller has one, and only then', () => {
+    const [withAr] = belowCostAnomalies([{ userId: 'u1', name: 'Ahmed', nameAr: 'أحمد', count: BELOW_COST_MIN_COUNT }]);
+    expect(withAr.params).toMatchObject({ seller: 'Ahmed', sellerAr: 'أحمد' });
+    const [latinOnly] = belowCostAnomalies([{ userId: 'u2', name: 'Ahmed', count: BELOW_COST_MIN_COUNT }]);
+    expect(latinOnly.params).not.toHaveProperty('sellerAr');
+  });
+});

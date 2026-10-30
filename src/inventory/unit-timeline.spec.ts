@@ -20,15 +20,15 @@ const CLERK = b(11);
 
 const lookups: TimelineLookups = {
   users: new Map([
-    [OWNER.toString('hex'), { name: 'Demo Owner', roles: new Map([[MAIN.toString('hex'), 'owner']]) }],
+    [OWNER.toString('hex'), { name: 'Demo Owner', nameAr: 'المالك', roles: new Map([[MAIN.toString('hex'), 'owner']]) }],
     [
       CLERK.toString('hex'),
-      { name: 'Sara', roles: new Map([[WAREHOUSE.toString('hex'), 'store_employee'], [MAIN.toString('hex'), 'store_manager']]) },
+      { name: 'Sara', nameAr: 'سارة', roles: new Map([[WAREHOUSE.toString('hex'), 'store_employee'], [MAIN.toString('hex'), 'store_manager']]) },
     ],
   ]),
   branches: new Map([
-    [MAIN.toString('hex'), 'Main Store'],
-    [WAREHOUSE.toString('hex'), 'Warehouse'],
+    [MAIN.toString('hex'), { name: 'Main Store', nameAr: 'المتجر الرئيسي' }],
+    [WAREHOUSE.toString('hex'), { name: 'Warehouse', nameAr: null }],
   ]),
 };
 
@@ -80,7 +80,7 @@ describe('unit timeline facts', () => {
 
   it('names the actor with their role at the branch where it happened', () => {
     const [atWarehouse] = shapeUnitTimeline([ev({ userId: CLERK, branchId: WAREHOUSE })], lookups);
-    expect(atWarehouse.actor).toEqual({ name: 'Sara', role: 'store_employee' });
+    expect(atWarehouse.actor).toEqual({ name: 'Sara', nameAr: 'سارة', role: 'store_employee' });
     const [system] = shapeUnitTimeline([ev({ userId: null })], lookups);
     expect(system.actor).toBeNull();
   });
@@ -90,16 +90,16 @@ describe('unit timeline facts', () => {
       [ev({ before: { status: 'reserved' }, after: { status: 'in_transit', toBranch: uuid(WAREHOUSE), transferId: 'T-1' } })],
       lookups,
     );
-    expect(sent.toBranch).toEqual({ name: 'Warehouse' });
+    expect(sent.toBranch).toEqual({ name: 'Warehouse', nameAr: null });
     expect(sent.transferId).toBe('T-1');
 
     const [arrived] = shapeUnitTimeline(
       [ev({ branchId: WAREHOUSE, before: { status: 'in_transit' }, after: { status: 'in_stock', branch: uuid(WAREHOUSE), fromBranch: uuid(MAIN) } })],
       lookups,
     );
-    expect(arrived.toBranch).toEqual({ name: 'Warehouse' });
-    expect(arrived.fromBranch).toEqual({ name: 'Main Store' });
-    expect(arrived.branch).toEqual({ name: 'Warehouse' });
+    expect(arrived.toBranch).toEqual({ name: 'Warehouse', nameAr: null });
+    expect(arrived.fromBranch).toEqual({ name: 'Main Store', nameAr: 'المتجر الرئيسي' });
+    expect(arrived.branch).toEqual({ name: 'Warehouse', nameAr: null });
   });
 
   it('keeps every repeated entry — nothing is merged or dropped', () => {

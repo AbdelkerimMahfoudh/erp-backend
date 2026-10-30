@@ -103,7 +103,7 @@ describe('the daily document service', () => {
   it('names the shop and the branch; the receivables are the open balances now', async () => {
     const { service } = harness(['report.view', 'closing.count']);
     const doc = await service.daily();
-    expect(doc.identity).toEqual({ company: 'Tech Plus', branch: 'Main Store', timezone: 'Africa/Nouakchott' });
+    expect(doc.identity).toEqual({ company: 'Tech Plus', branch: 'Main Store', companyAr: null, branchAr: null, timezone: 'Africa/Nouakchott' });
     expect(doc.receivables).toEqual({ amount: 13_000, sales: 2 });
   });
 

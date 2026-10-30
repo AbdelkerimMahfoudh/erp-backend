@@ -422,8 +422,8 @@ describe('a pending account’s seats, as the Team screen shows them', () => {
     const [u] = await service.list();
     expect(u.status).toBe('pending');
     expect(u.pending!.seats).toEqual([
-      { branchId: binToUuid(main.branch.id), branchName: 'Main Store', state: 'held' },
-      { branchId: binToUuid(market.branch.id), branchName: 'Market', state: 'included' },
+      { branchId: binToUuid(main.branch.id), branchName: 'Main Store', branchNameAr: null, state: 'held' },
+      { branchId: binToUuid(market.branch.id), branchName: 'Market', branchNameAr: null, state: 'included' },
     ]);
   });
 

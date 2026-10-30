@@ -242,6 +242,8 @@ export function cashShortfallAnomalies(input: CashShortfallInput): Anomaly[] {
 export interface BelowCostInput {
   userId: string;
   name: string;
+  /** D225: the seller's Arabic name, when given — the app shows it to an Arabic reader. */
+  nameAr?: string | null;
   count: number;
   /** The latest below-cost sale by this person. */
   latestAt?: Date | null;
@@ -262,7 +264,7 @@ export function belowCostAnomalies(rows: readonly BelowCostInput[]): Anomaly[] {
       anomaly(
         'anomaly.below_cost_cluster',
         'caution',
-        { seller: row.name, count: row.count, days: ANOMALY_WINDOW_DAYS },
+        { seller: row.name, ...(row.nameAr ? { sellerAr: row.nameAr } : {}), count: row.count, days: ANOMALY_WINDOW_DAYS },
         row.userId,
         row.latestAt ?? null,
       ),

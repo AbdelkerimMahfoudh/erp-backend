@@ -71,8 +71,8 @@ export class TacMappingService {
         where: { codeType: 'tac', code: tac },
         include: {
           product: { select: { brand: true, model: true, variant: true } },
-          proposedBy: { select: { name: true } },
-          confirmedBy: { select: { name: true } },
+          proposedBy: { select: { name: true, nameAr: true } },
+          confirmedBy: { select: { name: true, nameAr: true } },
         },
         orderBy: { id: 'desc' },
       }),
@@ -131,6 +131,9 @@ export class TacMappingService {
         status: r.status,
         proposedBy: r.proposedBy?.name ?? null,
         confirmedBy: r.confirmedBy?.name ?? null,
+        // D225: the same people in Arabic, for the Arabic interface.
+        proposedByAr: r.proposedBy?.nameAr ?? null,
+        confirmedByAr: r.confirmedBy?.nameAr ?? null,
         confirmedAt: r.confirmedAt?.toISOString() ?? null,
         evidenceSource: r.evidenceSource,
         timesSeen: r.timesSeen,

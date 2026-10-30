@@ -198,6 +198,8 @@ export interface ReportCashSet {
   at: string;
   localTime: string;
   byName: string | null;
+  /** D225: the same person's Arabic name, null until given; absent from a report frozen before it existed. */
+  byNameAr?: string | null;
   tracked: number;
   adjustment: number;
 }

@@ -124,7 +124,8 @@ export class ConnectionsService {
           ? { publicPhone: parsed.value }
           : // `startsWith`, never `contains`: a substring match on a
             // three-letter fragment would return most of the platform.
-            { name: { startsWith: parsed.value } };
+            // Either of the business's names (D225).
+            { OR: [{ name: { startsWith: parsed.value } }, { nameAr: { startsWith: parsed.value } }] };
 
     const found = await this.prisma.company.findMany({
       where: { ...where, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
@@ -132,6 +133,7 @@ export class ConnectionsService {
         id: true,
         publicStoreId: true,
         name: true,
+        nameAr: true,
         city: true,
         logoRef: true,
       },
@@ -190,8 +192,8 @@ export class ConnectionsService {
     const rows = await this.prisma.storeConnection.findMany({
       where: { OR: [{ requesterCompanyId: me }, { addresseeCompanyId: me }] },
       include: {
-        requesterCompany: { select: { id: true, publicStoreId: true, name: true, city: true, logoRef: true, publicPhone: true } },
-        addresseeCompany: { select: { id: true, publicStoreId: true, name: true, city: true, logoRef: true, publicPhone: true } },
+        requesterCompany: { select: { id: true, publicStoreId: true, name: true, nameAr: true, city: true, logoRef: true, publicPhone: true } },
+        addresseeCompany: { select: { id: true, publicStoreId: true, name: true, nameAr: true, city: true, logoRef: true, publicPhone: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
@@ -243,7 +245,7 @@ export class ConnectionsService {
 
     const company = await this.prisma.company.findFirst({
       where: { publicStoreId: code, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
-      select: { id: true, publicStoreId: true, name: true, city: true, logoRef: true },
+      select: { id: true, publicStoreId: true, name: true, nameAr: true, city: true, logoRef: true },
     });
     if (!company) throw new NotFoundException('No such store');
 
@@ -415,7 +417,7 @@ export class ConnectionsService {
     const [company, consignments, loans] = await Promise.all([
       this.prisma.company.findUnique({
         where: { id: themId },
-        select: { publicStoreId: true, name: true, city: true, logoRef: true, publicPhone: true },
+        select: { publicStoreId: true, name: true, nameAr: true, city: true, logoRef: true, publicPhone: true },
       }),
       this.prisma.consignment.findMany({
         where: {

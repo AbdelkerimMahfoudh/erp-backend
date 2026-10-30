@@ -248,6 +248,28 @@ describe('what a row says', () => {
     expect((await service.list(query())).rows[0]!.lineCount).toBe(1);
   });
 
+  it('draws each live line by its category (D225), so the row wears the picture its detail does', async () => {
+    const consoles = { id: newUuidV7Bin(), key: 'gaming.consoles', icon: null, parent: { key: 'gaming', icon: null } };
+    const rows = [
+      saleRow({
+        items: [
+          { unitId: newUuidV7Bin(), quantity: 1, voided: false, unit: { product: { brand: 'Sony', model: 'PS5', variant: null, trackingType: 'serial', category: consoles } } },
+          { unitId: null, quantity: 1, voided: true, product: { brand: 'X', model: 'Y', variant: null, trackingType: 'quantity', category: null } },
+          { unitId: null, quantity: 2, voided: false, product: { brand: 'Anker', model: 'Cable', variant: null, trackingType: 'quantity', category: null } },
+        ],
+      }),
+    ];
+    const { service } = makeService({ rows });
+    const row = (await service.list(query())).rows[0]!;
+    expect(row.lineVisuals).toEqual([
+      {
+        categoryVisual: { categoryId: expect.any(String), key: 'gaming.consoles', icon: null, parentKey: 'gaming', parentIcon: null },
+        trackingType: 'serial',
+      },
+      { categoryVisual: null, trackingType: 'quantity' },
+    ]);
+  });
+
   it('lists each payment method once', async () => {
     const rows = [saleRow({ payments: [{ method: 'cash' }, { method: 'cash' }, { method: 'card' }] })];
     const { service } = makeService({ rows });

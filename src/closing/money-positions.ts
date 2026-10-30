@@ -95,6 +95,8 @@ export interface TrackedAnchor {
   at: string | null;
   businessDate: string;
   byName: string | null;
+  /** D225: the same person's Arabic name, null until given. */
+  byNameAr: string | null;
   /** An opening's decision (docs/63): kept or set by the Owner, or carried by somebody else who opened. */
   decision?: 'keep' | 'set' | 'carried';
   /** A carried amount the Owner has not reviewed: shown as awaiting the Owner, never as checked. */
@@ -107,6 +109,7 @@ export interface OpenedAnchor {
   at: Date;
   businessDate: string;
   byName: string | null;
+  byNameAr?: string | null;
   decision: 'keep' | 'set' | 'carried';
   /** For a carried opening: whether the Owner has reviewed it. */
   reviewed: boolean;
@@ -155,6 +158,7 @@ export interface CountedClose {
   at: Date | null;
   /** Who counted, else who closed. */
   byName: string | null;
+  byNameAr?: string | null;
 }
 
 export interface DrawerInputs {
@@ -180,6 +184,7 @@ export interface DeclaredAnchor {
   at: Date;
   businessDate: string;
   byName: string | null;
+  byNameAr?: string | null;
 }
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -190,6 +195,7 @@ const countedAnchor = (close: CountedClose): TrackedAnchor => ({
   at: close.at ? close.at.toISOString() : null,
   businessDate: close.closingDate,
   byName: close.byName,
+  byNameAr: close.byNameAr ?? null,
 });
 
 /**
@@ -215,6 +221,7 @@ export function cashMethod(input: DrawerInputs, movement: MethodMovement): Track
       at: o.at.toISOString(),
       businessDate: o.businessDate,
       byName: o.byName,
+      byNameAr: o.byNameAr ?? null,
       decision: o.decision,
       awaitingOwnerReview: o.decision === 'carried' && !o.reviewed,
     };
@@ -269,7 +276,7 @@ export function accountMethod(account: AccountRow, anchor: DeclaredAnchor | null
     known: true,
     position,
     unknownReason: null,
-    anchor: { source: 'declared', amount, at: anchor.at.toISOString(), businessDate: anchor.businessDate, byName: anchor.byName },
+    anchor: { source: 'declared', amount, at: anchor.at.toISOString(), businessDate: anchor.businessDate, byName: anchor.byName, byNameAr: anchor.byNameAr ?? null },
     sinceAnchorNet: round2(position - amount),
   };
 }

@@ -39,6 +39,9 @@ export const REPORT_DOCUMENT_VERSION = 1 as const;
 export interface ReportIdentity {
   company: string;
   branch: string;
+  /** D225: the Arabic names, null until given — the app prints them on an Arabic report. */
+  companyAr?: string | null;
+  branchAr?: string | null;
   /** The company's zone, in which every business date and time is meant. */
   timezone: string;
 }

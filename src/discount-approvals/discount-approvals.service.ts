@@ -650,9 +650,13 @@ export class DiscountApprovalsService {
           }
         : null,
       identifier: row.unit?.imeiPrimary ?? row.unit?.serialNo ?? null,
+      // D225: each name with its Arabic twin, so the Arabic interface reads the Arabic one.
       branchName: row.branch?.name ?? null,
+      branchNameAr: row.branch?.nameAr ?? null,
       requesterName: row.requester?.name ?? null,
+      requesterNameAr: row.requester?.nameAr ?? null,
       approverName: row.approver?.name ?? null,
+      approverNameAr: row.approver?.nameAr ?? null,
     };
   }
 }
@@ -679,9 +683,9 @@ const DETAIL = {
       product: { select: { brand: true, model: true, variant: true } },
     },
   },
-  branch: { select: { name: true } },
-  requester: { select: { name: true } },
-  approver: { select: { name: true } },
+  branch: { select: { name: true, nameAr: true } },
+  requester: { select: { name: true, nameAr: true } },
+  approver: { select: { name: true, nameAr: true } },
 } as const;
 
 interface PresentableApproval {
@@ -708,9 +712,9 @@ interface PresentableApproval {
     serialNo: string | null;
     product?: { brand: string; model: string; variant: string | null } | null;
   } | null;
-  branch?: { name: string } | null;
-  requester?: { name: string } | null;
-  approver?: { name: string } | null;
+  branch?: { name: string; nameAr: string | null } | null;
+  requester?: { name: string; nameAr: string | null } | null;
+  approver?: { name: string; nameAr: string | null } | null;
 }
 
 function reasonMessage(reason: VoidReason): string {

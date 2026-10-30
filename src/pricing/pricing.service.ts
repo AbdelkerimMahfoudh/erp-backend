@@ -174,7 +174,7 @@ export class PricingService {
         newPrice: true,
         reason: true,
         createdAt: true,
-        actor: { select: { name: true } },
+        actor: { select: { name: true, nameAr: true } },
       },
     });
 
@@ -190,6 +190,7 @@ export class PricingService {
         newPrice: num(r.newPrice),
         reason: r.reason,
         actorName: r.actor?.name ?? null,
+        actorNameAr: r.actor?.nameAr ?? null,
         at: r.createdAt,
       })),
       nextCursor: rows.length > limit ? binToUuid(page[page.length - 1]!.id) : null,

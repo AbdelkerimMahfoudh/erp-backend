@@ -32,6 +32,8 @@ import {
 export interface AccountView {
   id: string;
   name: string;
+  /** D225: the Arabic name; null until given. */
+  nameAr: string | null;
   login: string;
   personalId: string;
   phone: string | null;
@@ -102,6 +104,7 @@ export class AccountService {
       select: {
         id: true,
         name: true,
+        nameAr: true,
         login: true,
         personalId: true,
         phone: true,
@@ -120,6 +123,7 @@ export class AccountService {
     return {
       id: binToUuid(user.id),
       name: user.name,
+      nameAr: user.nameAr ?? null,
       login: user.login,
       personalId: user.personalId,
       phone: user.phone,

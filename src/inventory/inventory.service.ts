@@ -53,7 +53,7 @@ export interface IdentifierConflict {
   alreadyInInventory: boolean;
   matchedIdentifierPosition: 'primary' | 'secondary' | null;
   /** Safe summary, only for a unit this caller can actually reach. */
-  unit: { productLabel: string; branchName: string; status: UnitStatus } | null;
+  unit: { productLabel: string; branchName: string; branchNameAr: string | null; status: UnitStatus } | null;
   /** Taken, but outside this caller's reach. Carries nothing else. */
   elsewhere: boolean;
   /** Two identifiers matched two different units — never one phone. */
@@ -473,7 +473,7 @@ export class InventoryService {
         imeiPrimary: true,
         imeiSecondary: true,
         branchId: true,
-        branch: { select: { name: true } },
+        branch: { select: { name: true, nameAr: true } },
         product: { select: { brand: true, model: true, variant: true } },
       },
       take: 3,
@@ -519,6 +519,7 @@ export class InventoryService {
             .filter(Boolean)
             .join(' '),
           branchName: match.branch.name,
+          branchNameAr: match.branch.nameAr,
           status: match.status,
         },
         elsewhere: false,
@@ -812,7 +813,7 @@ export class InventoryService {
       include: {
         // D225: with the category its picture is drawn from (key, chosen icon, parent's).
         product: { include: { category: CATEGORY_VISUAL_SELECT } },
-        branch: { select: { id: true, name: true } },
+        branch: { select: { id: true, name: true, nameAr: true } },
         // The purchase reference and date only. First release: no supplier name
         // is sent: ordinary purchases are anonymous, and historical supplier
         // links stay in the database, dormant.
@@ -858,11 +859,11 @@ export class InventoryService {
       userIds.length
         ? this.db.user.findMany({
             where: { id: { in: userIds } },
-            select: { id: true, name: true, userBranches: { select: { branchId: true, role: { select: { key: true } } } } },
+            select: { id: true, name: true, nameAr: true, userBranches: { select: { branchId: true, role: { select: { key: true } } } } },
           })
         : [],
       branchIds.length
-        ? this.db.branch.findMany({ where: { id: { in: branchIds } }, select: { id: true, name: true } })
+        ? this.db.branch.findMany({ where: { id: { in: branchIds } }, select: { id: true, name: true, nameAr: true } })
         : [],
     ]);
 
@@ -870,10 +871,10 @@ export class InventoryService {
       users: new Map(
         users.map((u) => [
           u.id.toString('hex'),
-          { name: u.name, roles: new Map(u.userBranches.map((ub) => [ub.branchId.toString('hex'), ub.role.key as string])) },
+          { name: u.name, nameAr: u.nameAr, roles: new Map(u.userBranches.map((ub) => [ub.branchId.toString('hex'), ub.role.key as string])) },
         ]),
       ),
-      branches: new Map(branches.map((br) => [br.id.toString('hex'), br.name])),
+      branches: new Map(branches.map((br) => [br.id.toString('hex'), { name: br.name, nameAr: br.nameAr }])),
     });
   }
 
@@ -1404,7 +1405,7 @@ export class InventoryService {
           where: { id },
           include: {
             product: true,
-            branch: { select: { id: true, name: true } },
+            branch: { select: { id: true, name: true, nameAr: true } },
             purchase: { select: { referenceNo: true, date: true } },
           },
         });

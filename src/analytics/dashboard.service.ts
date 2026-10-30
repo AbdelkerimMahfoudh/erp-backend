@@ -428,9 +428,11 @@ export class DashboardService {
       _sum: NET_SUM,
     });
     const branches = grouped.length
-      ? await this.db.branch.findMany({ where: { id: { in: grouped.map((g) => g.branchId) } }, select: { id: true, name: true } })
+      ? await this.db.branch.findMany({ where: { id: { in: grouped.map((g) => g.branchId) } }, select: { id: true, name: true, nameAr: true } })
       : [];
     const nameByHex = new Map(branches.map((b) => [b.id.toString('hex'), b.name]));
+    // D225: the Arabic name too, for the Arabic interface.
+    const nameArByHex = new Map(branches.map((b) => [b.id.toString('hex'), b.nameAr]));
     return grouped
       .map((g) => {
         // Net of returns and cancellations on their approval days (docs/53), as Results reads the same rollup.
@@ -438,6 +440,7 @@ export class DashboardService {
         return {
           branchId: binToUuid(g.branchId),
           name: nameByHex.get(g.branchId.toString('hex')) ?? null,
+          nameAr: nameArByHex.get(g.branchId.toString('hex')) ?? null,
           revenue: n.revenue,
           grossProfit: n.grossProfit,
           netProfit: n.netProfit,
@@ -465,13 +468,15 @@ export class DashboardService {
     const until = endingDaysAgo > 0 ? dayKey(this.windowStart(endingDaysAgo)) : null;
     const sellers = await sellerFigures(this.db, this.tenant.companyId(), branchId, from, until);
     const users = sellers.length
-      ? await this.db.user.findMany({ where: { id: { in: sellers.map((s) => s.userId) } }, select: { id: true, name: true } })
+      ? await this.db.user.findMany({ where: { id: { in: sellers.map((s) => s.userId) } }, select: { id: true, name: true, nameAr: true } })
       : [];
     const nameByHex = new Map(users.map((u) => [u.id.toString('hex'), u.name]));
+    const nameArByHex = new Map(users.map((u) => [u.id.toString('hex'), u.nameAr]));
     return sellers
       .map((s) => ({
         userId: binToUuid(s.userId),
         name: nameByHex.get(s.userId.toString('hex')) ?? null,
+        nameAr: nameArByHex.get(s.userId.toString('hex')) ?? null,
         salesCount: s.salesCount,
         returnsCount: s.returns,
         revenue: s.revenue,

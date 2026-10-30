@@ -184,7 +184,7 @@ export class DiscrepanciesService {
    */
   async ledgerFor(userId: string) {
     const target = uuidToBin(userId);
-    const person = await this.db.user.findFirst({ where: { id: target }, select: { id: true, name: true } });
+    const person = await this.db.user.findFirst({ where: { id: target }, select: { id: true, name: true, nameAr: true } });
     if (!person) throw new NotFoundException('No such person');
 
     const entries = await this.db.employeeDebtEntry.findMany({
@@ -194,6 +194,7 @@ export class DiscrepanciesService {
     return {
       userId: binToUuid(person.id),
       name: person.name,
+      nameAr: person.nameAr ?? null,
       outstanding: balanceOf(entries.map((e) => ({ kind: e.kind, amount: num(e.amount) }))),
       entries: entries.map((e) => this.shapeEntry(e)),
     };

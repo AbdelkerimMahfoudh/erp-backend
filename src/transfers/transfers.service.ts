@@ -47,6 +47,7 @@ import {
 import { priceForNewStockRow, receiveQuantityAtCost } from '../inventory/stock-cost';
 import { withLockRetry } from '../common/db/deadlock-retry';
 import { requestRollupTx, type RollupCause } from '../analytics/rollup-queue';
+import { nameSearch } from '../common/bilingual-name';
 
 /**
  * The transaction client of the TENANT-scoped client, not the plain
@@ -1191,9 +1192,9 @@ export class TransfersService {
         ...this.searchWhere(query.search),
       },
       include: {
-        fromBranch: { select: { id: true, name: true } },
-        toBranch: { select: { id: true, name: true } },
-        requestedBy: { select: { name: true } },
+        fromBranch: { select: { id: true, name: true, nameAr: true } },
+        toBranch: { select: { id: true, name: true, nameAr: true } },
+        requestedBy: { select: { name: true, nameAr: true } },
         // The rows themselves, not a count of them: "10 chargers" is one row
         // and ten things, and a list that says "1 item" is lying to whoever has
         // to receive the box.
@@ -1216,11 +1217,12 @@ export class TransfersService {
         status: t.status,
         // Which way the stock is moving, seen from where the user stands.
         direction: t.fromBranchId.equals(branchId) ? 'outgoing' : 'incoming',
-        from: { id: binToUuid(t.fromBranch.id), name: t.fromBranch.name },
-        to: { id: binToUuid(t.toBranch.id), name: t.toBranch.name },
+        from: { id: binToUuid(t.fromBranch.id), name: t.fromBranch.name, nameAr: t.fromBranch.nameAr },
+        to: { id: binToUuid(t.toBranch.id), name: t.toBranch.name, nameAr: t.toBranch.nameAr },
         itemCount: t.items.length,
         ...countLines(t.items),
         requestedBy: t.requestedBy?.name ?? null,
+        requestedByAr: t.requestedBy?.nameAr ?? null,
         requestedAt: requestedAtOf(t.id),
         approvedAt: t.approvedAt,
         sentAt: shippedAt(t),
@@ -1247,8 +1249,9 @@ export class TransfersService {
     return {
       OR: [
         { transferNo: { contains: q } },
-        { fromBranch: { name: { contains: q } } },
-        { toBranch: { name: { contains: q } } },
+        // Either store by either of its names (D225).
+        { fromBranch: nameSearch(q) },
+        { toBranch: nameSearch(q) },
         { items: { some: { unit: { imeiPrimary: { contains: q } } } } },
         { items: { some: { unit: { serialNo: { contains: q } } } } },
         { items: { some: { unit: { product: { brand: { contains: q } } } } } },
@@ -1307,13 +1310,13 @@ export class TransfersService {
     const transfer = await this.db.stockTransfer.findUnique({
       where: { id: uuidToBin(idStr) },
       include: {
-        fromBranch: { select: { id: true, name: true } },
-        toBranch: { select: { id: true, name: true } },
-        requestedBy: { select: { name: true } },
-        approvedBy: { select: { name: true } },
-        decidedBy: { select: { name: true } },
-        sentBy: { select: { name: true } },
-        receivedBy: { select: { name: true } },
+        fromBranch: { select: { id: true, name: true, nameAr: true } },
+        toBranch: { select: { id: true, name: true, nameAr: true } },
+        requestedBy: { select: { name: true, nameAr: true } },
+        approvedBy: { select: { name: true, nameAr: true } },
+        decidedBy: { select: { name: true, nameAr: true } },
+        sentBy: { select: { name: true, nameAr: true } },
+        receivedBy: { select: { name: true, nameAr: true } },
         items: {
           include: {
             unit: {
@@ -1361,8 +1364,8 @@ export class TransfersService {
       status: transfer.status,
       version: transfer.version,
       direction: transfer.fromBranchId.equals(activeBranchId) ? 'outgoing' : 'incoming',
-      from: { id: binToUuid(transfer.fromBranch.id), name: transfer.fromBranch.name },
-      to: { id: binToUuid(transfer.toBranch.id), name: transfer.toBranch.name },
+      from: { id: binToUuid(transfer.fromBranch.id), name: transfer.fromBranch.name, nameAr: transfer.fromBranch.nameAr },
+      to: { id: binToUuid(transfer.toBranch.id), name: transfer.toBranch.name, nameAr: transfer.toBranch.nameAr },
       autoApproved: transfer.autoApproved,
       decisionReason: transfer.decisionReason,
       people: {
@@ -1371,6 +1374,12 @@ export class TransfersService {
         decidedBy: transfer.decidedBy?.name ?? null,
         sentBy: transfer.sentBy?.name ?? null,
         receivedBy: transfer.receivedBy?.name ?? null,
+        // D225: the same people in Arabic, null until each has an Arabic name.
+        requestedByAr: transfer.requestedBy?.nameAr ?? null,
+        approvedByAr: transfer.approvedBy?.nameAr ?? null,
+        decidedByAr: transfer.decidedBy?.nameAr ?? null,
+        sentByAr: transfer.sentBy?.nameAr ?? null,
+        receivedByAr: transfer.receivedBy?.nameAr ?? null,
       },
       timestamps: {
         requestedAt: requestedAtOf(transfer.id),

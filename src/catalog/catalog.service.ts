@@ -30,6 +30,12 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ListProductsDto } from './dto/list-products.dto';
 import { CatalogCursor, decodeCatalogCursor, encodeCatalogCursor } from './catalog-cursor';
+import {
+  CATEGORY_VISUAL_SELECT,
+  categoryVisualOf,
+  type CategoryVisual,
+  type CategoryVisualSource,
+} from '../categories/category-visual';
 
 /**
  * Bounds on the adaptive `specifications` JSON. Unbounded client JSON on a row
@@ -61,6 +67,8 @@ export interface ProductSuggestion {
   trackingType: TrackingType;
   keySpecifications: Record<string, unknown>;
   image: string | null; // reserved — no product image field yet
+  /** What the confirm card draws the product as (D225) — its category's picture. */
+  categoryVisual: CategoryVisual | null;
   defaultCost: number | null;
   defaultPrice: number | null;
 }
@@ -77,6 +85,8 @@ export interface ProductListRow {
   serialized: boolean;
   barcode: string | null;
   categoryId: string | null;
+  /** The category's picture (D225), so the catalogue and its pickers draw what the product is. */
+  categoryVisual: CategoryVisual | null;
   isActive: boolean;
 }
 
@@ -131,6 +141,7 @@ const LIST_SELECT = {
   trackingType: true,
   barcode: true,
   categoryId: true,
+  category: CATEGORY_VISUAL_SELECT,
   deletedAt: true,
 } satisfies Prisma.ProductSelect;
 
@@ -379,18 +390,24 @@ export class CatalogService {
    * when nothing matches. The 2C.5c scanner feeds recognized ids/barcodes here.
    */
   async findOrSuggest(params: { productId?: string; barcode?: string }): Promise<ProductSuggestion | null> {
-    let product: Product | null = null;
+    let product: (Product & { category: CategoryVisualSource }) | null = null;
     if (params.productId) {
       // A malformed id matches nothing, like an unknown one — never a crash.
       if (!isUuid(params.productId)) return null;
-      product = await this.db.product.findFirst({ where: { id: uuidToBin(params.productId), deletedAt: null } });
+      product = await this.db.product.findFirst({
+        where: { id: uuidToBin(params.productId), deletedAt: null },
+        include: { category: CATEGORY_VISUAL_SELECT },
+      });
     } else if (params.barcode) {
-      product = await this.db.product.findFirst({ where: { barcode: params.barcode, deletedAt: null } });
+      product = await this.db.product.findFirst({
+        where: { barcode: params.barcode, deletedAt: null },
+        include: { category: CATEGORY_VISUAL_SELECT },
+      });
     }
     return product ? this.toSuggestion(product) : null;
   }
 
-  private toSuggestion(p: Product): ProductSuggestion {
+  private toSuggestion(p: Product & { category: CategoryVisualSource }): ProductSuggestion {
     return {
       productId: binToUuid(p.id),
       brand: p.brand,
@@ -399,6 +416,7 @@ export class CatalogService {
       trackingType: p.trackingType,
       keySpecifications: (p.specifications as Record<string, unknown>) ?? {},
       image: null,
+      categoryVisual: categoryVisualOf(p.category),
       defaultCost: p.defaultCost ? Number(p.defaultCost) : null,
       defaultPrice: p.defaultPrice ? Number(p.defaultPrice) : null,
     };
@@ -541,21 +559,24 @@ export class CatalogService {
 
     const branches = await this.db.branch.findMany({
       where: { id: { in: branchIds } },
-      select: { id: true, name: true },
+      select: { id: true, name: true, nameAr: true },
     });
     const nameOf = new Map(branches.map((b) => [b.id.toString('hex'), b.name]));
+    const nameArOf = new Map(branches.map((b) => [b.id.toString('hex'), b.nameAr]));
 
     const serialized = product.trackingType !== 'quantity';
     const stockByBranch = serialized
       ? units.map((u) => ({
           branchId: binToUuid(u.branchId),
           branchName: nameOf.get(u.branchId.toString('hex')) ?? '',
+          branchNameAr: nameArOf.get(u.branchId.toString('hex')) ?? null,
           quantity: u._count._all,
           price: null as number | null,
         }))
       : stock.map((s) => ({
           branchId: binToUuid(s.branchId),
           branchName: nameOf.get(s.branchId.toString('hex')) ?? '',
+          branchNameAr: nameArOf.get(s.branchId.toString('hex')) ?? null,
           quantity: s.quantity,
           price: Number(s.price),
         }));
@@ -774,7 +795,7 @@ export class CatalogService {
     if (!isUuid(idStr)) throw new NotFoundException('Product not found');
     const product = await this.db.product.findFirst({
       where: { id: uuidToBin(idStr), ...(opts.includeArchived ? {} : {}) },
-      include: { category: { select: { name: true } } },
+      include: { category: { select: { name: true, ...CATEGORY_VISUAL_SELECT.select } } },
     });
     if (!product) throw new NotFoundException('Product not found');
     return product;
@@ -820,6 +841,7 @@ export class CatalogService {
     trackingType: TrackingType;
     barcode: string | null;
     categoryId: Buffer | null;
+    category?: CategoryVisualSource;
     deletedAt: Date | null;
   }): ProductListRow {
     return {
@@ -833,6 +855,7 @@ export class CatalogService {
       serialized: p.trackingType !== 'quantity',
       barcode: p.barcode,
       categoryId: p.categoryId ? binToUuid(p.categoryId) : null,
+      categoryVisual: categoryVisualOf(p.category),
       isActive: p.deletedAt === null,
     };
   }

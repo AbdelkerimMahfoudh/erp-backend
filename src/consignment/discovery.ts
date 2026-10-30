@@ -27,6 +27,8 @@ export type SearchMode = 'storeId' | 'phone' | 'name';
 export interface PublicStorePreview {
   publicStoreId: string;
   name: string;
+  /** D225: the same name in Arabic, null until the business gives it. As public as the Latin one, never more. */
+  nameAr: string | null;
   city: string | null;
   logoRef: string | null;
   /**
@@ -122,12 +124,14 @@ export function parseQuery(raw: string): ParsedQuery {
 export function toPublicPreview(company: {
   publicStoreId: string;
   name: string;
+  nameAr?: string | null;
   city: string | null;
   logoRef: string | null;
 }): PublicStorePreview {
   return {
     publicStoreId: company.publicStoreId,
     name: company.name,
+    nameAr: company.nameAr ?? null,
     city: company.city,
     logoRef: company.logoRef,
     verification: 'Verified badge coming soon',
@@ -169,7 +173,7 @@ export interface ConnectedStoreDetail extends PublicStorePreview {
 }
 
 export function toConnectedDetail(
-  company: { publicStoreId: string; name: string; city: string | null; logoRef: string | null; publicPhone: string | null },
+  company: { publicStoreId: string; name: string; nameAr?: string | null; city: string | null; logoRef: string | null; publicPhone: string | null },
   accepted: boolean,
 ): ConnectedStoreDetail {
   return {

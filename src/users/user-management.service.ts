@@ -60,7 +60,7 @@ export interface PendingView {
   phone: 'verified' | 'awaiting' | 'not_selected';
   invitation: InvitationView;
   /** One per store: `included` (a free seat), `held` (paid or granted for this person) or `awaiting_payment`. */
-  seats: { branchId: string; branchName: string; state: 'included' | 'held' | 'awaiting_payment' }[];
+  seats: { branchId: string; branchName: string; branchNameAr?: string | null; state: 'included' | 'held' | 'awaiting_payment' }[];
 }
 
 export interface UserBranchView {
@@ -765,6 +765,7 @@ function pendingOf(row: UserRow): PendingView {
       return {
         branchId: binToUuid(ub.branch.id),
         branchName: ub.branch.name,
+        branchNameAr: ub.branch.nameAr ?? null,
         state: own ? (own.status === 'pending_payment' ? 'awaiting_payment' : 'held') : 'included',
       };
     }),

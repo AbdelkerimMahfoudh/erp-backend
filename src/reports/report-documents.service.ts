@@ -102,10 +102,10 @@ export class ReportDocumentsService {
   private async identity(branchId: Buffer, timezone: string): Promise<ReportIdentity> {
     // `Company` has no company column for the tenant client to scope by: the unscoped client, by id.
     const [company, branch] = await Promise.all([
-      this.prisma.company.findUnique({ where: { id: this.tenant.companyId() }, select: { name: true } }),
-      this.db.branch.findFirst({ where: { id: branchId }, select: { name: true } }),
+      this.prisma.company.findUnique({ where: { id: this.tenant.companyId() }, select: { name: true, nameAr: true } }),
+      this.db.branch.findFirst({ where: { id: branchId }, select: { name: true, nameAr: true } }),
     ]);
-    return { company: company?.name ?? '', branch: branch?.name ?? '', timezone };
+    return { company: company?.name ?? '', branch: branch?.name ?? '', companyAr: company?.nameAr ?? null, branchAr: branch?.nameAr ?? null, timezone };
   }
 
   /**

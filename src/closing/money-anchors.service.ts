@@ -46,7 +46,7 @@ const anchorSelect = {
   trackedBefore: true,
   difference: true,
   note: true,
-  recordedBy: { select: { name: true } },
+  recordedBy: { select: { name: true, nameAr: true } },
   receivingAccount: { select: { id: true, label: true, isActive: true, sortOrder: true } },
 } satisfies Prisma.MoneyAnchorSelect;
 
@@ -311,6 +311,7 @@ export class MoneyAnchorsService {
         difference: row.difference == null ? null : num(row.difference),
         note: row.note,
         byName: row.recordedBy.name,
+        byNameAr: row.recordedBy.nameAr ?? null,
       },
       method: await this.methodOf(this.db, this.tenant.companyId(), await this.businessDay.today(this.tenant.requireBranchId()), account),
     };
@@ -331,10 +332,17 @@ export class MoneyAnchorsService {
     const row = await client.moneyAnchor.findFirst({
       where: { receivingAccountId: uuidToBin(accountId) },
       orderBy: [{ at: 'desc' }, { createdAt: 'desc' }],
-      select: { amount: true, at: true, businessDate: true, recordedBy: { select: { name: true } } },
+      select: { amount: true, at: true, businessDate: true, recordedBy: { select: { name: true, nameAr: true } } },
     });
     if (!row) return null;
-    return { accountId, amount: num(row.amount), at: row.at, businessDate: dateKey(row.businessDate), byName: row.recordedBy.name };
+    return {
+      accountId,
+      amount: num(row.amount),
+      at: row.at,
+      businessDate: dateKey(row.businessDate),
+      byName: row.recordedBy.name,
+      byNameAr: row.recordedBy.nameAr ?? null,
+    };
   }
 
   /**
@@ -349,8 +357,8 @@ export class MoneyAnchorsService {
         status: true,
         countedCash: true,
         closedAt: true,
-        closedBy: { select: { name: true } },
-        channelCounts: { where: { channel: 'cash' }, select: { countedAt: true, countedBy: { select: { name: true } } } },
+        closedBy: { select: { name: true, nameAr: true } },
+        channelCounts: { where: { channel: 'cash' }, select: { countedAt: true, countedBy: { select: { name: true, nameAr: true } } } },
       },
     });
     if (!row || row.status !== 'locked' || row.countedCash == null) return null;
@@ -360,6 +368,8 @@ export class MoneyAnchorsService {
       countedCash: num(row.countedCash),
       at: count?.countedAt ?? row.closedAt,
       byName: count?.countedBy?.name ?? row.closedBy?.name ?? null,
+      // The same person as `byName`, in Arabic (D225).
+      byNameAr: count?.countedBy ? (count.countedBy.nameAr ?? null) : (row.closedBy?.nameAr ?? null),
     };
   }
 

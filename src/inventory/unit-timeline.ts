@@ -52,11 +52,17 @@ export interface RawUnitAuditEvent {
   branchId: Buffer | null;
 }
 
+/** A store's or a person's two names (D225): the Arabic one is null until given. */
+export interface TimelineName {
+  name: string;
+  nameAr: string | null;
+}
+
 export interface TimelineLookups {
-  /** By user id (hex): name, and role key per branch id (hex). */
-  users: Map<string, { name: string; roles: Map<string, string> }>;
-  /** By branch id (hex). */
-  branches: Map<string, string>;
+  /** By user id (hex): both names, and role key per branch id (hex). */
+  users: Map<string, TimelineName & { roles: Map<string, string> }>;
+  /** By branch id (hex): both names. */
+  branches: Map<string, TimelineName>;
 }
 
 export interface UnitTimelineEntry {
@@ -67,10 +73,10 @@ export interface UnitTimelineEntry {
   fromStatus: string | null;
   toStatus: string | null;
   context: UnitEventContext | null;
-  actor: { name: string; role: string | null } | null;
-  branch: { name: string } | null;
-  fromBranch: { name: string } | null;
-  toBranch: { name: string } | null;
+  actor: (TimelineName & { role: string | null }) | null;
+  branch: TimelineName | null;
+  fromBranch: TimelineName | null;
+  toBranch: TimelineName | null;
   transferId: string | null;
   // ── legacy, unchanged ──
   before: unknown;
@@ -114,11 +120,11 @@ export function shapeUnitTimeline(events: RawUnitAuditEvent[], lookups: Timeline
     .map((e) => {
       const branchKey = e.branchId ? hex(e.branchId) : null;
       const user = e.userId ? lookups.users.get(hex(e.userId)) : undefined;
-      const named = (value: unknown) => {
-        const id = uuidHex(value);
-        const name = id ? lookups.branches.get(id) : undefined;
-        return name ? { name } : null;
+      const store = (id: string | null): TimelineName | null => {
+        const found = id ? lookups.branches.get(id) : undefined;
+        return found ? { name: found.name, nameAr: found.nameAr } : null;
       };
+      const named = (value: unknown) => store(uuidHex(value));
       // A reason may sit in the column or, for returns, inside `after`.
       const systemReason = text(e.reason) ?? text(field(e.after, 'reason'));
 
@@ -133,10 +139,11 @@ export function shapeUnitTimeline(events: RawUnitAuditEvent[], lookups: Timeline
         actor: user
           ? {
               name: user.name,
+              nameAr: user.nameAr,
               role: (branchKey ? user.roles.get(branchKey) : undefined) ?? [...user.roles.values()][0] ?? null,
             }
           : null,
-        branch: branchKey && lookups.branches.has(branchKey) ? { name: lookups.branches.get(branchKey)! } : null,
+        branch: store(branchKey),
         fromBranch: named(field(e.after, 'fromBranch')),
         toBranch: named(field(e.after, 'toBranch')) ?? named(field(e.after, 'branch')),
         transferId: text(field(e.after, 'transferId')),

@@ -130,7 +130,7 @@ describe('carried across midnight — the overnight case', () => {
       known: true,
       position: 3400,
       unknownReason: null,
-      anchor: { source: 'counted_close', amount: 0, at: '2026-09-25T22:10:00.000Z', businessDate: '2026-09-25', byName: 'Aicha' },
+      anchor: { source: 'counted_close', amount: 0, at: '2026-09-25T22:10:00.000Z', businessDate: '2026-09-25', byName: 'Aicha', byNameAr: null },
       sinceAnchorNet: 3400,
       movement: { businessDate: '2026-09-26', inflows: 0, outflows: 0, net: 0 },
     });
@@ -144,7 +144,7 @@ describe('carried across midnight — the overnight case', () => {
       known: true,
       position: 2000,
       unknownReason: null,
-      anchor: { source: 'declared', amount: 0, at: '2026-09-26T06:30:00.000Z', businessDate: '2026-09-26', byName: 'Owner' },
+      anchor: { source: 'declared', amount: 0, at: '2026-09-26T06:30:00.000Z', businessDate: '2026-09-26', byName: 'Owner', byNameAr: null },
       sinceAnchorNet: 2000,
       movement: { businessDate: '2026-09-26', inflows: 0, outflows: 0, net: 0 },
     });

@@ -264,6 +264,8 @@ interface DrawerDecision extends CashSet {
   /** The Daily closing's expected cash at the instant. */
   tracked: number;
   byName: string | null;
+  /** D225: the same person's Arabic name, null until given. */
+  byNameAr: string | null;
   /** For a carried opening: whether the Owner has reviewed it. */
   reviewed: boolean;
 }
@@ -277,7 +279,7 @@ const drawerDecisionSelect = {
   cashAmount: true,
   cashDayNet: true,
   cashTracked: true,
-  recordedBy: { select: { name: true } },
+  recordedBy: { select: { name: true, nameAr: true } },
   review: { select: { id: true } },
 } satisfies Prisma.OpeningDecisionSelect;
 
@@ -292,6 +294,7 @@ function drawerDecisionOf(row: Prisma.OpeningDecisionGetPayload<{ select: typeof
     dayNetAt: round2(num(row.cashDayNet)),
     tracked: round2(num(row.cashTracked)),
     byName: row.recordedBy.name,
+    byNameAr: row.recordedBy.nameAr,
     reviewed: row.review !== null,
   };
 }
@@ -303,7 +306,7 @@ function decidedCash(verdict: { decision: OpeningDecisionValue; cashAmount: numb
 
 /** The decision anchoring the drawer, as Money's position reads it. */
 function openedAnchorOf(d: DrawerDecision | null): OpenedAnchor | null {
-  return d ? { amount: d.amount, at: d.at, businessDate: d.businessDate, byName: d.byName, decision: d.decision, reviewed: d.reviewed } : null;
+  return d ? { amount: d.amount, at: d.at, businessDate: d.businessDate, byName: d.byName, byNameAr: d.byNameAr, decision: d.decision, reviewed: d.reviewed } : null;
 }
 
 /** The day's own decision as the Daily closing shows it: what was set, by whom and when, and what it adds. */
@@ -316,6 +319,7 @@ function cashSetOf(d: DrawerDecision, adjustment: number, timezone: string): Rep
     at: d.at.toISOString(),
     localTime: localTimeOf(d.at, timezone),
     byName: d.byName,
+    byNameAr: d.byNameAr,
     tracked: d.tracked,
     adjustment,
   };
@@ -328,14 +332,14 @@ interface TimelineClosing {
   closedAt: Date;
   countedCash: Prisma.Decimal | null;
   difference: Prisma.Decimal | null;
-  closedBy: { name: string } | null;
+  closedBy: { name: string; nameAr?: string | null } | null;
   channelCounts: {
     labelSnapshot: string;
     counted: Prisma.Decimal | null;
     isSkipped: boolean;
     skipReason: string | null;
     countedAt: Date | null;
-    countedBy: { name: string } | null;
+    countedBy: { name: string; nameAr?: string | null } | null;
   }[];
 }
 
@@ -343,6 +347,8 @@ interface TimelineRow {
   kind: string;
   at: Date;
   actor: string | null;
+  /** D225: the same person's Arabic name, null until given. */
+  actorAr: string | null;
   payload: Record<string, unknown>;
 }
 
@@ -1129,7 +1135,7 @@ export class ClosingService {
         ? await this.db.closingEvent.findFirst({
             where: { closingId: closing.id, kind: { in: ['closed', 'reclosed'] } },
             orderBy: { at: 'desc' },
-            select: { kind: true, at: true, payload: true, actor: { select: { name: true } } },
+            select: { kind: true, at: true, payload: true, actor: { select: { name: true, nameAr: true } } },
           })
         : null;
     const stored = snapshotReport(snapshotEvent?.payload);
@@ -1151,6 +1157,7 @@ export class ClosingService {
               kind: snapshotEvent.kind,
               at: snapshotEvent.at,
               by: snapshotEvent.actor?.name ?? null,
+              byAr: snapshotEvent.actor?.nameAr ?? null,
               verification: stored.verification,
             }
           : null,
@@ -1192,7 +1199,7 @@ export class ClosingService {
           invoiceNo: true,
           total: true,
           soldAt: true,
-          user: { select: { name: true } },
+          user: { select: { name: true, nameAr: true } },
           customer: { select: { name: true } },
           counterparty: { select: { name: true } },
           corrections: corrected,
@@ -1214,7 +1221,7 @@ export class ClosingService {
           paidAt: true,
           accountLabelSnapshot: true,
           receivingAccountId: true,
-          recordedBy: { select: { name: true } },
+          recordedBy: { select: { name: true, nameAr: true } },
           sale: { select: { id: true, invoiceNo: true, businessDate: true, customerId: true, counterpartyId: true, corrections: corrected } },
           corrections: corrected,
         },
@@ -1245,7 +1252,7 @@ export class ClosingService {
           accountLabelSnapshot: true,
           receivingAccountId: true,
           paidAt: true,
-          createdBy: { select: { name: true } },
+          createdBy: { select: { name: true, nameAr: true } },
           corrections: corrected,
           purchase: {
             select: {
@@ -1293,7 +1300,7 @@ export class ClosingService {
           reason: true,
           requestedAt: true,
           version: true,
-          requestedBy: { select: { name: true } },
+          requestedBy: { select: { name: true, nameAr: true } },
           targetPayment: { select: { sale: { select: { invoiceNo: true } } } },
           targetSale: { select: { invoiceNo: true } },
           targetExpense: { select: { category: true } },
@@ -1344,6 +1351,8 @@ export class ClosingService {
       status: string;
       detail: Record<string, unknown>;
       recordedBy: string | null;
+      /** D225: the same person's Arabic name, null until given. */
+      recordedByAr: string | null;
       /** Every correction that applies to this record now; the preview has the last word. */
       actions: Action[];
       /** The record's own screen, where the flow that corrects it (a return) or its history lives. */
@@ -1388,6 +1397,7 @@ export class ClosingService {
             debtor: s.customer?.name ?? s.counterparty?.name ?? null,
           },
           recordedBy: s.user?.name ?? null,
+          recordedByAr: s.user?.nameAr ?? null,
           actions: refusal ? [] : ['cancel_sale'],
           open: 'sale',
           refusal,
@@ -1421,6 +1431,7 @@ export class ClosingService {
             reversible: hasDebtor,
           },
           recordedBy: p.recordedBy?.name ?? null,
+          recordedByAr: p.recordedBy?.nameAr ?? null,
           actions: refusal ? [] : hasDebtor ? ['reclassify_payment', 'reverse_payment'] : ['reclassify_payment'],
           open: 'sale',
           refusal,
@@ -1437,6 +1448,7 @@ export class ClosingService {
         status: r.correctedById ? 'corrected' : 'confirmed',
         detail: { returnId: binToUuid(r.returnRequestId) },
         recordedBy: null,
+        recordedByAr: null,
         // The Milestone B correction of a refund lives on the return itself.
         actions: [],
         open: 'return',
@@ -1456,6 +1468,7 @@ export class ClosingService {
           status: own.approved ? 'corrected' : own.requested ? 'correction_requested' : 'confirmed',
           detail: { category: e.category, expenseClass: e.expenseClass },
           recordedBy: null,
+          recordedByAr: null,
           actions: refusal ? [] : ['reverse_expense'],
           open: 'expense',
           refusal,
@@ -1491,6 +1504,7 @@ export class ClosingService {
             goodsMoved: moved,
           },
           recordedBy: sp.createdBy?.name ?? null,
+          recordedByAr: sp.createdBy?.nameAr ?? null,
           actions,
           open: null,
           refusal: refusal ?? (actions.length === 0 ? (own.requested ? 'request_pending' : moved ? 'goods_moved' : 'already_corrected') : null),
@@ -1510,6 +1524,7 @@ export class ClosingService {
           status: 'approved',
           detail: { targetKind: c.targetKind, action: c.action, fromMethod: c.method, fromAccountLabel: c.accountLabelSnapshot, moneyIn: legsIn, moneyOut: legsOut, reason: c.reason },
           recordedBy: null,
+          recordedByAr: null,
           actions: [],
           open: null,
           refusal: null,
@@ -1535,6 +1550,7 @@ export class ClosingService {
         to: c.action === 'reclassify' ? { method: c.toMethod, accountLabel: c.toAccountLabelSnapshot } : null,
         reason: c.reason,
         requestedBy: c.requestedBy?.name ?? null,
+        requestedByAr: c.requestedBy?.nameAr ?? null,
         requestedAt: c.requestedAt.toISOString(),
         version: c.version,
         label: c.targetSale?.invoiceNo ?? c.targetPayment?.sale.invoiceNo ?? c.targetExpense?.category ?? null,
@@ -1989,15 +2005,16 @@ export class ClosingService {
         decision: true,
         at: true,
         cashAmount: true,
-        recordedBy: { select: { name: true } },
-        review: { select: { decision: true, at: true, cashAmount: true, recordedBy: { select: { name: true } } } },
+        recordedBy: { select: { name: true, nameAr: true } },
+        review: { select: { decision: true, at: true, cashAmount: true, recordedBy: { select: { name: true, nameAr: true } } } },
       },
     });
     const state: OpeningState = openingStateOf(latest ? { decision: latest.decision, reviewed: latest.review !== null } : null);
-    const part = (d: { decision: OpeningDecisionValue; at: Date; cashAmount: Prisma.Decimal | null; recordedBy: { name: string } }) => ({
+    const part = (d: { decision: OpeningDecisionValue; at: Date; cashAmount: Prisma.Decimal | null; recordedBy: { name: string; nameAr: string | null } }) => ({
       decision: d.decision,
       at: d.at.toISOString(),
       byName: d.recordedBy.name,
+      byNameAr: d.recordedBy.nameAr,
       cash: d.cashAmount == null ? null : round2(num(d.cashAmount)),
     });
     return { state, opening: latest ? part(latest) : null, review: latest?.review ? part(latest.review) : null };
@@ -2633,7 +2650,10 @@ export class ClosingService {
 
     const closing = await this.db.dailyClosing.findUnique({
       where: { branchId_closingDate: { branchId, closingDate: dayDate } },
-      include: { channelCounts: { include: { countedBy: { select: { name: true } } } }, closedBy: { select: { name: true } } },
+      include: {
+        channelCounts: { include: { countedBy: { select: { name: true, nameAr: true } } } },
+        closedBy: { select: { name: true, nameAr: true } },
+      },
     });
     const drawer = await this.dayChannels(companyId, branchId, day);
     const openingCash = drawer.opening.amount;
@@ -2773,7 +2793,7 @@ export class ClosingService {
     const events = await this.db.closingEvent.findMany({
       where: { branchId, businessDate: dayDate },
       orderBy: { at: 'asc' },
-      select: { id: true, kind: true, at: true, payload: true, actor: { select: { name: true } } },
+      select: { id: true, kind: true, at: true, payload: true, actor: { select: { name: true, nameAr: true } } },
     });
     const saleSelect = {
       id: true,
@@ -2781,7 +2801,7 @@ export class ClosingService {
       total: true,
       amountPaid: true,
       balanceDue: true,
-      user: { select: { name: true } },
+      user: { select: { name: true, nameAr: true } },
       payments: { select: { method: true, amount: true } },
       items: {
         where: { voided: false },
@@ -2830,10 +2850,19 @@ export class ClosingService {
         kind: e.kind as string,
         at: e.at,
         actor: e.actor?.name ?? null,
+        actorAr: e.actor?.nameAr ?? null,
         payload: timelinePayload(e.kind as string, e.payload),
       })),
-      ...(firstSale ? [{ kind: 'first_activity', at: firstSale.soldAt, actor: firstSale.user?.name ?? null, payload: salePayload(firstSale) }] : []),
-      ...later.map((sale) => ({ kind: 'sale', at: sale.soldAt, actor: sale.user?.name ?? null, payload: salePayload(sale) })),
+      ...(firstSale ? [
+            {
+              kind: 'first_activity',
+              at: firstSale.soldAt,
+              actor: firstSale.user?.name ?? null,
+              actorAr: firstSale.user?.nameAr ?? null,
+              payload: salePayload(firstSale),
+            },
+          ] : []),
+      ...later.map((sale) => ({ kind: 'sale', at: sale.soldAt, actor: sale.user?.name ?? null, actorAr: sale.user?.nameAr ?? null, payload: salePayload(sale) })),
     ];
     // A day closed before the timeline existed: its row and its counts, as the events they were.
     if (closing && closing.status === 'locked' && !events.some((e) => e.kind === 'closed' || e.kind === 'reclosed')) {
@@ -2841,6 +2870,7 @@ export class ClosingService {
         kind: 'closed',
         at: closing.closedAt,
         actor: closing.closedBy?.name ?? null,
+        actorAr: closing.closedBy?.nameAr ?? null,
         payload: { countedCash: num(closing.countedCash), difference: num(closing.difference), fromRow: true },
       });
     }
@@ -2852,6 +2882,7 @@ export class ClosingService {
           kind: 'count_saved',
           at: c.countedAt,
           actor: c.countedBy?.name ?? null,
+          actorAr: c.countedBy?.nameAr ?? null,
           payload: { label: c.labelSnapshot, counted: c.counted == null ? null : num(c.counted), skipped: c.isSkipped, fromRow: true },
         });
       }
@@ -2866,6 +2897,7 @@ export class ClosingService {
             kind: opening.kind as string,
             at: opening.at,
             actor: opening.actor?.name ?? null,
+            actorAr: opening.actor?.nameAr ?? null,
             localDate: localParts(opening.at, timezone).date,
             localTime: localTimeOf(opening.at, timezone),
           }
@@ -3326,6 +3358,7 @@ export class ClosingService {
             skipReason: row.skipReason,
             countedAt: row.countedAt?.toISOString() ?? null,
             countedByName: row.countedBy?.name ?? null,
+            countedByNameAr: row.countedBy?.nameAr ?? null,
             ...(comparedAt ? { expectedAtCount: atCount } : {}),
             // Unknown at the count: only a movement recorded since can say the float moved (D159).
             ...(comparedAt && atCount === null ? { movedAfterCount: await this.floatMovedAfter(branchId, row.providerId, comparedAt, asOf) } : {}),
@@ -3342,6 +3375,7 @@ export class ClosingService {
           skipReason: null,
           countedAt: null,
           countedByName: null,
+          countedByNameAr: null,
         };
       }),
     );
@@ -3370,7 +3404,7 @@ export class ClosingService {
               isSkipped: true,
               skipReason: true,
               countedAt: true,
-              countedBy: { select: { name: true } },
+              countedBy: { select: { name: true, nameAr: true } },
             },
           })
         : Promise.resolve([]),
