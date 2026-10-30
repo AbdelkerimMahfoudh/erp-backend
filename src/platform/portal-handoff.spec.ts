@@ -27,7 +27,7 @@ import { DELEGATABLE_PERMISSIONS, isCompanyPermission } from '../rbac/permission
 function makeWorld() {
   const intents: any[] = [];
   const sessions: any[] = [];
-  const users = new Map<string, { id: Buffer; companyId: Buffer; isActive: boolean }>();
+  const users = new Map<string, { id: Buffer; companyId: Buffer; isActive: boolean; owner?: boolean }>();
 
   const prisma: any = {
     verificationIntent: {
@@ -45,6 +45,13 @@ function makeWorld() {
     },
     user: {
       findUnique: jest.fn(async ({ where }: any) => users.get(where.id.toString('hex')) ?? null),
+    },
+    // Holding the Owner role in that company — what `issue` asks (D225: not merely the Owner's permissions).
+    userBranch: {
+      count: jest.fn(async ({ where }: any) => {
+        const u = users.get(where.userId.toString('hex'));
+        return u && u.companyId.equals(where.companyId) && u.owner !== false && where.role?.key === 'owner' ? 1 : 0;
+      }),
     },
     // `consume` runs its work inside a transaction; the fake just passes itself.
     $transaction: jest.fn(async (fn: any) => fn(prisma)),
@@ -111,6 +118,14 @@ function addOwner(world: ReturnType<typeof makeWorld>, isActive = true) {
 }
 
 describe('issuing a portal handoff', () => {
+  it('an Acting Owner — the Owner’s permissions without the Owner role — is refused, and nothing is issued (D225)', async () => {
+    const w = makeWorld();
+    const { companyId, userId } = addOwner(w);
+    w.users.get(userId.toString('hex'))!.owner = false;
+    await expect(w.service.issue(companyId, userId)).rejects.toMatchObject({ response: { code: 'owner_only' } });
+    expect(w.intentsService.issue).not.toHaveBeenCalled();
+  });
+
   it('binds the ticket to one company, one user and the portal purpose', async () => {
     const w = makeWorld();
     const { companyId, userId } = addOwner(w);

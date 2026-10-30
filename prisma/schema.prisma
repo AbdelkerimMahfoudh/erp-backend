@@ -2981,6 +2981,10 @@ enum OtpPurpose {
   /// Its own purpose so a code issued to verify a phone or a device can never
   /// confirm a deletion, and the deletion executor can insist on it.
   account_deletion
+
+  /// Appointing, changing or removing an Acting Owner (D225, 0114): the Owner's second factor, its own purpose so
+  /// no other code can confirm it and it confirms nothing else.
+  acting_owner_step_up
 }
 
 /// What an account-deletion request deletes (0084, docs/64).

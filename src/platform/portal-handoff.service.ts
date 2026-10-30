@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { OtpPurpose } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SessionsService } from '../auth/sessions.service';
@@ -74,8 +74,14 @@ export class PortalHandoffService {
    * The caller has already proved who they are with a normal mobile session;
    * this adds no authority, it only moves the authority the caller already has
    * onto one other surface.
+   *
+   * The Owner role itself, not the Owner's permissions: an Acting Owner holds
+   * `settings.manage` by delegation (D225) and must not carry it to the
+   * subscription portal, which is the Owner's alone.
    */
   async issue(companyId: Buffer, userId: Buffer): Promise<{ token: string; expiresAt: string }> {
+    const owner = await this.prisma.userBranch.count({ where: { companyId, userId, role: { key: 'owner' } } });
+    if (owner === 0) throw new ForbiddenException({ code: 'owner_only', message: 'Only the Owner opens the subscription portal.' });
     const issued = await this.intents.issue({
       companyId,
       userId,

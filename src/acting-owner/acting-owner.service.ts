@@ -6,7 +6,9 @@ import { AuditService } from '../common/audit/audit.service';
 import { HashingService } from '../common/security/hashing.service';
 import { binToUuid, isUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { ACTING_OWNER_PERMISSIONS, inForce, liveOrScheduled, overlaps } from './acting-owner-rules';
-import type { AppointActingOwnerDto, RevokeActingOwnerDto } from './dto/acting-owner.dto';
+import type { AppointActingOwnerDto, RequestActingOwnerCodeDto, RevokeActingOwnerDto } from './dto/acting-owner.dto';
+import { links } from '../notifications/notification-target';
+import { ActingOwnerStepUp, StepUpAction, StepUpChallenge } from './acting-owner-step-up';
 
 /** A start this far in the past is a clock difference, read as now; further is refused. */
 const START_TOLERANCE_MS = 5 * 60_000;
@@ -14,7 +16,9 @@ const START_TOLERANCE_MS = 5 * 60_000;
 /**
  * The temporary Acting Owner (D225, 0112). Appointing and revoking are the REAL Owner's: the routes check the Owner
  * role itself, so a delegate holding every delegated permission still cannot extend, change or pass on their own
- * appointment. The Owner confirms with their password. Every change is audited, and both people are told.
+ * appointment. The Owner confirms with their password AND a one-time code sent to their verified WhatsApp number for
+ * that very change ({@link ActingOwnerStepUp}, the account-deletion code service). Changing an appointment is removing
+ * it and appointing again — each confirmed the same way. Every change is audited, and both people are told.
  */
 @Injectable()
 export class ActingOwnerService {
@@ -23,7 +27,31 @@ export class ActingOwnerService {
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
     private readonly hashing: HashingService,
+    private readonly stepUp: ActingOwnerStepUp,
   ) {}
+
+  /** The change a code is asked for, or confirmed against — the same normalisation both ways. */
+  private changeOf(dto: { delegateId?: string; startsAt?: string; endsAt?: string }): StepUpAction {
+    return {
+      action: 'appoint',
+      delegateId: dto.delegateId ?? '',
+      startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
+      endsAt: dto.endsAt ? new Date(dto.endsAt) : null,
+    };
+  }
+
+  /**
+   * The step-up's first half: the Owner's password, then a code to their verified WhatsApp number for exactly this
+   * appointment or removal. Nothing is changed here.
+   */
+  async requestCode(dto: RequestActingOwnerCodeDto): Promise<StepUpChallenge> {
+    const ownerId = this.tenant.requireUserId();
+    const companyId = this.tenant.companyId();
+    await this.assertRealOwner(ownerId);
+    await this.confirmPassword(ownerId, dto.currentPassword);
+    const change: StepUpAction = dto.action === 'revoke' ? { action: 'revoke', delegationId: dto.delegationId ?? '' } : this.changeOf(dto);
+    return this.stepUp.request({ companyId, userId: ownerId, change, language: dto.language });
+  }
 
   /** The actor holds the Owner role — not merely the Owner's permissions, which an Acting Owner has too. */
   private async assertRealOwner(userId: Buffer): Promise<void> {
@@ -89,6 +117,8 @@ export class ActingOwnerService {
     if (!isUuid(dto.delegateId)) throw new NotFoundException('User not found');
     const delegateId = uuidToBin(dto.delegateId);
     if (delegateId.equals(ownerId)) throw new BadRequestException({ code: 'delegate_self', message: 'Choose somebody other than yourself.' });
+    // The second factor, for this very appointment — "until revoked" included. Spent once, whatever follows.
+    const stepUpChallengeId = await this.stepUp.confirm({ companyId, userId: ownerId, change: this.changeOf(dto), challengeId: dto.challengeId, code: dto.code });
 
     const created = await this.db.$transaction(async (tx) => {
       // One appointment at a time per business: a parallel request waits here, then sees this one.
@@ -113,7 +143,13 @@ export class ActingOwnerService {
         entityType: 'ActingOwnerDelegation',
         entityId: id,
         action: 'create',
-        after: { delegateId: binToUuid(delegateId), startsAt: startsAt.toISOString(), endsAt: endsAt?.toISOString() ?? null, permissions: ACTING_OWNER_PERMISSIONS.length },
+        after: {
+          delegateId: binToUuid(delegateId),
+          startsAt: startsAt.toISOString(),
+          endsAt: endsAt?.toISOString() ?? null,
+          permissions: ACTING_OWNER_PERMISSIONS.length,
+          stepUp: { method: 'password+whatsapp_code', challengeId: stepUpChallengeId },
+        },
         reason: 'Acting Owner appointed',
       });
       await this.tellBoth(tx, companyId, ownerId, delegateId, 'acting_owner.appointed', { delegationId: binToUuid(id), startsAt: startsAt.toISOString(), endsAt: endsAt?.toISOString() ?? null });
@@ -129,6 +165,13 @@ export class ActingOwnerService {
     await this.confirmPassword(ownerId, dto.currentPassword);
     if (!isUuid(idStr)) throw new NotFoundException('Appointment not found');
     const id = uuidToBin(idStr);
+    const stepUpChallengeId = await this.stepUp.confirm({
+      companyId,
+      userId: ownerId,
+      change: { action: 'revoke', delegationId: idStr },
+      challengeId: dto.challengeId,
+      code: dto.code,
+    });
     const now = new Date();
     const updated = await this.db.$transaction(async (tx) => {
       const moved = await tx.actingOwnerDelegation.updateMany({ where: { id, companyId, revokedAt: null }, data: { revokedAt: now, revokedByUserId: ownerId } });
@@ -140,7 +183,7 @@ export class ActingOwnerService {
         entityId: id,
         action: 'status_change',
         before: { revokedAt: null },
-        after: { revokedAt: now.toISOString() },
+        after: { revokedAt: now.toISOString(), stepUp: { method: 'password+whatsapp_code', challengeId: stepUpChallengeId } },
         reason: 'Acting Owner removed',
       });
       await this.tellBoth(tx, companyId, ownerId, row.delegateUserId, 'acting_owner.revoked', { delegationId: idStr });
@@ -170,6 +213,7 @@ export class ActingOwnerService {
           actorUserId: ownerId,
           title: type === 'acting_owner.appointed' ? 'Acting Owner appointed' : 'Acting Owner removed',
           dedupeKey: `${type}:${payload.delegationId}`,
+          actionLink: links.actingOwner(),
           payload: { ...payload, delegateId: binToUuid(delegateId), ownerId: binToUuid(ownerId) },
           isRead: false,
         },

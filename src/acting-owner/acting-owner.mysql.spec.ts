@@ -28,6 +28,7 @@ const apps: PrismaClient[] = [];
 let seq = 0;
 const tag = () => `${Date.now().toString(36)}${seq++}`.toUpperCase().slice(-10);
 const PASSWORD = 'owner-password';
+const CODE = { challengeId: '00000000-0000-7000-8000-000000000000', code: '123456' };
 const hashing = { verify: async (_h: string, p: string) => p === PASSWORD, verifyDummy: async () => false };
 
 async function world() {
@@ -62,7 +63,9 @@ function serviceOn(client: PrismaClient, w: Awaited<ReturnType<typeof world>>, a
     recordTx: (tx: Prisma.TransactionClient, e: { entityType: string; entityId: Buffer; action: string; after?: object; before?: object; reason?: string }) =>
       tx.auditLog.create({ data: { companyId: w.companyId, userId: actor, entityType: e.entityType, entityId: e.entityId, action: e.action as never, before: e.before ?? Prisma.JsonNull, after: e.after ?? Prisma.JsonNull, reason: e.reason ?? null } }),
   };
-  return new ActingOwnerService(client as never, { companyId: () => w.companyId, requireUserId: () => actor } as never, audit as never, hashing as never);
+  // The WhatsApp step-up has its own spec (acting-owner-step-up.spec.ts, on the real OtpService); here it always passes.
+  const stepUp = { confirm: async () => '00000000-0000-7000-8000-000000000000' };
+  return new ActingOwnerService(client as never, { companyId: () => w.companyId, requireUserId: () => actor } as never, audit as never, hashing as never, stepUp as never);
 }
 
 run('the Acting Owner on real MySQL', () => {
@@ -76,8 +79,8 @@ run('the Acting Owner on real MySQL', () => {
   it('two appointments at once: one is made, the other is refused as overlapping', async () => {
     const w = await world();
     const results = await Promise.allSettled([
-      serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.manager), currentPassword: PASSWORD }),
-      serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.employee), currentPassword: PASSWORD }),
+      serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.manager), currentPassword: PASSWORD, ...CODE }),
+      serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.employee), currentPassword: PASSWORD, ...CODE }),
     ]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect((results.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason.response).toMatchObject({ code: 'delegation_overlap' });
@@ -99,36 +102,36 @@ run('the Acting Owner on real MySQL', () => {
     // A fresh appointment, then revoked by the Owner: gone on the next request.
     const w = await world();
     const client = app();
-    const made = await serviceOn(client, w, w.owner).appoint({ delegateId: binToUuid(w.employee), currentPassword: PASSWORD });
+    const made = await serviceOn(client, w, w.owner).appoint({ delegateId: binToUuid(w.employee), currentPassword: PASSWORD, ...CODE });
     expect((await access.getEffectivePermissions(w.employee, w.store)).has('user.manage')).toBe(true);
-    await serviceOn(client, w, w.owner).revoke(made.id, { currentPassword: PASSWORD });
+    await serviceOn(client, w, w.owner).revoke(made.id, { currentPassword: PASSWORD, ...CODE });
     expect((await access.getEffectivePermissions(w.employee, w.store)).has('user.manage')).toBe(false);
   });
 
   it('an appointment is never deleted or rewritten, even by the application account', async () => {
     const w = await world();
-    const made = await serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.manager), endsAt: new Date(Date.now() + 3_600_000).toISOString(), currentPassword: PASSWORD });
+    const made = await serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.manager), endsAt: new Date(Date.now() + 3_600_000).toISOString(), currentPassword: PASSWORD, ...CODE });
     const client = app();
     const id = Buffer.from(made.id.replace(/-/g, ''), 'hex');
     await expect(client.actingOwnerDelegation.delete({ where: { id } })).rejects.toThrow(/never deleted/);
     await expect(client.actingOwnerDelegation.update({ where: { id }, data: { endsAt: new Date(Date.now() + 90 * 86_400_000) } })).rejects.toThrow(/not changed/);
-    await serviceOn(client, w, w.owner).revoke(made.id, { currentPassword: PASSWORD });
+    await serviceOn(client, w, w.owner).revoke(made.id, { currentPassword: PASSWORD, ...CODE });
     await expect(client.actingOwnerDelegation.update({ where: { id }, data: { revokedAt: new Date() } })).rejects.toThrow(/already revoked/);
   });
 
   it('the delegate cannot appoint anyone nor remove their own appointment; a wrong password changes nothing', async () => {
     const w = await world();
-    const made = await serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.manager), currentPassword: PASSWORD });
+    const made = await serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.manager), currentPassword: PASSWORD, ...CODE });
     const asDelegate = serviceOn(app(), w, w.manager);
-    await expect(asDelegate.appoint({ delegateId: binToUuid(w.employee), currentPassword: PASSWORD })).rejects.toMatchObject({ response: { code: 'owner_only' } });
-    await expect(asDelegate.revoke(made.id, { currentPassword: PASSWORD })).rejects.toMatchObject({ response: { code: 'owner_only' } });
-    await expect(serviceOn(app(), w, w.owner).revoke(made.id, { currentPassword: 'wrong' })).rejects.toMatchObject({ response: { code: 'password_incorrect' } });
+    await expect(asDelegate.appoint({ delegateId: binToUuid(w.employee), currentPassword: PASSWORD, ...CODE })).rejects.toMatchObject({ response: { code: 'owner_only' } });
+    await expect(asDelegate.revoke(made.id, { currentPassword: PASSWORD, ...CODE })).rejects.toMatchObject({ response: { code: 'owner_only' } });
+    await expect(serviceOn(app(), w, w.owner).revoke(made.id, { currentPassword: 'wrong', ...CODE })).rejects.toMatchObject({ response: { code: 'password_incorrect' } });
     expect((await root.actingOwnerDelegation.findFirstOrThrow({ where: { companyId: w.companyId } })).revokedAt).toBeNull();
   });
 
   it('audits the appointment in the same transaction, and the database will not let the audit be edited', async () => {
     const w = await world();
-    const made = await serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.manager), currentPassword: PASSWORD });
+    const made = await serviceOn(app(), w, w.owner).appoint({ delegateId: binToUuid(w.manager), currentPassword: PASSWORD, ...CODE });
     const audit = await root.auditLog.findFirstOrThrow({ where: { entityType: 'ActingOwnerDelegation' , companyId: w.companyId }, select: { id: true, reason: true } });
     expect(audit.reason).toBe('Acting Owner appointed');
     await expect(app().auditLog.update({ where: { id: audit.id }, data: { reason: 'nothing happened' } })).rejects.toThrow();
