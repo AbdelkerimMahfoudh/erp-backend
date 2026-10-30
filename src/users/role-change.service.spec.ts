@@ -2,6 +2,10 @@ import { BadRequestException, ConflictException, ForbiddenException } from '@nes
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { REQUIRE_PERMISSIONS_KEY } from '../rbac/require-permissions.decorator';
+import { ROLE_PERMISSIONS } from '../rbac/role-permissions';
+import { ACTING_OWNER_PERMISSIONS } from '../acting-owner/acting-owner-rules';
+import { delegatedKeysKeptBy } from '../rbac/permission-scope';
+import { planPushes } from '../notifications/push-dispatcher';
 import { uuidToBin } from '../common/utils/uuid.util';
 import { ChangeRoleDto } from './dto/change-role.dto';
 import { RoleChangeService, planRoleChange } from './role-change.service';
@@ -78,7 +82,7 @@ function harness(opts: { assignments: { branchId: Buffer; role: string }[]; seat
   const tenant = { requireUserId: () => OWNER, companyId: () => COMPANY };
   const audit = { recordTx: async (_tx: unknown, p: unknown) => void audits.push(p) };
   const entitlement = { maySeat: jest.fn(async () => ({ allowed: opts.seats ?? true, full: opts.seats === false ? [uid(12)] : [] })) };
-  return { service: new RoleChangeService(db as never, tenant as never, audit as never, entitlement as never), rows, audits, notes, entitlement, grants };
+  return { service: new RoleChangeService(db as never, tenant as never, audit as never, entitlement as never), rows, audits, notes, entitlement, grants, tx };
 }
 
 describe('changing a role', () => {
@@ -128,5 +132,128 @@ describe('changing a role', () => {
     const h = harness({ assignments: [{ branchId: A, role: 'store_manager' }] });
     await expect(h.service.change(uid(3), { role: 'store_manager', branchIds: [uid(99)] })).rejects.toBeInstanceOf(BadRequestException);
     await expect(h.service.change(uid(3), { role: 'store_manager', branchIds: [uid(10)] })).rejects.toMatchObject({ response: { code: 'role_unchanged' } });
+  });
+});
+
+describe('who may change a role, and what it changes (D225)', () => {
+  it('only the Owner holds user.manage; a Manager or an Employee cannot reach the route at all', () => {
+    expect(ROLE_PERMISSIONS.owner).toContain('user.manage');
+    expect(ROLE_PERMISSIONS.store_manager).not.toContain('user.manage');
+    expect(ROLE_PERMISSIONS.store_employee).not.toContain('user.manage');
+  });
+
+  it('an Acting Owner holds it by delegation (Employee ↔ Manager is delegated), still never the Owner’s own role', async () => {
+    expect(ACTING_OWNER_PERMISSIONS).toContain('user.manage');
+    // Whoever calls, a person who is Owner in any store is refused, and nothing is written.
+    const h = harness({ assignments: [{ branchId: A, role: 'owner' }, { branchId: B, role: 'store_manager' }] });
+    await expect(h.service.change(uid(3), { role: 'store_employee', branchIds: [uid(11)] })).rejects.toMatchObject({ response: { code: 'owner_role_fixed' } });
+    expect(h.rows.map((r) => r.role)).toEqual(['owner', 'store_manager']);
+    expect(h.audits).toEqual([]);
+    expect(h.notes).toEqual([]);
+  });
+
+  it('nobody can be made Owner here, whoever asks', () => {
+    const errors = (body: object) => validateSync(plainToInstance(ChangeRoleDto, body)).map((e) => e.property);
+    expect(errors({ role: 'owner', branchIds: [uid(10)] })).toEqual(['role']);
+    expect(errors({ role: 'acting_owner', branchIds: [uid(10)] })).toEqual(['role']);
+  });
+
+  it('a promotion keeps the person’s other stores exactly as they were', async () => {
+    const h = harness({ assignments: [{ branchId: A, role: 'store_employee' }, { branchId: B, role: 'store_employee' }] });
+    const out = await h.service.change(uid(3), { role: 'store_manager', branchIds: [uid(10)] });
+    expect(out.assignments).toEqual([
+      { branchId: uid(10), role: 'store_manager' },
+      { branchId: uid(11), role: 'store_employee' },
+    ]);
+    expect(out.grantsRemoved).toBe(0);
+  });
+
+  it('a demotion prunes, in the same transaction, the delegated grants an Employee may not hold (price editing), keeping the rest', async () => {
+    const h = harness({ assignments: [{ branchId: A, role: 'store_manager' }] });
+    const deleteMany = jest.spyOn(h.tx.userBranchPermission, 'deleteMany');
+    await h.service.change(uid(3), { role: 'store_employee', branchIds: [uid(10)] });
+    const kept = delegatedKeysKeptBy('store_employee');
+    expect(kept).not.toContain('price.edit');
+    expect(deleteMany).toHaveBeenCalledWith({ where: { userBranchId: id(200), permission: { key: { notIn: kept } } } });
+  });
+
+  it('the audit row carries every store before and after, and why', async () => {
+    const h = harness({ assignments: [{ branchId: A, role: 'store_manager' }, { branchId: B, role: 'store_manager' }] });
+    await h.service.change(uid(3), { role: 'store_employee', branchIds: [uid(10)] });
+    expect(h.audits).toHaveLength(1);
+    expect(h.audits[0]).toEqual({
+      entityType: 'User',
+      entityId: PERSON,
+      action: 'update',
+      before: { assignments: [{ branchId: uid(10), role: 'store_manager' }, { branchId: uid(11), role: 'store_manager' }] },
+      after: { assignments: [{ branchId: uid(10), role: 'store_employee' }], grantsRemoved: 2 },
+      reason: 'Made an Employee',
+    });
+  });
+
+  it('the person is told (staff.role_changed); the one who made the change is never pushed their own action', async () => {
+    const h = harness({ assignments: [{ branchId: A, role: 'store_employee' }] });
+    await h.service.change(uid(3), { role: 'store_manager', branchIds: [uid(10)] });
+    expect(h.notes).toHaveLength(1);
+    const note = h.notes[0];
+    expect(note).toMatchObject({ targetUserId: PERSON, actorUserId: OWNER, type: 'staff.role_changed', payload: { role: 'store_manager', branchIds: [uid(10)], actorId: uid(2) } });
+    const pushes = planPushes({
+      notification: { id: note.id, type: note.type, actionLink: null, actorUserId: note.actorUserId },
+      storeName: null,
+      // Even if the actor were in the audience, at the most talkative level: the self-action rule removes them.
+      audience: [
+        { userId: PERSON, level: 'important' },
+        { userId: OWNER, level: 'all' },
+      ],
+      devices: [
+        { id: id(300), userId: PERSON, token: 'person-phone', locale: 'fr' },
+        { id: id(301), userId: OWNER, token: 'owner-phone', locale: 'en' },
+      ],
+    });
+    expect(pushes.map((p) => p.token)).toEqual(['person-phone']);
+  });
+
+  it('re-applying the same role is a no-op: refused as unchanged, with no write, no audit and no notification', async () => {
+    const h = harness({ assignments: [{ branchId: A, role: 'store_manager' }, { branchId: B, role: 'store_employee' }] });
+    const writes = [
+      jest.spyOn(h.tx.userBranch, 'update'),
+      jest.spyOn(h.tx.userBranch, 'create'),
+      jest.spyOn(h.tx.userBranch, 'delete'),
+      jest.spyOn(h.tx.userBranchPermission, 'deleteMany'),
+    ];
+    await expect(h.service.change(uid(3), { role: 'store_manager', branchIds: [uid(10)] })).rejects.toMatchObject({ response: { code: 'role_unchanged' } });
+    for (const w of writes) expect(w).not.toHaveBeenCalled();
+    expect(h.audits).toEqual([]);
+    expect(h.notes).toEqual([]);
+    expect(h.entitlement.maySeat).not.toHaveBeenCalled();
+  });
+
+  it('concurrent changes serialise: the person’s row is locked FOR UPDATE before anything is read', async () => {
+    const h = harness({ assignments: [{ branchId: A, role: 'store_employee' }] });
+    const order: string[] = [];
+    let lockedId: unknown;
+    h.tx.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      order.push(`lock:${strings.join('?')}`);
+      lockedId = values[0];
+      return [];
+    };
+    const read = h.tx.user.findFirst;
+    h.tx.user.findFirst = async (...args: unknown[]) => {
+      order.push('read');
+      return read(...args);
+    };
+    await h.service.change(uid(3), { role: 'store_manager', branchIds: [uid(10)] });
+    expect(order[0]).toBe('lock:SELECT id FROM users WHERE id = ? FOR UPDATE');
+    expect(order[1]).toBe('read');
+    expect(lockedId).toEqual(PERSON);
+  });
+
+  it('two changes in a row behave as the lock makes them: the second reads what the first set and changes nothing', async () => {
+    const h = harness({ assignments: [{ branchId: A, role: 'store_employee' }] });
+    await h.service.change(uid(3), { role: 'store_manager', branchIds: [uid(10)] });
+    await expect(h.service.change(uid(3), { role: 'store_manager', branchIds: [uid(10)] })).rejects.toMatchObject({ response: { code: 'role_unchanged' } });
+    expect(h.rows).toHaveLength(1);
+    expect(h.audits).toHaveLength(1);
+    expect(h.notes).toHaveLength(1);
   });
 });

@@ -248,6 +248,21 @@ describe('a grant takes effect on the NEXT request', () => {
     grants.length = 0;
     expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('price.edit')).toBe(false);
   });
+
+  it('an Employee ↔ Manager change (D225) is in force on the next request, both ways, in that store only', async () => {
+    const inA: Assignment = { id: UB_A, branchId: BRANCH_A, roleId: ROLE_EMPLOYEE, roleKey: 'store_employee' };
+    const svc = makeService([inA, { ...employeeInB }]);
+    expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('settings.manage')).toBe(false);
+
+    // Promotion: the role row changes; the very next resolution reads it.
+    Object.assign(inA, { roleId: ROLE_MANAGER, roleKey: 'store_manager' });
+    expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('settings.manage')).toBe(true);
+    expect((await svc.getEffectivePermissions(USER, BRANCH_B)).has('settings.manage')).toBe(false);
+
+    // Demotion: gone on the next request.
+    Object.assign(inA, { roleId: ROLE_EMPLOYEE, roleKey: 'store_employee' });
+    expect((await svc.getEffectivePermissions(USER, BRANCH_A)).has('settings.manage')).toBe(false);
+  });
 });
 
 describe('a temporary Acting Owner (D225)', () => {
