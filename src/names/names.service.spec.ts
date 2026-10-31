@@ -22,11 +22,16 @@ function harness() {
   stores.set(OTHER_COMPANY_STORE, { companyId: uuidToBin('00000000-0000-7000-8000-000000000009'), name: 'Theirs', nameAr: null });
   const audits: any[] = [];
   const key = (id: Buffer) => [...stores.keys()].find((k) => uuidToBin(k).equals(id));
-  const db = {
+  // The company row is read through the unscoped client, by id: `companies` has no company_id to scope on.
+  const system = {
     company: {
-      findUnique: async () => ({ ...company }),
-      update: async ({ data }: any) => Object.assign(company, data) && { ...company },
+      findUnique: jest.fn(async ({ where }: any) => (where.id.equals(COMPANY) ? { ...company } : null)),
+      update: jest.fn(async ({ where, data }: any) => (where.id.equals(COMPANY) ? Object.assign(company, data) && { ...company } : null)),
     },
+  };
+  const db = {
+    // The tenant client adds company_id to every where; on `companies` Prisma refuses it (2026-10-31).
+    company: new Proxy({}, { get: () => () => { throw new Error('Invalid query parameters'); } }),
     branch: {
       findMany: async () => [{ id: uuidToBin(STORE), name: stores.get(STORE)!.name, nameAr: stores.get(STORE)!.nameAr }],
       findFirst: async ({ where }: any) => {
@@ -43,8 +48,19 @@ function harness() {
   };
   const tenant = { companyId: () => COMPANY };
   const audit = { record: jest.fn(async (p: unknown) => void audits.push(p)) };
-  return { service: new NamesService(db as never, tenant as never, audit as never), company, stores, audits };
+  return { service: new NamesService(db as never, system as never, tenant as never, audit as never), company, stores, audits, system };
 }
+
+describe('the business row', () => {
+  it('is read and renamed by its own id, never through the tenant client that cannot scope it', async () => {
+    const { service, system } = harness();
+    await expect(service.overview()).resolves.toMatchObject({ business: { name: 'Boutique Kiffa' } });
+    await service.renameBusiness(plainToInstance(UpdateNamesDto, { nameAr: 'بوتيك كيفة' }));
+    for (const call of [...system.company.findUnique.mock.calls, ...system.company.update.mock.calls]) {
+      expect((call[0] as any).where.id.equals(COMPANY)).toBe(true);
+    }
+  });
+});
 
 describe('who may rename', () => {
   const required = (method: keyof NamesController) =>

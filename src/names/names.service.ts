@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
+import { PrismaService } from '../prisma/prisma.service';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { AuditService } from '../common/audit/audit.service';
 import { bilingual } from '../common/bilingual-name';
@@ -32,6 +33,12 @@ function pick(row: Named, keys: string[]): Record<string, string | null> {
 export class NamesService {
   constructor(
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
+    /**
+     * The company row itself. `companies` has no `company_id`, so the tenant client — which adds one to every
+     * `where` — made Prisma refuse both reads and writes of the business name ("Invalid query parameters", seen
+     * on the owner's iPhone, 2026-10-31). It is still this tenant's row only: every query names `companyId`.
+     */
+    private readonly system: PrismaService,
     private readonly tenant: TenantContext,
     private readonly audit: AuditService,
   ) {}
@@ -40,7 +47,7 @@ export class NamesService {
   async overview() {
     const companyId = this.tenant.companyId();
     const [company, branches] = await Promise.all([
-      this.db.company.findUnique({ where: { id: companyId }, select: { name: true, nameAr: true } }),
+      this.system.company.findUnique({ where: { id: companyId }, select: { name: true, nameAr: true } }),
       this.db.branch.findMany({
         where: { companyId, isActive: true },
         select: { id: true, name: true, nameAr: true },
@@ -56,13 +63,13 @@ export class NamesService {
 
   async renameBusiness(dto: UpdateNamesDto) {
     const companyId = this.tenant.companyId();
-    const before = await this.db.company.findUnique({ where: { id: companyId }, select: { name: true, nameAr: true } });
+    const before = await this.system.company.findUnique({ where: { id: companyId }, select: { name: true, nameAr: true } });
     if (!before) throw new NotFoundException('Business not found');
     const data = changes(before, dto);
     const keys = Object.keys(data);
     if (keys.length === 0) throw new BadRequestException('No changes were provided');
     const was = pick(before, keys);
-    const after = await this.db.company.update({ where: { id: companyId }, data, select: { name: true, nameAr: true } });
+    const after = await this.system.company.update({ where: { id: companyId }, data, select: { name: true, nameAr: true } });
     await this.audit.record({
       entityType: 'Company',
       entityId: companyId,
