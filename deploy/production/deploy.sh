@@ -36,6 +36,11 @@ fi
 [ -z "$(git -C "$REPO" status --porcelain)" ] || die "the checkout has uncommitted changes. Deploy a commit."
 [ -s "$API_ENV_FILE" ] || die "missing $API_ENV_FILE — copy .env.production.example there (mode 600) and fill it in."
 
+# D227: production starts only with a fresh backup proven off this host (backup-offhost.sh, from the operator's machine).
+if [ "$DEPLOY_PROFILE" = production ]; then
+  BACKUP_DIR="$BACKUP_DIR" "$PRODUCTION_DIR/backup-receipt.sh" check
+fi
+
 COMMIT=$(git -C "$REPO" rev-parse HEAD)
 APP_COMMIT=$COMMIT
 APP_BUILT_AT=${APP_BUILT_AT:-$(date -u +%FT%TZ)}
