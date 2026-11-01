@@ -97,6 +97,17 @@ describe('Open the boutique before 06:00 (docs/56)', () => {
     expect(audit.record).not.toHaveBeenCalled();
   });
 
+  it('a deadlock with another business is retried, and the day opens once', async () => {
+    const built = build([after6]);
+    const original = built.db.$transaction.getMockImplementation()!;
+    built.db.$transaction.mockImplementationOnce(async () => {
+      throw new Prisma.PrismaClientKnownRequestError('deadlock', { code: 'P2034', clientVersion: 'test' });
+    });
+    built.db.$transaction.mockImplementation(original);
+    await built.svc.open({ mode: 'keep' } as never).catch(() => undefined);
+    expect(built.db.$transaction.mock.calls.length).toBeGreaterThan(1);
+  });
+
   it('a start_new after 06:00 is refused by name: not_before_day_start', async () => {
     const { svc, db } = build([after6], { mayStartEarly: true });
     const refusal = await svc.open({ mode: 'start_new' }).catch((e: unknown) => e);

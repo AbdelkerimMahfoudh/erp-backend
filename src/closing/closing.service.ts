@@ -19,6 +19,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { RollupService } from '../analytics/rollup.service';
 import { periodFigures } from '../analytics/period-figures';
 import { expensesTodayOf } from './expenses-today';
+import { withLockRetry } from '../common/db/deadlock-retry';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
 import { dayWindow, isDateString, localParts, localTimeOf, shiftDate } from '../common/business-day';
 import { BusinessDayService, dateKey, dateValue } from '../common/business-day/business-day.service';
@@ -2181,7 +2182,9 @@ export class ClosingService {
     this.requireKeepable(verdict, position);
     const cashAmount = decidedCash(verdict, position);
     try {
-      await this.db.$transaction(async (tx) => {
+      // Two businesses opening at one moment can deadlock on shared index pages (seen in CI, 2026-11-01): the whole
+      // transaction is safe to run again, and its dedupe key still refuses a real second opening.
+      await withLockRetry(() => this.db.$transaction(async (tx) => {
         if (leaving) await this.startNextDayEarlyTx(tx, { companyId, branchId, userId, now, day: leaving });
         await tx.closingEvent.create({
           data: {
@@ -2212,7 +2215,7 @@ export class ClosingService {
           after: { businessDate: day, at: now.toISOString(), nth: n, ...(choice ? { choice, calendarDate: described.localDate } : {}) },
           branchId,
         });
-      });
+      }));
     } catch (e) {
       if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
       // The same attempt twice at once: the first opened the boutique; this one answers with it.
