@@ -3,7 +3,6 @@ import { CatalogService } from '../../catalog/catalog.service';
 import { ConnectionsService } from '../../consignment/connections.service';
 import { ConsignmentsService } from '../../consignment/consignments.service';
 import { DiscountApprovalsService } from '../../discount-approvals/discount-approvals.service';
-import { GoalsService } from '../../goals/goals.service';
 import { LoansService } from '../../loans/loans.service';
 import { TransfersService } from '../../transfers/transfers.service';
 
@@ -54,8 +53,6 @@ describe('a malformed record id is not found, never a crash', () => {
           expectedVersion: 0,
         }),
     ],
-    ['goals: reading one', () => bare(GoalsService, { tenant, db: { goal: untouched() } }).get(BAD)],
-    ['goals: archiving one', () => bare(GoalsService, { tenant, db: { goal: untouched() } }).archive(BAD, { reason: 'typo' })],
     ['loans: reading one', () => bare(LoansService, { tenant, prisma: { loan: untouched() } }).get(BAD)],
     ['loans: acting on one', () => bare(LoansService, { tenant, prisma: { loan: untouched() } }).mine(BAD)],
     ['transfers: reading one', () => bare(TransfersService, { tenant, db: { stockTransfer: untouched() } }).getById(BAD)],

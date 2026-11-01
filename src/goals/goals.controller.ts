@@ -1,57 +1,50 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
-import { RequirePermissions } from '../rbac/require-permissions.decorator';
-import { GoalsService } from './goals.service';
-import { CreateGoalDto } from './dto/create-goal.dto';
-import { ArchiveGoalDto } from './dto/archive-goal.dto';
+import { Controller, Get, GoneException, Headers, NotFoundException, Post } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 
+/** What an old build shows if someone tries to set a goal, in the language it asked for. */
+const UNAVAILABLE: Record<'en' | 'fr' | 'ar', string> = {
+  en: 'This feature is currently unavailable.',
+  fr: 'Cette fonctionnalité est actuellement indisponible.',
+  ar: 'هذه الميزة غير متاحة حاليًا.',
+};
+
+function unavailable(acceptLanguage?: string): GoneException {
+  const language = (['ar', 'fr'] as const).find((l) => acceptLanguage?.toLowerCase().startsWith(l)) ?? 'en';
+  return new GoneException({ code: 'feature_unavailable', message: UNAVAILABLE[language] });
+}
+
+/**
+ * DEPRECATED AND DORMANT (D227): Goals are out of the product. These routes exist only for builds up to 1.0.0 (3), whose
+ * Goals screen calls them; remove them once those builds are gone.
+ *
+ * Nothing here reads or writes the `goals` table, which is kept untouched for a possible redesign. Nothing is evaluated,
+ * no notification is sent, and no figure anywhere depends on a goal.
+ */
 @ApiTags('goals')
 @ApiBearerAuth()
 @Controller({ version: '1' })
 export class GoalsController {
-  constructor(private readonly goals: GoalsService) {}
-
-  /**
-   * Reading goals is deliberately **not** gated.
-   *
-   * An employee with a personal target has to be able to see it, and
-   * `report.view` — the obvious-looking gate — would hand them the shop's
-   * profit reporting at the same time. That is exactly the split `cost.view`
-   * and `report.view` already keep apart.
-   *
-   * The service scopes what comes back: everybody sees the branch's and the
-   * company's targets, and a personal target is visible only to the person it
-   * is set for and to whoever may manage goals.
-   */
   @Get('goals')
-  @ApiQuery({ name: 'includeArchived', required: false, type: Boolean })
-  @ApiOperation({ summary: 'Goals in view, each with progress computed now' })
-  list(@Query('includeArchived') includeArchived?: string) {
-    return this.goals.list(includeArchived === 'true');
+  @ApiOperation({ deprecated: true, summary: 'Dormant: always an empty list' })
+  list() {
+    return [];
   }
 
   @Get('goals/:id')
-  @ApiOperation({ summary: 'One goal and its progress' })
-  get(@Param('id') id: string) {
-    return this.goals.get(id);
+  @ApiOperation({ deprecated: true, summary: 'Dormant: no goal is ever found' })
+  get() {
+    throw new NotFoundException({ code: 'feature_unavailable', message: UNAVAILABLE.en });
   }
 
-  /** Setting a target is deciding what the shop is aiming at. */
   @Post('goals')
-  @RequirePermissions('goal.manage')
-  @ApiOperation({ summary: 'Set a goal for the company, a branch, or a person' })
-  create(@Body() dto: CreateGoalDto) {
-    return this.goals.create(dto);
+  @ApiOperation({ deprecated: true, summary: 'Dormant: refused with feature_unavailable' })
+  create(@Headers('accept-language') language?: string) {
+    throw unavailable(language);
   }
 
-  /**
-   * Archive, never delete. A goal that was missed is a fact about the shop, and
-   * removing it would make every past period look met.
-   */
   @Post('goals/:id/archive')
-  @RequirePermissions('goal.manage')
-  @ApiOperation({ summary: 'Archive a goal, with a reason' })
-  archive(@Param('id') id: string, @Body() dto: ArchiveGoalDto) {
-    return this.goals.archive(id, dto);
+  @ApiOperation({ deprecated: true, summary: 'Dormant: refused with feature_unavailable' })
+  archive(@Headers('accept-language') language?: string) {
+    throw unavailable(language);
   }
 }

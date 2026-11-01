@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sumFigures, type PeriodFigures } from './period-figures';
 import { profit } from './accounting-rules';
-import { ADJUSTMENT, METRIC_COLUMN, type GoalMetricKey } from '../goals/goal-progress';
+import { ADJUSTMENT, METRIC_COLUMN, type GoalMetricKey } from './net-rollup-expression.testing';
 import { expensesTodayOf } from '../closing/expenses-today';
 import { stripFinancialFields } from '../common/interceptors/financial-fields';
 import { assembleReport, reportVersion, type ReportInputs } from '../closing/closing-report';
@@ -164,11 +164,6 @@ describe('cost and profit stay hidden without cost.view (D35)', () => {
     expect(out).toEqual({ comparison: { netRevenue: { previous: 1 } }, block: { revenue: 6 } });
   });
 
-  it('a profit goal is neither listed for nor readable by someone who may not see cost', () => {
-    const goals = readFileSync(join(__dirname, '..', 'goals', 'goals.service.ts'), 'utf8');
-    expect(goals).toMatch(/\.\.\.\(seesCost \? \{\} : \{ metric: \{ not: 'gross_profit' as const \} \}\)/);
-    expect(goals).toMatch(/if \(goal\.metric === 'gross_profit' && !\(await this\.seesCost\(\)\)\) throw new NotFoundException/);
-  });
 });
 
 describe('the Daily closing shows the defined count, and every stored close stays valid', () => {

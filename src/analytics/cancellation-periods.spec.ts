@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildChannels, type MovementRow } from '../closing/channels';
 import { assembleReport, reportInvariants, type ReportInputs } from '../closing/closing-report';
-import { ADJUSTMENT, METRIC_COLUMN, type GoalMetricKey } from '../goals/goal-progress';
+import { ADJUSTMENT, METRIC_COLUMN, type GoalMetricKey } from './net-rollup-expression.testing';
 import { profit } from './accounting-rules';
 
 /**
@@ -248,7 +248,6 @@ describe('the keys the SQL uses (source pins)', () => {
   const code = (...p: string[]) =>
     readFileSync(join(SRC, ...p), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   const rollup = code('analytics', 'rollup.service.ts');
-  const goals = code('goals', 'goals.service.ts');
   const dashboard = code('analytics', 'dashboard.service.ts');
   const queries = code('closing', 'closing-report.queries.ts');
   const migration = readFileSync(join(SRC, '..', 'prisma', 'migrations', '0080_cancelled_units', 'migration.sql'), 'utf8');
@@ -270,12 +269,6 @@ describe('the keys the SQL uses (source pins)', () => {
     expect(dashboard).toMatch(/const saleWhere = \{ branchId, isReversed: false, businessDate: dateRange \};/);
   });
 
-  it('a personal goal keys the sale on its business date and the cancellation on its approval date', () => {
-    expect(goals).toMatch(/s\.business_date BETWEEN \$\{from\} AND \$\{to\}\) AS sold/);
-    expect(goals).toMatch(/fc\.correction_date BETWEEN \$\{from\} AND \$\{to\}\) AS cancelled/);
-    expect(goals).toMatch(/return round2\(num\(rows\[0\]\?\.sold as number\) - num\(rows\[0\]\?\.cancelled as number\) - num\(rows\[0\]\?\.returned as number\)\);/);
-    expect(goals).not.toMatch(/DATE\(s\.sold_at\)/);
-  });
 
   it('Home and the Daily closing count a cancellation on the day it was approved', () => {
     // Home reads the one dated definition (docs/53 D29), which keys a cancellation on its approval date.

@@ -154,7 +154,7 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    * an employee with a personal target must be able to see it, and gating it on
    * `report.view` would hand them the shop's profit reporting at the same time.
    */
-  { key: 'goal.manage',         label: 'Set and archive goals' },
+  { key: 'goal.manage',         label: 'Set and archive goals' }, // Dormant (D227): no route requires it,
   /**
    * Milestone H — inter-store consignment. Narrow keys, because consignment
    * mixes operational acts (hand a phone over, confirm one arrived) with

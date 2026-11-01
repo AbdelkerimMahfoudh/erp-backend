@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ADJUSTMENT, METRIC_COLUMN, type GoalMetricKey } from '../goals/goal-progress';
+import { ADJUSTMENT, METRIC_COLUMN, type GoalMetricKey } from './net-rollup-expression.testing';
 import { localDateOf, localTimeOf } from '../common/business-day';
 
 /**
@@ -51,11 +51,6 @@ describe('the units-sold goal takes returned units off on their approval day (D3
     expect(goal('sales_count', [d1, d2, d3])).toBe(1);
   });
 
-  it('a personal goal takes the seller\'s returned units the same way, one unit per return', () => {
-    const goals = read('goals', 'goals.service.ts');
-    expect(goals).toContain("units_sold: 'COUNT(*)',\n};");
-    expect(goals).toMatch(/FROM return_reversals rr\s+JOIN sales s ON s\.id = rr\.sale_id\s+WHERE rr\.company_id = \$\{companyId\} AND \$\{person\}\s+AND rr\.approval_date BETWEEN \$\{from\} AND \$\{to\}/);
-  });
 
   it('a return is one identified unit, so returns_count is the units returned', () => {
     const returns = read('returns', 'returns.service.ts');
