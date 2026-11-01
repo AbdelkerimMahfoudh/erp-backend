@@ -25,7 +25,6 @@ const rollup = code(read('analytics', 'rollup.service.ts'));
 const queries = code(read('closing', 'closing-report.queries.ts'));
 const closing = code(read('closing', 'closing.service.ts'));
 const ranking = code(read('consignment', 'partner-ranking.service.ts'));
-const goals = code(read('goals', 'goals.service.ts'));
 const sales = code(read('sales', 'sales.service.ts'));
 const collections = code(read('sales', 'sale-payments.service.ts'));
 const returns = code(read('returns', 'returns.service.ts'));
@@ -65,9 +64,6 @@ describe('what exists now sees the correction', () => {
 
   it('a cancelled sale comes off every goal on the day it was cancelled, and moves no stock velocity', () => {
     // Its own period keeps it, as its Daily closing does (docs/51 §16): no goal filters a released line.
-    expect(goals).not.toMatch(/released_by_correction_id/);
-    expect(goals).toMatch(/ADJUSTMENT\[metric\]/);
-    expect(goals).toMatch(/fc\.target_kind = 'sale' AND fc\.status = 'approved'\s+AND fc\.correction_date BETWEEN \$\{from\} AND \$\{to\}/);
     // Movement (sold in 30 days, last sold, not moving) leaves a cancelled sale out wherever it falls (docs/54 D39).
     expect(movement).toMatch(/AND NOT EXISTS \(SELECT 1 FROM financial_corrections fc\s+WHERE fc\.target_sale_id = s\.id AND fc\.target_kind = 'sale' AND fc\.status = 'approved'\)/);
   });

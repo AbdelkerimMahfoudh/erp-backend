@@ -222,6 +222,7 @@ describe('my operational WhatsApp consent, in the account', () => {
         findUnique: jest.fn(async () => ({ ...me })),
         update: jest.fn(async ({ data }: { data: { phone: string; phoneVerifiedAt: Date } }) => Object.assign(me, data)),
       },
+      userBranch: { findFirst: async () => null },
       otpChallenge: { findUnique: jest.fn(async () => ({ candidatePhone: NEW_NUMBER })) },
       authSession: { updateMany: jest.fn(async () => ({ count: 0 })) },
     });

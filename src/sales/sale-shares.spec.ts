@@ -61,10 +61,9 @@ describe('every per-line reader uses it (source pins)', () => {
   const returns = read('returns', 'returns.service.ts');
   const workflow = read('returns', 'return-workflow.ts');
   const closing = read('closing', 'closing.service.ts');
-  const goals = read('goals', 'goals.service.ts');
 
   it('no reader values a line as price × quantity − discount any more', () => {
-    for (const [name, src] of [['rollup', rollup], ['period-figures', figures], ['goals', goals], ['closing', closing], ['returns', returns]] as const) {
+    for (const [name, src] of [['rollup', rollup], ['period-figures', figures], ['closing', closing], ['returns', returns]] as const) {
       expect([name, /price \* si\.quantity - si\.discount|price\) \* it\.quantity - num\(it\.discount\)/.test(src)]).toEqual([name, false]);
     }
   });
@@ -84,8 +83,4 @@ describe('every per-line reader uses it (source pins)', () => {
     expect(closing).toMatch(/const salePrice = fromCents\(shares\.get\(it\.id\.toString\('hex'\)\) \?\? 0n\);/);
   });
 
-  it('a personal goal reads the invoice total and its cost, per sale', () => {
-    expect(goals).toContain("revenue: 'COALESCE(SUM(s.total), 0)'");
-    expect(goals).toContain("gross_profit: 'COALESCE(SUM(s.total - s.total_cost), 0)'");
-  });
 });

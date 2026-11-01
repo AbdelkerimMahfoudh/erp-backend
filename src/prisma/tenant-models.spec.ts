@@ -40,6 +40,8 @@ const PLATFORM_REALM = [
   // only by the acquisition code on the unscoped client.
   'Promoter',
   'PromoterCode',
+  // A public registration held before anything exists (D227): no company to name.
+  'RegistrationHold',
 ];
 
 /**
