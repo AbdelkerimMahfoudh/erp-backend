@@ -42,6 +42,7 @@ export interface ProductionGuardEnv {
   JWT_ACCESS_SECRET?: string;
   APP_DATABASE_URL?: string;
   WHATSAPP_CHANNEL?: string;
+  WHATSAPP_WEBHOOK?: string;
   WHATSAPP_API_BASE_URL?: string;
   WHATSAPP_PHONE_NUMBER_ID?: string;
   WHATSAPP_ACCESS_TOKEN?: string;
@@ -63,6 +64,8 @@ export interface ProductionGuardEnv {
   RESEND_API_BASE_URL?: string;
   WHATSAPP_APP_SECRET?: string;
   WHATSAPP_WEBHOOK_VERIFY_TOKEN?: string;
+  WHATSAPP_APP_SECRET_FILE?: string;
+  WHATSAPP_WEBHOOK_VERIFY_TOKEN_FILE?: string;
   WHATSAPP_MODE?: string;
   WHATSAPP_TEST_RECIPIENTS?: string;
   WHATSAPP_LIVE_SENDS?: string;
@@ -358,6 +361,18 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
       'WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN must be set together (the delivery webhook), or neither.',
     );
   }
+  /*
+   * Receiving and sending are two switches: WHATSAPP_WEBHOOK opens the webhook (Meta's subscription check and signed
+   * status deliveries, which never send), WHATSAPP_CHANNEL opens sending. The webhook can be registered and proven
+   * while sending stays off; sending needs the webhook, since only a signed delivery report proves delivery.
+   */
+  const webhook = (env.WHATSAPP_WEBHOOK ?? 'disabled').trim().toLowerCase();
+  if (webhook === 'enabled' && !(hasSecret && hasVerify)) {
+    problems.push('WHATSAPP_WEBHOOK=enabled needs WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN: the routes stay closed without them.');
+  }
+  if ((channel === 'cloud' || channel === 'cloud-api') && webhook !== 'enabled') {
+    problems.push('WHATSAPP_CHANNEL sends but WHATSAPP_WEBHOOK is not "enabled": without the signed delivery reports no delivery can be proven.');
+  }
 
   /*
    * The legacy static-key provisioning route (docs/48 risk R5). The route
@@ -407,6 +422,9 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
   if ((env.APP_ENV ?? '').trim().toLowerCase() === 'production') {
     if (email === 'smtp' && !env.SMTP_PASSWORD_FILE?.trim()) {
       problems.push('APP_ENV=production reads the SMTP key from a file: set SMTP_PASSWORD_FILE (a read-only secret), not SMTP_PASSWORD.');
+    }
+    if ((env.WHATSAPP_WEBHOOK ?? '').trim().toLowerCase() === 'enabled' && (!env.WHATSAPP_APP_SECRET_FILE?.trim() || !env.WHATSAPP_WEBHOOK_VERIFY_TOKEN_FILE?.trim())) {
+      problems.push('APP_ENV=production reads the webhook secrets from files: set WHATSAPP_APP_SECRET_FILE and WHATSAPP_WEBHOOK_VERIFY_TOKEN_FILE.');
     }
     if (env.STAGING_CONTACT_OUTBOX?.trim()) {
       problems.push('STAGING_CONTACT_OUTBOX is set in production. It is a staging setting: remove it (production never holds codes).');

@@ -209,7 +209,7 @@ describe('the request log never holds a secret, on success or failure (C16)', ()
         { provide: APP_GUARD, useClass: ThrottlerGuard },
         {
           provide: AppConfigService,
-          useValue: { whatsappWebhookVerifyToken: WEBHOOK.verifyToken, whatsappAppSecret: WEBHOOK.appSecret },
+          useValue: { whatsappWebhookEnabled: true, whatsappWebhookVerifyToken: WEBHOOK.verifyToken, whatsappAppSecret: WEBHOOK.appSecret },
         },
         { provide: PrismaService, useValue: {} },
         { provide: WhatsAppReadiness, useValue: {} },

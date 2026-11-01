@@ -174,8 +174,9 @@ export class WhatsAppWebhookController {
     private readonly worker: WhatsAppWebhookWorker,
   ) {}
 
-  /** Both settings, or the routes do not exist. */
+  /** The switch (WHATSAPP_WEBHOOK=enabled) and both settings, or the routes do not exist. Sending is not consulted. */
   private get configured(): { verifyToken: string; appSecret: string } | null {
+    if (!this.config.whatsappWebhookEnabled) return null;
     const verifyToken = this.config.whatsappWebhookVerifyToken;
     const appSecret = this.config.whatsappAppSecret;
     return verifyToken && appSecret ? { verifyToken, appSecret } : null;
@@ -194,7 +195,9 @@ export class WhatsAppWebhookController {
     if (mode !== 'subscribe' || !token || !constantTimeEqual(token, cfg.verifyToken)) {
       throw new ForbiddenException('Verification refused');
     }
-    res.status(200).type('text/plain').send(String(challenge ?? ''));
+    // Meta's challenge is a number. Anything else is not echoed: the route reflects nothing it did not expect.
+    if (!challenge || !/^\d{1,64}$/.test(challenge)) throw new ForbiddenException('Verification refused');
+    res.status(200).type('text/plain').send(challenge);
   }
 
   @Post('webhook')

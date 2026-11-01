@@ -138,7 +138,19 @@ if (email !== 'disabled' || whatsapp !== 'disabled') {
   );
 }
 
+// The webhook (receiving) has its own switch, apart from sending: Meta's subscription check and signed status reports
+// can be opened and proven while WHATSAPP_CHANNEL stays disabled. Both secrets are files, checked here by shape only.
+const webhook = val('WHATSAPP_WEBHOOK') || 'disabled';
+check(['disabled', 'enabled'].includes(webhook), 'WHATSAPP_WEBHOOK must be "disabled" or "enabled".');
+if (webhook === 'enabled') {
+  const appSecret = readSecret('WHATSAPP_APP_SECRET');
+  const verifyToken = readSecret('WHATSAPP_WEBHOOK_VERIFY_TOKEN');
+  check(appSecret.ok && verifyToken.ok, `The webhook secrets are files (WHATSAPP_APP_SECRET_FILE, WHATSAPP_WEBHOOK_VERIFY_TOKEN_FILE): ${[appSecret, verifyToken].filter((s) => !s.ok).map((s) => s.why).join('; ')}.`);
+  if (appSecret.ok) check(/^[0-9a-f]{32}$/.test(appSecret.value), `WHATSAPP_APP_SECRET must be Meta's app secret: 32 lowercase hexadecimal characters (it is ${appSecret.value.length} characters).`);
+  if (verifyToken.ok) check(verifyToken.value.length >= 32 && /^[\x21-\x7e]+$/.test(verifyToken.value), `WHATSAPP_WEBHOOK_VERIFY_TOKEN must be at least 32 printable characters without spaces (it is ${verifyToken.value.length}).`);
+}
+
 console.log(`production preflight (${profile || 'no profile'}): ${failures.length === 0 ? 'PASS' : 'FAIL'}`);
-console.log(`  API https://${host || '?'} · email ${email} · WhatsApp ${whatsapp} · CORS origins ${val('CORS_ORIGINS').split(',').filter((o) => o.trim()).length} · secrets as files ${Object.keys(keys).length + (appUrl.ok ? 1 : 0)}`);
+console.log(`  API https://${host || '?'} · email ${email} · WhatsApp ${whatsapp} (webhook ${webhook}) · CORS origins ${val('CORS_ORIGINS').split(',').filter((o) => o.trim()).length} · secrets as files ${Object.keys(keys).length + (appUrl.ok ? 1 : 0)}`);
 for (const f of failures) console.log(`  ✗ ${f}`);
 process.exit(failures.length === 0 ? 0 : 1);

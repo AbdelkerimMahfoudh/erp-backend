@@ -62,6 +62,9 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_ACCESS_TOKEN: Joi.string().allow('').default(''),
   // Delivery-status webhook: the app secret signs every delivery, the verify
   // token answers the provider's subscription check. Both or neither.
+  // The webhook's own switch, apart from sending (WHATSAPP_CHANNEL): "enabled" mounts the subscription check and the
+  // signed delivery route — receiving only, never a send — once both secrets below are set too. Default: closed.
+  WHATSAPP_WEBHOOK: Joi.string().valid('enabled', 'disabled').default('disabled'),
   WHATSAPP_APP_SECRET: Joi.string().allow('').default(''),
   WHATSAPP_WEBHOOK_VERIFY_TOKEN: Joi.string().allow('').default(''),
   WHATSAPP_SEND_TIMEOUT_MS: Joi.number().integer().min(1000).max(60_000).default(10_000),

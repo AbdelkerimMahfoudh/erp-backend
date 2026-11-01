@@ -1,0 +1,11 @@
+[Unit]
+Description=ERP off-site Borg backup to the Storage Box (docs/112)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/srv/erp-production/erp-backend/deploy/production/offsite-backup.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h

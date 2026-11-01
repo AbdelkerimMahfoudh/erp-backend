@@ -1,4 +1,4 @@
-import { ForbiddenException, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, Logger, NotFoundException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import { WhatsAppWebhookController, extractItems, extractStatuses, signatureMatches } from './whatsapp-webhook.controller';
 import { MAX_ATTEMPTS, UNKNOWN_MESSAGE_GRACE_MS, WhatsAppWebhookWorker } from './whatsapp-webhook.worker';
@@ -21,11 +21,12 @@ const KEY = 'test-messaging-hash-key-of-32-characters!';
 const sign = (raw: Buffer, secret = SECRET) => `sha256=${createHmac('sha256', secret).update(raw).digest('hex')}`;
 const hasher = { hash: (n: string) => recipientHash(n, KEY) };
 
-function harness(opts: { verifyToken?: string; appSecret?: string } = {}) {
+function harness(opts: { verifyToken?: string; appSecret?: string; webhookEnabled?: boolean } = {}) {
   const db: FakeMessagingPrisma = fakeMessagingPrisma();
   const records = new WhatsAppRecords(db as never, hasher as never);
   const readiness = { refresh: jest.fn(async () => undefined), missing: [] as string[] };
   const config = {
+    whatsappWebhookEnabled: opts.webhookEnabled ?? true,
     whatsappWebhookVerifyToken: opts.verifyToken ?? '',
     whatsappAppSecret: opts.appSecret ?? '',
     whatsappWebhookRetentionDays: 30,
@@ -60,6 +61,23 @@ describe('the subscription check', () => {
     const { controller } = harness({ verifyToken: 'v', appSecret: '' });
     const { r } = res();
     expect(() => controller.verify('subscribe', 'v', '123', r)).toThrow(NotFoundException);
+  });
+
+  it('does not exist while WHATSAPP_WEBHOOK is disabled, even with both settings', async () => {
+    const { controller } = harness({ verifyToken: 'right-token', appSecret: SECRET, webhookEnabled: false });
+    const { r } = res();
+    expect(() => controller.verify('subscribe', 'right-token', '123', r)).toThrow(NotFoundException);
+    const raw = Buffer.from('{}');
+    await expect(controller.receive({ rawBody: raw, body: {} } as never, sign(raw))).rejects.toThrow(NotFoundException);
+  });
+
+  it('echoes only a numeric challenge: anything else is refused, never reflected', () => {
+    const { controller } = harness({ verifyToken: 'right-token', appSecret: SECRET });
+    for (const challenge of [undefined, '', '<script>alert(1)</script>', '12 34', '1'.repeat(65)]) {
+      const { r, out } = res();
+      expect(() => controller.verify('subscribe', 'right-token', challenge, r)).toThrow(ForbiddenException);
+      expect(out.body).toBeUndefined();
+    }
   });
 
   it('refuses the wrong token', () => {
@@ -235,6 +253,67 @@ describe('receiving a delivery', () => {
     await deliver(h, body);
     await deliver(h, statusBody({ id: 'wamid.ok', status: 'delivered' }, { id: 'wamid.ok', status: 'read' }));
     expect(h.db.whatsAppWebhookEvent.rows.map((r) => r.dedupeKey)).toEqual(['s:wamid.ok:delivered', 's:wamid.bad:failed', 's:wamid.ok:read']);
+  });
+});
+
+describe('receiving while sending is disabled (WHATSAPP_WEBHOOK apart from WHATSAPP_CHANNEL)', () => {
+  const statusBody = { entry: [{ changes: [{ value: { statuses: [{ id: 'wamid.X', status: 'delivered', recipient_id: '22236000000' }], messages: [{ id: 'wamid.IN', from: '22236000000', type: 'text', text: { body: 'STOP' } }] } }] }] };
+
+  it('verifies, stores and works a signed delivery without any outbound call: nothing can be sent from here', async () => {
+    // The webhook has no channel at all; a call to the network would be the only way out, and none happens.
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new Error('no outbound call may happen while receiving');
+    });
+    try {
+      const { controller, worker, db } = harness({ verifyToken: 'right-token', appSecret: SECRET });
+      const { r, out } = res();
+      controller.verify('subscribe', 'right-token', '987654321', r);
+      expect(out.body).toBe('987654321');
+      const raw = Buffer.from(JSON.stringify(statusBody));
+      await expect(controller.receive({ rawBody: raw, body: statusBody } as never, sign(raw))).resolves.toEqual({ received: 2 });
+      await worker.processNow();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(JSON.stringify(db)).not.toMatch(/"direction":"outbound"|"status":"queued"/);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('refuses malformed, unsigned and mis-signed deliveries, and a retry of a good one changes nothing more', async () => {
+    const { controller, db } = harness({ verifyToken: 'right-token', appSecret: SECRET });
+    const raw = Buffer.from(JSON.stringify(statusBody));
+    await expect(controller.receive({ rawBody: undefined, body: statusBody } as never, sign(raw))).rejects.toThrow(UnauthorizedException);
+    await expect(controller.receive({ rawBody: raw, body: statusBody } as never, undefined)).rejects.toThrow(UnauthorizedException);
+    await expect(controller.receive({ rawBody: raw, body: statusBody } as never, sign(raw, 'another-secret'))).rejects.toThrow(UnauthorizedException);
+    const junk = Buffer.from('not json at all');
+    await expect(controller.receive({ rawBody: junk, body: 'not json at all' } as never, sign(junk))).resolves.toEqual({ received: 0 });
+    await controller.receive({ rawBody: raw, body: statusBody } as never, sign(raw));
+    const once = JSON.stringify(db);
+    await controller.receive({ rawBody: raw, body: statusBody } as never, sign(raw));
+    expect(JSON.stringify(db)).toBe(once);
+  });
+
+  it('never writes the app secret or the verify token to the log, on any path', async () => {
+    const lines: string[] = [];
+    const spies = (['log', 'warn', 'error', 'debug', 'verbose'] as const).map((level) =>
+      jest.spyOn(Logger.prototype, level).mockImplementation((...args: unknown[]) => void lines.push(args.map(String).join(' '))),
+    );
+    try {
+      const { controller, worker } = harness({ verifyToken: 'right-token-value', appSecret: SECRET });
+      const { r } = res();
+      expect(() => controller.verify('subscribe', 'wrong', '1', r)).toThrow(ForbiddenException);
+      const raw = Buffer.from(JSON.stringify(statusBody));
+      await expect(controller.receive({ rawBody: raw, body: statusBody } as never, 'sha256=00')).rejects.toThrow(UnauthorizedException);
+      jest.spyOn(worker, 'enqueue').mockRejectedValueOnce(new Error('database down'));
+      await expect(controller.receive({ rawBody: raw, body: statusBody } as never, sign(raw))).rejects.toThrow(ServiceUnavailableException);
+      expect(lines.length).toBeGreaterThan(0);
+      for (const line of lines) {
+        expect(line).not.toContain(SECRET);
+        expect(line).not.toContain('right-token-value');
+      }
+    } finally {
+      spies.forEach((s) => s.mockRestore());
+    }
   });
 });
 

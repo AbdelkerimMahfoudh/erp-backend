@@ -357,6 +357,7 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
         WHATSAPP_TEMPLATE_ACCOUNT_DELETION: 'erp_delete_code',
         WHATSAPP_TEMPLATE_ACCOUNT_DELETED: 'erp_deleted',
         WHATSAPP_TEMPLATE_DELIVERY_CHECK: 'erp_delivery_check',
+        WHATSAPP_WEBHOOK: 'enabled',
         WHATSAPP_APP_SECRET: 'app-secret',
         WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-token',
         OTP_PEPPER: 'a-pepper-that-is-at-least-32-characters-long',
@@ -380,6 +381,36 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
     expect(problems).toMatch(/WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN in production/);
     expect(problems).toMatch(/WHATSAPP_TEMPLATE_DELIVERY_CHECK/);
     expect(problems).toMatch(/WHATSAPP_TEMPLATE_ACCOUNT_DELETED/);
+  });
+
+  describe('receiving (WHATSAPP_WEBHOOK) apart from sending (WHATSAPP_CHANNEL)', () => {
+    const WEBHOOK = { WHATSAPP_WEBHOOK: 'enabled', WHATSAPP_APP_SECRET: 'app-secret', WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-token' };
+
+    it('accepts the webhook open while sending stays disabled', () => {
+      expect(productionConfigProblems({ ...SAFE, ...WEBHOOK, WHATSAPP_CHANNEL: 'disabled' })).toEqual([]);
+    });
+
+    it('refuses the webhook switched on without its two secrets', () => {
+      expect(productionConfigProblems({ ...SAFE, WHATSAPP_WEBHOOK: 'enabled' }).join('\n')).toMatch(/WHATSAPP_WEBHOOK=enabled needs WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN/);
+    });
+
+    it('refuses sending with the webhook closed: no delivery could be proven', () => {
+      const problems = productionConfigProblems({ ...SAFE, WHATSAPP_CHANNEL: 'cloud-api', WHATSAPP_APP_SECRET: 'app-secret', WHATSAPP_WEBHOOK_VERIFY_TOKEN: 'verify-token' }).join('\n');
+      expect(problems).toMatch(/WHATSAPP_WEBHOOK is not "enabled"/);
+    });
+
+    it('APP_ENV=production takes both webhook secrets as files only', () => {
+      const asValues = productionConfigProblems({ ...SAFE, ...WEBHOOK, APP_ENV: 'production' }).join('\n');
+      expect(asValues).toMatch(/WHATSAPP_APP_SECRET_FILE and WHATSAPP_WEBHOOK_VERIFY_TOKEN_FILE/);
+      expect(
+        productionConfigProblems({ ...SAFE, ...WEBHOOK, APP_ENV: 'production', PORTAL_ORIGIN: 'https://dukan.tsxmr.com', WHATSAPP_APP_SECRET_FILE: '/run/secrets/whatsapp_app_secret', WHATSAPP_WEBHOOK_VERIFY_TOKEN_FILE: '/run/secrets/whatsapp_webhook_verify_token' }),
+      ).toEqual([]);
+    });
+
+    it('never quotes a secret in a refusal', () => {
+      const text = productionConfigProblems({ ...SAFE, WHATSAPP_WEBHOOK: 'enabled', WHATSAPP_APP_SECRET: 'only-one-half-present', APP_ENV: 'production' }).join('\n');
+      expect(text).not.toContain('only-one-half-present');
+    });
   });
 
   it('email: development-log is refused; resend needs a key, a real sender, https and the pepper (correction phase)', () => {
@@ -406,6 +437,7 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
       ...SAFE,
       WHATSAPP_CHANNEL: 'cloud-api',
       WHATSAPP_API_BASE_URL: 'http://graph.example.test',
+WHATSAPP_WEBHOOK: 'enabled',
       WHATSAPP_PHONE_NUMBER_ID: '1',
       WHATSAPP_ACCESS_TOKEN: 't',
       WHATSAPP_TEMPLATE_AUTH_OTP: 'a',
@@ -496,6 +528,7 @@ describe("the portal's origin, for the one address the portal and subscription m
     const complete = {
       ...SAFE,
       WHATSAPP_CHANNEL: 'cloud-api',
+      WHATSAPP_WEBHOOK: 'enabled',
       WHATSAPP_PHONE_NUMBER_ID: '1234567890',
       WHATSAPP_ACCESS_TOKEN: 'EAAB-real-token',
       WHATSAPP_TEMPLATE_AUTH_OTP: 'erp_auth_code',
@@ -531,6 +564,7 @@ describe('test and live WhatsApp sending in production (D181 §4)', () => {
   const CLOUD = {
     ...SAFE,
     WHATSAPP_CHANNEL: 'cloud',
+    WHATSAPP_WEBHOOK: 'enabled',
     WHATSAPP_PHONE_NUMBER_ID: '1297799316760335',
     WHATSAPP_ACCESS_TOKEN: 'EAAG-real-token',
     WHATSAPP_TEMPLATE_AUTH_OTP: 'erp_auth_code',

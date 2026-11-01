@@ -231,6 +231,10 @@ export class AppConfigService {
   get whatsappAppSecret(): string {
     return this.get('WHATSAPP_APP_SECRET');
   }
+  /** The webhook's switch (receiving), independent of WHATSAPP_CHANNEL (sending). */
+  get whatsappWebhookEnabled(): boolean {
+    return this.get('WHATSAPP_WEBHOOK') === 'enabled';
+  }
   get whatsappWebhookVerifyToken(): string {
     return this.get('WHATSAPP_WEBHOOK_VERIFY_TOKEN');
   }
