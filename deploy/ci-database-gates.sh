@@ -113,6 +113,10 @@ echo "== 9. the 0102 real-MySQL spec (test businesses, the console's stores and 
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/platform/provisioning.mysql.spec.ts
 
+echo "== 9b. a real sale through the real API and Prisma client (the 2026-11-01 hotfix)"
+SALE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) SALE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
+  npx jest --ci src/sales/sale-http.mysql.spec.ts
+
 echo "== 9c. the D225 real-MySQL spec (Employee <-> Manager: in force on the next request, grants pruned, one change at a time), on the same disposable schema"
 ROLE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ROLE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/users/role-change.mysql.spec.ts

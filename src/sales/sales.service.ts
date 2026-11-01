@@ -1,3 +1,4 @@
+import { PrismaService } from '../prisma/prisma.service';
 import { CATEGORY_VISUAL_SELECT, categoryVisualOf } from '../categories/category-visual';
 import {
   BadRequestException,
@@ -99,6 +100,7 @@ export class SalesService {
     private readonly gate: WarningGate,
     private readonly businessDay: BusinessDayService,
     private readonly closing: ClosingService,
+    private readonly system: PrismaService,
   ) {}
 
   async createSale(dto: CreateSaleDto) {
@@ -160,6 +162,13 @@ export class SalesService {
       policy: EffectivePolicy;
       customer: { name: string; phone: string | null } | null;
     };
+    /*
+     * The business as named now, for the receipt (0111, D225). `companies` has no `company_id`, so the tenant client,
+     * which adds one to every `where`, makes Prisma refuse it ("Invalid query parameters", every sale, 2026-11-01). This
+     * client is unscoped, so it asks only for the caller's own company, by the id their session resolved to.
+     */
+    const business = await this.system.company.findUnique({ where: { id: companyId }, select: { name: true, nameAr: true } });
+
     try {
       result = await this.db.$transaction(async (tx) => {
         const prepared: PreparedLine[] = [];
@@ -437,10 +446,9 @@ export class SalesService {
           : null;
         // The business, the store and the seller as named NOW, in both scripts (0111, D225): a rename never
         // rewrites this sale's receipt.
-        const [business, store, seller] = await Promise.all([
-          tx.company.findUnique({ where: { id: companyId }, select: { name: true, nameAr: true } }),
-          tx.branch.findUnique({ where: { id: branchId }, select: { name: true, nameAr: true } }),
-          tx.user.findUnique({ where: { id: userId }, select: { name: true, nameAr: true } }),
+        const [store, seller] = await Promise.all([
+          tx.branch.findFirst({ where: { id: branchId, companyId }, select: { name: true, nameAr: true } }),
+          tx.user.findFirst({ where: { id: userId, companyId }, select: { name: true, nameAr: true } }),
         ]);
 
         await tx.sale.create({
