@@ -291,7 +291,7 @@ describe('the governed channel', () => {
 
   it('is still closed in production until delivery is proven, whatever the policy allows (D166)', async () => {
     const { channel, raw } = governed();
-    const proven = new ProvenWhatsAppChannel(channel, { isProven: false, missing: ['ar'] });
+    const proven = new ProvenWhatsAppChannel(channel, { isProven: false, missing: ['ar'], proves: () => false });
     expect(proven.isEnabled).toBe(false);
     expect(proven.accepts(TEST_NUMBER)).toBe(false);
     expect(await proven.send(otp(TEST_NUMBER))).toMatchObject({ status: 'failed', reason: 'channel_unavailable' });

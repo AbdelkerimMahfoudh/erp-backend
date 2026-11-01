@@ -91,17 +91,16 @@ export const AUTH_OTP_TEMPLATE: TemplateDefinition = {
 /**
  * The account-deletion code (docs/64).
  *
- * A UTILITY template, not an authentication one, on purpose: the approved text
- * must say what the code is for and that confirming is irreversible, and the
- * provider's authentication category allows neither. The approved copy, in all
- * three languages, is recorded in docs/64 §4.
+ * An AUTHENTICATION template: Meta approved `dukan_account_action_code` in that
+ * category, so it takes the code and its copy button only. What the code is for
+ * and that confirming is irreversible are said in the app, where it is typed.
  */
 export const ACCOUNT_DELETION_TEMPLATE: TemplateDefinition = {
   key: 'account.deletion',
   category: 'account',
   variables: ['code', 'ttlMinutes'],
   languages: ['en', 'ar', 'fr'],
-  providerKind: 'utility',
+  providerKind: 'authentication',
   use: 'essential',
   configKey: 'WHATSAPP_TEMPLATE_ACCOUNT_DELETION',
 };
@@ -159,15 +158,15 @@ export const CLOSING_RECLOSED_TEMPLATE: TemplateDefinition = {
 /**
  * The operator's delivery check (correction phase, 2026-10-12): one message per language, sent by
  * `npm run whatsapp:prove` to the operator's own number, so that a delivered status — reaching us through the
- * signed webhook — proves the account, the number, the template approvals and the webhook together. Nothing
- * personal: the variable is a short reference the operator recognises.
+ * signed webhook — proves the account, the number, the template approval and the webhook together. It goes through
+ * an approved authentication template (WHATSAPP_TEMPLATE_DELIVERY_CHECK names it), with a code that redeems nothing.
  */
 export const DELIVERY_CHECK_TEMPLATE: TemplateDefinition = {
   key: 'delivery.check',
   category: 'operational',
-  variables: ['reference'],
+  variables: ['code'],
   languages: ['en', 'ar', 'fr'],
-  providerKind: 'utility',
+  providerKind: 'authentication',
   use: 'operator',
   configKey: 'WHATSAPP_TEMPLATE_DELIVERY_CHECK',
 };

@@ -110,7 +110,8 @@ check(val('UPLOAD_DIR') === '/app/uploads', 'UPLOAD_DIR must be /app/uploads, th
 const email = val('EMAIL_CHANNEL') || 'disabled';
 const whatsapp = val('WHATSAPP_CHANNEL') || 'disabled';
 check(['disabled', 'smtp'].includes(email), 'EMAIL_CHANNEL must be "disabled" or "smtp" in production.');
-check(whatsapp === 'disabled', 'WHATSAPP_CHANNEL must be "disabled": WhatsApp opens only by a reviewed change, after its Meta configuration and delivery proofs (docs/100 §10).');
+// Opened by the owner's reviewed decision (2026-11-01, docs/112): the Cloud API, or nothing.
+check(['disabled', 'cloud'].includes(whatsapp), 'WHATSAPP_CHANNEL must be "disabled" or "cloud" (docs/112).');
 if (email === 'smtp') {
   const pw = readSecret('SMTP_PASSWORD');
   const user = readSecret('SMTP_USERNAME');

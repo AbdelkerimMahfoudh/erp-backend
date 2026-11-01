@@ -194,7 +194,7 @@ describe('WhatsApp first; email only for a recorded reason, to a verified addres
   });
 
   it('WhatsApp disabled, or closed until its delivery is proven: email, whatsapp_disabled', async () => {
-    for (const whatsapp of [new DisabledWhatsAppChannel(), new ProvenWhatsAppChannel(new TestWhatsAppChannel(), { isProven: false, missing: ['en'] })]) {
+    for (const whatsapp of [new DisabledWhatsAppChannel(), new ProvenWhatsAppChannel(new TestWhatsAppChannel(), { isProven: false, missing: ['en'], proves: () => false })]) {
       const { notice } = await fallback({ whatsapp });
       expect(notice).toMatchObject({ state: 'accepted', channel: 'email', fallbackReason: 'whatsapp_disabled' });
     }

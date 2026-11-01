@@ -3,11 +3,11 @@
 // Prove WhatsApp delivery on THIS deployment (correction phase, 2026-10-12;
 // docs/64, src/messaging/delivery-readiness.ts).
 //
-//   npm run whatsapp:prove -- --to +2223XXXXXXX     send the delivery check in en, fr and ar
+//   npm run whatsapp:prove -- --to +2223XXXXXXX --language en     send ONE delivery check, in that language
 //   npm run whatsapp:prove -- --status              what is proven, what is missing
 //
-// A production deployment sends no WhatsApp message — no sign-in code, no
-// deletion code, no invitation — until each of en, fr and ar has a DELIVERED
+// A production deployment sends no WhatsApp message in a language — no sign-in
+// code, no deletion code, no invitation — until that language has a DELIVERED
 // proof for the configured sending number. This command makes the sends (to the
 // operator's own number, with the approved `delivery.check` template); the
 // provider's signed delivery report, received by the webhook, completes each
@@ -30,7 +30,7 @@ import { config as loadEnv } from 'dotenv';
 loadEnv({ override: false });
 
 import { NestFactory } from '@nestjs/core';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { WHATSAPP_GOVERNED_CHANNEL, isCloudChannel, sendControlsFrom } from '../src/messaging/messaging.module';
@@ -83,14 +83,17 @@ async function main(): Promise<void> {
       throw new Error(`${maskDestination(to)} is not in WHATSAPP_TEST_RECIPIENTS: the proof goes only to an allowlisted number.`);
     }
 
-    console.log(`\n  Sending the delivery check to ${maskDestination(to)} in ${PROOF_LANGUAGES.join(', ')}\n`);
-    for (const language of PROOF_LANGUAGES) {
-      const reference = randomBytes(3).toString('hex').toUpperCase();
+    const language = PROOF_LANGUAGES.find((l) => l === arg('--language'));
+    if (!language) throw new Error(`Name one language: --language ${PROOF_LANGUAGES.join('|')}`);
+    console.log(`\n  Sending one delivery check to ${maskDestination(to)} in ${language}\n`);
+    {
+      // Redeems nothing: no challenge exists for it. Never printed.
+      const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
       const result = await channel.send({
         to,
         template: DELIVERY_CHECK_TEMPLATE.key,
         language,
-        variables: { reference },
+        variables: { code },
         idempotencyKey: `proof:${language}:${randomUUID()}`,
       });
       await prisma.messagingDeliveryProof.create({
@@ -109,7 +112,7 @@ async function main(): Promise<void> {
       });
       console.log(
         result.status === 'accepted'
-          ? `  ${language}: accepted (reference ${reference}) — the proof completes when the signed delivery report arrives`
+          ? `  ${language}: accepted — the proof completes when the signed delivery report arrives`
           : `  ${language}: NOT accepted — ${result.reason}: ${result.detail}`,
       );
     }

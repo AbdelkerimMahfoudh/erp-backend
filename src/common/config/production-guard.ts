@@ -269,12 +269,10 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
           'delivery report can prove delivery, and without the proof the channel stays closed.',
       );
     }
-    if (!env.WHATSAPP_TEMPLATE_DELIVERY_CHECK?.trim() || !env.WHATSAPP_TEMPLATE_ACCOUNT_DELETED?.trim()) {
-      problems.push(
-        'WHATSAPP_CHANNEL=cloud-api needs the approved template names WHATSAPP_TEMPLATE_DELIVERY_CHECK (the operator\'s ' +
-          'delivery proof) and WHATSAPP_TEMPLATE_ACCOUNT_DELETED (the deletion completion notice).',
-      );
+    if (!env.WHATSAPP_TEMPLATE_DELIVERY_CHECK?.trim()) {
+      problems.push("WHATSAPP_CHANNEL=cloud-api needs the approved template name WHATSAPP_TEMPLATE_DELIVERY_CHECK (the operator's delivery proof).");
     }
+    // The deletion completion notice (WHATSAPP_TEMPLATE_ACCOUNT_DELETED) has no approved template yet: it is not sent.
     // The portal and subscription templates (WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS and the seven lifecycle ones) are
     // deliberately NOT required: without one, WhatsApp cannot carry that message, the recorded email fallback is tried
     // (a verified email only), the status says so honestly, and the Owner can still start the trial on the portal.

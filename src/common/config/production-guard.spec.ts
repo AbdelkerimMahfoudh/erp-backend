@@ -368,7 +368,7 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
     ).toEqual([]);
   });
 
-  it('refuses cloud-api without the signed webhook or the proof and completion templates: delivery could never be proven (correction phase)', () => {
+  it('refuses cloud-api without the signed webhook or the proof template: delivery could never be proven (correction phase)', () => {
     const problems = productionConfigProblems({
       ...SAFE,
       WHATSAPP_CHANNEL: 'cloud-api',
@@ -380,7 +380,6 @@ describe('the WhatsApp channel in production (docs/48 control 19, docs/64)', () 
     }).join('\n');
     expect(problems).toMatch(/WHATSAPP_APP_SECRET and WHATSAPP_WEBHOOK_VERIFY_TOKEN in production/);
     expect(problems).toMatch(/WHATSAPP_TEMPLATE_DELIVERY_CHECK/);
-    expect(problems).toMatch(/WHATSAPP_TEMPLATE_ACCOUNT_DELETED/);
   });
 
   describe('receiving (WHATSAPP_WEBHOOK) apart from sending (WHATSAPP_CHANNEL)', () => {

@@ -107,6 +107,7 @@ export function sendControlsFrom(config: AppConfigService): WhatsAppSendControls
     phoneNumberId: config.whatsappPhoneNumberId,
     maxPerSecond: config.whatsappMaxSendsPerSecond,
     recipientMinIntervalMs: config.whatsappRecipientMinIntervalMs,
+    portfolioRecipientLimit: config.whatsappPortfolioRecipientLimit,
   };
 }
 

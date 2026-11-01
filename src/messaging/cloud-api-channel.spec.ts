@@ -88,7 +88,7 @@ describe('the request the provider receives', () => {
     expect(JSON.stringify(body.template.components)).not.toContain('"5"');
   });
 
-  it('fills a utility template with its declared variables in order', async () => {
+  it('fills the account-deletion code as the authentication template Meta approved: the code and its copy button', async () => {
     const { calls, fetchImpl } = fakeFetch(() => json(200, { messages: [{ id: 'wamid.3' }] }));
     await new CloudApiWhatsAppChannel(config({ fetchImpl })).send({
       ...otp,
@@ -101,13 +101,8 @@ describe('the request the provider receives', () => {
     expect(body.template.name).toBe('erp_delete_code');
     expect(body.template.language).toEqual({ code: 'ar' });
     expect(body.template.components).toEqual([
-      {
-        type: 'body',
-        parameters: [
-          { type: 'text', text: '111222' },
-          { type: 'text', text: '10' },
-        ],
-      },
+      { type: 'body', parameters: [{ type: 'text', text: '111222' }] },
+      { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: '111222' }] },
     ]);
   });
 

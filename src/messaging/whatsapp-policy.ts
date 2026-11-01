@@ -33,7 +33,14 @@ export interface WhatsAppSendControls {
   phoneNumberId: string;
   maxPerSecond: number;
   recipientMinIntervalMs: number;
+  /**
+   * The most unique recipients this number may reach in a rolling 24 hours, kept below Meta's own ceiling (250 while
+   * the business is unverified). A number already reached in the window costs nothing more. Absent: no guard.
+   */
+  portfolioRecipientLimit?: number;
 }
+
+const PORTFOLIO_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const E164 = /^\+[1-9]\d{7,14}$/;
 
@@ -154,6 +161,10 @@ const UNDELIVERABLE = 131026;
 export class GovernedWhatsAppChannel implements WhatsAppChannel {
   private readonly logger = new Logger(GovernedWhatsAppChannel.name);
   private readonly pacer: SendPacer;
+  /** Recipients being sent to right now: not yet in the records, already counted. One API instance (docs/98). */
+  private readonly inFlight = new Map<string, number>();
+  /** Check and reservation run one at a time, so two sends cannot both take the last place. */
+  private reservations: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly inner: WhatsAppChannel,
@@ -214,6 +225,14 @@ export class GovernedWhatsAppChannel implements WhatsAppChannel {
       return this.failed('temporary', detail);
     }
 
+    const place = await this.reservePlace(message.to);
+    if (place !== 'ok') {
+      const detail = place === 'full' ? 'The rolling 24-hour recipient limit is reached' : 'Message records are unavailable';
+      if (place === 'full') this.logger.warn(`WhatsApp send held (${message.template}): the rolling 24-hour recipient limit is reached`);
+      await this.record(message, template, { status: 'failed', reason: 'temporary', detail, provider: this.name }, true);
+      return this.failed('temporary', detail);
+    }
+
     let result: DeliveryResult;
     try {
       result = await this.inner.send(message);
@@ -221,10 +240,44 @@ export class GovernedWhatsAppChannel implements WhatsAppChannel {
       result = { status: 'failed', reason: 'temporary', detail: 'Channel raised an unexpected error', provider: this.name };
     }
     await this.record(message, template, result, false);
+    this.releasePlace(message.to);
     if (result.status === 'failed' && result.providerCode === UNDELIVERABLE) {
       await this.records.markUndeliverable(message.to).catch(() => undefined);
     }
     return result;
+  }
+
+  /**
+   * A place for this recipient in the rolling window, or why not. Fails closed: without the records nothing can be
+   * counted, so nothing is sent. Unique recipients are counted, as the provider counts them; one already reached in the
+   * window, or being sent to now, takes no new place.
+   */
+  private reservePlace(to: E164): Promise<'ok' | 'full' | 'unavailable'> {
+    const limit = this.controls.portfolioRecipientLimit;
+    if (limit === undefined) return Promise.resolve('ok');
+    const turn = this.reservations.then(async () => {
+      try {
+        const since = new Date(Date.now() - PORTFOLIO_WINDOW_MS);
+        const known = this.inFlight.has(to) || (await this.records.recipientReachedSince(to, since));
+        if (!known) {
+          const reached = await this.records.uniqueRecipientsSince(this.controls.phoneNumberId, since);
+          if (reached + this.inFlight.size >= limit) return 'full' as const;
+        }
+        this.inFlight.set(to, (this.inFlight.get(to) ?? 0) + 1);
+        return 'ok' as const;
+      } catch {
+        return 'unavailable' as const;
+      }
+    });
+    this.reservations = turn;
+    return turn;
+  }
+
+  private releasePlace(to: E164): void {
+    if (this.controls.portfolioRecipientLimit === undefined) return;
+    const left = (this.inFlight.get(to) ?? 1) - 1;
+    if (left > 0) this.inFlight.set(to, left);
+    else this.inFlight.delete(to);
   }
 
   /** Recorded after the fact: a record that cannot be written never turns a sent message into a failure. */

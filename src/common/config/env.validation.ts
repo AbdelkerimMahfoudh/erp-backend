@@ -52,6 +52,8 @@ export const envValidationSchema = Joi.object({
   // The Meta app's id (not a secret): the live-mode credential check asks the provider about the token with it.
   WHATSAPP_APP_ID: Joi.string().allow('').pattern(/^\d*$/).default(''),
   WHATSAPP_MAX_SENDS_PER_SECOND: Joi.number().integer().min(1).max(80).default(20),
+  // Unique recipients per rolling 24 hours, below Meta's ceiling of 250 for an unverified business (headroom for how Meta counts).
+  WHATSAPP_PORTFOLIO_RECIPIENT_LIMIT: Joi.number().integer().min(1).max(240).default(200),
   WHATSAPP_RECIPIENT_MIN_INTERVAL_MS: Joi.number().integer().min(0).max(60_000).default(1000),
   WHATSAPP_WEBHOOK_RETENTION_DAYS: Joi.number().integer().min(8).max(365).default(30),
   WHATSAPP_API_BASE_URL: Joi.string().uri({ scheme: ['https', 'http'] }).default('https://graph.facebook.com'),

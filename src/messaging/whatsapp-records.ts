@@ -149,6 +149,9 @@ export interface StatusOutcome {
   recipientHash: string | null;
 }
 
+/** The statuses of a message the provider took: what counts towards its rolling recipient limit. */
+const REACHED = ['accepted', 'sent', 'delivered', 'read'] as const;
+
 @Injectable()
 export class WhatsAppRecords {
   constructor(
@@ -235,6 +238,25 @@ export class WhatsAppRecords {
     if (now.getTime() - pending.createdAt.getTime() >= PENDING_CONSENT_TTL_MS) return false;
     const concluded = await db.whatsAppConsent.findFirst({ where: { pendingId: pending.id }, select: { event: true } });
     return concluded === null;
+  }
+
+  /** How many different numbers this sending number's messages reached (the provider accepted them) since then. */
+  async uniqueRecipientsSince(phoneNumberId: string, since: Date): Promise<number> {
+    const rows = await this.prisma.whatsAppMessage.findMany({
+      where: { phoneNumberId: phoneNumberId.slice(0, 40), createdAt: { gte: since }, status: { in: [...REACHED] } },
+      distinct: ['recipientHash'],
+      select: { recipientHash: true },
+    });
+    return rows.length;
+  }
+
+  /** Whether this number was already reached since then: it takes no new place in the rolling limit. */
+  async recipientReachedSince(to: string, since: Date): Promise<boolean> {
+    const row = await this.prisma.whatsAppMessage.findFirst({
+      where: { recipientHash: this.hasher.hash(to), createdAt: { gte: since }, status: { in: [...REACHED] } },
+      select: { id: true },
+    });
+    return row !== null;
   }
 
   async messageExists(idempotencyKey: string): Promise<boolean> {

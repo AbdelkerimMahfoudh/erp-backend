@@ -14,6 +14,7 @@ import type { DeliveryResult, MessageLanguage, WhatsAppChannel, WhatsAppMessage 
  *  - the delivery webhook is reachable and its signatures verify (the "delivered" status reached us through the
  *    signed webhook — it is the only thing that can set `delivered_at`).
  *
+ * A language opens on its own proof: an unproven language stays closed and says so, and nothing is substituted for it.
  * The proof is a row per language in `messaging_delivery_proofs`, written by `npm run whatsapp:prove` and completed
  * by the webhook. Nothing here is an attestation an operator can type into a variable.
  */
@@ -59,7 +60,11 @@ export class WhatsAppReadiness implements OnModuleInit {
   }
 
   get isProven(): boolean {
-    return this.missing.length === 0;
+    return this.delivered.size > 0;
+  }
+
+  proves(language: MessageLanguage): boolean {
+    return this.delivered.has(language);
   }
 }
 
@@ -71,7 +76,7 @@ export class WhatsAppReadiness implements OnModuleInit {
 export class ProvenWhatsAppChannel implements WhatsAppChannel {
   constructor(
     private readonly inner: WhatsAppChannel,
-    private readonly readiness: Pick<WhatsAppReadiness, 'isProven' | 'missing'>,
+    private readonly readiness: Pick<WhatsAppReadiness, 'isProven' | 'missing' | 'proves'>,
   ) {}
 
   get name(): string {
@@ -87,11 +92,11 @@ export class ProvenWhatsAppChannel implements WhatsAppChannel {
   }
 
   async send(message: WhatsAppMessage): Promise<DeliveryResult> {
-    if (!this.readiness.isProven) {
+    if (!this.readiness.proves(message.language)) {
       return {
         status: 'failed',
         reason: 'channel_unavailable',
-        detail: `WhatsApp delivery is not proven for this deployment (missing: ${this.readiness.missing.join(', ')})`,
+        detail: `WhatsApp delivery is not proven for this deployment in this language (missing: ${this.readiness.missing.join(', ')})`,
         provider: this.inner.name,
       };
     }

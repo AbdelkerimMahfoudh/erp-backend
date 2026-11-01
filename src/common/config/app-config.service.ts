@@ -93,6 +93,9 @@ export class AppConfigService {
   get whatsappMaxSendsPerSecond(): number {
     return this.get('WHATSAPP_MAX_SENDS_PER_SECOND');
   }
+  get whatsappPortfolioRecipientLimit(): number {
+    return this.get('WHATSAPP_PORTFOLIO_RECIPIENT_LIMIT');
+  }
   get whatsappRecipientMinIntervalMs(): number {
     return this.get('WHATSAPP_RECIPIENT_MIN_INTERVAL_MS');
   }
