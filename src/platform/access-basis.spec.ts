@@ -28,7 +28,9 @@ describe('why an administrator-created business has access (D227)', () => {
   });
 
   it('a grant names its reason and duration, and asks for no payment', () => {
-    expect(problems({ kind: 'grant' })).toEqual(['days', 'reason']);
+    expect(problems({ kind: 'grant' })).toEqual(['reason']);
+    expect(refusal(() => parseBasis({ kind: 'grant', reason: 'pilot shop' } as AccessBasisDto, false, NOW))).toBe('grant_days_required');
+    expect(parseBasis({ kind: 'grant', reason: 'pilot shop' } as AccessBasisDto, false, NOW, { store: true }).kind).toBe('grant');
     expect(problems(GRANT)).toEqual([]);
     expect(parseBasis(GRANT, false, NOW)).toEqual({ kind: 'grant', days: 30, reason: 'pilot shop' });
   });

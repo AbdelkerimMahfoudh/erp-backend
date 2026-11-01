@@ -682,7 +682,7 @@ export class SeatAllocationService {
    */
   async grantStore(
     companyId: Buffer,
-    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string; by: string },
+    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string; by: string; untilRenewal?: boolean },
   ): Promise<{ allocation: SeatAllocationView; created: boolean }> {
     const sub = await this.subscriptionOf(companyId);
     const name = (input.name ?? '').trim();
@@ -698,13 +698,18 @@ export class SeatAllocationService {
     const outcome = await this.prisma.$transaction(async (tx) => {
       await lockSubscription(tx, companyId);
       const company = await tx.company.findUnique({ where: { id: companyId }, select: { isTest: true, isActive: true, closedAt: true } });
-      if (!company?.isTest) {
+      // D227: a customer's store may be granted only free until the renewal of a period in force.
+      const freePeriod = input.untilRenewal ? await this.billing.runningPeriodId(companyId, tx) : null;
+      if (input.untilRenewal && !company?.isTest && !freePeriod) {
+        throw new ConflictException({ code: 'no_running_period', message: 'This business has no paid period running to grant a store within.' });
+      }
+      if (!company?.isTest && !input.untilRenewal) {
         throw new ConflictException({
           code: 'test_business_only',
           message: 'Only a test business has a store opened under its grant. A customer asks for a store and pays for it.',
         });
       }
-      if (!company.isActive || company.closedAt) {
+      if (!company || !company.isActive || company.closedAt) {
         throw new ConflictException({ code: 'business_closed', message: 'This business is closed.' });
       }
       const now = this.clock.now();
@@ -717,7 +722,7 @@ export class SeatAllocationService {
         locked.isComplimentary &&
         locked.complimentaryUntil !== null &&
         locked.complimentaryUntil.getTime() > now.getTime();
-      if (!inForce) {
+      if (!inForce && !(input.untilRenewal && !company?.isTest && locked?.status === 'activated')) {
         throw new ConflictException({
           code: 'grant_required',
           message: 'Give this test business an administrative grant first: its stores open under that grant.',
@@ -733,6 +738,13 @@ export class SeatAllocationService {
         throw new ConflictException({ code: 'store_name_in_use', message: 'A store with that name already exists.' });
       }
 
+      // The priced request this grant answers is withdrawn: one store, one record.
+      if (input.untilRenewal) {
+        await tx.seatAllocation.updateMany({
+          where: { companyId, kind: 'store', label: name, status: 'pending_payment' },
+          data: { status: 'released', reason: 'Withdrawn: granted free until renewal.' },
+        });
+      }
       const id = newUuidV7Bin();
       await tx.seatAllocation.create({
         data: {
@@ -749,6 +761,7 @@ export class SeatAllocationService {
           confirmedBy: actor,
           confirmedAt: now,
           reason: `Opened under the administrative grant: ${reason}`.slice(0, 500),
+          freeUntilPeriodId: freePeriod?.id ?? null,
         },
       });
       const branchId = await this.openStoreTx(tx, {

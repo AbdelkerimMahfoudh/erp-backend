@@ -399,6 +399,14 @@ const PINNED: { at: string; count?: number; why: string }[] = [
     why: 'The open activity requests of each store, for the options shown (kind = activity). An activity row is never scheduled.',
   },
   {
+    at: 'src/billing/billing.service.ts BillingService.freeStoresOf = granted',
+    why: 'Only a store granted free until renewal names a period (D227). A scheduled request has no branch and no such mark.',
+  },
+  {
+    at: 'src/platform/seat-allocation.service.ts SeatAllocationService.grantStore = pending_payment',
+    why: 'The priced request a free grant answers is withdrawn (D227). A scheduled request is already paid for, so it is left alone.',
+  },
+  {
     at: 'src/platform/seat-allocation.service.ts SeatAllocationService.grantStore = granted',
     why: 'The store already opened under a test business’s grant, for a retry with the same name (D217). It is granted and has its branch; a scheduled request has neither, and a test business is never paid for, so it never has one.',
   },

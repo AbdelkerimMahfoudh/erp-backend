@@ -970,7 +970,7 @@ export class PlatformController {
   private async applyBasis(companyId: string, basis: ParsedBasis, reason: string, ctx: { admin: PlatformAdminIdentity; ip?: string }): Promise<boolean> {
     try {
       if (basis.kind === 'grant') {
-        await this.lifecycle.activateByGrant(companyId, { days: basis.days, reason: basis.reason }, ctx);
+        await this.lifecycle.activateByGrant(companyId, { days: basis.days!, reason: basis.reason }, ctx);
       } else {
         await this.lifecycle.recordPayment(
           companyId,

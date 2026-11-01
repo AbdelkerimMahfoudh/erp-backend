@@ -334,10 +334,21 @@ export class ProvisioningService {
           amount: result.allocation.monthlyAmount,
         });
       }
-      const basis = parseBasis(input.access, false, new Date());
+      const basis = parseBasis(input.access, false, new Date(), { store: true });
       if (basis.kind !== 'payment') {
-        // The owner decides what a no-payment grant means for a customer's store at renewal (docs/113).
-        throw new ConflictException({ code: 'store_grant_not_decided', message: 'A no-payment grant for a customer\u2019s store is not available yet.' });
+        // D227: free until the renewal of the period in force, then billed like any store. The period is the duration.
+        const granted = await this.seats.grantStore(companyId, { name: input.name, nameAr: input.nameAr, activity: input.activity, reason: basis.reason, by, untilRenewal: true });
+        await this.audit.record({
+          admin: ctx.admin,
+          action: 'business.store_grant',
+          targetType: 'Company',
+          targetId: companyId,
+          targetLabel: company.name,
+          reason: basis.reason,
+          after: { store: granted.allocation.label, status: granted.allocation.status, monthlyAmount: 0, until: 'renewal', outcome: 'applied' },
+          ip: ctx.ip ?? null,
+        });
+        return { mode: 'opened' as const, ...granted };
       }
       const paid = await this.seats.confirmPayment(
         uuidToBin(result.allocation.id),

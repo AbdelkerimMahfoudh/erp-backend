@@ -45,6 +45,7 @@ function processOn(client: PrismaClient) {
   const seats = new SeatAllocationService(db, audit, billing, clock, { recordTx: async () => undefined } as never);
   const provisioning = new ProvisioningService(db, { customerActivationOpen: false } as never, audit, seats);
   return {
+    billing,
     registration: new RegistrationService(db, new HashingService(), clock),
     lifecycle: new SubscriptionLifecycleService(db, audit, billing, clock),
     invitations: new OwnerInvitationService(db, new HashingService(), { revokeAll: async () => 0 } as never, audit),
@@ -160,6 +161,30 @@ run('test businesses and provisioning on real MySQL (0102)', () => {
     await expect(a.provisioning.openStore(shop.companyId, { name: 'Annex', reason: 'asked by phone' }, CTX)).rejects.toMatchObject({ response: { code: 'access_basis_required' } });
     const shopId = Buffer.from(shop.companyId.replace(/-/g, ''), 'hex');
     expect(await root.branch.count({ where: { companyId: shopId } })).toBe(1);
+  });
+
+  it('a store granted free until renewal: open at once, never assessed in this period, billed by the next (D227)', async () => {
+    const shop = await consoleBusiness(a, false);
+    const id = Buffer.from(shop.companyId.replace(/-/g, ''), 'hex');
+    await a.lifecycle.approve(shop.companyId, { months: 1, reason: 'paid' }, CTX);
+    const before = await root.billingPeriod.findFirstOrThrow({ where: { companyId: id } });
+
+    const opened = await a.provisioning.openStore(shop.companyId, { name: 'Gift', reason: 'pilot', access: { kind: 'grant', reason: 'goodwill' } }, CTX);
+    expect(opened).toMatchObject({ mode: 'opened', allocation: { status: 'granted', monthlyAmount: 0 } });
+    expect(await root.branch.count({ where: { companyId: id } })).toBe(2);
+
+    // The moment a later assessment would have charged it.
+    await a.billing.assessNow(id);
+    const after = await root.billingPeriod.findFirstOrThrow({ where: { companyId: id } });
+    expect(Number(after.assessedTotal)).toBe(Number(before.assessedTotal));
+    const row = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, label: 'Gift', status: 'granted' } });
+    expect(row.freeUntilPeriodId?.equals(before.id)).toBe(true);
+
+    // Another period does not match the mark: renewal bills it.
+    await root.seatAllocation.update({ where: { id: row.id }, data: { freeUntilPeriodId: Buffer.alloc(16, 9) } });
+    await a.billing.assessNow(id);
+    const billed = await root.billingPeriod.findFirstOrThrow({ where: { companyId: id } });
+    expect(Number(billed.assessedTotal)).toBeGreaterThan(Number(before.assessedTotal));
   });
 
   it('serialises two administrators changing one business’s test status: one applies, the other finds it done', async () => {

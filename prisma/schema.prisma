@@ -4774,6 +4774,8 @@ model SeatAllocation {
   replacesBranchId    Bytes? @map("replaces_branch_id") @db.Binary(16)
   replacementCredit   Int?   @map("replacement_credit") @db.UnsignedInt
   replacementPeriodId Bytes? @map("replacement_period_id") @db.Binary(16)
+  /// A store granted free until renewal (D227, 0117): the one billing period it is not assessed in.
+  freeUntilPeriodId Bytes? @map("free_until_period_id") @db.Binary(16)
 
   /// Integer MRU per month, copied from the plan when requested. Zero for a grant.
   monthlyAmount Int    @map("monthly_amount") @db.UnsignedInt

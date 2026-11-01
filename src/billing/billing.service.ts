@@ -120,6 +120,19 @@ export interface ReplacementSlot {
  * that ended — lapsed, in grace, or waiting for its prepaid successor to roll —
  * charges nothing more, and the change waits for the next period instead.
  */
+/** A company's size without the stores granted free this period, and without those stores' staff (D227). */
+export function withoutFreeStores(size: CompanySize, free: ReadonlySet<string>): CompanySize {
+  if (free.size === 0) return size;
+  const branches = (size.branches ?? []).filter((b) => !b.branchId || !free.has(b.branchId));
+  const removed = (size.branches ?? []).filter((b) => b.branchId && free.has(b.branchId));
+  return {
+    ...size,
+    branches,
+    activeBranchCount: size.activeBranchCount - removed.length,
+    activeStaffCount: size.activeStaffCount - removed.reduce((n, b) => n + (b.staffCount ?? 0), 0),
+  };
+}
+
 export function periodRunning(period: Pick<PeriodState, 'periodEnd'> | null, now: Date): boolean {
   return period !== null && (period.periodEnd === null || period.periodEnd.getTime() > now.getTime());
 }
@@ -481,7 +494,7 @@ export class BillingService {
     // priced in full by the next period instead (D154, reviewed 2026-10-09).
     if (!periodRunning(period, now)) return;
 
-    const size = await this.sizeOf(companyId, db);
+    const size = withoutFreeStores(await this.sizeOf(companyId, db), await this.freeStoresOf(companyId, period.id, db));
     const stored = feesFrom(period.assessedActivityFeeByBranch);
     const assessment = assessPeriod(
       size,
@@ -526,6 +539,21 @@ export class BillingService {
         assessedActivityFeeByBranch: assessment.assessedActivityFeeByBranch,
       },
     });
+  }
+
+  /** Stores granted free for exactly this period (D227): a renewal's new period does not match, and bills them. */
+  private async freeStoresOf(companyId: Buffer, periodId: Buffer, db: BillingDb): Promise<Set<string>> {
+    const rows = await db.seatAllocation.findMany({
+      where: { companyId, kind: 'store', status: 'granted', freeUntilPeriodId: periodId, branchId: { not: null } },
+      select: { branchId: true },
+    });
+    return new Set(rows.map((r) => binToUuid(r.branchId!)));
+  }
+
+  /** The running paid period in force, under the caller's lock; null when there is none. */
+  async runningPeriodId(companyId: Buffer, db: BillingDb, now: Date = this.clock.now()): Promise<{ id: Buffer } | null> {
+    const period = await db.billingPeriod.findFirst({ where: { companyId }, orderBy: NEWEST_PERIOD_FIRST });
+    return period && periodRunning(period, now) ? { id: period.id } : null;
   }
 
   /**
