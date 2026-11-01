@@ -28,7 +28,7 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
-import { IsArabicName, IsLatinName, NormalizeName } from '../common/bilingual-name';
+import { IsArabicName, IsLatinName, NormalizeName, NormalizeOptionalName } from '../common/bilingual-name';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
@@ -214,14 +214,14 @@ export class CreateBusinessDto {
    * enough that the key stored with its prefix still fits its column, whole.
    */
   @IsString() @IsIdempotencyKey(ADMIN_KEY_PREFIX) idempotencyKey: string;
-  /** D225: every name in both scripts. The console ships with this API, so here both are required. */
+  /** D225: the Latin names are required, the Arabic ones optional (D227). */
   @IsString() @NormalizeName() @IsLatinName() ownerName: string;
-  @IsString() @NormalizeName() @IsArabicName() ownerNameAr: string;
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() ownerNameAr?: string | null;
   @IsString() @NormalizeName() @IsLatinName() businessName: string;
-  @IsString() @NormalizeName() @IsArabicName() businessNameAr: string;
-  /** The first store's names. Both or neither: neither is "Main Store" / "المتجر الرئيسي". */
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() businessNameAr?: string | null;
+  /** The first store's names. No Latin name is "Main Store" / "المتجر الرئيسي". */
   @IsOptional() @NormalizeName() @IsLatinName() branchName?: string;
-  @ValidateIf((o: CreateBusinessDto) => o.branchName !== undefined) @NormalizeName() @IsArabicName() branchNameAr?: string;
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() branchNameAr?: string | null;
   /** What the first branch does (D154): electronics when not said. */
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
   @IsOptional() @IsString() @MaxLength(120) city?: string;
@@ -251,9 +251,9 @@ class TestStatusDto {
 
 /** A store from the console: granted under a test business's grant, or a customer's priced request (D217). */
 class ConsoleStoreDto {
-  /** D225: both names, required. */
+  /** D225: the Latin name, and optionally the Arabic one (D227). */
   @IsString() @NormalizeName() @IsLatinName() name: string;
-  @IsString() @NormalizeName() @IsArabicName() nameAr: string;
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() nameAr?: string | null;
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
   @IsString() @MinLength(1) @MaxLength(500) reason: string;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;

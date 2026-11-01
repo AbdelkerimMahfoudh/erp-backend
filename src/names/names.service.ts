@@ -43,7 +43,7 @@ export class NamesService {
     private readonly audit: AuditService,
   ) {}
 
-  /** The business and every store, each with whether its Arabic name is still missing: the completion list. */
+  /** The business and every store, with both names. */
   async overview() {
     const companyId = this.tenant.companyId();
     const [company, branches] = await Promise.all([

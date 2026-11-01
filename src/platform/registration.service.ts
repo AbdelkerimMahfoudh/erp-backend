@@ -52,10 +52,10 @@ export interface RegistrationInput {
   ownerName: string;
   businessName: string;
   branchName: string;
-  /** D225: the Arabic names. Absent from the released app (1.0.0 (1)): the record is then marked for completion. */
-  ownerNameAr?: string;
-  businessNameAr?: string;
-  branchNameAr?: string;
+  /** D225: the Arabic names, optional (D227). */
+  ownerNameAr?: string | null;
+  businessNameAr?: string | null;
+  branchNameAr?: string | null;
   /**
    * What the first branch does (D154): the electronics store, the money
    * services agent counter, or both. Electronics when not said — the default

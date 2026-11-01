@@ -11,7 +11,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { IsArabicName, IsLatinNameOrLegacy, NormalizeName } from '../common/bilingual-name';
+import { IsArabicName, IsLatinNameOrLegacy, NormalizeName, NormalizeOptionalName } from '../common/bilingual-name';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import {
@@ -68,7 +68,7 @@ export class SeatRequestDto {
 export class StoreRequestDto {
   /** D225: the Arabic twin is optional only because the released app (1.0.0 (1)) sends one name. */
   @IsString() @NormalizeName() @IsLatinNameOrLegacy('nameAr') name: string;
-  @IsOptional() @NormalizeName() @IsArabicName() nameAr?: string;
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() nameAr?: string | null;
   /** The new store's activity (D154). Electronics when not said. */
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
 }

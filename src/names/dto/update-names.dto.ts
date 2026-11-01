@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArabicName, IsLatinName, NAME_MAX, NormalizeName } from '../../common/bilingual-name';
+import { IsOptional } from 'class-validator';
+import { IsArabicName, IsLatinName, NAME_MAX, NormalizeName, NormalizeOptionalName } from '../../common/bilingual-name';
 import { Optional } from '../../settings/dto/optional.decorator';
 
 /**
@@ -14,8 +15,8 @@ export class UpdateNamesDto {
   name?: string;
 
   @ApiPropertyOptional({ maxLength: NAME_MAX, description: 'الاسم بالعربية — the name the Arabic screens show.' })
-  @Optional()
-  @NormalizeName()
+  @IsOptional()
+  @NormalizeOptionalName()
   @IsArabicName()
-  nameAr?: string;
+  nameAr?: string | null;
 }

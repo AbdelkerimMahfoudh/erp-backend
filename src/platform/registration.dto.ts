@@ -1,6 +1,6 @@
 import { IsIn, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { IsIdempotencyKey } from '../common/decorators/idempotency-key.decorator';
-import { IsArabicName, IsLatinNameOrLegacy, NormalizeName } from '../common/bilingual-name';
+import { IsArabicName, IsLatinNameOrLegacy, NormalizeName, NormalizeOptionalName } from '../common/bilingual-name';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { REFERRAL_TOKEN_LENGTH } from '../acquisition/referral-token';
 
@@ -16,16 +16,16 @@ export class RegisterDto {
   @IsString() @IsIdempotencyKey() idempotencyKey: string;
 
   /**
-   * D225: each name in the Latin alphabet, with its Arabic twin. The twins are optional here only because the
-   * released app (1.0.0 (1)) sends one name per field; a client that sends a twin is held to both rules
+   * D225: each name in the Latin alphabet, with an optional Arabic twin (D227). The released app (1.0.0 (1)) sends one
+   * name per field; a client that sends a twin, even a blank one, has its Latin name held to the Latin rule
    * ({@link IsLatinNameOrLegacy}).
    */
   @IsString() @NormalizeName() @IsLatinNameOrLegacy('ownerNameAr') ownerName: string;
-  @IsOptional() @NormalizeName() @IsArabicName() ownerNameAr?: string;
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() ownerNameAr?: string | null;
   @IsString() @NormalizeName() @IsLatinNameOrLegacy('businessNameAr') businessName: string;
-  @IsOptional() @NormalizeName() @IsArabicName() businessNameAr?: string;
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() businessNameAr?: string | null;
   @IsString() @NormalizeName() @IsLatinNameOrLegacy('branchNameAr') branchName: string;
-  @IsOptional() @NormalizeName() @IsArabicName() branchNameAr?: string;
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() branchNameAr?: string | null;
   /** What the first branch does (D154): electronics when not said. */
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
 

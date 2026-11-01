@@ -116,8 +116,8 @@ describe('renaming', () => {
   it('lists what is still missing an Arabic name, for the Owner to complete', async () => {
     const h = harness();
     expect(await h.service.overview()).toEqual({
-      business: { name: 'Boutique Kiffa', nameAr: null, nameIncomplete: true },
-      stores: [{ id: STORE, name: 'Centre', nameAr: null, nameIncomplete: true }],
+      business: { name: 'Boutique Kiffa', nameAr: null, nameIncomplete: false },
+      stores: [{ id: STORE, name: 'Centre', nameAr: null, nameIncomplete: false }],
     });
   });
 });
@@ -129,7 +129,7 @@ describe('what the body may carry', () => {
     expect(errors({ name: 'PS5 Center', nameAr: 'مركز PS5' })).toEqual([]);
   });
 
-  it('refuses each name in the other’s field', () => {
-    expect(errors({ name: 'مركز', nameAr: 'Center' })).toEqual(['name', 'nameAr']);
+  it('refuses Arabic letters in the Latin field; the Arabic field is not limited to one script (D227)', () => {
+    expect(errors({ name: 'مركز', nameAr: 'Center' })).toEqual(['name']);
   });
 });

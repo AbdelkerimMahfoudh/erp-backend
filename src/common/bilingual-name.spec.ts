@@ -3,6 +3,7 @@ import { IsOptional, validateSync } from 'class-validator';
 import {
   IsArabicName,
   IsLatinName,
+  NormalizeOptionalName,
   IsLatinNameOrLegacy,
   NormalizeName,
   arabicNameProblem,
@@ -46,9 +47,9 @@ describe('the Arabic name', () => {
     expect(arabicNameProblem(name)).toBeNull(),
   );
 
-  it('refuses a name without a single Arabic letter: the same mistake the other way round', () => {
-    expect(arabicNameProblem('PS5 Center')).toBe('name_ar_needs_arabic');
-    expect(arabicNameProblem('١٢٣')).toBe('name_ar_needs_arabic');
+  it('accepts a name without an Arabic letter: it is optional, and not limited to one script (D227)', () => {
+    expect(arabicNameProblem('PS5 Center')).toBeNull();
+    expect(arabicNameProblem('١٢٣')).toBeNull();
   });
 
   it('refuses a direction override in Arabic too', () => {
@@ -75,11 +76,11 @@ describe('what is stored', () => {
     expect(validateSync(ok)).toEqual([]);
     expect(ok).toMatchObject({ name: 'PS5 Center', nameAr: 'مركز PS5' });
 
-    const swapped = plainToInstance(Dto, { name: 'مركز', nameAr: 'Center' });
+    const swapped = plainToInstance(Dto, { name: 'مركز', nameAr: 'Center\u202E' });
     const errors = validateSync(swapped).map((e) => Object.values(e.constraints ?? {})[0]);
     expect(errors).toEqual([
       'The Latin-alphabet name contains Arabic letters. Put the Arabic name in the Arabic field.',
-      'The Arabic name needs at least one Arabic letter',
+      'A name cannot contain control or text-direction characters',
     ]);
   });
 });
@@ -92,11 +93,24 @@ describe('what is shown', () => {
     expect(localizedName(shop, 'en')).toBe('PS5 Center');
   });
 
-  it('falls back to the existing name until an Arabic one is given, and says it is incomplete', () => {
+  it('falls back to the existing name until an Arabic one is given, and asks for nothing', () => {
     const legacy = { name: 'Boutique Kiffa', nameAr: null };
     expect(localizedName(legacy, 'ar')).toBe('Boutique Kiffa');
-    expect(bilingual(legacy)).toEqual({ name: 'Boutique Kiffa', nameAr: null, nameIncomplete: true });
+    expect(bilingual(legacy)).toEqual({ name: 'Boutique Kiffa', nameAr: null, nameIncomplete: false });
     expect(bilingual({ name: 'A', nameAr: 'أ' }).nameIncomplete).toBe(false);
+  });
+
+  it('a blank optional Arabic name is null, and passes', () => {
+    class Dto {
+      @IsOptional()
+      @NormalizeOptionalName()
+      @IsArabicName()
+      nameAr?: string | null;
+    }
+    const blank = plainToInstance(Dto, { nameAr: '   ' });
+    expect(validateSync(blank)).toEqual([]);
+    expect(blank.nameAr).toBeNull();
+    expect(validateSync(plainToInstance(Dto, {}))).toEqual([]);
   });
 
   it('searches both names', () => {

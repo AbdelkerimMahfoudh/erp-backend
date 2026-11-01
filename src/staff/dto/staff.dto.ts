@@ -11,7 +11,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
-import { IsArabicName, IsLatinNameOrLegacy, NAME_MAX, NormalizeName } from '../../common/bilingual-name';
+import { IsArabicName, IsLatinNameOrLegacy, NAME_MAX, NormalizeName, NormalizeOptionalName } from '../../common/bilingual-name';
 
 export const STAFF_ROLES = ['store_manager', 'store_employee'] as const;
 export type StaffRole = (typeof STAFF_ROLES)[number];
@@ -30,9 +30,9 @@ export class CreateStaffDto {
   /** D225: الاسم بالعربية. Optional only because the released app (1.0.0 (1)) sends one name. */
   @ApiPropertyOptional({ maxLength: NAME_MAX })
   @IsOptional()
-  @NormalizeName()
+  @NormalizeOptionalName()
   @IsArabicName()
-  nameAr?: string;
+  nameAr?: string | null;
 
   @ApiPropertyOptional({
     maxLength: 160,

@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
-import { IsArabicName, IsLatinName, NormalizeName } from '../common/bilingual-name';
+import { IsArabicName, IsLatinName, NormalizeName, NormalizeOptionalName } from '../common/bilingual-name';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ArrayMaxSize, ArrayMinSize, Equals, IsArray, IsBoolean, IsIn, IsISO8601, IsOptional, IsString, MaxLength, MinLength, ValidateNested } from 'class-validator';
@@ -17,9 +17,9 @@ export class DeferralDto {
 }
 
 class ProvisionStaffDto {
-  /** D225: both names, required — the console ships with this API. */
+  /** D225: the Latin name, and optionally the Arabic one (D227). */
   @IsString() @NormalizeName() @IsLatinName() name: string;
-  @IsString() @NormalizeName() @IsArabicName() nameAr: string;
+  @IsOptional() @NormalizeOptionalName() @IsArabicName() nameAr?: string | null;
   @IsString() @MinLength(4) @MaxLength(24) phone: string;
   @IsOptional() @IsString() @MaxLength(160) email?: string;
   @IsIn(['store_manager', 'store_employee']) role: StaffRoleKey;

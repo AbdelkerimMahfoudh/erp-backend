@@ -683,7 +683,7 @@ export class UserManagementService {
       id: binToUuid(row.id),
       name: row.name,
       nameAr: row.nameAr,
-      nameIncomplete: !row.nameAr,
+      nameIncomplete: false, // D227: read by builds up to 1.0.0 (3); nothing to complete.
       login: row.login,
       phone: row.phone,
       email: row.email,

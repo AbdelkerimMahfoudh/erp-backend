@@ -7,7 +7,7 @@ import type { PlatformAdminIdentity } from './platform-admin.service';
 
 export interface NamesInput {
   name?: string;
-  nameAr?: string;
+  nameAr?: string | null;
 }
 
 type Named = { name: string; nameAr: string | null };

@@ -85,9 +85,9 @@ describe('registering, by the shop or by the platform', () => {
 
     const admin = { idempotencyKey: 'k-2', ownerName: 'Aicha', ownerNameAr: 'عائشة', businessName: 'Boutique', businessNameAr: 'بوتيك', language: 'fr', reason: 'Signed up by phone' };
     expect(await problems(plainToInstance(CreateBusinessDto, admin))).toEqual([]);
-    // D225: the console creates a business only with both names — the business's and its Owner's.
+    // D227: the Latin names are required; the Arabic ones are optional, and blank is none.
     const { ownerNameAr, businessNameAr, ...latinOnly } = admin;
-    expect(await problems(plainToInstance(CreateBusinessDto, latinOnly))).not.toEqual([]);
+    expect(await problems(plainToInstance(CreateBusinessDto, latinOnly))).toEqual([]);
     expect([ownerNameAr, businessNameAr]).toEqual(['عائشة', 'بوتيك']);
     expect(await problems(plainToInstance(CreateBusinessDto, { ...admin, activity: 'money_agent' }))).toEqual([]);
     expect(await problems(plainToInstance(CreateBusinessDto, { ...admin, activity: 'agent' }))).not.toEqual([]);

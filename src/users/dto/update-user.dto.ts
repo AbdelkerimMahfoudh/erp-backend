@@ -2,7 +2,8 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsString, MaxLength } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { Optional } from '../../settings/dto/optional.decorator';
-import { IsArabicName, IsLatinNameOrLegacy, NAME_MAX, NormalizeName } from '../../common/bilingual-name';
+import { IsOptional } from 'class-validator';
+import { IsArabicName, IsLatinNameOrLegacy, NAME_MAX, NormalizeName, NormalizeOptionalName } from '../../common/bilingual-name';
 
 const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
 const trimLower = ({ value }: { value: unknown }) =>
@@ -32,10 +33,10 @@ export class UpdateUserDto {
   name?: string;
 
   @ApiPropertyOptional({ maxLength: NAME_MAX, description: 'الاسم بالعربية — the name the Arabic screens show.' })
-  @Optional()
-  @NormalizeName()
+  @IsOptional()
+  @NormalizeOptionalName()
   @IsArabicName()
-  nameAr?: string;
+  nameAr?: string | null;
 
   @ApiPropertyOptional({
     maxLength: 24,

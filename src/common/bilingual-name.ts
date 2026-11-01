@@ -5,13 +5,12 @@ import { ValidateBy, type ValidationOptions } from 'class-validator';
  * Bilingual names for businesses, stores and people (D225, 0111).
  *
  * `name` is the Latin-alphabet name, read by the French and English interfaces. `nameAr` is the Arabic name, read
- * by the Arabic interface. A record without an Arabic name keeps working: every screen shows `name` meanwhile, and
- * the record is marked for completion. Nothing is ever transliterated by a machine.
+ * by the Arabic interface. The Arabic name is optional (D227): without one every screen shows `name`, and nothing asks
+ * for it. Nothing is ever transliterated by a machine.
  *
  * The rules catch the obvious mistake, never a real shop's name. "PS5 Center", "Samsung-Store 2", "Électro Kiffa"
  * and "متجر PS5" are all valid. What is refused:
  *  - Arabic letters in the Latin name: the field was filled in the wrong language;
- *  - an Arabic name with no Arabic letter: the same mistake the other way round;
  *  - control and bidirectional-override characters, in either. An override can make a name read differently on
  *    screen from how it is stored, which is how a name impersonates another.
  */
@@ -29,7 +28,7 @@ const LATIN_LETTER_OR_DIGIT = /[A-Za-z0-9À-ÖØ-öø-ɏ]/u;
 /** C0/C1 controls, and the bidirectional embeddings, overrides and isolates. */
 const FORBIDDEN = /[\u0000-\u001F\u007F-\u009F‪-‮⁦-⁩]/u;
 
-export type NameProblem = 'name_blank' | 'name_too_long' | 'name_forbidden_character' | 'name_latin_has_arabic' | 'name_latin_needs_letter' | 'name_ar_needs_arabic';
+export type NameProblem = 'name_blank' | 'name_too_long' | 'name_forbidden_character' | 'name_latin_has_arabic' | 'name_latin_needs_letter';
 
 /** One space between words, nothing around them, composed form — "  PS5   Center " is "PS5 Center". */
 export function normalizeName(value: string): string {
@@ -55,9 +54,7 @@ export function latinNameProblem(raw: string): NameProblem | null {
 export function arabicNameProblem(raw: string): NameProblem | null {
   const value = normalizeName(raw);
   const problem = common(value);
-  if (problem) return problem;
-  if (!ARABIC_LETTER.test(value)) return 'name_ar_needs_arabic';
-  return null;
+  return problem;
 }
 
 /** Plain words for each refusal, in English as every validation message of this API is. */
@@ -67,7 +64,6 @@ const MESSAGES: Record<NameProblem, string> = {
   name_forbidden_character: 'A name cannot contain control or text-direction characters',
   name_latin_has_arabic: 'The Latin-alphabet name contains Arabic letters. Put the Arabic name in the Arabic field.',
   name_latin_needs_letter: 'The Latin-alphabet name needs at least one letter or digit',
-  name_ar_needs_arabic: 'The Arabic name needs at least one Arabic letter',
 };
 
 export function nameProblemMessage(problem: NameProblem): string {
@@ -77,6 +73,10 @@ export function nameProblemMessage(problem: NameProblem): string {
 /** Trims and collapses spaces before validation, so what is checked is what is stored. */
 export const NormalizeName = () =>
   Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? normalizeName(value) : value));
+
+/** The optional Arabic name (D227): blank is no name at all, stored as null. */
+export const NormalizeOptionalName = () =>
+  Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? normalizeName(value) || null : value));
 
 export function IsLatinName(options?: ValidationOptions) {
   return ValidateBy(
@@ -143,14 +143,12 @@ export function localizedName(named: BilingualName, locale: NameLocale | string 
   return named.name;
 }
 
-/** A record created before 0111, or since without its Arabic name: shown, never blocked, marked to complete. */
-export function nameNeedsCompletion(named: BilingualName): boolean {
-  return !named.nameAr;
-}
-
-/** Both names and whether one is missing, the shape every response that names somebody sends (D225). */
-export function bilingual(named: BilingualName): { name: string; nameAr: string | null; nameIncomplete: boolean } {
-  return { name: named.name, nameAr: named.nameAr ?? null, nameIncomplete: nameNeedsCompletion(named) };
+/**
+ * Both names, the shape every response that names somebody sends (D225). `nameIncomplete` stays in the shape for builds
+ * up to 1.0.0 (3), which read it, and is always false: a missing Arabic name is no longer anything to complete (D227).
+ */
+export function bilingual(named: BilingualName): { name: string; nameAr: string | null; nameIncomplete: false } {
+  return { name: named.name, nameAr: named.nameAr ?? null, nameIncomplete: false };
 }
 
 /** Search on either name: what a `where` matches when somebody types part of one. */
