@@ -127,9 +127,8 @@ function saleHarness() {
     // 0108: the branch has no policy of its own, so the company's window applies.
     branchReturnPolicy: { findFirst: async () => null },
     // 0111: the names the receipt is issued under.
-    company: { findUnique: async () => ({ name: 'Boutique Kiffa', nameAr: null }) },
-    branch: { findUnique: async () => ({ name: 'Centre', nameAr: 'المركز' }) },
-    user: { findUnique: async () => ({ name: 'Aminetou', nameAr: 'أمينتو' }) },
+    branch: { findFirst: async () => ({ name: 'Centre', nameAr: 'المركز' }) },
+    user: { findFirst: async () => ({ name: 'Aminetou', nameAr: 'أمينتو' }) },
     sale: { create: jest.fn(async (args: any) => { saleRows.push(args.data); return {}; }) },
     saleItem: { create: async () => ({}) },
     payment: { create: jest.fn(async (args: any) => { created.push(args.data); return {}; }) },
@@ -165,7 +164,7 @@ function saleHarness() {
     { configuredPrice: jest.fn(() => null), medianSalePrice: jest.fn(async () => null) } as never,
     { check: jest.fn(() => ({ ok: true })) } as never,
     businessDay,
-    closing,
+    closing, { company: { findUnique: async () => ({ name: 'Shop', nameAr: null }) } } as never
   );
   const saleAudit = () => audits.find((a) => a.entityType === 'Sale' && a.action === 'create');
   const byAccount = (acct: string | null) =>
@@ -273,7 +272,7 @@ function replayHarness(stored: Record<string, unknown>[]) {
   const service = new SalesService(
     db, tenant, {} as never, policy, {} as never, {} as never, {} as never, { get: () => new Set() } as never, {} as never, {} as never, {} as never,
     { assign: async () => DAY, today: async () => DAY } as never,
-    { assertCounterOpen: async () => undefined, assertCounterOpenTx: async () => undefined, afterSaleCommitted: async () => undefined } as never,
+    { assertCounterOpen: async () => undefined, assertCounterOpenTx: async () => undefined, afterSaleCommitted: async () => undefined } as never, { company: { findUnique: async () => ({ name: 'Shop', nameAr: null }) } } as never
   );
   return { service, db };
 }

@@ -72,10 +72,12 @@ describe('the sale writes the snapshot when it is confirmed', () => {
     'sellerNameArSnapshot: seller?.nameAr',
   ])('%s', (field) => expect(create).toContain(field));
 
-  it('reads the names inside the sale transaction, so the snapshot is what the sale was confirmed under', () => {
-    const lookup = source.slice(source.indexOf('const [business, store, seller]'), source.indexOf('await tx.sale.create({'));
-    expect(lookup).toContain('tx.company.findUnique');
-    expect(lookup).toContain('tx.branch.findUnique');
-    expect(lookup).toContain('tx.user.findUnique');
+  it('reads the store and seller in the sale transaction, constrained to the company; the business by its exact id, unscoped', () => {
+    const lookup = source.slice(source.indexOf('const [store, seller]'), source.indexOf('await tx.sale.create({'));
+    expect(lookup).toContain('tx.branch.findFirst({ where: { id: branchId, companyId }');
+    expect(lookup).toContain('tx.user.findFirst({ where: { id: userId, companyId }');
+    expect(source).toContain('this.system.company.findUnique({ where: { id: companyId }');
+    // `companies` has no `company_id`: the tenant client can never read it (real Prisma refuses; see sale-http.mysql.spec).
+    expect(source).not.toMatch(/\b(tx|this\.db)\.company\./);
   });
 });
