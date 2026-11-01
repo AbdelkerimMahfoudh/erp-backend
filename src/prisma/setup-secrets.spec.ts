@@ -72,8 +72,12 @@ const canRun = bash.status === 0 && process.platform !== 'win32';
   });
 
   it('names its files: no recursive find, chmod or chown over the directory', () => {
-    const source = readFileSync(SCRIPT, 'utf8');
-    expect(source).not.toMatch(/find\s+"?\$SECRETS_DIR/);
-    expect(source).not.toMatch(/chmod\s+-R|chown/);
+    // Commands only: the header comment names what the script never does.
+    const code = readFileSync(SCRIPT, 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n');
+    expect(code).not.toMatch(/\bfind\s+"?\$SECRETS_DIR/);
+    expect(code).not.toMatch(/\bchmod\s+-R\b|\bchown\b/);
   });
 });
