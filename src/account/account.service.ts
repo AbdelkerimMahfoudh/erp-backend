@@ -6,6 +6,7 @@ import { OtpService } from '../auth/otp/otp.service';
 import { maskPhone } from '../auth/otp/otp-code.util';
 import { normalisePhone } from '../auth/identifier';
 import { toE164 } from '../users/contact.util';
+import { moveOwnerContactTx } from '../platform/owner-identity/owner-identity';
 import type { MessageLanguage } from '../messaging/templates';
 import { binToUuid, uuidToBin } from '../common/utils/uuid.util';
 import { TrialSetupService } from '../platform/trial/trial-setup.service';
@@ -348,6 +349,8 @@ export class AccountService {
        */
       await this.prisma.$transaction(async (tx) => {
         await tx.user.update({ where: { id: p.userId }, data: { phone: candidate, phoneVerifiedAt: now } });
+        // D227: an Owner's number is theirs across the platform; a refusal rolls this back and names nobody.
+        if (before?.phone !== candidate) await moveOwnerContactTx(tx, { id: p.userId, companyId: p.companyId }, 'phone', candidate);
         if (!this.whatsappRecords) return;
         await this.whatsappRecords.activatePending({ number: candidate, userId: p.userId, companyId: p.companyId }, tx);
         if (before?.phone && before.phoneVerifiedAt && before.phone !== candidate) {

@@ -11,6 +11,7 @@ import { CLOCK, type Clock } from '../entitlement/clock';
 import { TRIAL_DURATION_DAYS } from './trial/trial-rules';
 import { AcquisitionService, AcquisitionUnavailableException, type AcquisitionClaim } from '../acquisition/acquisition.service';
 import { seedDefaultCategories } from '../catalog/default-categories';
+import { claimedBy, claimOwnerContactsTx, OwnerIdentityTakenError } from './owner-identity/owner-identity';
 import {
   generatePersonalId,
   isEmail,
@@ -154,7 +155,7 @@ export class RegistrationService {
   ) {}
 
   async register(input: RegistrationInput): Promise<RegistrationResult> {
-    const email = input.email?.trim() ? normaliseEmail(input.email) : null;
+    let email = input.email?.trim() ? normaliseEmail(input.email) : null;
     const phone = input.phone?.trim() ? normalisePhone(input.phone) : null;
 
     // At least one contact, because it is the credential. An account with
@@ -190,6 +191,13 @@ export class RegistrationService {
     if (seen?.companyId) {
       return this.describe(seen.companyId, false);
     }
+
+    /*
+     * An email another Owner already holds (D227). A self-registration has proved nothing about it and may not learn it
+     * is taken, and the number is the contact it verifies: the address is simply not recorded, and can be added and
+     * verified later from the account. The console is authenticated: it asks first, and a race still refuses below.
+     */
+    if (email && input.trialEligible && !input.isTest && (await claimedBy(this.prisma, 'email', email))) email = null;
 
     const passwordHash = await this.hashing.hash(input.password);
 
@@ -292,6 +300,9 @@ export class RegistrationService {
           },
         });
 
+        // D227: one Owner, one business. A test business neither claims nor is refused.
+        if (!input.isTest) await claimOwnerContactsTx(tx, companyId, userId, { phone, email });
+
         const subscriptionId = newUuidV7Bin();
         await tx.subscription.create({
           data: {
@@ -364,6 +375,7 @@ export class RegistrationService {
         }
       });
     } catch (e) {
+      if (e instanceof OwnerIdentityTakenError) throw e;
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
         const target = String((e.meta as { target?: string })?.target ?? '');
 

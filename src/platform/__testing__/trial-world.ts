@@ -377,6 +377,10 @@ export function makeTrialWorld(options: WorldOptions = {}) {
     trialEligibility: {
       findUnique: async ({ where, select }: Row) => pick(t.eligibilities.find((x) => same(x.companyId, where.companyId)), select),
     },
+    ownerIdentity: {
+      findUnique: async () => null,
+      create: async ({ data }: Row) => data,
+    },
     registrationAttempt: {
       findFirst: async ({ where, select }: Row) => pick(t.registrations.find((x) => same(x.companyId, where.companyId)), select),
     },

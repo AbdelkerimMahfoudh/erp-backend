@@ -473,6 +473,8 @@ describe('a WhatsApp number verified in the app (0095)', () => {
         findFirst: async () => ({ phone: null, phoneVerifiedAt: null }),
         update: async ({ data }: { data: Record<string, unknown> }) => Object.assign(trial.owner(shop), data),
       },
+      // Not an Owner in this world: the claim on the number is not at stake here.
+      userBranch: { findFirst: async () => null },
       $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
       authSession: { updateMany: async () => ({ count: 0 }) },
       auditLog: { create: async () => ({}) },

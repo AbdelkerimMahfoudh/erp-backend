@@ -316,6 +316,7 @@ enum SyncStatus {
 // ------------------------- Tenancy & Access --------------------------------
 
 model Company {
+  ownerIdentities OwnerIdentity[]
   notificationPreferences NotificationPreference[]
   notificationReads       NotificationRead[]
   pushDevices             PushDevice[]
@@ -727,6 +728,8 @@ model User {
   trialSetupLinks              TrialSetupLink[]
   trialSetupMessages           TrialSetupMessage[]
   requestedNotices             SubscriptionNotice[]
+
+  ownerIdentities              OwnerIdentity[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -6435,4 +6438,41 @@ model PushDelivery {
   @@unique([notificationId, deviceId], map: "push_deliveries_once")
   @@index([companyId, status, createdAt], map: "push_deliveries_status")
   @@map("push_deliveries")
+}
+
+enum OwnerIdentityKind {
+  phone
+  email
+}
+
+/// One Owner contact, unique across the platform (D227, 0116). Staff never appear here.
+model OwnerIdentity {
+  id        Bytes             @id @db.Binary(16)
+  kind      OwnerIdentityKind
+  /// E.164, or a lowercased email.
+  value     String            @db.VarChar(160)
+  companyId Bytes             @map("company_id") @db.Binary(16)
+  userId    Bytes             @map("user_id") @db.Binary(16)
+  createdAt DateTime          @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id], map: "fk_owner_identities_company")
+  user    User    @relation(fields: [userId], references: [id], map: "fk_owner_identities_user")
+
+  @@unique([kind, value], map: "ux_owner_identities_kind_value")
+  @@index([userId], map: "ix_owner_identities_user")
+  @@index([companyId], map: "ix_owner_identities_company")
+  @@map("owner_identities")
+}
+
+/// A public registration whose phone already has an Owner (D227, 0116): the same code flow, and nothing created.
+model RegistrationHold {
+  id          Bytes     @id @db.Binary(16)
+  tokenHash   String    @unique(map: "ux_registration_holds_token") @map("token_hash") @db.VarChar(128)
+  destination String    @db.VarChar(160)
+  challengeId Bytes?    @map("challenge_id") @db.Binary(16)
+  expiresAt   DateTime  @map("expires_at") @db.DateTime(6)
+  consumedAt  DateTime? @map("consumed_at") @db.DateTime(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  @@map("registration_holds")
 }

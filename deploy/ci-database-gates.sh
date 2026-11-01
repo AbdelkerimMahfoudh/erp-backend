@@ -116,6 +116,8 @@ PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$
 echo "== 9b. a real sale through the real API and Prisma client (the 2026-11-01 hotfix)"
 SALE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) SALE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
   npx jest --ci src/sales/sale-http.mysql.spec.ts
+echo "== 9b2. the D227 real-MySQL spec (one Owner, one business: the unique index decides a race)"
+OWNER_IDENTITY_URL=$(url root "${ROOT_PW:-}" grace_ci) npx jest --ci src/platform/owner-identity/owner-identity.mysql.spec.ts
 
 echo "== 9c. the D225 real-MySQL spec (Employee <-> Manager: in force on the next request, grants pruned, one change at a time), on the same disposable schema"
 ROLE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ROLE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \

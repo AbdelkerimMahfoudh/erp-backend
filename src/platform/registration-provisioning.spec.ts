@@ -80,6 +80,13 @@ function makeStore(failOn?: string) {
           return { count };
         }),
       },
+      ownerIdentity: {
+        findUnique: jest.fn(async ({ where }: any) => (t.ownerIdentity ?? []).find((r: any) => r.kind === where.kind_value.kind && r.value === where.kind_value.value) ?? null),
+        create: jest.fn(async ({ data }: any) => {
+          (t.ownerIdentity ??= []).push(data);
+          return data;
+        }),
+      },
       registrationAttempt: {
         ...simple('registrationAttempt'),
         findUnique: jest.fn(async ({ where }: any) =>

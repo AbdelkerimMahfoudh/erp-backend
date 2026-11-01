@@ -1,3 +1,6 @@
+import { ConflictException } from '@nestjs/common';
+import { claimedBy } from './owner-identity/owner-identity';
+import { normaliseEmail, normalisePhone } from '../auth/identifier';
 import {
   Body,
   Controller,
@@ -852,6 +855,12 @@ export class PlatformController {
     const deferral = deferOwner ? this.testProvisioning.parseDeferral(dto.deferral) : null;
     if (deferOwner) await this.testProvisioning.assertMayDefer(actor, { id: null, name: dto.businessName }, 'phone_verification.defer');
 
+    // D227: this form never opens another business for an existing Owner. The console then offers to add a store to theirs.
+    if (!isTest) {
+      const taken = await this.existingOwner(dto);
+      if (taken) throw new ConflictException({ code: 'existing_owner', message: 'This contact already belongs to an Owner.', companyId: binToUuid(taken.companyId) });
+    }
+
     const result = await this.registration.register({
       idempotencyKey: `${ADMIN_KEY_PREFIX}${dto.idempotencyKey}`,
       ownerName: dto.ownerName,
@@ -940,6 +949,12 @@ export class PlatformController {
       },
       setup: await this.provisioning.status(uuidToBin(result.companyId)),
     };
+  }
+
+  private async existingOwner(dto: { phone?: string; email?: string }) {
+    const phone = dto.phone?.trim() ? normalisePhone(dto.phone) : null;
+    const email = dto.email?.trim() ? normaliseEmail(dto.email) : null;
+    return (phone && (await claimedBy(this.prisma, 'phone', phone))) || (email && (await claimedBy(this.prisma, 'email', email))) || null;
   }
 
   /**

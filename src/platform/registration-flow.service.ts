@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
 import type { ContactChannel } from '@prisma/client';
 import { normalisePhone } from '../auth/identifier';
 import { WhatsAppRecords } from '../messaging/whatsapp-records';
@@ -8,6 +8,13 @@ import { RegistrationContinuationService, CONTINUATION_TTL_SECONDS } from './reg
 import { ContactDeliveryProvider } from './contact-delivery';
 import type { ContinueConfirmDto, ContinueStartDto, RegisterDto } from './registration.dto';
 import { AcquisitionService, AcquisitionUnavailableException } from '../acquisition/acquisition.service';
+import { randomBytes } from 'node:crypto';
+import { PrismaService } from '../prisma/prisma.service';
+import { HashingService } from '../common/security/hashing.service';
+import { newUuidV7Bin } from '../common/utils/uuid.util';
+import { generateIntentToken, hashIntentToken, maskPhone } from '../auth/otp/otp-code.util';
+import { ContactVerificationService } from './contact-verification.service';
+import { claimedBy, OwnerIdentityTakenError } from './owner-identity/owner-identity';
 
 /**
  * A business registering itself — the one flow behind both of its doors (0095, the owner's decision Q1 of
@@ -26,7 +33,38 @@ export class RegistrationFlowService {
     private readonly delivery: ContactDeliveryProvider,
     @Optional() private readonly whatsappRecords?: WhatsAppRecords,
     @Optional() private readonly acquisition?: AcquisitionService,
+    @Optional() private readonly prisma?: PrismaService,
+    @Optional() private readonly hashing?: HashingService,
+    @Optional() private readonly verification?: ContactVerificationService,
   ) {}
+
+  /**
+   * A number that already has an Owner (D227). The answer has the shape of any other registration and the same code goes
+   * out, so a caller who does not hold the phone learns nothing; nothing is created. The password is hashed only so this
+   * path costs what the other does.
+   */
+  private async held(dto: RegisterDto, phone: string) {
+    await this.hashing!.hash(dto.password);
+    const token = generateIntentToken();
+    const expiresAt = new Date(Date.now() + CONTINUATION_TTL_SECONDS * 1000);
+    await this.prisma!.registrationHold.create({ data: { id: newUuidV7Bin(), tokenHash: hashIntentToken(token), destination: phone, expiresAt } });
+    return {
+      status: 'pending_activation' as const,
+      created: true,
+      publicStoreId: randomBytes(5).toString('hex').toUpperCase(),
+      activity: dto.activity ?? 'electronics',
+      trialEligible: true,
+      verification: { destination: maskPhone(phone), channel: 'phone' as const },
+      continuation: { token, expiresAt: expiresAt.toISOString(), expiresInSeconds: CONTINUATION_TTL_SECONDS },
+      next: 'verify_contact',
+    };
+  }
+
+  private async holdOf(token: string) {
+    if (!this.prisma) return null;
+    const hold = await this.prisma.registrationHold.findUnique({ where: { tokenHash: hashIntentToken(token) } });
+    return hold && !hold.consumedAt && hold.expiresAt > new Date() ? hold : null;
+  }
 
   /**
    * Create the business, its Owner and its pending subscription, and hand back the continuation that finishes it.
@@ -84,6 +122,12 @@ export class RegistrationFlowService {
     const acquisition = this.acquisition?.claimOf(claimed) ?? null;
     if (acquisition) this.acquisition!.assertMayClaim(door.ip);
 
+    // A retry of a registration that already made its business is that business's, never a hold.
+    if (this.prisma && (await claimedBy(this.prisma, 'phone', phone))) {
+      const seen = await this.prisma.registrationAttempt.findUnique({ where: { idempotencyKey: dto.idempotencyKey }, select: { companyId: true } });
+      if (!seen?.companyId) return this.held(dto, phone);
+    }
+
     const result = await this.registration.register({
       idempotencyKey: dto.idempotencyKey,
       ownerName: dto.ownerName,
@@ -103,8 +147,11 @@ export class RegistrationFlowService {
       acquisition,
     }).catch((e: unknown) => {
       if (e instanceof AcquisitionUnavailableException) this.acquisition?.recordRefusedClaim(door.ip);
+      // Lost the race for the number: the same answer as if it had been taken already.
+      if (e instanceof OwnerIdentityTakenError) return null;
       throw e;
     });
+    if (!result) return this.held(dto, phone);
 
     /*
      * A continuation, never a session.
@@ -168,6 +215,13 @@ export class RegistrationFlowService {
    * redirect a code somewhere else.
    */
   async startVerification(dto: ContinueStartDto) {
+    const hold = await this.holdOf(dto.continuation);
+    if (hold) {
+      const started = await this.verification!.start(hold.destination, dto.language);
+      const challengeId = await this.verification!.latestChallengeFor(hold.destination);
+      await this.prisma!.registrationHold.update({ where: { id: hold.id }, data: { challengeId } });
+      return { delivery: started.delivery };
+    }
     const result = await this.continuation.startChallenge(dto.continuation, dto.language);
     if (!result.ok) {
       // One shape for every refusal: a caller must not be able to tell an
@@ -187,6 +241,17 @@ export class RegistrationFlowService {
    * an eligible business's free trial is still not started.
    */
   async confirmVerification(dto: ContinueConfirmDto, context: { ip?: string; userAgent?: string }) {
+    const hold = await this.holdOf(dto.continuation);
+    if (hold) {
+      const checked = hold.challengeId ? await this.verification!.confirmChallenge(hold.challengeId, dto.code) : 'gone';
+      if (checked === 'wrong' || checked === 'gone') throw new BadRequestException('That code did not match.');
+      await this.prisma!.registrationHold.updateMany({ where: { id: hold.id, consumedAt: null }, data: { consumedAt: new Date() } });
+      // Only now, to whoever holds the phone: no business name, nothing else.
+      throw new ConflictException({
+        code: 'existing_owner_sign_in',
+        message: 'This number already has a Dukan account. Sign in, then add a store from inside your account.',
+      });
+    }
     const result = await this.continuation.complete(dto.continuation, dto.code, context);
     if (!result.ok) {
       throw new BadRequestException('That code did not match.');
