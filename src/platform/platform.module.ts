@@ -3,6 +3,8 @@ import { PlatformNamesController } from './platform-names.controller';
 import { PlatformNamesService } from './platform-names.service';
 import { PlatformMfaService } from './platform-mfa.service';
 import { PlatformMfaController } from './platform-mfa.controller';
+import { PlatformAdminSetupController } from './platform-admin-setup.controller';
+import { PlatformAdminInvitationService } from './platform-admin-invitation.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { HashingService } from '../common/security/hashing.service';
 import { PlatformController } from './platform.controller';
@@ -115,6 +117,7 @@ export function selectContactDelivery(
     PlatformNamesController,
     SeatRequestsController,
     PlatformMfaController,
+    PlatformAdminSetupController,
     AppRegistrationController,
     // An Owner's setup code spent from the app (D217): the same act as platform/owner-invitation/accept.
     AppOwnerSetupController,
@@ -139,6 +142,7 @@ export function selectContactDelivery(
     PlatformNamesService,
     PlatformAdminService,
     PlatformMfaService,
+    PlatformAdminInvitationService,
     PlatformAdminGuard,
     PlatformAuditService,
     SubscriptionLifecycleService,

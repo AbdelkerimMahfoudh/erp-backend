@@ -154,6 +154,12 @@ export class PlatformMfaService {
       });
       await this.replaceRecoveryCodes(tx, admin.id, recoveryCodes, key, now);
       await tx.platformAdminSession.update({ where: { id: sessionId }, data: { mfaVerifiedAt: now } });
+      // 0115: an invited administrator becomes active here, in the same transaction as the factor, and only here.
+      if (row.adminState === 'enrolling') {
+        const n = await tx.platformAdmin.updateMany({ where: { id: admin.id, adminState: 'enrolling' }, data: { adminState: 'active' } });
+        if (n.count !== 1) throw refuse(HttpStatus.CONFLICT, 'enrolment_not_started', 'Start the enrolment again with your enrolment token.');
+        await this.audit.record({ admin, action: 'admin.invitation.activated', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, ip }, tx);
+      }
     });
     await this.audit.record({ admin, action: 'admin.mfa.enrolled', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, ip });
     return { recoveryCodes };

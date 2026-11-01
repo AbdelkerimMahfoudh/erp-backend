@@ -25,7 +25,7 @@ function harness() {
   const mfa = new PlatformMfaService(prisma as never, config as never, audit, hashing as never);
   const admins = new PlatformAdminService(prisma as never, hashing as never, { get: (k: string) => cls.get(k) } as never);
   admins.useStepUpCheck(mfa);
-  const blank = { passwordHash: 'hash:admin-pw', isActive: true, deletedAt: null, lastLoginAt: null, mfaSecretEnc: null, mfaEnabledAt: null, mfaLastStep: null, mfaPendingSecretEnc: null, mfaEnrolmentTokenHash: null, mfaEnrolmentExpiresAt: null, mfaFailedCount: 0, mfaLockedUntil: null };
+  const blank = { passwordHash: 'hash:admin-pw', adminState: 'active', setupCodeHash: null, setupCodeExpiresAt: null, isActive: true, deletedAt: null, lastLoginAt: null, mfaSecretEnc: null, mfaEnabledAt: null, mfaLastStep: null, mfaPendingSecretEnc: null, mfaEnrolmentTokenHash: null, mfaEnrolmentExpiresAt: null, mfaFailedCount: 0, mfaLockedUntil: null };
   prisma.seed('platformAdmin', { id: ADMIN, email: 'ops@tsx.mr', name: 'Ops', ...blank }, { id: OTHER, email: 'other@tsx.mr', name: 'Other', ...blank });
   const identity = { id: ADMIN, email: 'ops@tsx.mr', name: 'Ops' };
   const session = async (token: string) => (await admins.resolveSession(token))!;

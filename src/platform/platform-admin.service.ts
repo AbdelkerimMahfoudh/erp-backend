@@ -51,6 +51,8 @@ export interface AdminSession {
   admin: PlatformAdminIdentity;
   sessionId: Buffer;
   mfaVerified: boolean;
+  /** 0115: only `active` can ever be verified; `enrolling` reaches the enrolment routes, nothing else. */
+  state: string;
 }
 
 /** The interval within which a password-and-code step-up stays good, checked on the session. */
@@ -95,8 +97,9 @@ export class PlatformAdminService {
   ): Promise<AdminSessionResult> {
     const email = normaliseEmail(emailRaw);
 
+    // 0115: an `invited` administrator signs in to nothing; an `enrolling` one to the enrolment routes only.
     const admin = await this.prisma.platformAdmin.findFirst({
-      where: { email, isActive: true, deletedAt: null },
+      where: { email, isActive: true, deletedAt: null, adminState: { in: ['enrolling', 'active'] } },
     });
 
     const ok = admin
@@ -130,7 +133,7 @@ export class PlatformAdminService {
       admin: { id: admin.id.toString('hex'), email: admin.email, name: admin.name },
       sessionToken: token,
       expiresAt,
-      mfa: admin.mfaEnabledAt && admin.mfaSecretEnc ? 'required' : 'enrolment_required',
+      mfa: admin.adminState === 'active' && admin.mfaEnabledAt && admin.mfaSecretEnc ? 'required' : 'enrolment_required',
     };
   }
 
@@ -153,13 +156,14 @@ export class PlatformAdminService {
       include: { admin: true },
     });
 
-    if (!session || !session.admin.isActive || session.admin.deletedAt) return null;
+    if (!session || !session.admin.isActive || session.admin.deletedAt || session.admin.adminState === 'invited') return null;
 
     return {
       admin: { id: session.admin.id, email: session.admin.email, name: session.admin.name },
       sessionId: session.id,
       // Verified on THIS session, for an administrator whose factor is still enrolled: a reset voids it.
-      mfaVerified: Boolean(session.mfaVerifiedAt) && Boolean(session.admin.mfaEnabledAt),
+      mfaVerified: Boolean(session.mfaVerifiedAt) && Boolean(session.admin.mfaEnabledAt) && session.admin.adminState === 'active',
+      state: session.admin.adminState,
     };
   }
 

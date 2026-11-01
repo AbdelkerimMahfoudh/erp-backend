@@ -4555,6 +4555,13 @@ model PlatformAdmin {
   email String @unique(map: "ux_platform_admins_email") @db.VarChar(160)
   name  String @db.VarChar(160)
 
+  /// 0115: invited (a setup code outstanding, no sign-in) → enrolling (password chosen; the enrolment routes only)
+  /// → active. Every administrator from before 0115 is active.
+  adminState         String    @default("active") @map("admin_state") @db.VarChar(16)
+  /// Keyed digest of the one-time setup code, never the code; set exactly while invited.
+  setupCodeHash      String?   @map("setup_code_hash") @db.Char(64)
+  setupCodeExpiresAt DateTime? @map("setup_code_expires_at") @db.DateTime(6)
+
   passwordHash String @map("password_hash") @db.VarChar(255)
 
   /// Mandatory TOTP (0094): the secret sealed with AES-256-GCM under PLATFORM_MFA_KEY; null until enrolled.
