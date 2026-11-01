@@ -22,7 +22,7 @@ same() {
 
 file_sum() {
   [ -s "$1" ] || die "the backup $(basename "$1") is missing or empty."
-  sha256sum "$1" | cut -d' ' -f1
+  sha256sum < "$1" | cut -d' ' -f1
 }
 
 # A name, never a path: the receipt must not be able to point outside the backup directory.

@@ -28,7 +28,7 @@ COPY=$DEST/$NAME
 mv -f "$COPY.part" "$COPY"
 
 HOST_SUM=$(remote "sudo -n sha256sum '$BACKUP_DIR/$NAME'" | cut -d' ' -f1)
-LOCAL_SUM=$(sha256sum "$COPY" | cut -d' ' -f1)
+LOCAL_SUM=$(sha256sum < "$COPY" | cut -d' ' -f1)
 tr -d '\r' < "$HERE/backup-receipt.sh" | bash -s -- same "$HOST_SUM" "$LOCAL_SUM"
 
 remote "cd '$REMOTE' && sudo -n bash -c 'source deploy/production/lib.sh >/dev/null; BACKUP_DIR=\"\$BACKUP_DIR\" deploy/production/backup-receipt.sh record \"$NAME\" \"$LOCAL_SUM\"'"
