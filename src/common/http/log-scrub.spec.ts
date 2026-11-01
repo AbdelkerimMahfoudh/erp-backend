@@ -77,6 +77,17 @@ describe('log scrubbing of every other credential a request may carry (C16)', ()
     expect(scrubQuery({ 'hub.mode': 'subscribe', 'hub.verify_token': 's3cr3t-verify' })).toEqual({ 'hub.mode': 'subscribe', 'hub.verify_token': REDACTED });
   });
 
+  it('both copies Meta’s own subscription check sends: hub.verify_token and hub_verify_token (2026-11-01)', () => {
+    // The exact shape of the request Meta made on registration: every parameter twice, dotted and underscored.
+    const url = '/api/v1/messaging/whatsapp/webhook?hub.mode=subscribe&hub.challenge=54527406&hub.verify_token=s3cr3t-verify'
+      + '&hub_mode=subscribe&hub_challenge=54527406&hub_verify_token=s3cr3t-verify';
+    const scrubbed = scrubUrl(url);
+    expect(scrubbed).not.toContain('s3cr3t-verify');
+    expect(scrubbed).toContain(`hub_verify_token=${REDACTED}`);
+    expect(scrubbed).toContain('hub_challenge=54527406');
+    expect(scrubQuery({ hub_mode: 'subscribe', hub_verify_token: 's3cr3t-verify', 'hub_verify_token[]': 'x' })).toEqual({ hub_mode: 'subscribe', hub_verify_token: REDACTED, 'hub_verify_token[]': REDACTED });
+  });
+
   it('a credential this API takes in a body, sent in a URL by mistake', () => {
     for (const key of ['password', 'confirmPassword', 'currentPassword', 'refreshToken', 'access_token', 'recoveryCode', 'enrolmentToken', 'deviceSecret', 'pin']) {
       expect(scrubUrl(`/x?${key}=abcdef123456&page=2`)).toBe(`/x?${key}=${REDACTED}&page=2`);

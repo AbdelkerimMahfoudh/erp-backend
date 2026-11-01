@@ -25,9 +25,12 @@ const SECRET_QUERY_KEYS = new Set([
   /*
    * The WhatsApp webhook's verification (`GET messaging/whatsapp/webhook`): Meta presents the verify token both sides
    * configured, as `hub.verify_token`. It is a shared secret, and the request that carries it is a successful one —
-   * logged on every subscription check (C16).
+   * logged on every subscription check (C16). Meta's own check sends it a second time as `hub_verify_token`, beside
+   * `hub_mode` and `hub_challenge`: matched by the dotted name only, that copy reached the production log in full
+   * (2026-11-01, the token rotated since).
    */
   'hub.verify_token',
+  'hub_verify_token',
   /*
    * The credentials this API takes in a body, should a client ever send one in a URL instead: the URL is the one part
    * of a request every log line carries (C16).
