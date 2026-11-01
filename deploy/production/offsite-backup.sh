@@ -14,7 +14,9 @@ source "$(dirname "$0")/lib.sh"
 CHECKOUT=$(dirname "$DEPLOY_DIR")
 [ "$DEPLOY_PROFILE" = production ] || die "offsite-backup.sh runs on production only."
 
-PING_FILE=$SECRETS_DIR/healthchecks_ping_url
+# The two backup-only secrets live outside SECRETS_DIR (relocated 2026-11-01: setup-secrets.sh manages that directory).
+OPS_SECRETS=/srv/erp-production/ops/secrets
+PING_FILE=$OPS_SECRETS/healthchecks_ping_url
 ping_hc() { [ -s "$PING_FILE" ] && curl -fsS -m 10 --retry 3 -o /dev/null "$(cat "$PING_FILE")$1" || true; }
 on_exit() { local rc=$?; [ "$rc" -eq 0 ] || ping_hc /fail; }
 trap on_exit EXIT
@@ -22,7 +24,7 @@ ping_hc /start
 
 take_lock
 export BORG_REPO=ssh://u705821-sub1@u705821.your-storagebox.de:23/./borg
-export BORG_PASSCOMMAND="cat $SECRETS_DIR/borg_passphrase"
+export BORG_PASSCOMMAND="cat $OPS_SECRETS/borg_passphrase"
 export BORG_RSH="ssh -i /root/.ssh/storagebox-backup -o UserKnownHostsFile=/root/.ssh/known_hosts.storagebox -o StrictHostKeyChecking=yes -o BatchMode=yes -o ServerAliveInterval=30"
 export BORG_REMOTE_PATH=borg-1.2
 

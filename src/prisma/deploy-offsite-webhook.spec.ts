@@ -175,8 +175,11 @@ describe('the off-site backup (docs/112)', () => {
       expect(text).not.toMatch(/BORG_PASSPHRASE=/);
       expect(text).not.toMatch(/BEGIN [A-Z ]*PRIVATE KEY/);
     }
-    expect(script).toContain('BORG_PASSCOMMAND="cat $SECRETS_DIR/borg_passphrase"');
-    expect(script).toContain('PING_FILE=$SECRETS_DIR/healthchecks_ping_url');
+    expect(script).toContain('OPS_SECRETS=/srv/erp-production/ops/secrets');
+    expect(script).toContain('BORG_PASSCOMMAND="cat $OPS_SECRETS/borg_passphrase"');
+    expect(script).toContain('PING_FILE=$OPS_SECRETS/healthchecks_ping_url');
+    // Outside SECRETS_DIR, which setup-secrets.sh manages (relocated 2026-11-01).
+    for (const name of ['borg_passphrase', 'healthchecks_ping_url']) expect(script).not.toContain('$SECRETS_DIR/' + name);
     expect(script).toMatch(/curl -fsS -m 10 --retry 3 -o \/dev\/null "\$\(cat "\$PING_FILE"\)\$1"/);
     expect(script).toContain('StrictHostKeyChecking=yes');
   });
