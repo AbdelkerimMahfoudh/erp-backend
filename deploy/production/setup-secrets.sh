@@ -12,7 +12,12 @@
 #   migrator.env   DATABASE_URL as phonestore_migrator, for the one-off migrate container only
 #
 # Every value comes from openssl's generator straight into its file: never printed, never on a command line, never in
-# an environment a person can read. Nothing here is a backup: the database passwords are recreated with the server,
+# an environment a person can read.
+#
+# It manages ONLY the files named in OWNED below. Anything else placed under SECRETS_DIR — the off-site backup's
+# root-only files, say — is never read, chmod-ed, chown-ed or counted here: the 2026-11-01 deployment stopped on a
+# blanket `find … -exec chmod` meeting two root-owned files it had no business touching.
+# Nothing here is a backup: the database passwords are recreated with the server,
 # and the backups' decryption key never lives on it (docs/100 §5).
 # shellcheck source=deploy/production/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -42,9 +47,22 @@ printf 'mysql://phonestore_app:%s@db:3306/phonestore?connection_limit=10\n' "$AP
 printf 'DATABASE_URL=mysql://phonestore_app:%s@db:3306/phonestore\n' "$APP_PW" > "$SECRETS_DIR/database.env"
 printf 'DATABASE_URL=mysql://phonestore_migrator:%s@db:3306/phonestore\n' "$MIGRATOR_PW" > "$SECRETS_DIR/migrator.env"
 unset APP_PW MIGRATOR_PW
-find "$SECRETS_DIR" -type f -exec chmod 600 {} +
+# The application secrets this script owns, by name: generated above, rebuilt above, or the owner's entered ones the
+# API reads. Only these are set to mode 600; a name not here is left exactly as it is.
+OWNED=(
+  db/mysql_root.pw db/migrator.pw db/app.pw db/backup.pw db/admin.pw
+  api/jwt_access_secret api/otp_pepper api/messaging_hash_key api/staff_invitation_key api/referral_key
+  api/platform_mfa_key api/app_database_url database.env migrator.env
+  api/smtp_username api/smtp_password
+  api/whatsapp_access_token api/whatsapp_app_secret api/whatsapp_webhook_verify_token
+)
+present=0
+for name in "${OWNED[@]}"; do
+  [ -f "$SECRETS_DIR/$name" ] || continue
+  chmod 600 "$SECRETS_DIR/$name"; present=$((present + 1))
+done
 
-echo "secrets: $made generated now; $(find "$SECRETS_DIR" -type f | wc -l) files under $SECRETS_DIR (mode 600)."
+echo "secrets: $made generated now; $present application secret files under $SECRETS_DIR (mode 600)."
 for f in "$SECRETS_DIR"/api/smtp_username "$SECRETS_DIR"/api/smtp_password; do
   [ -s "$f" ] && echo "  $(basename "$f"): present (the owner's)" || echo "  $(basename "$f"): absent (email stays disabled until the owner enters it)"
 done
