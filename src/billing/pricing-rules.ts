@@ -487,8 +487,12 @@ export function assessPeriod(
   prior: AssessedPeriod,
   plan: PlanPricing = CURRENT_PLAN,
   credits: ReplacementCredits = {},
+  /** Stores granted free this period (D227): their own fee only. Their paid seats stay chargeable. */
+  freeStores: ReadonlySet<string> = new Set(),
 ): PeriodAssessment {
   const q = quoteFor(size, plan);
+  const isFree = (line: { branchId: string | null }) => line.branchId !== null && freeStores.has(line.branchId);
+  const chargedBranchFee = q.lines.reduce((n, line) => n + (isFree(line) ? 0 : line.activityFee), 0);
 
   const priorBranch = whole(prior.assessedBranchFee);
   const priorStaff = whole(prior.assessedStaffFee);
@@ -501,7 +505,7 @@ export function assessPeriod(
     assessedActivityFeeByBranch[branchId] = whole(fee);
   }
   for (const line of q.lines) {
-    if (line.branchId === null) continue;
+    if (line.branchId === null || isFree(line)) continue;
     assessedActivityFeeByBranch[line.branchId] = Math.max(
       assessedActivityFeeByBranch[line.branchId] ?? 0,
       line.activityFee,
@@ -516,7 +520,7 @@ export function assessPeriod(
   // The high-water mark, component by component. Taken per component rather
   // than on the total, so a store added late cannot mask a seat charge that
   // was already assessed — the two are separate facts about the period.
-  const assessedBranchFee = Math.max(priorBranch, q.branchFee, branchFeeByBranch);
+  const assessedBranchFee = Math.max(priorBranch, chargedBranchFee, branchFeeByBranch);
   const assessedStaffFee = Math.max(priorStaff, q.staffFee);
 
   const assessedTotal = assessedBranchFee + assessedStaffFee;

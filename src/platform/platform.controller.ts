@@ -1,4 +1,5 @@
 import { ConflictException } from '@nestjs/common';
+import { IsUUID } from 'class-validator';
 import { claimedBy } from './owner-identity/owner-identity';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 import { AccessBasisDto, parseBasis, type ParsedBasis } from './access-basis';
@@ -264,6 +265,8 @@ class ConsoleStoreDto {
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
   /** Needed only when the business's access does not already cover another store (D227). */
   @IsOptional() @ValidateNested() @Type(() => AccessBasisDto) access?: AccessBasisDto;
+  /** The exact priced request this basis answers, as the refusal named it. */
+  @IsOptional() @IsUUID() requestId?: string;
   @IsString() @MinLength(1) @MaxLength(500) reason: string;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
@@ -1018,7 +1021,7 @@ export class PlatformController {
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
     return this.provisioning.openStore(
       id,
-      { name: dto.name, nameAr: dto.nameAr, activity: dto.activity, reason: dto.reason, access: dto.access },
+      { name: dto.name, nameAr: dto.nameAr, activity: dto.activity, reason: dto.reason, access: dto.access, requestId: dto.requestId },
       { admin, ip: req.ip },
     );
   }

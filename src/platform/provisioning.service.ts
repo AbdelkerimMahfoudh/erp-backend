@@ -286,7 +286,7 @@ export class ProvisioningService {
    */
   async openStore(
     companyUuid: string,
-    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string; access?: AccessBasisDto },
+    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string; access?: AccessBasisDto; requestId?: string },
     ctx: ProvisioningActor,
   ): Promise<{ mode: 'granted' | 'requested' | 'opened'; allocation: SeatAllocationView; created: boolean }> {
     const companyId = this.companyIdOf(companyUuid);
@@ -332,12 +332,22 @@ export class ProvisioningService {
           code: 'access_basis_required',
           message: 'This store is not covered by the business\u2019s access. Record the payment received.',
           amount: result.allocation.monthlyAmount,
+          requestId: result.allocation.id,
+        });
+      }
+      // A request that already existed may be somebody else's with the same name: only its exact id may act on it.
+      if (!result.created && input.requestId !== result.allocation.id) {
+        throw new ConflictException({
+          code: 'pending_request_exists',
+          message: 'A priced request with this name already exists. Confirm that exact request, or choose another name.',
+          amount: result.allocation.monthlyAmount,
+          requestId: result.allocation.id,
         });
       }
       const basis = parseBasis(input.access, false, new Date(), { store: true });
       if (basis.kind !== 'payment') {
         // D227: free until the renewal of the period in force, then billed like any store. The period is the duration.
-        const granted = await this.seats.grantStore(companyId, { name: input.name, nameAr: input.nameAr, activity: input.activity, reason: basis.reason, by, untilRenewal: true });
+        const granted = await this.seats.grantStore(companyId, { name: input.name, nameAr: input.nameAr, activity: input.activity, reason: basis.reason, by, untilRenewal: true, withdrawRequestId: uuidToBin(result.allocation.id) });
         await this.audit.record({
           admin: ctx.admin,
           action: 'business.store_grant',

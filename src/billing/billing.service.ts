@@ -120,19 +120,6 @@ export interface ReplacementSlot {
  * that ended — lapsed, in grace, or waiting for its prepaid successor to roll —
  * charges nothing more, and the change waits for the next period instead.
  */
-/** A company's size without the stores granted free this period, and without those stores' staff (D227). */
-export function withoutFreeStores(size: CompanySize, free: ReadonlySet<string>): CompanySize {
-  if (free.size === 0) return size;
-  const branches = (size.branches ?? []).filter((b) => !b.branchId || !free.has(b.branchId));
-  const removed = (size.branches ?? []).filter((b) => b.branchId && free.has(b.branchId));
-  return {
-    ...size,
-    branches,
-    activeBranchCount: size.activeBranchCount - removed.length,
-    activeStaffCount: size.activeStaffCount - removed.reduce((n, b) => n + (b.staffCount ?? 0), 0),
-  };
-}
-
 export function periodRunning(period: Pick<PeriodState, 'periodEnd'> | null, now: Date): boolean {
   return period !== null && (period.periodEnd === null || period.periodEnd.getTime() > now.getTime());
 }
@@ -450,6 +437,7 @@ export class BillingService {
         extraStaffMonthly: period.extraStaffMonthly,
       },
       await this.creditsOf(period.id),
+      await this.freeStoresOf(companyId, period.id, this.prisma),
     );
 
     return {
@@ -494,7 +482,7 @@ export class BillingService {
     // priced in full by the next period instead (D154, reviewed 2026-10-09).
     if (!periodRunning(period, now)) return;
 
-    const size = withoutFreeStores(await this.sizeOf(companyId, db), await this.freeStoresOf(companyId, period.id, db));
+    const size = await this.sizeOf(companyId, db);
     const stored = feesFrom(period.assessedActivityFeeByBranch);
     const assessment = assessPeriod(
       size,
@@ -512,6 +500,7 @@ export class BillingService {
       },
       // A store that took an archived one's place this period is charged only what that location was not paid (D158).
       await this.creditsOf(period.id, db),
+      await this.freeStoresOf(companyId, period.id, db),
     );
 
     if (assessment.addedThisPeriod === 0) {

@@ -682,7 +682,7 @@ export class SeatAllocationService {
    */
   async grantStore(
     companyId: Buffer,
-    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string; by: string; untilRenewal?: boolean },
+    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string; by: string; untilRenewal?: boolean; withdrawRequestId?: Buffer },
   ): Promise<{ allocation: SeatAllocationView; created: boolean }> {
     const sub = await this.subscriptionOf(companyId);
     const name = (input.name ?? '').trim();
@@ -738,10 +738,10 @@ export class SeatAllocationService {
         throw new ConflictException({ code: 'store_name_in_use', message: 'A store with that name already exists.' });
       }
 
-      // The priced request this grant answers is withdrawn: one store, one record.
-      if (input.untilRenewal) {
+      // The one priced request this grant answers, by its id and company. A name is not an identifier.
+      if (input.withdrawRequestId) {
         await tx.seatAllocation.updateMany({
-          where: { companyId, kind: 'store', label: name, status: 'pending_payment' },
+          where: { id: input.withdrawRequestId, companyId, kind: 'store', status: 'pending_payment' },
           data: { status: 'released', reason: 'Withdrawn: granted free until renewal.' },
         });
       }

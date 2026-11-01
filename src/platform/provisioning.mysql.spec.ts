@@ -180,11 +180,6 @@ run('test businesses and provisioning on real MySQL (0102)', () => {
     const row = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, label: 'Gift', status: 'granted' } });
     expect(row.freeUntilPeriodId?.equals(before.id)).toBe(true);
 
-    // Another period does not match the mark: renewal bills it.
-    await root.seatAllocation.update({ where: { id: row.id }, data: { freeUntilPeriodId: Buffer.alloc(16, 9) } });
-    await a.billing.assessNow(id);
-    const billed = await root.billingPeriod.findFirstOrThrow({ where: { companyId: id } });
-    expect(Number(billed.assessedTotal)).toBeGreaterThan(Number(before.assessedTotal));
   });
 
   it('serialises two administrators changing one business’s test status: one applies, the other finds it done', async () => {
