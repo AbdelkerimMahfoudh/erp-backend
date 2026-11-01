@@ -8,6 +8,7 @@ import { WhatsAppRecords, type ConsentState } from '../messaging/whatsapp-record
 import { PlatformAuditService } from './platform-audit.service';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 import { SeatAllocationService, type SeatAllocationView } from './seat-allocation.service';
+import { parseBasis, type AccessBasisDto } from './access-basis';
 
 /** The administrator acting, and from where. */
 export interface ProvisioningActor {
@@ -285,9 +286,9 @@ export class ProvisioningService {
    */
   async openStore(
     companyUuid: string,
-    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string },
+    input: { name: string; nameAr?: string | null; activity?: Activity | null; reason: string; access?: AccessBasisDto },
     ctx: ProvisioningActor,
-  ): Promise<{ mode: 'granted' | 'requested'; allocation: SeatAllocationView; created: boolean }> {
+  ): Promise<{ mode: 'granted' | 'requested' | 'opened'; allocation: SeatAllocationView; created: boolean }> {
     const companyId = this.companyIdOf(companyUuid);
     const company = await this.companyOf(companyId);
     const target = { id: company.id, label: company.name };
@@ -318,7 +319,32 @@ export class ProvisioningService {
           ip: ctx.ip ?? null,
         });
       }
-      return { mode, ...result };
+      if (company.isTest) return { mode, ...result };
+
+      /*
+       * D227: no Owner approval of the administrator's own action. A store the business's access already covers has
+       * opened above. One that costs more waits for an explicit basis; the request above holds its price, and sending the
+       * same name again with the basis finds it.
+       */
+      if (result.allocation.status !== 'pending_payment') return { mode: 'opened' as const, ...result };
+      if (!input.access) {
+        throw new ConflictException({
+          code: 'access_basis_required',
+          message: 'This store is not covered by the business\u2019s access. Record the payment received.',
+          amount: result.allocation.monthlyAmount,
+        });
+      }
+      const basis = parseBasis(input.access, false, new Date());
+      if (basis.kind !== 'payment') {
+        // The owner decides what a no-payment grant means for a customer's store at renewal (docs/113).
+        throw new ConflictException({ code: 'store_grant_not_decided', message: 'A no-payment grant for a customer\u2019s store is not available yet.' });
+      }
+      const paid = await this.seats.confirmPayment(
+        uuidToBin(result.allocation.id),
+        { amount: basis.amount, paidAt: basis.paidAt, channel: basis.channel, reference: basis.reference, note: reason },
+        { admin: ctx.admin, ip: ctx.ip ?? null },
+      );
+      return { mode: 'opened' as const, allocation: paid.allocation, created: result.created };
     });
   }
 

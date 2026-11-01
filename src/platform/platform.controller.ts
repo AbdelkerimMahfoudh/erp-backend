@@ -1,5 +1,7 @@
 import { ConflictException } from '@nestjs/common';
 import { claimedBy } from './owner-identity/owner-identity';
+import type { PlatformAdminIdentity } from './platform-admin.service';
+import { AccessBasisDto, parseBasis, type ParsedBasis } from './access-basis';
 import { normaliseEmail, normalisePhone } from '../auth/identifier';
 import {
   Body,
@@ -232,6 +234,8 @@ export class CreateBusinessDto {
   @IsOptional() @IsString() @MaxLength(160) email?: string;
   @IsOptional() @IsString() @MaxLength(24) phone?: string;
   @IsIn(['en', 'ar', 'fr']) language: 'en' | 'ar' | 'fr';
+  /** Why it has access (D227): required, and refused before anything is created. */
+  @ValidateNested() @Type(() => AccessBasisDto) access: AccessBasisDto;
   /** A persistent test business (D217), marked in the same transaction that creates it. */
   @IsOptional() @IsBoolean() isTest?: boolean;
   /**
@@ -258,6 +262,8 @@ class ConsoleStoreDto {
   @IsString() @NormalizeName() @IsLatinName() name: string;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() nameAr?: string | null;
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
+  /** Needed only when the business's access does not already cover another store (D227). */
+  @IsOptional() @ValidateNested() @Type(() => AccessBasisDto) access?: AccessBasisDto;
   @IsString() @MinLength(1) @MaxLength(500) reason: string;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
@@ -849,6 +855,7 @@ export class PlatformController {
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
     const isTest = dto.isTest === true;
     await this.provisioning.assertMayCreate(isTest, { admin, ip: req.ip }, dto.businessName);
+    const basis = parseBasis(dto.access, isTest, new Date());
     const deferOwner = dto.verification === 'deferred_by_platform';
     const actor = { admin, sessionId: req.platformSessionId, ip: req.ip ?? null };
     // Every condition before anything is written: a refused deferral creates no business.
@@ -885,7 +892,9 @@ export class PlatformController {
     });
 
     if (!result.created) {
-      return { ...result, invitation: null, setup: await this.provisioning.status(uuidToBin(result.companyId)) };
+      // A retry finishes what a lost answer may have left: each step recognises work already done.
+      const accessFailed = !(await this.applyBasis(result.companyId, basis, dto.reason, { admin, ip: req.ip }));
+      return { ...result, accessFailed, invitation: null, setup: await this.provisioning.status(uuidToBin(result.companyId)) };
     }
 
     await this.audit.record({
@@ -910,11 +919,15 @@ export class PlatformController {
       ip: req.ip ?? null,
     });
 
+    // The business exists either way. A failure is said, never hidden, and retrying this form finishes it.
+    const accessFailed = !(await this.applyBasis(result.companyId, basis, dto.reason, { admin, ip: req.ip }));
+
     if (deferral) {
       // The deferred Owner's setup code replaces the setup invitation: one way in, never two.
       const deferred = await this.testProvisioning.deferOwner(result.companyId, deferral, actor);
       return {
         ...result,
+        accessFailed,
         invitation: null,
         setupCode: deferred.setupCode,
         ownerPhoneVerification: 'deferred_by_platform' as const,
@@ -933,6 +946,7 @@ export class PlatformController {
       // The business exists; its invitation does not. Said, not hidden: the console issues one from the business.
       return {
         ...result,
+        accessFailed,
         invitation: null,
         invitationFailed: true,
         setup: await this.provisioning.status(uuidToBin(result.companyId)),
@@ -941,6 +955,7 @@ export class PlatformController {
 
     return {
       ...result,
+      accessFailed,
       invitation: {
         token: invitation.token,
         expiresAt: invitation.expiresAt.toISOString(),
@@ -949,6 +964,25 @@ export class PlatformController {
       },
       setup: await this.provisioning.status(uuidToBin(result.companyId)),
     };
+  }
+
+  /** The payment recorded with its period and then the activation, or the grant: each audited by its own service. */
+  private async applyBasis(companyId: string, basis: ParsedBasis, reason: string, ctx: { admin: PlatformAdminIdentity; ip?: string }): Promise<boolean> {
+    try {
+      if (basis.kind === 'grant') {
+        await this.lifecycle.activateByGrant(companyId, { days: basis.days, reason: basis.reason }, ctx);
+      } else {
+        await this.lifecycle.recordPayment(
+          companyId,
+          { amount: basis.amount, paidAt: basis.paidAt, channel: basis.channel, reference: basis.reference, note: reason, confirm: true },
+          ctx,
+        );
+        await this.lifecycle.approve(companyId, { months: basis.months, reason }, ctx);
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async existingOwner(dto: { phone?: string; email?: string }) {
@@ -984,7 +1018,7 @@ export class PlatformController {
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
     return this.provisioning.openStore(
       id,
-      { name: dto.name, nameAr: dto.nameAr, activity: dto.activity, reason: dto.reason },
+      { name: dto.name, nameAr: dto.nameAr, activity: dto.activity, reason: dto.reason, access: dto.access },
       { admin, ip: req.ip },
     );
   }

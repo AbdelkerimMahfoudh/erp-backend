@@ -230,11 +230,12 @@ describe('the shared flow', () => {
       },
       audit: { record: async () => undefined },
       invitations: { issue: async () => ({ token: 'i', expiresAt: new Date(), delivery: 'manual', owner: {} }) },
+      lifecycle: { activateByGrant: async () => ({}) },
       provisioning: { assertMayCreate: async () => undefined, status: async () => null },
     });
     const req = { platformAdmin: { id: Buffer.alloc(16, 3), email: 'ops@example.test', name: 'Ops' }, ip: '127.0.0.1' };
     const answer = await platform.createBusiness(
-      { idempotencyKey: 'a-1', ownerName: 'O', businessName: 'B', language: 'en', reason: 'by phone' } as never,
+      { idempotencyKey: 'a-1', ownerName: 'O', businessName: 'B', language: 'en', reason: 'by phone', access: { kind: 'grant', days: 30, reason: 'pilot' } } as never,
       req as never,
     );
     expect(seen).toHaveLength(1);

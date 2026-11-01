@@ -196,14 +196,14 @@ describe('the test status', () => {
 });
 
 describe('a store from the console (the owner’s decision of 2026-10-20)', () => {
-  it('opens a test business’s store under its grant, and files a customer’s priced request — each audited', async () => {
+  it('opens a test business’s store under its grant, and holds a customer’s priced request for a basis — each audited', async () => {
     const { service, real, test, seatCalls, audits } = world();
     const granted = await service.openStore(binToUuid(test.id), { name: 'Annex', reason: 'second test store' }, CTX);
-    const requested = await service.openStore(binToUuid(real.id), { name: 'Annex', reason: 'asked by phone' }, CTX);
+    // D227: a customer's store that costs more waits for an explicit basis; its priced request holds the amount.
+    await expect(service.openStore(binToUuid(real.id), { name: 'Annex', reason: 'asked by phone' }, CTX)).rejects.toMatchObject({ response: { code: 'access_basis_required' } });
     expect(seatCalls).toEqual(['grantStore', 'requestStore']);
     expect(granted).toMatchObject({ mode: 'granted', created: true, allocation: { status: 'granted', monthlyAmount: 0 } });
-    expect(requested).toMatchObject({ mode: 'requested', created: true, allocation: { status: 'pending_payment' } });
-    expect(audits.map((a) => a.action)).toEqual(['business.store_grant', 'business.store_request']);
+    expect(audits.map((a) => a.action)).toEqual(['business.store_grant', 'business.store_request', 'business.store.refused']);
   });
 
   it('audits a refusal from below with its code', async () => {

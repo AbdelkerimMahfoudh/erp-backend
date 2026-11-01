@@ -156,10 +156,8 @@ run('test businesses and provisioning on real MySQL (0102)', () => {
     expect(longNote.note).toHaveLength(255);
     expect((await root.seatAllocation.findUniqueOrThrow({ where: { id: Buffer.from(long.allocation.id.replace(/-/g, ''), 'hex') }, select: { reason: true } })).reason).toHaveLength(500);
 
-    // A customer's store from the console is the priced request, awaiting a real payment.
-    const requested = await a.provisioning.openStore(shop.companyId, { name: 'Annex', reason: 'asked by phone' }, CTX);
-    expect(requested).toMatchObject({ mode: 'requested', allocation: { status: 'pending_payment' } });
-    expect(requested.allocation.monthlyAmount).toBeGreaterThan(0);
+    // D227: a customer's store that costs more waits for an explicit basis, and opens nothing meanwhile.
+    await expect(a.provisioning.openStore(shop.companyId, { name: 'Annex', reason: 'asked by phone' }, CTX)).rejects.toMatchObject({ response: { code: 'access_basis_required' } });
     const shopId = Buffer.from(shop.companyId.replace(/-/g, ''), 'hex');
     expect(await root.branch.count({ where: { companyId: shopId } })).toBe(1);
   });
