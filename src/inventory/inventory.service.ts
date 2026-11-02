@@ -84,6 +84,7 @@ const INVENTORY_PRODUCT_SELECT = {
   model: true,
   variant: true,
   barcode: true,
+  defaultPrice: true,
   trackingType: true,
   specifications: true,
   // D225: what the unit's picture is drawn from (key, chosen icon, parent's).
