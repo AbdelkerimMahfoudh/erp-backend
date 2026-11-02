@@ -1,3 +1,5 @@
+import { AccountSecurityService } from './account-security.service';
+import { CancelChangeDto, ChangeCodeDto, ConfirmPasswordChangeDto, StartContactChangeDto, StartPasswordChangeDto } from './account-security.dto';
 import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
@@ -44,6 +46,7 @@ const languageOf = (language?: string): 'en' | 'fr' | 'ar' => (language === 'fr'
 @Controller({ path: 'account', version: '1' })
 export class AccountController {
   constructor(
+    private readonly security_: AccountSecurityService,
     private readonly account: AccountService,
     private readonly deletion: AccountDeletionService,
   ) {}
@@ -149,6 +152,53 @@ export class AccountController {
     @Query('language') language?: string,
   ) {
     return this.account.withdrawWhatsappConsent(this.principal(user), dto, languageOf(language), req.ip ?? null);
+  }
+
+  @Get('security')
+  @ApiOperation({ summary: 'What Security and sign-in can do here, and my own history' })
+  async security(@CurrentUser() user: AuthUser) {
+    return { ...this.security_.capabilities(), history: await this.security_.history(this.principal(user)) };
+  }
+
+  @Post('security/password/start')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(SENSITIVE_THROTTLE)
+  startPassword(@CurrentUser() user: AuthUser, @Body() dto: StartPasswordChangeDto) {
+    return this.security_.startPassword(this.principal(user), { ...dto, language: languageOf(dto.language) });
+  }
+
+  @Post('security/password/confirm')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(SENSITIVE_THROTTLE)
+  confirmPassword(@CurrentUser() user: AuthUser, @Body() dto: ConfirmPasswordChangeDto) {
+    return this.security_.confirmPassword(this.principal(user), dto);
+  }
+
+  @Post('security/contact/start')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(SENSITIVE_THROTTLE)
+  startContact(@CurrentUser() user: AuthUser, @Body() dto: StartContactChangeDto, @Req() req: { ip?: string }) {
+    return this.security_.startContact(this.principal(user), { ...dto, language: languageOf(dto.language) }, req.ip ?? null);
+  }
+
+  @Post('security/contact/confirm-old')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(SENSITIVE_THROTTLE)
+  confirmOld(@CurrentUser() user: AuthUser, @Body() dto: ChangeCodeDto) {
+    return this.security_.confirmOld(this.principal(user), { ...dto, language: languageOf(dto.language) });
+  }
+
+  @Post('security/contact/confirm-new')
+  @HttpCode(HttpStatus.OK)
+  @Throttle(SENSITIVE_THROTTLE)
+  confirmNew(@CurrentUser() user: AuthUser, @Body() dto: ChangeCodeDto) {
+    return this.security_.confirmNew(this.principal(user), dto);
+  }
+
+  @Post('security/cancel')
+  @HttpCode(HttpStatus.OK)
+  cancelChange(@CurrentUser() user: AuthUser, @Body() dto: CancelChangeDto) {
+    return this.security_.cancel(this.principal(user), dto.changeId);
   }
 
   @Post('whatsapp/verify/confirm')

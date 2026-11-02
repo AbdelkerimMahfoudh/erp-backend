@@ -1,3 +1,4 @@
+import { AccountSecurityService } from './account-security.service';
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { PlatformModule } from '../platform/platform.module';
@@ -15,7 +16,7 @@ import { AccountDeletionService } from './account-deletion.service';
 @Module({
   imports: [AuthModule, PlatformModule],
   controllers: [AccountController],
-  providers: [AccountService, AccountDeletionService],
+  providers: [AccountService, AccountDeletionService, AccountSecurityService],
   exports: [AccountDeletionService],
 })
 export class AccountModule {}

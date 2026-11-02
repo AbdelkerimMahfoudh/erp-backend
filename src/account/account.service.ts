@@ -164,6 +164,10 @@ export class AccountService {
     if (user.phone === phone && user.phoneVerifiedAt) {
       throw refuse(HttpStatus.CONFLICT, 'already_verified', 'This number is already verified.');
     }
+    // D227: moving a number already proven needs its holder's code as well, through Security and sign-in. Build 3 is told so.
+    if (user.phone && user.phoneVerifiedAt && user.phone !== phone) {
+      throw refuse(HttpStatus.CONFLICT, 'use_security_screen', 'Update the app to change this number.');
+    }
     const clash = await this.prisma.user.findFirst({
       where: { companyId: p.companyId, phone, id: { not: p.userId }, deletedAt: null },
       select: { id: true },

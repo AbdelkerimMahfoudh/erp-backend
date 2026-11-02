@@ -21,7 +21,7 @@ describe('composing an email from approved text', () => {
     expect(() => composeEmail({ ...message, variables: { code: '123456' } })).toThrow(/needs exactly/);
     expect(() => composeEmail({ ...message, variables: { code: '1', ttlMinutes: '10', extra: 'x' } })).toThrow(/needs exactly/);
     expect(() => composeEmail({ ...message, variables: { code: ' ', ttlMinutes: '10' } })).toThrow(/needs exactly/);
-    for (const held of ['password.recovery', 'security.alert', 'staff.invitation'] as const) {
+    for (const held of ['password.recovery', 'staff.invitation'] as const) {
       expect(() => composeEmail({ ...message, template: held })).toThrow(/not wired/);
     }
   });

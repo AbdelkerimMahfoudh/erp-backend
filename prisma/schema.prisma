@@ -2992,6 +2992,8 @@ enum OtpPurpose {
   /// Appointing, changing or removing an Acting Owner (D225, 0114): the Owner's second factor, its own purpose so
   /// no other code can confirm it and it confirms nothing else.
   acting_owner_step_up
+  /// A stage of changing a password or contact (0125), bound to its credential_changes row.
+  credential_change
 }
 
 /// What an account-deletion request deletes (0084, docs/64).
@@ -6537,4 +6539,24 @@ model PaymentProof {
   @@index([status, submittedAt], map: "ix_payment_proofs_status")
   @@index([companyId, sha256], map: "ix_payment_proofs_sha")
   @@map("payment_proofs")
+}
+
+/// One attempt at changing a sign-in credential (0125): each stage waits for one specific code.
+model CredentialChange {
+  id             Bytes     @id @db.Binary(16)
+  companyId      Bytes     @map("company_id") @db.Binary(16)
+  userId         Bytes     @map("user_id") @db.Binary(16)
+  kind           String    @db.VarChar(16)
+  stage          String    @db.VarChar(16)
+  newContact     String?   @map("new_contact") @db.VarChar(160)
+  oldCodeId      Bytes     @map("old_code_id") @db.Binary(16)
+  oldCodeChannel String    @map("old_code_channel") @db.VarChar(8)
+  newCodeId      Bytes?    @map("new_code_id") @db.Binary(16)
+  newCodeChannel String?   @map("new_code_channel") @db.VarChar(8)
+  expiresAt      DateTime  @map("expires_at") @db.DateTime(6)
+  completedAt    DateTime? @map("completed_at") @db.DateTime(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+
+  @@index([userId, stage], map: "ix_credential_changes_user")
+  @@map("credential_changes")
 }

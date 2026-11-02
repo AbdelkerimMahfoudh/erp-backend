@@ -284,7 +284,7 @@ export const EMAIL_TEMPLATES: Record<EmailTemplateKey, EmailTemplate> = {
     sender: 'verification',
     essential: true,
     variables: ['what', 'when'],
-    wired: false,
+    wired: true,
     subject: { en: 'Dukan ERP security notice', fr: 'Avis de sécurité Dukan ERP', ar: 'تنبيه أمني من Dukan ERP' },
     body: {
       en: '{what} on your Dukan ERP account at {when}. If this was not you, change your password and contact your business owner.',

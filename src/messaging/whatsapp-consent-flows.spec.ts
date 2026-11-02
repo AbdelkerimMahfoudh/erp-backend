@@ -201,7 +201,7 @@ describe('what never goes by email (the owner’s security correction of 2026-10
 });
 
 describe('my operational WhatsApp consent, in the account', () => {
-  function account(opts: { verified?: boolean; email?: boolean; canDeliverTo?: boolean; records?: WhatsAppRecords; db?: ReturnType<typeof fakeMessagingPrisma> } = {}) {
+  function account(opts: { verified?: boolean; startUnverified?: boolean; email?: boolean; canDeliverTo?: boolean; records?: WhatsAppRecords; db?: ReturnType<typeof fakeMessagingPrisma> } = {}) {
     const db = opts.db ?? fakeMessagingPrisma();
     const records = opts.records ?? new WhatsAppRecords(db as never, { hash: (n: string) => recipientHash(n, KEY) } as never);
     const me = {
@@ -217,7 +217,10 @@ describe('my operational WhatsApp consent, in the account', () => {
       user: {
         // The caller's own row; nobody else in the business holds the number.
         findFirst: jest.fn(async (args: { where: { id?: unknown } }) =>
-          args.where.id && typeof args.where.id === 'object' && 'not' in (args.where.id as object) ? null : { ...me },
+          args.where.id && typeof args.where.id === 'object' && 'not' in (args.where.id as object)
+            ? null
+            : // D227: a verified number now moves through Security and sign-in; this route's consent rules are held for one not yet proven.
+              { ...me, ...(opts.startUnverified && 'select' in args && (args as { select?: { passwordHash?: boolean } }).select?.passwordHash ? { phoneVerifiedAt: null } : {}) },
         ),
         findUnique: jest.fn(async () => ({ ...me })),
         update: jest.fn(async ({ data }: { data: { phone: string; phoneVerifiedAt: Date } }) => Object.assign(me, data)),
@@ -315,7 +318,7 @@ describe('my operational WhatsApp consent, in the account', () => {
   });
 
   it('a new number needs its own consent with the code request, recorded for that number only', async () => {
-    const { service, db, otp } = account();
+    const { service, db, otp } = account({ startUnverified: true });
     await expect(service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p' })).rejects.toMatchObject({ response: { code: 'whatsapp_consent_required' } });
     expect(otp.request).not.toHaveBeenCalled();
     await service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p', language: 'fr', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION });
@@ -323,7 +326,7 @@ describe('my operational WhatsApp consent, in the account', () => {
   });
 
   it('once the new number is verified, its pending agreement is active and the replaced number’s is superseded — never carried over', async () => {
-    const { service, records } = account();
+    const { service, records } = account({ startUnverified: true });
     await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION });
     await service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION });
     await service.confirmPhoneVerification(me, { challengeId: '0192d1a0-0000-7000-8000-000000000001', code: '123456' });
@@ -336,7 +339,7 @@ describe('my operational WhatsApp consent, in the account', () => {
   });
 
   it('a new number whose code is never confirmed stays pending: it authorises nothing proactive and the old number keeps its consent', async () => {
-    const { service, records } = account();
+    const { service, records } = account({ startUnverified: true });
     await service.grantWhatsappConsent(me, { version: WHATSAPP_CONSENT_VERSION });
     await service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION });
     expect(await records.contactState(NEW_NUMBER)).toMatchObject({ consented: false, consent: 'pending', pendingLive: true });
@@ -344,7 +347,7 @@ describe('my operational WhatsApp consent, in the account', () => {
   });
 
   it('number verification refuses up front a number the channel would not send to (test mode), creating no code', async () => {
-    const { service, otp } = account({ canDeliverTo: false });
+    const { service, otp } = account({ canDeliverTo: false, startUnverified: true });
     await expect(service.startPhoneVerification(me, { phone: NEW_NUMBER, password: 'p', whatsappConsentVersion: WHATSAPP_CONSENT_VERSION })).rejects.toMatchObject({
       response: { code: 'verification_unavailable' },
     });
