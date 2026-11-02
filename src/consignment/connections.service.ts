@@ -126,7 +126,14 @@ export class ConnectionsService {
           : // `startsWith`, never `contains`: a substring match on a
             // three-letter fragment would return most of the platform.
             // Either of the business's names (D225).
-            { OR: [{ name: { startsWith: parsed.value } }, { nameAr: { startsWith: parsed.value } }] };
+            {
+              OR: [
+                { name: { startsWith: parsed.value } },
+                { nameAr: { startsWith: parsed.value } },
+                // D227: most shops are known by a store.
+                { branches: { some: { isActive: true, OR: [{ name: { startsWith: parsed.value } }, { nameAr: { startsWith: parsed.value } }] } } },
+              ],
+            };
 
     const found = await this.prisma.company.findMany({
       where: { ...where, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
@@ -157,7 +164,7 @@ export class ConnectionsService {
             isSelf: c.id.equals(me),
           }),
         )
-        .map(toPublicPreview),
+        .map((c) => toPublicPreview(c, parsed.mode === 'name' ? parsed.value : undefined)),
     };
   }
 

@@ -129,12 +129,13 @@ export function toPublicPreview(company: {
   branches?: NamedStore[];
   city: string | null;
   logoRef: string | null;
-}): PublicStorePreview {
+}, query?: string): PublicStorePreview {
+  const shown = accountView(company, query);
   return {
     publicStoreId: company.publicStoreId,
     // The compact label only. A stranger does not get an account's list of stores.
-    name: accountView(company).name,
-    nameAr: accountView(company).nameAr,
+    name: shown.name,
+    nameAr: shown.nameAr,
     city: company.city,
     logoRef: company.logoRef,
     verification: 'Verified badge coming soon',

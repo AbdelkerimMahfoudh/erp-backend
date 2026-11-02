@@ -26,29 +26,31 @@ export const ACTIVE_STORES = {
   },
 };
 
-const MORE: Record<'en' | 'fr' | 'ar', (n: number) => string> = {
-  en: (n) => `+ ${n} more`,
-  fr: (n) => `+ ${n} autre${n > 1 ? 's' : ''}`,
-  ar: (n) => `+ ${n} أخرى`,
-};
-
-/** `Store A + 2 more`: a presentation label over the full list, for a field one string must fill. */
-export function compactStores(stores: readonly NamedStore[], language: 'en' | 'fr' | 'ar'): string {
-  if (stores.length === 0) return '';
-  const first = language === 'ar' ? (stores[0].nameAr ?? stores[0].name) : stores[0].name;
-  return stores.length === 1 ? first : `${first} ${MORE[language](stores.length - 1)}`;
+/**
+ * `Boutique Centre (+2)`: one string for a field a build up to 1.0.0 (3) reads whole. Locale-neutral, because the server
+ * cannot know that reader's language; new clients word it themselves from the list. `leading` is a store a search matched.
+ */
+export function compactStores(stores: readonly NamedStore[], arabic = false, leading?: NamedStore): string {
+  const first = leading ?? stores[0];
+  if (!first) return '';
+  const name = arabic ? (first.nameAr ?? first.name) : first.name;
+  return stores.length > 1 ? `${name} (+${stores.length - 1})` : name;
 }
 
-/** An account as another account reads it: a connection is account-level, with its stores beneath. */
-export function accountView(account: { name: string | null; nameAr?: string | null; branches?: NamedStore[] }) {
+/** The store a name search matched: the one it should lead with, rather than an unrelated oldest one. */
+export function matchedStore(stores: readonly NamedStore[], query: string | undefined): NamedStore | undefined {
+  const q = query?.trim().toLocaleLowerCase();
+  if (!q) return undefined;
+  return stores.find((s) => s.name.toLocaleLowerCase().startsWith(q) || s.nameAr?.toLocaleLowerCase().startsWith(q));
+}
+
+/** An account as another account reads it: account-level, its name in one string for older builds. */
+export function accountView(account: { name: string | null; nameAr?: string | null; branches?: NamedStore[] }, query?: string) {
   const stores = account.branches ?? [];
+  const leading = matchedStore(stores, query);
   return {
-    // One string, for builds up to 1.0.0 (3): the trading name, or the compact label.
-    name: account.name || compactStores(stores, 'en'),
-    nameAr: account.name ? (account.nameAr ?? null) : stores.length ? compactStores(stores, 'ar') : null,
-    tradingName: account.name,
-    tradingNameAr: account.nameAr ?? null,
-    stores,
+    name: account.name || compactStores(stores, false, leading),
+    nameAr: account.name ? (account.nameAr ?? null) : stores.length ? compactStores(stores, true, leading) : null,
   };
 }
 

@@ -81,30 +81,25 @@ describe('the console’s label, presentation only', () => {
 describe('a connection joins whole accounts', () => {
   const STORES = [CENTRE, PORT, { name: 'Boutique Marche', nameAr: 'متجر السوق' }];
 
-  it.each([
-    ['en', 'Boutique Centre + 2 more'],
-    ['fr', 'Boutique Centre + 2 autres'],
-    ['ar', 'متجر المركز + 2 أخرى'],
-  ] as const)('the compact label in %s', (language, label) => expect(compactStores(STORES, language)).toBe(label));
+  const MARCHE = STORES[2];
 
-  it('one more is singular where the language says so, and one store has no suffix', () => {
-    expect(compactStores([CENTRE, PORT], 'fr')).toBe('Boutique Centre + 1 autre');
-    expect(compactStores([CENTRE], 'en')).toBe('Boutique Centre');
-    expect(compactStores([], 'en')).toBe('');
+  it('one locale-neutral string for older builds: no English word reaches a French reader', () => {
+    expect(compactStores(STORES)).toBe('Boutique Centre (+2)');
+    expect(compactStores(STORES, true)).toBe('متجر المركز (+2)');
+    expect(compactStores([CENTRE])).toBe('Boutique Centre');
+    expect(compactStores([])).toBe('');
   });
 
-  it('with no trading name: the compact string for build 3, the whole ordered list for new clients', () => {
-    expect(accountView({ name: null, branches: STORES })).toEqual({
-      name: 'Boutique Centre + 2 more',
-      nameAr: 'متجر المركز + 2 أخرى',
-      tradingName: null,
-      tradingNameAr: null,
-      stores: STORES,
-    });
+  it('a search leads with the store it matched, in either script, and otherwise the oldest', () => {
+    expect(accountView({ name: null, branches: STORES }, 'boutique m')).toEqual({ name: 'Boutique Marche (+2)', nameAr: 'متجر السوق (+2)' });
+    expect(accountView({ name: null, branches: STORES }, 'متجر السوق').name).toBe('Boutique Marche (+2)');
+    expect(accountView({ name: null, branches: STORES }, 'nothing').name).toBe('Boutique Centre (+2)');
+    expect(accountView({ name: null, branches: STORES }).name).toBe('Boutique Centre (+2)');
+    expect(MARCHE.name).toBe('Boutique Marche');
   });
 
-  it('with one: the trading name, and the stores underneath', () => {
-    expect(accountView({ name: 'SARL Kiffa', nameAr: null, branches: STORES })).toMatchObject({ name: 'SARL Kiffa', nameAr: null, tradingName: 'SARL Kiffa', stores: STORES });
+  it('with a trading name, that name', () => {
+    expect(accountView({ name: 'SARL Kiffa', nameAr: null, branches: STORES })).toEqual({ name: 'SARL Kiffa', nameAr: null });
   });
 
   it('the order is explicit and stable, and every active store is listed', () => {

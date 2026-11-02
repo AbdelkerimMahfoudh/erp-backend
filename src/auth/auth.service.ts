@@ -54,7 +54,7 @@ export interface AccountChoiceResponse {
    * One entry per person the password matched. `stores` is what they choose among (D227). `companyName` stays for builds
    * up to 1.0.0 (3): the trading name, or those stores written out, never a parent invented from one of them.
    */
-  accounts: { accountRef: string; companyName: string; companyNameAr: string | null; userName: string; userNameAr: string | null; stores: NamedStore[] }[];
+  accounts: { accountRef: string; companyName: string; companyNameAr: string | null; userName: string; userNameAr: string | null; tradingName: string | null; tradingNameAr: string | null; stores: NamedStore[] }[];
 }
 
 export type LoginResult = AuthTokenResponse | AccountChoiceResponse;
@@ -377,6 +377,8 @@ export class AuthService {
             companyNameAr: company.name ? company.nameAr : storesTextAr(stores),
             userName: m.name,
             userNameAr: m.nameAr,
+            tradingName: company.name,
+            tradingNameAr: company.nameAr,
             stores,
           };
         }),
