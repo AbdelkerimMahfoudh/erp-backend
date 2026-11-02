@@ -92,9 +92,10 @@ export class AccessService {
   }
 
   /** Branches the user is assigned to (for the app's branch picker / X-Branch-Id). */
+  /** Active stores only: a closed store is not one to choose (D227). */
   async getUserBranches(userId: Buffer): Promise<{ id: string; name: string; nameAr: string | null; type: string; role: string }[]> {
     const assignments = await this.db.userBranch.findMany({
-      where: { userId },
+      where: { userId, branch: { isActive: true } },
       select: {
         branch: { select: { id: true, name: true, nameAr: true, type: true } },
         role: { select: { key: true } },
