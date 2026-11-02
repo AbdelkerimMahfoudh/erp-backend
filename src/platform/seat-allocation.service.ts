@@ -118,7 +118,7 @@ export interface AddOnActivationView {
 }
 
 export interface SeatRequestQueueItem extends SeatAllocationView {
-  business: { id: string; name: string; publicStoreId: string };
+  business: { id: string; name: string | null; publicStoreId: string };
 }
 
 interface ActorContext {

@@ -8,7 +8,7 @@ import { bilingual } from '../common/bilingual-name';
 import { binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
 import type { UpdateNamesDto } from './dto/update-names.dto';
 
-type Named = { name: string; nameAr: string | null };
+type Named = { name: string | null; nameAr: string | null };
 
 /** What changed between two names, for the update and its audit; nothing when nothing did. */
 function changes(before: Named, dto: UpdateNamesDto): Partial<Named> {
@@ -86,11 +86,12 @@ export class NamesService {
     const companyId = this.tenant.companyId();
     const before = await this.db.branch.findFirst({ where: { id, companyId }, select: { name: true, nameAr: true } });
     if (!before) throw new NotFoundException('Store not found');
+    if (dto.name === null) throw new BadRequestException({ code: 'store_name_required', message: 'A store needs a name.' });
     const data = changes(before, dto);
     const keys = Object.keys(data);
     if (keys.length === 0) throw new BadRequestException('No changes were provided');
     const was = pick(before, keys);
-    const after = await this.db.branch.update({ where: { id }, data, select: { name: true, nameAr: true } });
+    const after = await this.db.branch.update({ where: { id }, data: data as { name?: string; nameAr?: string | null }, select: { name: true, nameAr: true } });
     await this.audit.record({
       entityType: 'Branch',
       entityId: id,
@@ -99,6 +100,6 @@ export class NamesService {
       before: was,
       after: pick(after, keys),
     });
-    return { id: idStr, ...bilingual(after) };
+    return { id: idStr, ...bilingual({ ...after, name: after.name }) };
   }
 }

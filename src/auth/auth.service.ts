@@ -1,3 +1,4 @@
+import { FIRST_STORE, labelArOf, labelOf } from '../common/account-label';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { User } from '@prisma/client';
 import { UsersService } from '../users/users.service';
@@ -344,10 +345,10 @@ export class AuthService {
   ): Promise<AccountChoiceResponse> {
     const companies = await this.prisma.company.findMany({
       where: { id: { in: matches.map((m) => m.companyId) }, isActive: true },
-      select: { id: true, name: true, nameAr: true },
+      select: { id: true, name: true, nameAr: true, ...FIRST_STORE },
     });
-    const nameOf = new Map(companies.map((c) => [c.id.toString('hex'), c.name]));
-    const nameArOf = new Map(companies.map((c) => [c.id.toString('hex'), c.nameAr]));
+    const nameOf = new Map(companies.map((c) => [c.id.toString('hex'), labelOf(c)]));
+    const nameArOf = new Map(companies.map((c) => [c.id.toString('hex'), labelArOf(c)]));
 
     // A company that has since been deactivated is dropped rather than named.
     const usable = matches.filter((m) => nameOf.has(m.companyId.toString('hex')));

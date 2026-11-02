@@ -1,5 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { IsUUID } from 'class-validator';
+import { FIRST_STORE } from '../common/account-label';
 import { claimedBy } from './owner-identity/owner-identity';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 import { AccessBasisDto, parseBasis, type ParsedBasis } from './access-basis';
@@ -223,7 +224,7 @@ export class CreateBusinessDto {
   /** D225: the Latin names are required, the Arabic ones optional (D227). */
   @IsString() @NormalizeName() @IsLatinName() ownerName: string;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() ownerNameAr?: string | null;
-  @IsString() @NormalizeName() @IsLatinName() businessName: string;
+  @IsOptional() @NormalizeOptionalName() @IsLatinName() businessName?: string | null;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() businessNameAr?: string | null;
   /** The first store's names. No Latin name is "Main Store" / "المتجر الرئيسي". */
   @IsOptional() @NormalizeName() @IsLatinName() branchName?: string;
@@ -568,6 +569,7 @@ export class PlatformController {
             { nameAr: { contains: term } },
             { publicStoreId: { contains: term } },
             { users: { some: { OR: [{ name: { contains: term } }, { nameAr: { contains: term } }] } } },
+            { branches: { some: { OR: [{ name: { contains: term } }, { nameAr: { contains: term } }] } } },
             { users: { some: { email: { contains: term } } } },
             { users: { some: { phone: { contains: term } } } },
           ],
@@ -600,6 +602,8 @@ export class PlatformController {
           subscription: true,
           ...TRIAL_FACTS,
           _count: { select: { branches: true, users: true } },
+          ...FIRST_STORE,
+          users: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' }, take: 1, select: { name: true } },
         },
       }),
       this.prisma.company.count({ where }),
@@ -616,6 +620,8 @@ export class PlatformController {
         id: binToUuid(c.id),
         name: c.name,
         nameAr: c.nameAr,
+        // D227: for this list only, and never stored: an account with no trading name, by its Owner and store.
+        label: c.name ?? [c.users[0]?.name, c.branches[0]?.name].filter(Boolean).join(' — '),
         publicStoreId: c.publicStoreId,
         city: c.city,
         createdAt: c.createdAt.toISOString(),
@@ -863,13 +869,13 @@ export class PlatformController {
     const admin = req.platformAdmin!;
     await this.admins.confirmPassword(admin.id, dto.confirmPassword);
     const isTest = dto.isTest === true;
-    await this.provisioning.assertMayCreate(isTest, { admin, ip: req.ip }, dto.businessName);
+    await this.provisioning.assertMayCreate(isTest, { admin, ip: req.ip }, dto.businessName ?? dto.branchName ?? dto.ownerName);
     const basis = parseBasis(dto.access, isTest, new Date());
     const deferOwner = dto.verification === 'deferred_by_platform';
     const actor = { admin, sessionId: req.platformSessionId, ip: req.ip ?? null };
     // Every condition before anything is written: a refused deferral creates no business.
     const deferral = deferOwner ? this.testProvisioning.parseDeferral(dto.deferral) : null;
-    if (deferOwner) await this.testProvisioning.assertMayDefer(actor, { id: null, name: dto.businessName }, 'phone_verification.defer');
+    if (deferOwner) await this.testProvisioning.assertMayDefer(actor, { id: null, name: dto.businessName ?? dto.ownerName }, 'phone_verification.defer');
 
     // D227: this form never opens another business for an existing Owner. The console then offers to add a store to theirs.
     if (!isTest) {
@@ -911,7 +917,7 @@ export class PlatformController {
       action: 'business.create',
       targetType: 'Company',
       targetId: uuidToBin(result.companyId),
-      targetLabel: dto.businessName,
+      targetLabel: dto.businessName ?? dto.branchName ?? null,
       reason: dto.reason,
       after: {
         publicStoreId: result.publicStoreId,

@@ -350,7 +350,7 @@ export class AcquisitionService {
   }
 
   private async businessFacts(ids: Buffer[]) {
-    const out = new Map<string, { name: string; isTest: boolean; status: string | null; closed: boolean; completed: boolean }>();
+    const out = new Map<string, { name: string | null; isTest: boolean; status: string | null; closed: boolean; completed: boolean }>();
     if (ids.length === 0) return out;
     const companies = await this.prisma.company.findMany({
       where: { id: { in: ids } },

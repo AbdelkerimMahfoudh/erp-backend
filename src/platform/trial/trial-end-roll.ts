@@ -282,7 +282,7 @@ export async function activateDueAddOnsTx(
               action: 'store.activation_blocked',
               targetType: 'Company',
               targetId: companyId,
-              targetLabel: company.name.slice(0, 200),
+              targetLabel: company.name?.slice(0, 200) ?? null,
               afterJson: redact({ requestId, store: name, paymentId: row.paymentId ? binToUuid(row.paymentId) : null }) as Prisma.InputJsonValue,
               createdAt: now,
             },
@@ -346,7 +346,7 @@ export async function activateDueAddOnsTx(
         action: row.kind === 'store' ? 'store.activate' : 'seat.activate',
         targetType: 'Company',
         targetId: companyId,
-        targetLabel: company.name.slice(0, 200),
+        targetLabel: company.name?.slice(0, 200) ?? null,
         afterJson: redact({
           requestId,
           paymentId: row.paymentId ? binToUuid(row.paymentId) : null,
@@ -504,7 +504,7 @@ export class TrialEndRoll {
     });
     const claim = row?.company?.trialClaim ?? null;
     if (!row || !claim) return null;
-    return { subscriptionId: row.id, label: row.company.name, claim };
+    return { subscriptionId: row.id, label: row.company.name ?? '', claim };
   }
 
   /**

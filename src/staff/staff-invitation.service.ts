@@ -1,3 +1,4 @@
+import { accountLabel } from '../common/account-label';
 import {
   BadRequestException,
   ConflictException,
@@ -381,7 +382,7 @@ export class StaffInvitationService {
   async open(reference: string): Promise<OpenedInvitation> {
     const invitation = await this.usable(this.prisma, reference, new Date());
     return {
-      business: invitation.company.name,
+      business: invitation.company.name ?? (await accountLabel(this.prisma, invitation.companyId)),
       name: invitation.user.name,
       numberEnding: invitation.user.phone!.slice(-2),
       expiresAt: invitation.expiresAt.toISOString(),
@@ -507,7 +508,7 @@ export class StaffInvitationService {
     const final = outcome.activated ? outcome : await this.activation.tryActivate(invitation.userId, actor);
     return {
       verified: true,
-      business: invitation.company.name,
+      business: invitation.company.name ?? (await accountLabel(this.prisma, invitation.companyId)),
       name: invitation.user.name,
       activated: final.activated,
       pending: final.pending,

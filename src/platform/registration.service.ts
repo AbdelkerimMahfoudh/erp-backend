@@ -51,7 +51,8 @@ import {
 export interface RegistrationInput {
   idempotencyKey: string;
   ownerName: string;
-  businessName: string;
+  /** Optional (D227): a registered or trading name, when the shop has one. */
+  businessName?: string | null;
   branchName: string;
   /** D225: the Arabic names, optional (D227). */
   ownerNameAr?: string | null;
@@ -174,7 +175,6 @@ export class RegistrationService {
     if (!input.password || input.password.length < 8) {
       throw new BadRequestException('Use a password of at least 8 characters.');
     }
-    if (!input.businessName?.trim()) throw new BadRequestException('Give your business a name.');
     if (!input.ownerName?.trim()) throw new BadRequestException('Give your own name.');
     if (!input.idempotencyKey?.trim()) throw new BadRequestException('Missing request key.');
 
@@ -215,7 +215,7 @@ export class RegistrationService {
             id: attemptId,
             idempotencyKey: input.idempotencyKey,
             companyId,
-            businessName: input.businessName.slice(0, 160),
+            businessName: input.businessName?.trim()?.slice(0, 160) || null,
             ownerName: input.ownerName.slice(0, 160),
             city: input.city?.slice(0, 120) ?? null,
             email,
@@ -227,7 +227,7 @@ export class RegistrationService {
         await tx.company.create({
           data: {
             id: companyId,
-            name: input.businessName.slice(0, 160),
+            name: input.businessName?.trim()?.slice(0, 160) || null,
             nameAr: input.businessNameAr?.slice(0, 160) || null,
             publicStoreId: newPublicStoreId(),
             city: input.city?.slice(0, 120) ?? null,

@@ -1,7 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsOptional } from 'class-validator';
-import { IsArabicName, IsLatinName, NAME_MAX, NormalizeName, NormalizeOptionalName } from '../../common/bilingual-name';
-import { Optional } from '../../settings/dto/optional.decorator';
+import { IsArabicName, IsLatinName, NAME_MAX, NormalizeOptionalName } from '../../common/bilingual-name';
 
 /**
  * A business's or a store's two names (D225). Each is edited on its own: sending one never touches the other, so
@@ -9,10 +8,11 @@ import { Optional } from '../../settings/dto/optional.decorator';
  */
 export class UpdateNamesDto {
   @ApiPropertyOptional({ maxLength: NAME_MAX, description: 'The name in the Latin alphabet (French and English screens).' })
-  @Optional()
-  @NormalizeName()
+  // D227: a blank business name clears the optional trading name. A store's route refuses it: a store needs a name.
+  @IsOptional()
+  @NormalizeOptionalName()
   @IsLatinName()
-  name?: string;
+  name?: string | null;
 
   @ApiPropertyOptional({ maxLength: NAME_MAX, description: 'الاسم بالعربية — the name the Arabic screens show.' })
   @IsOptional()

@@ -44,7 +44,7 @@ const NOTICE = {
 } satisfies Prisma.SubscriptionNoticeSelect;
 
 type NoticeRecord = Prisma.SubscriptionNoticeGetPayload<{ select: typeof NOTICE }>;
-type BusinessRecord = { id: Buffer; name: string; publicStoreId: string };
+type BusinessRecord = { id: Buffer; name: string | null; publicStoreId: string };
 
 const businessOf = (b: BusinessRecord) => ({ id: binToUuid(b.id), name: b.name, publicStoreId: b.publicStoreId });
 

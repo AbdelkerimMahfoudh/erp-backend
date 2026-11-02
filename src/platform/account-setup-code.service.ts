@@ -1,3 +1,4 @@
+import { accountLabel } from '../common/account-label';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { createHmac, randomBytes } from 'node:crypto';
@@ -81,7 +82,7 @@ export class AccountSetupCodeService {
     return { token, expiresAt: expiresAt.toISOString(), delivery: 'manual', replaced: replaced.count };
   }
 
-  async recordIssue(ctx: { admin: PlatformAdminIdentity; ip?: string | null }, p: { companyId: Buffer; company: string; userId: Buffer; replaced: number; expiresAt: string; reason?: string | null }): Promise<void> {
+  async recordIssue(ctx: { admin: PlatformAdminIdentity; ip?: string | null }, p: { companyId: Buffer; company: string | null; userId: Buffer; replaced: number; expiresAt: string; reason?: string | null }): Promise<void> {
     await this.audit.record({
       admin: ctx.admin,
       action: p.replaced > 0 ? 'account_setup_code.reissue' : 'account_setup_code.issue',
@@ -157,10 +158,10 @@ export class AccountSetupCodeService {
         })
       : true;
     await this.recordRedemption(row.companyId, row.company.name, row.userId, 'used', meta.ip, activated);
-    return { spent: true, companyId: row.companyId, userId: row.userId, business: row.company.name, publicStoreId: row.company.publicStoreId, activated };
+    return { spent: true, companyId: row.companyId, userId: row.userId, business: row.company.name ?? (await accountLabel(this.prisma, row.companyId)), publicStoreId: row.company.publicStoreId, activated };
   }
 
-  private async recordRedemption(companyId: Buffer, company: string, userId: Buffer, outcome: 'used' | 'expired' | 'refused', ip?: string | null, activated?: boolean): Promise<void> {
+  private async recordRedemption(companyId: Buffer, company: string | null, userId: Buffer, outcome: 'used' | 'expired' | 'refused', ip?: string | null, activated?: boolean): Promise<void> {
     await this.audit.record({
       admin: null,
       actor: actorRef(binToUuid(userId)),

@@ -119,7 +119,7 @@ export class AuthController {
       publicStoreId: found.company.publicStoreId,
       // The business's name, so the customer's invoice can carry the store
       // identity rather than only the branch. Not a secret.
-      companyName: found.company.name,
+      companyName: found.company.name ?? '',
       companyNameAr: found.company.nameAr,
       // A persistent test business (D217): the app says so on every screen, so nobody mistakes it for a real shop.
       isTestBusiness: found.company.isTest,

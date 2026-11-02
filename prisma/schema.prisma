@@ -325,7 +325,7 @@ model Company {
   branchReturnPolicies BranchReturnPolicy[]
   discountApprovals    DiscountApproval[]
   id                   Bytes                @id @db.Binary(16)
-  name                 String               @db.VarChar(160)
+  name                 String?               @db.VarChar(160)
   /// D225 (0111): the Arabic name, read by the Arabic interface. NULL until given: `name` is shown meanwhile.
   nameAr               String?              @map("name_ar") @db.VarChar(160)
   /// Public Store Account ID (F1 Stage 3.2): the human-typable, NON-secret code
@@ -4836,7 +4836,7 @@ model RegistrationAttempt {
   companyId Bytes? @map("company_id") @db.Binary(16)
 
   /// What was asked for, for the pending-registrations queue. Never a password.
-  businessName String  @map("business_name") @db.VarChar(160)
+  businessName String? @map("business_name") @db.VarChar(160)
   ownerName    String  @map("owner_name") @db.VarChar(160)
   city         String? @db.VarChar(120)
   email        String? @db.VarChar(160)

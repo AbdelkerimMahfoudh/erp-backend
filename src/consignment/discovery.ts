@@ -1,3 +1,4 @@
+import { labelArOf, labelOf } from '../common/account-label';
 /**
  * Finding another shop, without letting anybody enumerate the platform
  * (Milestone H, H-CP2).
@@ -123,15 +124,16 @@ export function parseQuery(raw: string): ParsedQuery {
  */
 export function toPublicPreview(company: {
   publicStoreId: string;
-  name: string;
+  name: string | null;
   nameAr?: string | null;
+  branches?: { name: string; nameAr: string | null }[];
   city: string | null;
   logoRef: string | null;
 }): PublicStorePreview {
   return {
     publicStoreId: company.publicStoreId,
-    name: company.name,
-    nameAr: company.nameAr ?? null,
+    name: labelOf(company),
+    nameAr: labelArOf(company),
     city: company.city,
     logoRef: company.logoRef,
     verification: 'Verified badge coming soon',
@@ -173,7 +175,7 @@ export interface ConnectedStoreDetail extends PublicStorePreview {
 }
 
 export function toConnectedDetail(
-  company: { publicStoreId: string; name: string; nameAr?: string | null; city: string | null; logoRef: string | null; publicPhone: string | null },
+  company: { publicStoreId: string; name: string | null; branches?: { name: string; nameAr: string | null }[]; nameAr?: string | null; city: string | null; logoRef: string | null; publicPhone: string | null },
   accepted: boolean,
 ): ConnectedStoreDetail {
   return {

@@ -207,6 +207,8 @@ function scan(): { uncovered: Finding[]; covered: number } {
 
 /** Classified occurrences that stay without their Arabic twin. Generated from the dump, then reviewed by hand. */
 const ALLOWED: Record<string, [Cls, string]> = {
+  'common/account-label.ts :: accountLabel :: select company.findUnique.select': ['latin', 'a single fallback label for a message; the Arabic has labelArOf'],
+  'platform/platform.controller.ts :: businesses :: select users.select': ['latin', 'platform console: the Owner in an account label, never stored'],
   'acquisition/acquisition.service.ts :: report :: select inviterCompany.select': ['latin', 'platform acquisition report, read in the console'],
   'acquisition/acquisition.service.ts :: report :: read company.name': ['latin', 'platform acquisition report, read in the console'],
   'acquisition/acquisition.service.ts :: report :: read a.inviterCompany.name': ['latin', 'platform acquisition report, read in the console'],
@@ -232,12 +234,10 @@ const ALLOWED: Record<string, [Cls, string]> = {
   'closing/closing.service.ts :: anchorCountedFloatsTx :: select user.findFirst.select': ['latin', 'immutable snapshot of who locked the count on the anchor row'],
   'closing/closing.service.ts :: anchorCountedFloatsTx :: read locker.name': ['latin', 'immutable snapshot of who locked the count on the anchor row'],
   'consignment/connections.service.ts :: ensureCounterparty :: select company.findUnique.select': ['other', 'a counterparty has one name of its own (not a business, store or person record)'],
-  'consignment/connections.service.ts :: ensureCounterparty :: read company.name': ['other', 'a counterparty has one name of its own (not a business, store or person record)'],
   'entitlement/entitlement.service.ts :: recordFor :: read row.company.name': ['latin', 'seat census: internal counting, never shown'],
   'entitlement/seat-census.ts :: seatCensus :: select branch.findMany.select': ['latin', 'seat census: internal counting, never shown'],
   'loans/loans.service.ts :: closingReminders :: select company.select': ['latin', 'reminder text written into an English stored fallback; the app words it from fields'],
   'notices/notice.service.ts :: readSubject :: select company.findUnique.select': ['latin', 'platform notice subject for WhatsApp/email templates'],
-  'notices/notice.service.ts :: readSubject :: read company.name': ['latin', 'platform notice subject for WhatsApp/email templates'],
   'platform/account-provisioning.service.ts :: assertMayDefer :: read company.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/account-provisioning.service.ts :: out :: select company.findUniqueOrThrow.select': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/account-provisioning.service.ts :: out :: select user.findFirstOrThrow.select': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
@@ -274,7 +274,6 @@ const ALLOWED: Record<string, [Cls, string]> = {
   'platform/portal/portal-session.service.ts :: ownerOf :: select user.findFirst.select': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/portal/portal-session.service.ts :: ownerOf :: select company.select': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/portal/portal-session.service.ts :: viewOf :: read owner.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
-  'platform/portal/portal-session.service.ts :: viewOf :: read owner.company.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/provisioning.service.ts :: companyOf :: select company.findUnique.select': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/provisioning.service.ts :: assertMayActivate :: read company.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/provisioning.service.ts :: assertMayTakePayment :: read company.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],

@@ -22,7 +22,7 @@ export class RegisterDto {
    */
   @IsString() @NormalizeName() @IsLatinNameOrLegacy('ownerNameAr') ownerName: string;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() ownerNameAr?: string | null;
-  @IsString() @NormalizeName() @IsLatinNameOrLegacy('businessNameAr') businessName: string;
+  @IsOptional() @NormalizeOptionalName() @IsLatinNameOrLegacy('businessNameAr') businessName?: string | null;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() businessNameAr?: string | null;
   @IsString() @NormalizeName() @IsLatinNameOrLegacy('branchNameAr') branchName: string;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() branchNameAr?: string | null;

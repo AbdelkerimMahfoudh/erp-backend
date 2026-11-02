@@ -1,3 +1,4 @@
+import { FIRST_STORE, labelOf, type LabelledAccount } from '../../common/account-label';
 import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppConfigService } from '../../common/config/app-config.service';
@@ -117,14 +118,14 @@ export class PortalSessionService {
   private ownerOf(userId: Buffer, companyId: Buffer) {
     return this.prisma.user.findFirst({
       where: { id: userId, companyId, isActive: true, deletedAt: null, userBranches: { some: { role: { key: 'owner' } } } },
-      select: { name: true, company: { select: { name: true } } },
+      select: { name: true, company: { select: { name: true, ...FIRST_STORE } } },
     });
   }
 
-  private viewOf(owner: { name: string; company: { name: string } }, sessionId: string): PortalSessionView {
+  private viewOf(owner: { name: string; company: LabelledAccount }, sessionId: string): PortalSessionView {
     return {
       owner: { name: owner.name },
-      business: { name: owner.company.name },
+      business: { name: labelOf(owner.company) },
       csrfToken: portalCsrfToken(this.config.jwtAccessSecret, sessionId),
     };
   }

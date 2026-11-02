@@ -1,3 +1,4 @@
+import { FIRST_STORE, labelArOf, labelOf, type LabelledAccount } from '../common/account-label';
 import {
   BadRequestException,
   ConflictException,
@@ -163,7 +164,7 @@ export class LoansService {
       where: this.visible(me),
       include: {
         counterparty: { select: { name: true, kind: true, connectedCompany: { select: { nameAr: true } } } },
-        company: { select: { name: true, nameAr: true } },
+        company: { select: { name: true, nameAr: true, ...FIRST_STORE } },
         ledger: { select: { kind: true, amount: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -182,7 +183,7 @@ export class LoansService {
       where: { id: uuidToBin(id), ...this.visible(me) },
       include: {
         counterparty: { select: { name: true, kind: true, connectedCompany: { select: { nameAr: true } } } },
-        company: { select: { name: true, nameAr: true } },
+        company: { select: { name: true, nameAr: true, ...FIRST_STORE } },
         ledger: { orderBy: { createdAt: 'asc' } },
       },
     });
@@ -701,7 +702,7 @@ export class LoansService {
       createdAt: Date;
       version: number;
       counterparty: { name: string; kind: string; connectedCompany?: { nameAr: string | null } | null };
-      company: { name: string; nameAr: string | null };
+      company: LabelledAccount;
       ledger: { kind: string; amount: Prisma.Decimal }[];
     },
     me: Buffer,
@@ -722,12 +723,12 @@ export class LoansService {
         binToUuid(me),
       ),
       /** Always the OTHER party's name, whichever side you are on. */
-      otherParty: iAmOwner ? loan.counterparty.name : loan.company.name,
+      otherParty: iAmOwner ? loan.counterparty.name : labelOf(loan.company),
       /**
        * D225: the other business's Arabic name when it is a connected business, null otherwise. A counterparty
        * typed by hand has one name, the one the shop gave it.
        */
-      otherPartyAr: iAmOwner ? (loan.counterparty.connectedCompany?.nameAr ?? null) : loan.company.nameAr,
+      otherPartyAr: iAmOwner ? (loan.counterparty.connectedCompany?.nameAr ?? null) : labelArOf(loan.company),
       proposedAmount: num(loan.proposedAmount),
       counterAmount: loan.counterAmount == null ? null : num(loan.counterAmount),
       principal: loan.principal == null ? null : num(loan.principal),

@@ -1681,7 +1681,7 @@ export class SalesService {
   }
 }
 
-type NamedLive = { name: string; nameAr: string | null } | null;
+type NamedLive = { name: string | null; nameAr: string | null } | null;
 
 /**
  * The names a sale's receipt prints (0111): its snapshot when it has one, the live record otherwise. Snapshotted
@@ -1702,7 +1702,10 @@ export function receiptNamesOf(sale: {
   const of = (name: string | null, nameAr: string | null, live: NamedLive | undefined) =>
     name !== null ? { name, nameAr } : live ? { name: live.name, nameAr: live.nameAr } : null;
   return {
-    business: of(sale.businessNameSnapshot, sale.businessNameArSnapshot, sale.company),
+    // D227: a sale since 0111 recorded its own answer, and "no trading name" is one. A later name is never read into it.
+    business: sale.branchNameSnapshot !== null
+      ? { name: sale.businessNameSnapshot, nameAr: sale.businessNameArSnapshot }
+      : of(sale.businessNameSnapshot, sale.businessNameArSnapshot, sale.company ?? undefined),
     branch: of(sale.branchNameSnapshot, sale.branchNameArSnapshot, sale.branch),
     seller: of(sale.sellerNameSnapshot, sale.sellerNameArSnapshot, sale.user),
     snapshot: sale.businessNameSnapshot !== null,

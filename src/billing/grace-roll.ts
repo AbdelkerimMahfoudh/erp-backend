@@ -130,7 +130,7 @@ export async function recordDueGraceTx(
       action: decision === 'granted' ? 'grace.started' : 'grace.unavailable',
       targetType: 'Company',
       targetId: companyId,
-      targetLabel: sub.company.name.slice(0, 200),
+      targetLabel: sub.company.name?.slice(0, 200) ?? null,
       afterJson: redact({
         episodeId: binToUuid(id),
         periodEnd: periodEnd.toISOString(),

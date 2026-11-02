@@ -1,3 +1,4 @@
+import { FIRST_STORE, labelOf } from '../common/account-label';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma, type SubscriptionNotice, type SubscriptionNoticeKind } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -639,6 +640,7 @@ export class NoticeService {
       where: { id: companyId },
       select: {
         name: true,
+        ...FIRST_STORE,
         timezone: true,
         isActive: true,
         closedAt: true,
@@ -652,7 +654,7 @@ export class NoticeService {
       ? await this.prisma.graceEpisode.findFirst({ where: { companyId, periodEnd: sub.currentPeriodEnd }, select: { decision: true, usesBefore: true } })
       : null;
     return {
-      name: company.name,
+      name: labelOf(company),
       timezone: company.timezone,
       subscriptionId: sub.id,
       usesBefore: episode?.usesBefore ?? null,

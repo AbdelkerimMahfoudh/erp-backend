@@ -6,11 +6,11 @@ import { PlatformAuditService } from './platform-audit.service';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
 export interface NamesInput {
-  name?: string;
+  name?: string | null;
   nameAr?: string | null;
 }
 
-type Named = { name: string; nameAr: string | null };
+type Named = { name: string | null; nameAr: string | null };
 
 function changes(before: Named, input: NamesInput): Partial<Named> {
   const data: Partial<Named> = {};
@@ -68,11 +68,12 @@ export class PlatformNamesService {
     // The store must be THIS business's: an id from another business answers as one that does not exist.
     const before = await this.prisma.branch.findFirst({ where: { id: branchId, companyId }, select: { name: true, nameAr: true } });
     if (!before) throw new NotFoundException('Store not found');
+    if (input.name === null) throw new BadRequestException({ code: 'name_required', message: 'A name is required here.' });
     const data = changes(before, input);
     const keys = Object.keys(data);
     if (keys.length === 0) throw new BadRequestException('No changes were provided');
     const was = pick(before, keys);
-    const after = await this.prisma.branch.update({ where: { id: branchId }, data, select: { name: true, nameAr: true } });
+    const after = await this.prisma.branch.update({ where: { id: branchId }, data: data as { name?: string; nameAr?: string | null }, select: { name: true, nameAr: true } });
     await this.audit.record({
       admin: ctx.admin,
       action: 'store.rename',
@@ -96,11 +97,12 @@ export class PlatformNamesService {
       select: { name: true, nameAr: true },
     });
     if (!before) throw new NotFoundException('Account not found');
+    if (input.name === null) throw new BadRequestException({ code: 'name_required', message: 'A name is required here.' });
     const data = changes(before, input);
     const keys = Object.keys(data);
     if (keys.length === 0) throw new BadRequestException('No changes were provided');
     const was = pick(before, keys);
-    const after = await this.prisma.user.update({ where: { id: target }, data, select: { name: true, nameAr: true } });
+    const after = await this.prisma.user.update({ where: { id: target }, data: data as { name?: string; nameAr?: string | null }, select: { name: true, nameAr: true } });
     await this.audit.record({
       admin: ctx.admin,
       action: 'account.rename',

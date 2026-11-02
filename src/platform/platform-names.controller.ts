@@ -2,14 +2,14 @@ import { Body, Controller, HttpCode, HttpStatus, Param, Patch, Req, UseGuards } 
 import { ApiExcludeController } from '@nestjs/swagger';
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { Public } from '../common/decorators/public.decorator';
-import { IsArabicName, IsLatinName, NormalizeName, NormalizeOptionalName } from '../common/bilingual-name';
+import { IsArabicName, IsLatinName, NormalizeOptionalName } from '../common/bilingual-name';
 import { PlatformAdminService } from './platform-admin.service';
 import { PlatformAdminGuard, type AdminRequest } from './platform-admin.guard';
 import { PlatformNamesService } from './platform-names.service';
 
 /** Either name or both (D225), why, and the administrator's password. */
 class PlatformNamesDto {
-  @IsOptional() @NormalizeName() @IsLatinName() name?: string;
+  @IsOptional() @NormalizeOptionalName() @IsLatinName() name?: string | null;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() nameAr?: string | null;
   @IsString() @MinLength(1) @MaxLength(500) reason: string;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;

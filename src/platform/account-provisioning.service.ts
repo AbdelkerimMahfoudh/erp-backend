@@ -126,7 +126,7 @@ export class AccountProvisioningService {
   /**
    * Every condition of a deferral, the server's (docs/109 §2.3). Refused and audited unless all hold.
    */
-  async assertMayDefer(ctx: ProvisioningActor, company: { id: Buffer | null; name: string }, attempted: string): Promise<void> {
+  async assertMayDefer(ctx: ProvisioningActor, company: { id: Buffer | null; name: string | null }, attempted: string): Promise<void> {
     const target = { id: company.id, label: company.name };
     if (!this.config.phoneVerificationDeferralEnabled) {
       await this.refuse(new ForbiddenException({ code: 'deferral_disabled', message: 'Deferred WhatsApp verification is switched off on this server.' }), ctx, attempted, target, { condition: 'kill_switch' });
@@ -479,7 +479,7 @@ export class AccountProvisioningService {
   // ── reading ─────────────────────────────────────────────────────────────
 
   /** Every account whose verification is deferred — one business's, or the platform's. */
-  async listDeferred(companyUuid?: string): Promise<(DeferralView & { companyId: string; business: string })[]> {
+  async listDeferred(companyUuid?: string): Promise<(DeferralView & { companyId: string; business: string | null })[]> {
     const where: Prisma.UserWhereInput = { phoneVerification: 'deferred_by_platform', deletedAt: null };
     if (companyUuid) {
       if (!isUuid(companyUuid)) throw new NotFoundException('Unknown business');

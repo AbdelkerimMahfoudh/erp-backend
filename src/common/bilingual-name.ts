@@ -133,21 +133,21 @@ export function IsArabicName(options?: ValidationOptions) {
 export type NameLocale = 'en' | 'fr' | 'ar';
 
 export interface BilingualName {
-  name: string;
+  name: string | null;
   nameAr?: string | null;
 }
 
 /** The name an interface in `locale` shows: the Arabic one in Arabic when there is one, the Latin one otherwise. */
 export function localizedName(named: BilingualName, locale: NameLocale | string | null | undefined): string {
   if (locale === 'ar' && named.nameAr) return named.nameAr;
-  return named.name;
+  return named.name ?? '';
 }
 
 /**
  * Both names, the shape every response that names somebody sends (D225). `nameIncomplete` stays in the shape for builds
  * up to 1.0.0 (3), which read it, and is always false: a missing Arabic name is no longer anything to complete (D227).
  */
-export function bilingual(named: BilingualName): { name: string; nameAr: string | null; nameIncomplete: false } {
+export function bilingual(named: BilingualName): { name: string | null; nameAr: string | null; nameIncomplete: false } {
   return { name: named.name, nameAr: named.nameAr ?? null, nameIncomplete: false };
 }
 

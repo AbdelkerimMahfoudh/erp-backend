@@ -1,3 +1,4 @@
+import { FIRST_STORE, labelArOf, labelOf, type LabelledAccount } from '../common/account-label';
 import {
   BadRequestException,
   ConflictException,
@@ -238,7 +239,7 @@ export class ConsignmentsService {
       include: {
         lines: true,
         counterparty: { select: { name: true, kind: true, connectedCompany: { select: { nameAr: true } } } },
-        sourceCompany: { select: { name: true, nameAr: true } },
+        sourceCompany: { select: { name: true, nameAr: true, ...FIRST_STORE } },
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
@@ -260,7 +261,7 @@ export class ConsignmentsService {
       include: {
         lines: true,
         counterparty: { select: { name: true, kind: true, connectedCompany: { select: { nameAr: true } } } },
-        sourceCompany: { select: { name: true, nameAr: true } },
+        sourceCompany: { select: { name: true, nameAr: true, ...FIRST_STORE } },
         ledger: { orderBy: { createdAt: 'asc' } },
       },
     });
@@ -1030,7 +1031,7 @@ export class ConsignmentsService {
       version: number;
       lines: { id: Buffer }[];
       counterparty: { name: string; kind: string; connectedCompany?: { nameAr: string | null } | null };
-      sourceCompany: { name: string; nameAr: string | null };
+      sourceCompany: LabelledAccount;
     },
     side: Side,
   ) {
@@ -1046,9 +1047,9 @@ export class ConsignmentsService {
        * as "counterparty" is the kind of small wrongness that makes people
        * distrust the whole screen.
        */
-      otherParty: side === 'source' ? c.counterparty.name : c.sourceCompany.name,
+      otherParty: side === 'source' ? c.counterparty.name : labelOf(c.sourceCompany),
       /** D225: the other business's Arabic name when it is a connected business; a hand-typed party has one name. */
-      otherPartyAr: side === 'source' ? (c.counterparty.connectedCompany?.nameAr ?? null) : c.sourceCompany.nameAr,
+      otherPartyAr: side === 'source' ? (c.counterparty.connectedCompany?.nameAr ?? null) : labelArOf(c.sourceCompany),
       phones: c.lines.length,
       proposedAmount: c.proposedAmount == null ? null : num(c.proposedAmount as number),
       counterAmount: c.counterAmount == null ? null : num(c.counterAmount as number),
