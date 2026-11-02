@@ -3,7 +3,8 @@ import { IsUUID } from 'class-validator';
 import { adminAccountLabel } from '../common/account-label';
 import { claimedBy } from './owner-identity/owner-identity';
 import type { PlatformAdminIdentity } from './platform-admin.service';
-import { AccessBasisDto, parseBasis, type ParsedBasis } from './access-basis';
+import { AccessBasisDto, parseBasis } from './access-basis';
+import { finishDraft } from './provisioning-draft';
 import { normaliseEmail, normalisePhone } from '../auth/identifier';
 import {
   Body,
@@ -215,6 +216,11 @@ export const ADMIN_KEY_PREFIX = 'admin:';
  * A business created by an administrator for a shop — the same record public
  * registration leaves behind, minus the password, which nobody chooses here.
  */
+export class ResumeProvisioningDto {
+  @IsString() @MinLength(1) confirmPassword!: string;
+  @IsString() @MinLength(1) @MaxLength(500) reason!: string;
+}
+
 export class CreateBusinessDto {
   /**
    * The administrator's own key, so a retry cannot create a second business: the registration's rule (C11), short
@@ -600,6 +606,7 @@ export class PlatformController {
           createdAt: true,
           timezone: true,
           isTest: true,
+          provisioningState: true,
           subscription: true,
           ...TRIAL_FACTS,
           _count: { select: { branches: true, users: true } },
@@ -634,6 +641,8 @@ export class PlatformController {
         createdAt: c.createdAt.toISOString(),
         /** A persistent test business (D217): shown as one wherever it is listed. */
         isTest: c.isTest,
+        /** D227: not an ordinary account yet; the console offers to resume it. */
+        provisioningDraft: c.provisioningState === 'draft',
         branches: c._count.branches,
         users: c._count.users,
         state: listed.state,
@@ -811,13 +820,15 @@ export class PlatformController {
     // The businesses behind the applications, with what their state and their trial are computed from (C8).
     const businesses = await this.prisma.company.findMany({
       where: { id: { in: ids } },
-      select: { id: true, timezone: true, subscription: { select: SUBSCRIPTION_FACTS }, ...TRIAL_FACTS },
+      select: { id: true, timezone: true, provisioningState: true, subscription: { select: SUBSCRIPTION_FACTS }, ...TRIAL_FACTS },
     });
     const byCompany = new Map(businesses.map((c) => [c.id.toString('hex'), c]));
     const episodes = await graceEpisodesOf(this.prisma, ids);
 
     const now = new Date();
-    return rows.map((r) => {
+    // A draft is an administrator's unfinished work, not an application waiting for anybody.
+    const applications = rows.filter((r) => !(r.companyId && byCompany.get(r.companyId.toString('hex'))?.provisioningState === 'draft'));
+    return applications.map((r) => {
       const business = r.companyId ? byCompany.get(r.companyId.toString('hex')) : undefined;
       /*
        * The state computed for the business, its free trial's included — a business using its trial is not shown as
@@ -911,13 +922,18 @@ export class PlatformController {
         : 'Created by the platform for the shop. Awaiting approval.',
       isTest,
       testMarkedBy: isTest ? admin.email : undefined,
+      provisioningDraft: {
+        kind: basis.kind,
+        reason: basis.kind === 'grant' ? basis.reason : dto.reason,
+        ...(basis.kind === 'grant'
+          ? { days: basis.days }
+          : { amount: basis.amount, paidAt: basis.paidAt.toISOString(), reference: basis.reference, channel: basis.channel, months: basis.months }),
+        ...(deferral ? { deferral } : {}),
+      },
     });
 
-    if (!result.created) {
-      // A retry finishes what a lost answer may have left: each step recognises work already done.
-      const accessFailed = !(await this.applyBasis(result.companyId, basis, dto.reason, { admin, ip: req.ip }));
-      return { ...result, accessFailed, invitation: null, setup: await this.provisioning.status(uuidToBin(result.companyId)) };
-    }
+    // A retry finds the same account, audited once, and resumes it.
+    if (!result.created) return this.finishProvisioning(result, dto.reason, { admin, sessionId: req.platformSessionId, ip: req.ip ?? null });
 
     await this.audit.record({
       admin,
@@ -941,70 +957,69 @@ export class PlatformController {
       ip: req.ip ?? null,
     });
 
-    // The business exists either way. A failure is said, never hidden, and retrying this form finishes it.
-    const accessFailed = !(await this.applyBasis(result.companyId, basis, dto.reason, { admin, ip: req.ip }));
+    return this.finishProvisioning(result, dto.reason, { admin, sessionId: req.platformSessionId, ip: req.ip ?? null });
+  }
 
-    if (deferral) {
+  /** Resume a draft from the console: the request it holds, under the same rules. A finished account answers as finished. */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/resume-provisioning')
+  @HttpCode(HttpStatus.OK)
+  async resumeProvisioning(@Param('id') id: string, @Body() dto: ResumeProvisioningDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    const result = await this.registration.describe(uuidToBin(id), false);
+    return this.finishProvisioning(result, dto.reason, { admin, sessionId: req.platformSessionId, ip: req.ip ?? null });
+  }
+
+  /**
+   * The state machine's last steps (`provisioning-draft.ts`). The invitation and every other outward effect come only
+   * after the account is complete, and only from the one call that completed it.
+   */
+  private async finishProvisioning(
+    result: Awaited<ReturnType<RegistrationService['register']>>,
+    reason: string,
+    actor: { admin: PlatformAdminIdentity; sessionId?: Buffer; ip: string | null },
+  ) {
+    const { admin, ip } = actor;
+    const ctx = { admin, ip: ip ?? undefined };
+    const id = uuidToBin(result.companyId);
+    const done = await finishDraft(this.prisma, this.lifecycle as never, id, result.companyId, ctx);
+    const setup = async () => this.provisioning.status(id);
+    if (!done.complete) return { ...result, provisioningDraft: true, invitation: null, setup: await setup() };
+    if (!done.completedNow) return { ...result, provisioningDraft: false, invitation: null, setup: await setup() };
+
+    if (done.basis?.deferral) {
       // The deferred Owner's setup code replaces the setup invitation: one way in, never two.
-      const deferred = await this.testProvisioning.deferOwner(result.companyId, deferral, actor);
+      const deferred = await this.testProvisioning.deferOwner(result.companyId, done.basis.deferral as never, actor as never);
       return {
         ...result,
-        accessFailed,
+        provisioningDraft: false,
         invitation: null,
         setupCode: deferred.setupCode,
         ownerPhoneVerification: 'deferred_by_platform' as const,
-        setup: await this.provisioning.status(uuidToBin(result.companyId)),
+        setup: await setup(),
       };
     }
 
     let invitation;
     try {
-      invitation = await this.invitations.issue(result.companyId, {
-        admin,
-        ip: req.ip,
-        reason: dto.reason,
-      });
+      invitation = await this.invitations.issue(result.companyId, { admin, ip, reason });
     } catch {
-      // The business exists; its invitation does not. Said, not hidden: the console issues one from the business.
-      return {
-        ...result,
-        accessFailed,
-        invitation: null,
-        invitationFailed: true,
-        setup: await this.provisioning.status(uuidToBin(result.companyId)),
-      };
+      // The account is complete; its invitation is not. Said, not hidden: the console issues one from the business.
+      return { ...result, provisioningDraft: false, invitation: null, invitationFailed: true, setup: await setup() };
     }
-
     return {
       ...result,
-      accessFailed,
+      provisioningDraft: false,
       invitation: {
         token: invitation.token,
         expiresAt: invitation.expiresAt.toISOString(),
         delivery: invitation.delivery,
         owner: invitation.owner,
       },
-      setup: await this.provisioning.status(uuidToBin(result.companyId)),
+      setup: await setup(),
     };
-  }
-
-  /** The payment recorded with its period and then the activation, or the grant: each audited by its own service. */
-  private async applyBasis(companyId: string, basis: ParsedBasis, reason: string, ctx: { admin: PlatformAdminIdentity; ip?: string }): Promise<boolean> {
-    try {
-      if (basis.kind === 'grant') {
-        await this.lifecycle.activateByGrant(companyId, { days: basis.days!, reason: basis.reason }, ctx);
-      } else {
-        await this.lifecycle.recordPayment(
-          companyId,
-          { amount: basis.amount, paidAt: basis.paidAt, channel: basis.channel, reference: basis.reference, note: reason, confirm: true },
-          ctx,
-        );
-        await this.lifecycle.approve(companyId, { months: basis.months, reason }, ctx);
-      }
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   private async existingOwner(dto: { phone?: string; email?: string }) {

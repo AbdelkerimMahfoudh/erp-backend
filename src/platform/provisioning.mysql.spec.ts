@@ -6,6 +6,7 @@ import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 import { ConnectionsService } from '../consignment/connections.service';
 import { OwnerInvitationService } from './owner-invitation.service';
 import { PlatformAuditService } from './platform-audit.service';
+import { finishDraft } from './provisioning-draft';
 import { ProvisioningService } from './provisioning.service';
 import { RegistrationService } from './registration.service';
 import { SeatAllocationService } from './seat-allocation.service';
@@ -87,6 +88,38 @@ run('test businesses and provisioning on real MySQL (0102)', () => {
 
   afterAll(async () => {
     await Promise.all([root, ...apps].map((c) => c?.$disconnect()));
+  });
+
+  it('D227: one key, a real payment and a failed approval: still a draft, and a retry makes no second account or payment', async () => {
+    const key = tag();
+    const request = {
+      idempotencyKey: `admin:${key}`,
+      ownerName: 'Tester',
+      branchName: `Store ${key}`,
+      phone: `+2224${(Date.now() % 10_000_000).toString().padStart(7, '0')}`,
+      password: 'unusable-password-for-the-spec',
+      language: 'en' as const,
+      actor: ADMIN.email,
+      provisioningDraft: { kind: 'payment' as const, reason: 'paid', amount: '300', paidAt: '2026-10-01T00:00:00.000Z', reference: `R-${key}`, months: 1 },
+    };
+    const made = await a.registration.register(request);
+    const id = Buffer.from(made.companyId.replace(/-/g, ''), 'hex');
+    const failing = { recordPayment: a.lifecycle.recordPayment.bind(a.lifecycle), activateByGrant: a.lifecycle.activateByGrant.bind(a.lifecycle), approve: jest.fn().mockRejectedValue(new Error('down')) };
+
+    expect(await finishDraft(root, failing as never, id, made.companyId, CTX)).toMatchObject({ complete: false });
+    expect((await root.subscription.findFirstOrThrow({ where: { companyId: id } })).status).toBe('pending_activation');
+    expect(await a.provisioning.status(id)).toMatchObject({ provisioningDraft: true });
+
+    const again = await a.registration.register(request);
+    expect(again).toMatchObject({ companyId: made.companyId, created: false });
+    expect(await finishDraft(root, a.lifecycle as never, id, made.companyId, CTX)).toMatchObject({ complete: true, completedNow: true });
+    expect(await finishDraft(root, a.lifecycle as never, id, made.companyId, CTX)).toMatchObject({ completedNow: false });
+
+    expect((await root.subscription.findFirstOrThrow({ where: { companyId: id } })).status).toBe('activated');
+    expect(await root.subscriptionPayment.count({ where: { companyId: id } })).toBe(1);
+    expect(await root.branch.count({ where: { companyId: id } })).toBe(1);
+    expect(await root.company.count({ where: { id } })).toBe(1);
+    expect(await a.provisioning.status(id)).toMatchObject({ provisioningDraft: false });
   });
 
   it('adds the columns with their defaults: an existing business stays a customer’s', async () => {

@@ -1,3 +1,4 @@
+import type { DraftBasis } from './provisioning-draft';
 import { BadRequestException, ConflictException, Inject, Injectable, Optional } from '@nestjs/common';
 import { DEFAULT_STORE_NAME, DEFAULT_STORE_NAME_AR } from '../common/bilingual-name';
 import { Prisma, type TrialRegistrationMethod } from '@prisma/client';
@@ -75,6 +76,8 @@ export interface RegistrationInput {
    * shop's behalf passes their own address, so the trail says so.
    */
   actor?: string;
+  /** D227: an administrator's request, held whole until its access basis is applied. */
+  provisioningDraft?: DraftBasis;
   note?: string;
   /**
    * Make the business eligible for its one free trial (0095). Only the public
@@ -234,6 +237,9 @@ export class RegistrationService {
             currency: 'MRU',
             timezone: 'Africa/Nouakchott',
             settingsJson: {},
+            ...(input.provisioningDraft
+              ? { provisioningState: 'draft', provisioningBasis: input.provisioningDraft as unknown as Prisma.InputJsonValue }
+              : {}),
             ...(input.isTest
               ? { isTest: true, testMarkedAt: this.clock.now(), testMarkedBy: (input.testMarkedBy ?? input.actor ?? 'platform').slice(0, 160) }
               : {}),
@@ -455,7 +461,7 @@ export class RegistrationService {
     };
   }
 
-  private async describe(companyId: Buffer, created: boolean): Promise<RegistrationResult> {
+  async describe(companyId: Buffer, created: boolean): Promise<RegistrationResult> {
     const company = await this.prisma.company.findUniqueOrThrow({
       where: { id: companyId },
       select: { id: true, publicStoreId: true },

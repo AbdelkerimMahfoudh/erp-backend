@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { storesOfUser, storesText } from '../common/account-label';
 import { BadRequestException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
@@ -81,9 +82,11 @@ export class OwnerInvitationService {
 
     const company = await this.prisma.company.findUnique({
       where: { id: companyId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, provisioningState: true },
     });
     if (!company) throw new NotFoundException('Unknown business');
+    // D227: nobody is invited into an account still being provisioned.
+    if (company.provisioningState === 'draft') throw new ConflictException({ code: 'provisioning_incomplete', message: 'Finish this account first.' });
 
     // The Owner is the account the business was created with.
     const owner = await this.prisma.user.findFirst({

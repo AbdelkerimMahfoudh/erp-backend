@@ -355,6 +355,9 @@ model Company {
   /// A persistent test business (0102, D217): set and cleared only by a platform administrator. Kept out of the
   /// platform's customer counts, connected only to other test businesses, never paid for.
   isTest       Boolean   @default(false) @map("is_test")
+  /// D227: `draft` until an administrator's account has its access basis applied; NULL is an ordinary account.
+  provisioningState String? @map("provisioning_state") @db.VarChar(16)
+  provisioningBasis Json?   @map("provisioning_basis")
   /// When, and by which administrator, the test status was last set or cleared. Null for a business never marked.
   testMarkedAt DateTime? @map("test_marked_at") @db.DateTime(6)
   testMarkedBy String?   @map("test_marked_by") @db.VarChar(160)

@@ -231,6 +231,10 @@ describe('the shared flow', () => {
       audit: { record: async () => undefined },
       invitations: { issue: async () => ({ token: 'i', expiresAt: new Date(), delivery: 'manual', owner: {} }) },
       lifecycle: { activateByGrant: async () => ({}) },
+      prisma: {
+        company: { findUnique: async () => ({ provisioningState: 'draft', provisioningBasis: { kind: 'grant', days: 30, reason: 'pilot' } }), updateMany: async () => ({ count: 1 }) },
+        subscription: { findFirst: async () => null },
+      },
       provisioning: { assertMayCreate: async () => undefined, status: async () => null },
     });
     const req = { platformAdmin: { id: Buffer.alloc(16, 3), email: 'ops@example.test', name: 'Ops' }, ip: '127.0.0.1' };

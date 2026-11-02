@@ -35,6 +35,8 @@ export type CreatedBy = 'console' | 'self_service' | 'other';
  */
 export interface ProvisioningStatus {
   isTest: boolean;
+  /** D227: an administrator's account whose access basis is not yet applied. */
+  provisioningDraft: boolean;
   testMarkedAt: string | null;
   testMarkedBy: string | null;
   /** The platform's setting, so the console can say why an action is refused. */
@@ -399,7 +401,7 @@ export class ProvisioningService {
     const [company, attempt, owner, invitation, sub] = await Promise.all([
       this.prisma.company.findUniqueOrThrow({
         where: { id: companyId },
-        select: { isTest: true, testMarkedAt: true, testMarkedBy: true },
+        select: { isTest: true, provisioningState: true, testMarkedAt: true, testMarkedBy: true },
       }),
       this.prisma.registrationAttempt.findFirst({ where: { companyId }, select: { idempotencyKey: true } }),
       // The Owner is the account the business was created with.
@@ -439,6 +441,7 @@ export class ProvisioningService {
 
     return {
       isTest: company.isTest,
+      provisioningDraft: company.provisioningState === 'draft',
       testMarkedAt: company.testMarkedAt?.toISOString() ?? null,
       testMarkedBy: company.testMarkedBy,
       customerActivation: this.activationOpen ? 'open' : 'closed',

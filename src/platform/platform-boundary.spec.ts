@@ -251,7 +251,7 @@ describe('the controller, from the platform’s side', () => {
   it('creating a business mints an invitation once, and never a password anybody chose', () => {
     const body = bodyOf('createBusiness');
     expect(body).toMatch(/password: randomBytes\(48\)/);
-    expect(body).toMatch(/if \(!result\.created\) \{\s*[\s\S]*?return \{ \.\.\.result, accessFailed, invitation: null, setup: /);
+    expect(body).toMatch(/if \(!result\.created\) return this\.finishProvisioning\(/);
   });
 
   it('no public route answers with a price — the quote by company id is gone (2026-10-05)', () => {
