@@ -3269,6 +3269,8 @@ model ReturnRequest {
   unitId     Bytes? @map("unit_id") @db.Binary(16)
   /// How many of a counted line come back. Null for a device, which is always the one.
   returnedQuantity Int? @map("returned_quantity")
+  /// Decided at approval for a counted return: `sellable` went back on the shelf, `damaged` did not.
+  disposition String? @db.VarChar(16)
 
   status ReturnStatus @default(pending_investigation)
 
@@ -3374,6 +3376,7 @@ model ReturnReversal {
   saleItemId      Bytes @map("sale_item_id") @db.Binary(16)
   unitId          Bytes? @map("unit_id") @db.Binary(16)
   returnedQuantity Int?  @map("returned_quantity")
+  disposition      String? @db.VarChar(16)
   returnRequestId Bytes @map("return_request_id") @db.Binary(16)
 
   lineRevenue Decimal  @map("line_revenue") @db.Decimal(14, 2)
@@ -5236,8 +5239,11 @@ model DiscountApproval {
 
   /// The exact physical unit. Serialized stock only — a quantity line has no
   /// single thing to hold an approval against.
-  unitId    Bytes   @map("unit_id") @db.Binary(16)
+  unitId    Bytes?  @map("unit_id") @db.Binary(16)
   productId Bytes   @map("product_id") @db.Binary(16)
+  /// A counted line (0124): how many, and its name as it was, there being no unit to read it from.
+  quantity  Int?
+  itemLabel String? @map("item_label") @db.VarChar(200)
   /// The variant as it was, so a later edit cannot silently change what was
   /// approved.
   variant   String? @db.VarChar(120)
@@ -5300,7 +5306,7 @@ model DiscountApproval {
 
   company   Company @relation(fields: [companyId], references: [id])
   branch    Branch  @relation(fields: [branchId], references: [id])
-  unit      Unit    @relation(fields: [unitId], references: [id])
+  unit      Unit?   @relation(fields: [unitId], references: [id])
   requester User    @relation("DiscountApprovalRequester", fields: [requesterId], references: [id])
   approver  User?   @relation("DiscountApprovalApprover", fields: [approverId], references: [id])
 

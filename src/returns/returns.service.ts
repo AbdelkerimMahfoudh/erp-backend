@@ -50,10 +50,24 @@ import {
   settleRefund,
 } from './return-workflow';
 
-/** A counted line's refund is the share of it that came back; a device is the whole line. Rounded down to the cent, in the shop's favour by at most one. */
-export function returnedShare(lineGross: number, request: { returnedQuantity: number | null; saleItem: { quantity: number } }): number {
+/**
+ * A counted return's refund, from what the line actually brought in (its discounts already in it). The share of everything
+ * returned so far, less the share already refunded, so repeated returns telescope: whatever the order or rounding, the last
+ * piece brings the total to the line exactly, and it can never pass it. A device is the whole line.
+ */
+export function returnedShare(lineGross: number, request: { returnedQuantity: number | null; saleItem: { quantity: number } }, alreadyReversed = 0): number {
   if (request.returnedQuantity === null) return lineGross;
-  return Math.floor((Math.round(lineGross * 100) * request.returnedQuantity) / request.saleItem.quantity) / 100;
+  const cents = Math.round(lineGross * 100);
+  const upTo = (n: number) => Math.floor((cents * n) / request.saleItem.quantity);
+  return (upTo(alreadyReversed + request.returnedQuantity) - upTo(alreadyReversed)) / 100;
+}
+
+/** The average cost once returned pieces of known cost rejoin the shelf; unknown cost stays counted as unknown (0107). */
+export function restockedCost(stock: { quantity: number; missingCostQuantity: number; cost: number | null }, pieces: number, unitCost: number | null) {
+  if (unitCost === null) return { cost: stock.cost, missingCostQuantity: stock.missingCostQuantity + pieces };
+  const known = stock.quantity - stock.missingCostQuantity;
+  const value = (stock.cost ?? 0) * known + unitCost * pieces;
+  return { cost: Math.round((value / (known + pieces)) * 100) / 100, missingCostQuantity: stock.missingCostQuantity };
 }
 
 type NamedProduct = { brand: string | null; model: string | null; variant: string | null } | null | undefined;
@@ -200,6 +214,18 @@ export class ReturnsService {
     try {
       const id = newUuidV7Bin();
       await this.db.$transaction(async (tx) => {
+        if (counted) {
+          // The line's row serialises every return against it: two at once cannot both take the last piece.
+          await tx.$queryRaw`SELECT id FROM sale_items WHERE id = ${line.id} FOR UPDATE`;
+          const open = await tx.returnRequest.aggregate({
+            where: { saleItemId: line.id, status: { not: 'rejected' } },
+            _sum: { returnedQuantity: true },
+          });
+          const remaining = line.quantity - (open._sum.returnedQuantity ?? 0);
+          if (dto.quantity! > remaining) {
+            throw new ConflictException({ code: 'return_quantity_exceeded', remaining, message: 'That is more than is left to return on this line.' });
+          }
+        }
         await tx.returnRequest.create({
           data: {
             id,
@@ -271,6 +297,9 @@ export class ReturnsService {
        * plainly rather than shown a raw constraint error.
        */
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        // The same request twice at once is one return: the winner's answer, not a refusal.
+        const twin = await this.db.returnRequest.findFirst({ where: { companyId, clientUuid: uuidToBin(dto.clientUuid) } });
+        if (twin?.clientRequestHash === fingerprint) return this.detail(binToUuid(twin.id));
         throw new ConflictException({
           code: 'return_already_open',
           message: 'A return is already open for this phone.',
@@ -415,7 +444,7 @@ export class ReturnsService {
     assertEditable(request.status);
 
     const { totalAmount } = priceAdjustment(dto);
-    const gross = returnedShare(grossRefundOf(request.saleItemId, await this.saleBasis(request.saleId)), request);
+    const gross = await this.grossOfReturn(request);
 
     // Validated against everything already drafted, so the ceiling holds for
     // the SET of lines rather than for each one in isolation.
@@ -502,7 +531,7 @@ export class ReturnsService {
    * Six things must hold, and the order is deliberate — cheapest refusals and
    * the ones a person can act on come first.
    */
-  async approve(idStr: string, dto: { expectedVersion: number; exceptionReason?: string }) {
+  async approve(idStr: string, dto: { expectedVersion: number; exceptionReason?: string; disposition?: 'sellable' | 'damaged' }) {
     const companyId = this.tenant.companyId();
     const branchId = this.tenant.requireBranchId();
     const userId = this.tenant.userId();
@@ -529,14 +558,19 @@ export class ReturnsService {
       exceptionReason: dto.exceptionReason,
     });
 
+    if (request.returnedQuantity !== null && !dto.disposition) {
+      throw new BadRequestException({ code: 'disposition_required', message: 'Say whether these pieces can be sold again or are damaged.' });
+    }
+    const disposition = request.returnedQuantity === null ? null : dto.disposition!;
+
     // Money, from the immutable sale and the drafted adjustments. Never from
     // the request.
-    const gross = returnedShare(grossRefundOf(request.saleItemId, await this.saleBasis(request.saleId)), request);
+    let gross = await this.grossOfReturn(request);
     const adjustments = await this.db.returnAdjustment.findMany({
       where: { returnRequestId: request.id },
       select: { totalAmount: true },
     });
-    const { adjustmentTotal, netRefundDue } = settleRefund(
+    let { adjustmentTotal, netRefundDue } = settleRefund(
       gross,
       adjustments.map((a) => ({ totalAmount: num(a.totalAmount) })),
     );
@@ -554,6 +588,12 @@ export class ReturnsService {
 
     const reversalId = newUuidV7Bin();
     await this.db.$transaction(async (tx) => {
+      if (request.returnedQuantity !== null) {
+        // Under the line's lock, so what has been reversed cannot move before this reversal joins it.
+        await tx.$queryRaw`SELECT id FROM sale_items WHERE id = ${request.saleItemId} FOR UPDATE`;
+        gross = await this.grossOfReturn(request, tx);
+        ({ adjustmentTotal, netRefundDue } = settleRefund(gross, adjustments.map((a) => ({ totalAmount: num(a.totalAmount) }))));
+      }
       // Compare-and-swap on the version: approve and reject race, and exactly
       // one of them wins.
       const moved = await tx.returnRequest.updateMany({
@@ -564,6 +604,7 @@ export class ReturnsService {
           decidedById: userId ?? null,
           decidedAt: new Date(),
           exceptionReason: isException ? dto.exceptionReason!.trim() : null,
+          disposition,
           version: { increment: 1 },
         },
       });
@@ -589,8 +630,10 @@ export class ReturnsService {
           returnRequestId: request.id,
           lineRevenue: gross,
           // An unknown cost (0107) stays unknown: nothing is credited back, and the line had no profit to reverse.
-          lineCost: request.saleItem.cost === null ? null : num(request.saleItem.cost) * (request.returnedQuantity ?? request.saleItem.quantity),
-          lineMargin: request.saleItem.cost === null ? 0 : gross - num(request.saleItem.cost) * (request.returnedQuantity ?? request.saleItem.quantity),
+          disposition,
+          // Damaged pieces credit no cost: their value is gone, and the refund falls on profit in full.
+          lineCost: disposition === 'damaged' ? 0 : request.saleItem.cost === null ? null : num(request.saleItem.cost) * (request.returnedQuantity ?? request.saleItem.quantity),
+          lineMargin: disposition === 'damaged' ? gross : request.saleItem.cost === null ? 0 : gross - num(request.saleItem.cost) * (request.returnedQuantity ?? request.saleItem.quantity),
           grossRefund: gross,
           adjustmentTotal,
           netRefundDue,
@@ -601,6 +644,26 @@ export class ReturnsService {
 
       // Unsellable, and staying that way until somebody inspects it.
       if (request.unitId) await this.moveUnitForCustody(tx, request.unitId, 'returned', 'faulty');
+
+      if (disposition === 'sellable') {
+        const productId = request.saleItem.productId!;
+        const pieces = request.returnedQuantity!;
+        const stock = await tx.stockItem.findUnique({ where: { companyId_productId_branchId: { companyId, productId, branchId } } });
+        const unitCost = request.saleItem.cost === null ? null : num(request.saleItem.cost);
+        const next = restockedCost({ quantity: stock?.quantity ?? 0, missingCostQuantity: stock?.missingCostQuantity ?? 0, cost: stock?.cost == null ? null : num(stock.cost) }, pieces, unitCost);
+        await tx.stockItem.upsert({
+          where: { companyId_productId_branchId: { companyId, productId, branchId } },
+          update: { quantity: { increment: pieces }, cost: next.cost, missingCostQuantity: next.missingCostQuantity, version: { increment: 1 } },
+          create: { id: newUuidV7Bin(), companyId, productId, branchId, quantity: pieces, cost: next.cost, missingCostQuantity: next.missingCostQuantity },
+        });
+        await this.audit.recordTx(tx, {
+          entityType: 'StockItem',
+          entityId: productId,
+          action: 'update',
+          after: { reason: 'return_restocked', pieces, returnRequestId: binToUuid(request.id) },
+          branchId,
+        });
+      }
 
       await this.audit.recordTx(tx, {
         entityType: 'ReturnRequest',
@@ -1308,8 +1371,8 @@ export class ReturnsService {
     const page = rows.slice(0, limit);
     const bases = await this.saleBases(page.map((r) => r.saleId));
     return {
-      rows: page.map((r) => {
-        const gross = returnedShare(grossRefundOf(r.saleItemId, bases.get(r.saleId.toString('hex'))!), r);
+      rows: await Promise.all(page.map(async (r) => {
+        const gross = await this.grossOfReturn(r, this.db, bases.get(r.saleId.toString('hex'))!);
         const adjustmentTotal = r.adjustments.reduce((s, a) => s + num(a.totalAmount), 0);
         return {
           id: binToUuid(r.id),
@@ -1329,7 +1392,7 @@ export class ReturnsService {
           provisionalAdjustmentTotal: Math.round(adjustmentTotal * 100) / 100,
           provisionalNetRefundDue: Math.round((gross - adjustmentTotal) * 100) / 100,
         };
-      }),
+      })),
       nextCursor: rows.length > limit ? binToUuid(page[page.length - 1]!.id) : null,
     };
   }
@@ -1338,7 +1401,7 @@ export class ReturnsService {
     const branchId = this.tenant.requireBranchId();
     const r = await this.load(idStr, branchId);
 
-    const gross = returnedShare(grossRefundOf(r.saleItemId, await this.saleBasis(r.saleId)), r);
+    const gross = await this.grossOfReturn(r);
     const adjustments = await this.db.returnAdjustment.findMany({
       where: { returnRequestId: r.id },
       orderBy: { id: 'asc' },
@@ -1391,7 +1454,8 @@ export class ReturnsService {
         soldAt: r.sale.soldAt,
       },
       phone: {
-        unitId: r.unitId ? binToUuid(r.unitId) : null,
+        // Strings for a counted return too: TestFlight build 3 draws these unconditionally. `returnedQuantity` tells a newer app.
+        unitId: r.unitId ? binToUuid(r.unitId) : '',
         imei: r.unit?.imeiPrimary ?? null,
         serialNo: r.unit?.serialNo ?? null,
         product: productOfReturn(r),
@@ -1399,7 +1463,8 @@ export class ReturnsService {
         returnedQuantity: r.returnedQuantity,
         // So a screen can say "held, not sellable" from the same fact the
         // inventory uses.
-        unitStatus: r.unit?.status ?? null,
+        unitStatus: r.unit?.status ?? 'returned',
+        disposition: r.disposition,
       },
       policy: {
         windowHours: r.policyWindowHours,
@@ -1529,6 +1594,26 @@ export class ReturnsService {
     const basis = (await this.saleBases([saleId])).get(saleId.toString('hex'));
     if (!basis) throw new NotFoundException('Sale not found');
     return basis;
+  }
+
+  /**
+   * What this return refunds. Once approved, what its reversal recorded and nothing else; before that, the share of what has
+   * not yet been reversed. Provisional until approval, which works it out again under the line's lock.
+   */
+  private async grossOfReturn(
+    r: { id: Buffer; saleId: Buffer; saleItemId: Buffer; returnedQuantity: number | null; saleItem: { quantity: number } },
+    db: { returnReversal: { findMany(args: never): Promise<never[]> } } | TenantPrisma | Prisma.TransactionClient = this.db,
+    basis?: Awaited<ReturnType<ReturnsService['saleBasis']>>,
+  ): Promise<number> {
+    const lineGross = grossRefundOf(r.saleItemId, basis ?? (await this.saleBasis(r.saleId)));
+    if (r.returnedQuantity === null) return lineGross;
+    const reversals = (await (db as Prisma.TransactionClient).returnReversal.findMany({
+      where: { saleItemId: r.saleItemId },
+      select: { returnRequestId: true, grossRefund: true, returnedQuantity: true },
+    }));
+    const own = reversals.find((v) => v.returnRequestId.equals(r.id));
+    if (own) return num(own.grossRefund);
+    return returnedShare(lineGross, r, reversals.reduce((n, v) => n + (v.returnedQuantity ?? 0), 0));
   }
 
   private async load(idStr: string, branchId: Buffer) {

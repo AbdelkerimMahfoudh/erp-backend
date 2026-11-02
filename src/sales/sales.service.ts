@@ -367,9 +367,11 @@ export class SalesService {
            * wins. Checking first and writing after would let both through.
            */
           const approval =
-            !mayAcceptLoss && line.unitId && line.cost !== null && line.price < line.cost
+            !mayAcceptLoss && line.cost !== null && line.price < line.cost
               ? await this.approvals.consume(tx as unknown as Prisma.TransactionClient, {
-                  unitId: line.unitId,
+                  unitId: line.unitId ?? null,
+                  productId: line.productId,
+                  quantity: line.quantity,
                   requestedPrice: line.price,
                   currentConfiguredPrice: line.configuredPrice,
                   currentPriceVersion: null,

@@ -115,7 +115,7 @@ PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$
 
 echo "== 9b. a real sale through the real API and Prisma client (the 2026-11-01 hotfix)"
 SALE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) SALE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
-  npx jest --ci src/sales/sale-http.mysql.spec.ts
+  npx jest --ci src/sales/sale-http.mysql.spec.ts src/sales/basket-journey.mysql.spec.ts
 echo "== 9b0. one basket, one sale, through the real API (D227), each race repeated"
 SALE_REPEAT=5 SALE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) SALE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
   npx jest --ci src/sales/sale-basket.mysql.spec.ts

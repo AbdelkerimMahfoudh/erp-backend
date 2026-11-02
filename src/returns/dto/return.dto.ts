@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
   IsEnum,
+  IsIn,
   IsInt,
   IsISO8601,
   IsNotEmpty,
@@ -222,6 +223,12 @@ export class ListReturnsDto {
 }
 
 export class ApproveReturnDto {
+  /** Required for a counted return: whether the pieces go back on the shelf. Nothing is assumed. */
+  @ApiPropertyOptional({ enum: ['sellable', 'damaged'] })
+  @IsOptional()
+  @IsIn(['sellable', 'damaged'])
+  disposition?: 'sellable' | 'damaged';
+
   @ApiProperty({ description: 'The version last seen. Approve and reject race; one wins.' })
   @IsInt()
   @Min(0)

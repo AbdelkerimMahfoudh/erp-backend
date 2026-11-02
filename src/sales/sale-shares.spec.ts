@@ -78,7 +78,8 @@ describe('every per-line reader uses it (source pins)', () => {
   it('the product report\'s cancelled lines, a return\'s refund and the closing digest take the same shares', () => {
     expect(figures).toMatch(/const share = fromCents\(shares\.get\(l\.id\.toString\('hex'\)\) \?\? 0n\);\s*e\.cancelledRevenue = round2\(e\.cancelledRevenue \+ share\);/);
     expect(workflow).toMatch(/const cents = lineShareCents\(sale\.lines, sale\.total\)\.get\(lineId\.toString\('hex'\)\);/);
-    expect(returns.match(/grossRefundOf\(/g)?.length).toBe(4);
+    expect(returns.match(/grossRefundOf\(/g)?.length).toBe(1);
+    expect(returns.match(/this\.grossOfReturn\(/g)?.length).toBe(5);
     expect(returns).toMatch(/items: \{ where: \{ voided: false \}, select: \{ id: true, price: true, quantity: true, discount: true \} \}/);
     expect(closing).toMatch(/const salePrice = fromCents\(shares\.get\(it\.id\.toString\('hex'\)\) \?\? 0n\);/);
   });

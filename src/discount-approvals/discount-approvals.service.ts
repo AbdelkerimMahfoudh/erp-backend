@@ -255,11 +255,25 @@ export class DiscountApprovalsService {
       return this.presentGroup(replay.cartGroupId!, hash);
     }
 
-    const asked: { unit: Awaited<ReturnType<DiscountApprovalsService['cartUnit']>>; price: number }[] = [];
+    const asked: AskedLine[] = [];
     for (const line of input.lines) {
-      if (!line.identifier || line.price == null) continue;
-      const unit = await this.cartUnit(line.identifier);
-      if (unit.cost !== null && line.price < Number(unit.cost)) asked.push({ unit, price: line.price });
+      if (line.price == null) continue;
+      if (line.identifier) {
+        const unit = await this.cartUnit(line.identifier);
+        if (unit.cost !== null && line.price < Number(unit.cost)) {
+          asked.push({ unit, unitId: unit.id, productId: unit.productId, quantity: null, label: null, lineCost: Number(unit.cost), price: line.price, variant: unit.product?.variant ?? null, defaultPrice: unit.product?.defaultPrice ?? null });
+        }
+      } else if (line.productId && isUuid(line.productId)) {
+        const productId = uuidToBin(line.productId);
+        const stock = await this.db.stockItem.findFirst({
+          where: { productId, branchId },
+          include: { product: { select: { brand: true, model: true, variant: true, defaultPrice: true } } },
+        });
+        // As the sale reads it: pieces of unknown cost make the line's cost unknown, with nothing to be below.
+        if (stock?.cost != null && stock.missingCostQuantity === 0 && line.price < Number(stock.cost)) {
+          asked.push({ unit: null, unitId: null, productId, quantity: line.quantity ?? 1, label: `${stock.product.brand} ${stock.product.model}`, lineCost: Number(stock.cost), price: line.price, variant: stock.product.variant, defaultPrice: stock.product.defaultPrice, stockPrice: stock.price, stockVersion: stock.version });
+        }
+      }
     }
     if (asked.length === 0) {
       throw new BadRequestException({ code: 'approval_not_needed', message: 'No device in this sale is below cost, so no approval is needed' });
@@ -269,14 +283,23 @@ export class DiscountApprovalsService {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + APPROVAL_TTL_MINUTES * 60_000);
     await this.db.discountApproval.updateMany({
-      where: { requesterId, unitId: { in: asked.map((a) => a.unit.id) }, status: { in: [DiscountApprovalStatus.pending, DiscountApprovalStatus.approved] }, cartGroupId: { not: null } },
+      where: {
+        requesterId,
+        status: { in: [DiscountApprovalStatus.pending, DiscountApprovalStatus.approved] },
+        cartGroupId: { not: null },
+        OR: [{ unitId: { in: asked.flatMap((a) => a.unitId ?? []) } }, { unitId: null, productId: { in: asked.filter((a) => !a.unitId).map((a) => a.productId) } }],
+      },
       data: { status: DiscountApprovalStatus.voided, voidReason: 'cart_changed', version: { increment: 1 } },
     });
     let first: Buffer | null = null;
-    for (const [i, { unit, price }] of asked.entries()) {
+    for (const [i, a] of asked.entries()) {
+      const { price } = a;
+      const productDefault = a.defaultPrice != null ? Number(a.defaultPrice) : null;
       const resolved = await this.pricing.resolveForSaleTx(
         this.db as never,
-        { kind: 'unit', unitId: unit.id, productId: unit.productId, unitBranchId: unit.branchId, productDefault: unit.product?.defaultPrice != null ? Number(unit.product.defaultPrice) : null },
+        a.unit
+          ? { kind: 'unit', unitId: a.unit.id, productId: a.productId, unitBranchId: a.unit.branchId, productDefault }
+          : { kind: 'quantity', productId: a.productId, stock: a.stockPrice == null ? null : { price: Number(a.stockPrice), version: a.stockVersion! }, productDefault },
         branchId,
       );
       const configured = resolved.price ?? price;
@@ -287,17 +310,19 @@ export class DiscountApprovalsService {
           id,
           companyId,
           branchId,
-          unitId: unit.id,
-          productId: unit.productId,
-          variant: unit.product?.variant ?? null,
+          unitId: a.unitId,
+          productId: a.productId,
+          quantity: a.quantity,
+          itemLabel: a.label?.slice(0, 200) ?? null,
+          variant: a.variant,
           configuredPrice: new Prisma.Decimal(configured.toFixed(2)),
           priceSource: resolved.source,
           priceVersion: resolved.version ?? 0,
-          unitCost: new Prisma.Decimal(Number(unit.cost).toFixed(2)),
+          unitCost: new Prisma.Decimal(a.lineCost.toFixed(2)),
           requestedPrice: new Prisma.Decimal(price.toFixed(2)),
           discountAmount: new Prisma.Decimal(Math.max(configured - price, 0).toFixed(2)),
           belowCost: true,
-          unitBranchId: unit.branchId,
+          unitBranchId: a.unit?.branchId ?? branchId,
           requesterId,
           reason,
           status: DiscountApprovalStatus.pending,
@@ -577,7 +602,10 @@ export class DiscountApprovalsService {
   async consume(
     tx: Prisma.TransactionClient,
     params: {
-      unitId: Buffer;
+      /** Null for a counted line, whose approval names its product and exact quantity and always its cart. */
+      unitId: Buffer | null;
+      productId?: Buffer;
+      quantity?: number;
       requestedPrice: number;
       currentConfiguredPrice: number | null;
       currentPriceVersion: number | null;
@@ -589,7 +617,9 @@ export class DiscountApprovalsService {
     },
   ): Promise<{ approvedPrice: number; belowCost: boolean } | null> {
     const rows = await tx.discountApproval.findMany({
-      where: { unitId: params.unitId, status: DiscountApprovalStatus.approved },
+      where: params.unitId
+        ? { unitId: params.unitId, status: DiscountApprovalStatus.approved }
+        : { unitId: null, productId: params.productId, quantity: params.quantity, cartHash: params.cartHash, status: DiscountApprovalStatus.approved },
       orderBy: { decidedAt: 'desc' },
       take: 5,
     });
@@ -772,7 +802,9 @@ export class DiscountApprovalsService {
     return {
       id: binToUuid(row.id),
       status: row.status,
-      unitId: binToUuid(row.unitId),
+      // A string for a counted line too: TestFlight build 3 reads it as one.
+      unitId: row.unitId ? binToUuid(row.unitId) : '',
+      quantity: row.quantity ?? null,
       requesterId: binToUuid(row.requesterId),
       approverId: row.approverId ? binToUuid(row.approverId) : null,
       configuredPrice: Number(row.configuredPrice),
@@ -801,7 +833,9 @@ export class DiscountApprovalsService {
        */
       unitCost: Number(row.unitCost),
       /** What the request is about, in the words the shop uses. */
-      product: row.unit?.product
+      product: row.itemLabel
+        ? { name: row.itemLabel, variant: row.variant ?? null }
+        : row.unit?.product
         ? {
             name: `${row.unit.product.brand} ${row.unit.product.model}`,
             // The variant AS IT WAS when the request was made, so a later
@@ -848,6 +882,20 @@ const DETAIL = {
   approver: { select: { name: true, nameAr: true } },
 } as const;
 
+interface AskedLine {
+  unit: { id: Buffer; branchId: Buffer } | null;
+  unitId: Buffer | null;
+  productId: Buffer;
+  quantity: number | null;
+  label: string | null;
+  lineCost: number;
+  price: number;
+  variant: string | null;
+  defaultPrice: Prisma.Decimal | null;
+  stockPrice?: Prisma.Decimal | null;
+  stockVersion?: number;
+}
+
 interface PresentableApproval {
   id: Buffer;
   status: DiscountApprovalStatus;
@@ -864,7 +912,9 @@ interface PresentableApproval {
   createdAt: Date;
   version: number;
   voidReason: string | null;
-  unitId: Buffer;
+  unitId: Buffer | null;
+  quantity?: number | null;
+  itemLabel?: string | null;
   requesterId: Buffer;
   approverId: Buffer | null;
   unit?: {

@@ -60,7 +60,7 @@ export async function returnFigures(db: RawRunner, companyId: Buffer, branchId: 
            COALESCE(SUM(adjustment_total), 0) AS adj,
            COALESCE(SUM(net_refund_due), 0) AS net,
            COALESCE(SUM(line_cost), 0) AS cost,
-           COALESCE(SUM(line_cost IS NULL OR line_cost <= ${MISSING_COST_EPSILON}), 0) AS missing
+           COALESCE(SUM((line_cost IS NULL OR line_cost <= ${MISSING_COST_EPSILON}) AND COALESCE(disposition, '') <> 'damaged'), 0) AS missing
       FROM return_reversals
      WHERE company_id = ${companyId} AND branch_id = ${branchId} AND approval_date = ${date}`);
   return {

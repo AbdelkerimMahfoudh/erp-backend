@@ -30,6 +30,8 @@ interface ErrorBody {
   belowCost?: unknown;
   configuredPrice?: unknown;
   lineIndex?: unknown;
+  cartHash?: unknown;
+  remaining?: unknown;
   unitId?: unknown;
   identifier?: unknown;
   productId?: unknown;
@@ -90,6 +92,9 @@ const DETAIL_KEYS = ['lines', 'amount', 'pendingRequestId',
   'belowCost',
   'configuredPrice',
   'lineIndex',
+  /* D227: the cart an approval must be asked for, and what is left to return on a line. */
+  'cartHash',
+  'remaining',
   'unitId',
   'identifier',
   /* D223: `product_exists` names the product the intake should receive into instead — an id of the caller's own company. */

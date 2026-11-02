@@ -73,7 +73,7 @@ describe('the reversal is dated, immutable and singular', () => {
 
   it('snapshots the line, so later price or cost changes cannot alter it', () => {
     expect(code).toMatch(/lineRevenue: gross/);
-    expect(code).toMatch(/lineCost: request\.saleItem\.cost === null \? null : num\(request\.saleItem\.cost\)/);
+    expect(code).toMatch(/lineCost: disposition === 'damaged' \? 0 : request\.saleItem\.cost === null \? null : num\(request\.saleItem\.cost\)/);
   });
 
   it('is unique per sale line and per request, in the database', () => {
@@ -96,7 +96,7 @@ describe('the reversal is dated, immutable and singular', () => {
 
 describe('money is the server’s', () => {
   it('takes gross from the sale — the line\'s share of its recorded total — never from the request', () => {
-    expect(code).toMatch(/grossRefundOf\(request\.saleItemId, await this\.saleBasis\(request\.saleId\)\)/);
+    expect(code).toMatch(/grossRefundOf\(r\.saleItemId, basis \?\? \(await this\.saleBasis\(r\.saleId\)\)\)/);
     expect(code).not.toMatch(/dto\.(grossRefund|netRefundDue|refundAmount|adjustmentTotal)/);
   });
 
