@@ -11,6 +11,24 @@ import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 export const MAX_PROOF_BYTES = 5 * 1024 * 1024;
 /** How long a decided proof's file is kept. The decision and its figures stay; the image of somebody's receipt does not. */
 export const PROOF_RETENTION_DAYS = 365;
+/** How long a claim may belong to an approval still running, before anyone may act on it. */
+export const RECOVERY_AFTER_MS = 2 * 60 * 1000;
+
+type Channel = 'manual' | 'bank_transfer' | 'mobile_money';
+interface ApplyRequest {
+  amount: string;
+  paidAt: string;
+  channel?: Channel;
+  months: number;
+  reason: string;
+}
+class PeriodAlreadyApplied extends Error {}
+const refused = (state: { stopped: boolean; mayStillBeRunning: boolean }) =>
+  new ConflictException(
+    state.mayStillBeRunning
+      ? { code: 'proof_may_be_running', message: 'This approval may still be running. Look again in a couple of minutes.' }
+      : { code: 'proof_recovery_refused', message: state.stopped ? 'That action does not fit what happened to this proof. Read its recovery again.' : 'This proof has nothing to recover.' },
+  );
 
 /** By its bytes, never its name or the type it claims. Only these three, none of which runs in a browser here. */
 export function sniffProof(buffer: Buffer): 'application/pdf' | 'image/png' | 'image/jpeg' | null {
@@ -141,7 +159,10 @@ export class PaymentProofsService {
       take: 100,
       select: VIEW,
     });
-    return rows.map(view);
+    // Said only to the administrator: the Owner's list stays Submitted until there is a decision.
+    const stopped = await this.prisma.paymentProof.findMany({ where: { id: { in: rows.map((r) => r.id) }, appliedAt: { not: null } }, select: { id: true } });
+    const isStopped = new Set(stopped.map((r) => r.id.toString('hex')));
+    return rows.map((r) => ({ ...view(r), applying: isStopped.has(r.id.toString('hex')) && !r.decidedAt }));
   }
 
   /** On the administrator's own read: no job to fail silently, and at most a list's delay late. */
@@ -184,13 +205,14 @@ export class PaymentProofsService {
   }
 
   /**
-   * The verified amount, method and period become a real payment. The period is claimed before it is applied, because
-   * extending twice cannot be recognised afterwards: a failure releases the claim, while a crash between the two leaves
-   * `proof_applying` for a person to check, which can never double a period.
+   * The verified amount, method and period become a real payment. What was decided is stored with the claim, and the period
+   * marks the proof in its own transaction, so every step can tell whether it already happened. A failure before any money
+   * was recorded releases the claim. After that the claim stays, whatever the failure: a second decision could name another
+   * amount and so record a second payment. `recovery` reads such a proof; `completeRecovery` and `releaseRecovery` settle it.
    */
   async approve(
     id: string,
-    input: { amount: string; paidAt: string; channel?: 'manual' | 'bank_transfer' | 'mobile_money'; months: number; reason: string },
+    input: { amount: string; paidAt: string; channel?: Channel; months: number; reason: string },
     ctx: Actor,
   ) {
     const row = await this.rowOf(id);
@@ -201,31 +223,142 @@ export class PaymentProofsService {
     if (Number.isNaN(paidAt.getTime())) throw new BadRequestException({ code: 'paid_at_invalid', message: 'Enter the payment date.' });
     if (!input.reason?.trim()) throw new BadRequestException({ code: 'reason_required', message: 'Say why.' });
 
-    const claimed = await this.prisma.paymentProof.updateMany({ where: { id: row.id, appliedAt: null, status: { in: ['submitted', 'under_review'] } }, data: { appliedAt: new Date() } });
-    if (!claimed.count) throw new ConflictException({ code: 'proof_applying', message: 'This proof is being applied, or stopped part-way. Check the business before trying again.' });
+    const request: ApplyRequest = { amount: input.amount, paidAt: paidAt.toISOString(), channel: input.channel, months: input.months, reason: input.reason };
+    const claimed = await this.prisma.paymentProof.updateMany({
+      where: { id: row.id, appliedAt: null, status: { in: ['submitted', 'under_review'] } },
+      data: { appliedAt: new Date(), applyRequest: request as never },
+    });
+    if (!claimed.count) throw new ConflictException({ code: 'proof_applying', message: 'This proof is being applied, or stopped part-way. Open its recovery to see what happened.' });
 
-    const company = binToUuid(row.companyId);
     try {
-      await this.lifecycle.recordPayment(
-        company,
-        { amount: input.amount, paidAt, channel: input.channel, reference: `proof:${id}`, note: input.reason, confirm: true },
-        { admin: ctx.admin, ip: ctx.ip ?? undefined } as never,
-      );
-      const sub = await this.prisma.subscription.findFirst({ where: { companyId: row.companyId }, select: { status: true } });
-      if (sub?.status === 'pending_activation' || sub?.status === 'rejected') {
-        await this.lifecycle.approve(company, { months: input.months, reason: input.reason }, { admin: ctx.admin, ip: ctx.ip ?? undefined } as never);
-      } else {
-        await this.lifecycle.extend(company, { months: input.months, reason: input.reason }, { admin: ctx.admin, ip: ctx.ip ?? undefined } as never);
-      }
+      return await this.applySteps(row, id, request, ctx);
     } catch (e) {
-      await this.prisma.paymentProof.updateMany({ where: { id: row.id, status: { not: 'approved' } }, data: { appliedAt: null } });
+      const { payment, periodApplied } = await this.progress(row.companyId, row.id, id);
+      if (!payment && !periodApplied) {
+        await this.prisma.paymentProof.updateMany({ where: { id: row.id, status: { not: 'approved' } }, data: { appliedAt: null, applyRequest: Prisma.DbNull } });
+      }
       throw e;
     }
-    await this.prisma.paymentProof.update({
-      where: { id: row.id },
-      data: { status: 'approved', months: input.months, decidedAt: new Date(), refusalReason: null },
+  }
+
+  /** Each step recognises its own work: the payment by its reference, the period by the proof's mark, the decision by its status. */
+  private async applySteps(row: Row, id: string, request: ApplyRequest, ctx: Actor, applyPeriod = true) {
+    const company = binToUuid(row.companyId);
+    const actor = { admin: ctx.admin, ip: ctx.ip ?? undefined } as never;
+    await this.lifecycle.recordPayment(
+      company,
+      { amount: request.amount, paidAt: new Date(request.paidAt), channel: request.channel, reference: `proof:${id}`, note: request.reason, confirm: true },
+      actor,
+    );
+
+    if (applyPeriod && !(await this.progress(row.companyId, row.id, id)).periodApplied) {
+      const mark = async (tx: Prisma.TransactionClient) => {
+        const moved = await tx.paymentProof.updateMany({ where: { id: row.id, periodAppliedAt: null }, data: { periodAppliedAt: new Date() } });
+        // Rolls the second period back: two recoveries at once apply one.
+        if (!moved.count) throw new PeriodAlreadyApplied();
+      };
+      const decision = { months: request.months, reason: request.reason };
+      try {
+        const sub = await this.prisma.subscription.findFirst({ where: { companyId: row.companyId }, select: { status: true } });
+        const first = sub?.status === 'pending_activation' || sub?.status === 'rejected';
+        // Someone else activating it first is answered `applied: false`, with no mark: this paid period still has to be added.
+        const approved = first ? await this.lifecycle.approve(company, decision, actor, mark) : null;
+        if (!approved?.applied) await this.lifecycle.extend(company, decision, actor, mark);
+      } catch (e) {
+        if (!(e instanceof PeriodAlreadyApplied)) throw e;
+      }
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const decided = await tx.paymentProof.updateMany({
+        where: { id: row.id, status: { in: ['submitted', 'under_review'] } },
+        data: { status: 'approved', months: applyPeriod ? request.months : null, decidedAt: new Date(), refusalReason: null },
+      });
+      if (decided.count) await this.record('payment_proof.approve', row.companyId, id, request.reason, { amount: request.amount, months: request.months, periodApplied: applyPeriod }, ctx, tx);
     });
-    await this.record('payment_proof.approve', row.companyId, id, input.reason, { amount: input.amount, months: input.months }, ctx);
+    return view(await this.rowOf(id));
+  }
+
+  private async progress(companyId: Buffer, proofId: Buffer, id: string) {
+    const [proof, payment] = await Promise.all([
+      this.prisma.paymentProof.findUniqueOrThrow({ where: { id: proofId }, select: { periodAppliedAt: true } }),
+      this.prisma.subscriptionPayment.findFirst({
+        where: { companyId, reference: `proof:${id}` },
+        select: { id: true, amount: true, paidAt: true, channel: true, confirmedAt: true },
+      }),
+    ]);
+    return { payment, periodApplied: proof.periodAppliedAt !== null, periodAppliedAt: proof.periodAppliedAt };
+  }
+
+  /** What actually happened to a proof whose approval did not finish, and what may be done about it. Reads only. */
+  async recovery(id: string) {
+    const row = await this.rowOf(id);
+    const full = await this.prisma.paymentProof.findUniqueOrThrow({ where: { id: row.id }, select: { appliedAt: true, applyRequest: true } });
+    const { payment, periodApplied, periodAppliedAt } = await this.progress(row.companyId, row.id, id);
+    const sub = await this.prisma.subscription.findFirst({
+      where: { companyId: row.companyId },
+      select: { status: true, currentPeriodEnd: true, isComplimentary: true, complimentaryUntil: true },
+    });
+    const open = row.status === 'submitted' || row.status === 'under_review';
+    const stopped = open && full.appliedAt !== null;
+    const settled = stopped && Date.now() - full.appliedAt!.getTime() >= RECOVERY_AFTER_MS;
+    const known = full.applyRequest !== null;
+    return {
+      proofId: id,
+      status: row.status,
+      stopped,
+      claimedAt: full.appliedAt?.toISOString() ?? null,
+      /** Still inside the window where the approval may be running: nothing may be done yet. */
+      mayStillBeRunning: stopped && !settled,
+      request: full.applyRequest,
+      paymentRecorded: payment !== null,
+      payment: payment && { id: binToUuid(payment.id), amount: payment.amount.toString(), paidAt: payment.paidAt.toISOString(), channel: payment.channel, confirmed: payment.confirmedAt !== null },
+      periodApplied,
+      periodAppliedAt: periodAppliedAt?.toISOString() ?? null,
+      subscription: sub && { status: sub.status, currentPeriodEnd: sub.currentPeriodEnd?.toISOString() ?? null, isComplimentary: sub.isComplimentary, complimentaryUntil: sub.complimentaryUntil?.toISOString() ?? null },
+      actions: {
+        complete: settled && known,
+        // Only with the money recorded and no period from this proof: for a period the administrator gave some other way.
+        closeWithoutPeriod: settled && known && payment !== null && !periodApplied,
+        // Only when nothing happened, so the proof goes back to a fresh decision.
+        release: settled && payment === null && !periodApplied,
+      },
+    };
+  }
+
+  /** Finishes the stored decision, never a new one. `closeWithoutPeriod` records it as decided and adds no period. */
+  async completeRecovery(id: string, input: { reason: string; closeWithoutPeriod?: boolean }, ctx: Actor) {
+    const reason = input.reason?.trim();
+    if (!reason) throw new BadRequestException({ code: 'reason_required', message: 'Say why.' });
+    const state = await this.recovery(id);
+    if (!(input.closeWithoutPeriod ? state.actions.closeWithoutPeriod : state.actions.complete)) throw refused(state);
+    const row = await this.rowOf(id);
+    await this.record(
+      input.closeWithoutPeriod ? 'payment_proof.recovery_close_without_period' : 'payment_proof.recovery_complete',
+      row.companyId,
+      id,
+      reason,
+      { found: { paymentRecorded: state.paymentRecorded, periodApplied: state.periodApplied, subscription: state.subscription } },
+      ctx,
+    );
+    return this.applySteps(row, id, state.request as unknown as ApplyRequest, ctx, !input.closeWithoutPeriod);
+  }
+
+  /** Nothing was applied: the claim goes and the proof waits for a decision again. */
+  async releaseRecovery(id: string, reason: string, ctx: Actor) {
+    const why = reason?.trim();
+    if (!why) throw new BadRequestException({ code: 'reason_required', message: 'Say why.' });
+    const state = await this.recovery(id);
+    if (!state.actions.release) throw refused(state);
+    const row = await this.rowOf(id);
+    await this.prisma.$transaction(async (tx) => {
+      const moved = await tx.paymentProof.updateMany({
+        where: { id: row.id, appliedAt: { not: null }, periodAppliedAt: null, status: { in: ['submitted', 'under_review'] } },
+        data: { appliedAt: null, applyRequest: Prisma.DbNull },
+      });
+      if (!moved.count) throw refused(state);
+      await this.record('payment_proof.recovery_release', row.companyId, id, why, { found: { paymentRecorded: false, periodApplied: false } }, ctx, tx);
+    });
     return view(await this.rowOf(id));
   }
 
@@ -236,7 +369,7 @@ export class PaymentProofsService {
     return row;
   }
 
-  private record(action: string, companyId: Buffer, proof: string, reason: string | null, after: Record<string, unknown>, ctx: Actor) {
+  private record(action: string, companyId: Buffer, proof: string, reason: string | null, after: Record<string, unknown>, ctx: Actor, db?: Prisma.TransactionClient) {
     return this.audit.record({
       admin: ctx.admin,
       action,
@@ -246,6 +379,6 @@ export class PaymentProofsService {
       reason,
       after: { proof, ...after, outcome: 'applied' },
       ip: ctx.ip ?? null,
-    });
+    }, db);
   }
 }

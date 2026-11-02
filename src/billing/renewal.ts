@@ -78,8 +78,10 @@ export class SubscriptionRenewal {
     periodEnd: Date | null,
     actor: string,
     at: Date = this.clock.now(),
+    /** The caller's transaction, already holding the lock: the decision and its period then commit as one (D227). */
+    db?: Prisma.TransactionClient,
   ): Promise<RenewalOutcome> {
-    return this.prisma.$transaction(async (tx) => {
+    const roll = async (tx: Prisma.TransactionClient) => {
       await lockSubscription(tx, companyId);
       // Read behind the lock, as every writer here reads its instant: whether the period opens later than now is
       // decided against what the previous holder committed.
@@ -109,7 +111,8 @@ export class SubscriptionRenewal {
         },
       });
       return { at: at.toISOString(), closedPeriod, activityChanges };
-    });
+    };
+    return db ? roll(db) : this.prisma.$transaction(roll);
   }
 
   /**

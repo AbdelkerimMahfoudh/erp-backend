@@ -649,7 +649,7 @@ describe('the gate holds on every other path', () => {
   });
 
   it('sign-in considers only active accounts, so a pending one cannot sign in by any client', () => {
-    expect(readFileSync('src/users/users.service.ts', 'utf8')).toMatch(/const base = \{ deletedAt: null, isActive: true \};/);
+    expect(readFileSync('src/users/users.service.ts', 'utf8')).toMatch(/const base = \{ deletedAt: null, isActive: true, company: \{ provisioningState: null \} \};/);
   });
 
   it('the Team PATCH cannot switch a pending account on by hand, nor change the number its invitation is for', () => {

@@ -373,18 +373,21 @@ describe('7. one charge only', () => {
       earlier: [],
     },
     {
-      order: 'both confirmed between the approval’s decision and the opening of its first period',
+      // The decision and its first period now commit as one (D227), so there is no moment between them: a confirmation
+      // arriving during the approval waits for its lock and joins the period it opened.
+      order: 'both confirmed while the approval is committing',
       run: async (w, b) => {
-        let between = false;
-        w.hooks.onEvent = async (event) => {
-          if (event.kind !== 'approved' || between) return;
-          between = true;
+        let during: Promise<void> | null = null;
+        w.hooks.onEvent = (event, inTransaction) => {
+          if (event.kind !== 'approved' || during) return;
+          expect(inTransaction).toBe(true);
           expect(w.periods(b)).toEqual([]);
-          await scheduledStoreAndSeat(w, b);
+          during = scheduledStoreAndSeat(w, b).then(() => undefined);
         };
         await approve(w, b);
         w.hooks.onEvent = null;
-        expect(between).toBe(true);
+        expect(during).not.toBeNull();
+        await during;
       },
       earlier: [],
     },

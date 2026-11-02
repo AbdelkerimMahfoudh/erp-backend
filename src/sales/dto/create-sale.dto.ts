@@ -124,6 +124,18 @@ export class NewCustomerDto {
   phone?: string;
 }
 
+class CheckCartLineDto {
+  @IsOptional() @IsString() @MaxLength(64) identifier?: string;
+  @IsOptional() @IsString() @MaxLength(36) productId?: string;
+  @IsOptional() @IsInt() @Min(1) quantity?: number;
+  @IsOptional() @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @IsMoney({ min: 0 }) price?: number;
+}
+
+export class CheckCartDto {
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(100) @ValidateNested({ each: true }) @Type(() => CheckCartLineDto) lines: CheckCartLineDto[];
+  @IsOptional() @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @IsMoney({ min: 0 }) saleDiscount?: number;
+}
+
 export class CreateSaleDto {
   @ApiProperty({ type: [SaleLineDto] })
   @IsArray()

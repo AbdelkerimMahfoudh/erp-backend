@@ -3,7 +3,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { DiscountApprovalStatus } from '@prisma/client';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { DiscountApprovalsService } from './discount-approvals.service';
-import { DecideDiscountApprovalDto, RequestDiscountApprovalDto } from './dto/discount-approval.dto';
+import { DecideDiscountApprovalDto, RequestCartApprovalDto, RequestDiscountApprovalDto } from './dto/discount-approval.dto';
 
 /**
  * Asking to sell below the configured price, and the Owner's answer (A2).
@@ -26,6 +26,13 @@ export class DiscountApprovalsController {
   @ApiOperation({ summary: 'Ask a Manager or the Owner to allow one sale below cost' })
   request(@Body() dto: RequestDiscountApprovalDto) {
     return this.approvals.request(dto);
+  }
+
+  @Post('cart')
+  @RequirePermissions('sale.create')
+  @ApiOperation({ summary: 'One approval for every device below cost in one sale, bound to that exact cart' })
+  requestCart(@Body() dto: RequestCartApprovalDto) {
+    return this.approvals.requestCart(dto);
   }
 
   @Get()

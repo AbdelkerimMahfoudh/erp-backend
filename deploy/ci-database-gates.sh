@@ -111,7 +111,7 @@ INVITATION_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) INVITATION_APP_URL=$(url
 
 echo "== 9. the 0102 real-MySQL spec (test businesses, the console's stores and invitations), on the same disposable schema"
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
-  npx jest --ci src/platform/provisioning.mysql.spec.ts src/platform/provisioning-draft.mysql.spec.ts src/platform/payment-proofs.mysql.spec.ts
+  npx jest --ci src/platform/provisioning.mysql.spec.ts src/platform/provisioning-draft.mysql.spec.ts src/platform/payment-proofs.mysql.spec.ts src/platform/approval-recovery.mysql.spec.ts src/discount-approvals/cart-approval.mysql.spec.ts
 
 echo "== 9b. a real sale through the real API and Prisma client (the 2026-11-01 hotfix)"
 SALE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) SALE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \

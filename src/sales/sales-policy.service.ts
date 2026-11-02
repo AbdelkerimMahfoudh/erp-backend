@@ -111,7 +111,7 @@ export class SalesPolicyService {
      * with three lines and one refusal otherwise leaves the seller to guess
      * which item the approver is being asked about.
      */
-    line?: { index: number; unitId: string | null; identifier: string | null };
+    line?: { index: number; unitId: string | null; identifier: string | null; cartHash?: string };
   }): void {
     const { price, cost, mayAcceptLoss, approval, reason } = input;
     if (cost === null || price >= cost - EPSILON) return;
@@ -129,6 +129,7 @@ export class SalesPolicyService {
           lineIndex: input.line?.index ?? null,
           unitId: input.line?.unitId ?? null,
           identifier: input.line?.identifier ?? null,
+          cartHash: input.line?.cartHash ?? null,
           message: 'Selling below cost needs the approval of a Manager or the Owner for this exact item and price',
         });
       }

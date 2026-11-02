@@ -206,3 +206,41 @@ describe('a barcode finds a counted product to sell', () => {
     expect((await failure(svc.select('6901234567890')))?.body.code).toBe('not_available_here');
   });
 });
+
+describe('checking a basket before it is confirmed (D227)', () => {
+  const stock = (quantity: number) => ({ quantity, reservedQuantity: 0 });
+  const build = (found: Record<string, unknown> | null, available: number, price: number | null) => {
+    const service = new SaleSelectionService(
+      { stockItem: { findFirst: async () => stock(available) } } as never,
+      { requireBranchId: () => Buffer.alloc(16, 1) } as never,
+      { getProductPricing: async () => ({ price }) } as never,
+      { get: () => new Set() } as never,
+    );
+    service.select = (async () => {
+      if (!found) throw new NotFoundException();
+      return found;
+    }) as never;
+    return service;
+  };
+  const productId = '018f0000-0000-7000-8000-000000000001';
+
+  it('charges what was sent, says what is set now, and totals on the server', async () => {
+    const r = await build({ availability: 'available', price: 500 }, 5, 30).checkCart({ lines: [{ identifier: '356938035643809', price: 450 }, { productId, quantity: 2 }], saleDiscount: 10 });
+    expect(r.ok).toBe(true);
+    expect(r.lines[0]).toMatchObject({ setPrice: 500, charged: 450, lineTotal: 450 });
+    expect(r.lines[1]).toMatchObject({ setPrice: 30, charged: 30, lineTotal: 60 });
+    expect(r).toMatchObject({ subtotal: 510, discount: 10, total: 500 });
+  });
+
+  it('names the line that cannot be sold instead of failing the whole check', async () => {
+    const gone = await build(null, 5, 30).checkCart({ lines: [{ identifier: '356938035643809', price: 450 }, { productId, quantity: 1 }] });
+    expect(gone.ok).toBe(false);
+    expect(gone.lines.map((l) => l.problem)).toEqual(['unavailable', null]);
+    expect((await build(null, 1, 30).checkCart({ lines: [{ productId, quantity: 2 }] })).lines[0]).toMatchObject({ problem: 'not_enough', quantityAvailable: 1 });
+  });
+
+  it('an item with no set price needs one entered', async () => {
+    expect((await build(null, 3, null).checkCart({ lines: [{ productId, quantity: 1 }] })).lines[0].problem).toBe('price_required');
+    expect((await build(null, 3, null).checkCart({ lines: [{ productId, quantity: 1, price: 40 }] })).ok).toBe(true);
+  });
+});

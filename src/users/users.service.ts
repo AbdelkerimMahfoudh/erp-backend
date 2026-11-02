@@ -48,7 +48,8 @@ export class UsersService {
      * `utf8mb4_0900_ai_ci`, so the comparison here is already case-insensitive
      * and matches the unique indexes exactly.
      */
-    const base = { deletedAt: null, isActive: true };
+    // A draft's Owner (D227) is nobody yet, whatever password was set: the account exists only once it is finished.
+    const base = { deletedAt: null, isActive: true, company: { provisioningState: null } };
     const where =
       kind === 'email'
         ? { email: value, ...base }

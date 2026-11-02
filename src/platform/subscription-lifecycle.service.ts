@@ -135,8 +135,8 @@ export class SubscriptionLifecycleService {
    * period's end, so a downgrade never takes away an activity the shop has
    * paid for before its month is over.
    */
-  private async periodStillRunning(companyId: Buffer): Promise<boolean> {
-    return periodRunning(await this.billing.latestPeriod(companyId), this.clock.now());
+  private async periodStillRunning(companyId: Buffer, db?: Prisma.TransactionClient): Promise<boolean> {
+    return periodRunning(await this.billing.latestPeriod(companyId, db), this.clock.now());
   }
 
   private companyIdOf(companyId: string): Buffer {
@@ -314,58 +314,63 @@ export class SubscriptionLifecycleService {
         },
         tx,
       );
-      return { after, from, trialEndsAt };
+
+      // In this transaction (D227): a committed grant always has its trail, its period and its audit.
+      await tx.subscriptionEvent.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: id,
+          subscriptionId: before.id,
+          // The kind says what it was. Nobody reading this later can mistake a
+          // grant for money that arrived.
+          kind: 'administrative_grant',
+          note: input.reason.slice(0, 255),
+          periodEndAfter: after.currentPeriodEnd,
+          branchesAfter: after.subscribedBranchCount,
+          seatsAfter: after.additionalSeats,
+          actor: ctx.admin.email,
+        },
+      });
+
+      /*
+       * A grant is a renewal (D154, reviewed 2026-10-09): the period running now
+       * closes at this instant, the downgrades scheduled for it apply, and the
+       * grant's period opens at today's size and prices — never a second period
+       * overlapping the first. Done here rather than at registration: a pending
+       * business has never been billed, and a period snapshot for one would be a
+       * billing history it does not have. During a free trial, "this instant" is
+       * the trial's end (0095).
+       */
+      await this.renewal.rollNow(id, before.id, after.complimentaryUntil, ctx.admin.email, from, tx);
+
+      await this.audit.record(
+        {
+          admin: ctx.admin,
+          action: 'subscription.activate_grant',
+          targetType: 'Company',
+          targetId: id,
+          targetLabel: before.company.name,
+          reason: input.reason,
+          before: this.snapshot(before),
+          after: {
+            ...this.snapshot(after),
+            grantDays: input.days,
+            grantFrom: from.toISOString(),
+            trialEndsAt: trialEndsAt?.toISOString() ?? null,
+            paymentRecorded: false,
+          },
+          ip: ctx.ip ?? null,
+        },
+        tx,
+      );
+      return { after };
     });
 
     if (!granted) {
       return { subscription: before, applied: false };
     }
-    const { after, from, trialEndsAt } = granted;
+    const { after } = granted;
 
-    await this.prisma.subscriptionEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId: id,
-        subscriptionId: before.id,
-        // The kind says what it was. Nobody reading this later can mistake a
-        // grant for money that arrived.
-        kind: 'administrative_grant',
-        note: input.reason.slice(0, 255),
-        periodEndAfter: after.currentPeriodEnd,
-        branchesAfter: after.subscribedBranchCount,
-        seatsAfter: after.additionalSeats,
-        actor: ctx.admin.email,
-      },
-    });
-
-    await this.audit.record({
-      admin: ctx.admin,
-      action: 'subscription.activate_grant',
-      targetType: 'Company',
-      targetId: id,
-      targetLabel: before.company.name,
-      reason: input.reason,
-      before: this.snapshot(before),
-      after: {
-        ...this.snapshot(after),
-        grantDays: input.days,
-        grantFrom: from.toISOString(),
-        trialEndsAt: trialEndsAt?.toISOString() ?? null,
-        paymentRecorded: false,
-      },
-      ip: ctx.ip ?? null,
-    });
-
-    /*
-     * A grant is a renewal (D154, reviewed 2026-10-09): the period running now
-     * closes at this instant, the downgrades scheduled for it apply, and the
-     * grant's period opens at today's size and prices — never a second period
-     * overlapping the first. Done here rather than at registration: a pending
-     * business has never been billed, and a period snapshot for one would be a
-     * billing history it does not have. During a free trial, "this instant" is
-     * the trial's end (0095).
-     */
-    await this.renewal.rollNow(id, before.id, after.complimentaryUntil, ctx.admin.email, from);
     // What was paid for during an ended trial joins the grant's period now (D176); during the trial, nothing is due.
     await this.trialEnd.applyIfDue(id);
 
@@ -396,6 +401,8 @@ export class SubscriptionLifecycleService {
     companyId: string,
     input: { months?: number; periodEnd?: Date; reason?: string; expectedVersion?: number },
     ctx: ActorContext,
+    /** Written in the decision's own transaction, so a caller's record of it can never disagree with it (D227). */
+    alongside?: (tx: Prisma.TransactionClient) => Promise<void>,
   ) {
     const hasMonths = input.months !== undefined;
     const hasEnd = input.periodEnd !== undefined;
@@ -439,51 +446,57 @@ export class SubscriptionLifecycleService {
         { status: 'activated' as SubscriptionStatus, currentPeriodEnd: end },
         tx,
       );
-      return { after, now, paidFrom, trialEndsAt, end };
+
+      // In this transaction (D227), as in `activateByGrant`.
+      await tx.subscriptionEvent.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: id,
+          subscriptionId: before.id,
+          kind: 'approved',
+          // When it starts is data — the period's start, the trial's end — never an instant in the note (C7).
+          note: noteWith(input.reason, trialEndsAt ? 'Paid access starts when the free trial ends.' : null),
+          periodEndAfter: end,
+          branchesAfter: after.subscribedBranchCount,
+          seatsAfter: after.additionalSeats,
+          actor: ctx.admin.email,
+        },
+      });
+
+      // The first billing period, at today's prices — see `activateByGrant`.
+      // Through the renewal routine, so a refused-then-approved shop that
+      // scheduled a downgrade meanwhile starts at the size it asked for. It
+      // opens where paid access starts: now, or at the free trial's end.
+      const renewal = await this.renewal.rollNow(id, before.id, end, ctx.admin.email, paidFrom, tx);
+      await alongside?.(tx);
+
+      await this.audit.record(
+        {
+          admin: ctx.admin,
+          action: 'subscription.approve',
+          targetType: 'Company',
+          targetId: id,
+          targetLabel: before.company.name,
+          reason: input.reason ?? null,
+          before: this.snapshot(before),
+          after: {
+            ...this.snapshot(after),
+            ...(hasMonths ? { months: input.months } : {}),
+            approvedAt: now.toISOString(),
+            paidFrom: paidFrom.toISOString(),
+            trialEndsAt: trialEndsAt?.toISOString() ?? null,
+            paymentRecorded: false,
+            renewal,
+          },
+          ip: ctx.ip ?? null,
+        },
+        tx,
+      );
+      return { after };
     });
     if (!approved) return { subscription: before, applied: false };
-    const { after, now, paidFrom, trialEndsAt, end } = approved;
+    const { after } = approved;
 
-    await this.prisma.subscriptionEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId: id,
-        subscriptionId: before.id,
-        kind: 'approved',
-        // When it starts is data — the period's start, the trial's end — never an instant in the note (C7).
-        note: noteWith(input.reason, trialEndsAt ? 'Paid access starts when the free trial ends.' : null),
-        periodEndAfter: end,
-        branchesAfter: after.subscribedBranchCount,
-        seatsAfter: after.additionalSeats,
-        actor: ctx.admin.email,
-      },
-    });
-
-    // The first billing period, at today's prices — see `activateByGrant`.
-    // Through the renewal routine, so a refused-then-approved shop that
-    // scheduled a downgrade meanwhile starts at the size it asked for. It
-    // opens where paid access starts: now, or at the free trial's end.
-    const renewal = await this.renewal.rollNow(id, before.id, end, ctx.admin.email, paidFrom);
-
-    await this.audit.record({
-      admin: ctx.admin,
-      action: 'subscription.approve',
-      targetType: 'Company',
-      targetId: id,
-      targetLabel: before.company.name,
-      reason: input.reason ?? null,
-      before: this.snapshot(before),
-      after: {
-        ...this.snapshot(after),
-        ...(hasMonths ? { months: input.months } : {}),
-        approvedAt: now.toISOString(),
-        paidFrom: paidFrom.toISOString(),
-        trialEndsAt: trialEndsAt?.toISOString() ?? null,
-        paymentRecorded: false,
-        renewal,
-      },
-      ip: ctx.ip ?? null,
-    });
     // What was paid for during an ended trial joins the first period now (D176); during the trial, nothing is due.
     await this.trialEnd.applyIfDue(id);
 
@@ -669,6 +682,8 @@ export class SubscriptionLifecycleService {
     companyId: string,
     input: { months: number; reason?: string; expectedVersion?: number },
     ctx: ActorContext,
+    /** As in `approve`. */
+    alongside?: (tx: Prisma.TransactionClient) => Promise<void>,
   ) {
     if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) {
       throw new BadRequestException('Extend by between 1 and 60 months.');
@@ -678,7 +693,7 @@ export class SubscriptionLifecycleService {
     const before = await this.loadOrThrow(id);
 
     // Fenced (0095): an extension makes the business paid, so no trial can start after it.
-    const { after, end, from, accessFrom, trialEndsAt, inGrace } = await this.fenced(id, 'paid_period', async (tx, { now, trialEndsAt }) => {
+    const { after } = await this.fenced(id, 'paid_period', async (tx, { now, trialEndsAt }) => {
       const current = before.currentPeriodEnd;
       // The decision for an end that passed was recorded by the fence a moment ago, under this lock.
       const grace =
@@ -699,45 +714,50 @@ export class SubscriptionLifecycleService {
         { status: 'activated' as SubscriptionStatus, currentPeriodEnd: end },
         tx,
       );
-      return { after, end, from, accessFrom, trialEndsAt, inGrace };
-    });
 
-    await this.prisma.subscriptionEvent.create({
-      data: {
-        id: newUuidV7Bin(),
-        companyId: id,
-        subscriptionId: before.id,
-        kind: 'extended',
-        note: input.reason?.slice(0, 255) ?? null,
-        periodEndAfter: end,
-        branchesAfter: after.subscribedBranchCount,
-        seatsAfter: after.additionalSeats,
-        actor: ctx.admin.email,
-      },
-    });
+      // In this transaction (D227), as in `activateByGrant`.
+      await tx.subscriptionEvent.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId: id,
+          subscriptionId: before.id,
+          kind: 'extended',
+          note: input.reason?.slice(0, 255) ?? null,
+          periodEndAfter: end,
+          branchesAfter: after.subscribedBranchCount,
+          seatsAfter: after.additionalSeats,
+          actor: ctx.admin.email,
+        },
+      });
 
-    const renewal = (await this.periodStillRunning(id))
-      ? null
-      : await this.renewal.rollNow(id, before.id, end, ctx.admin.email, accessFrom);
+      const renewal = (await this.periodStillRunning(id, tx))
+        ? null
+        : await this.renewal.rollNow(id, before.id, end, ctx.admin.email, accessFrom, tx);
+      await alongside?.(tx);
 
-    await this.audit.record({
-      admin: ctx.admin,
-      action: 'subscription.extend',
-      targetType: 'Company',
-      targetId: id,
-      targetLabel: before.company.name,
-      reason: input.reason ?? null,
-      before: this.snapshot(before),
-      after: {
-        ...this.snapshot(after),
-        months: input.months,
-        renewal,
-        renewalDueAt: renewal ? null : before.currentPeriodEnd?.toISOString() ?? null,
-        trialEndsAt: trialEndsAt?.toISOString() ?? null,
-        extendedFrom: from.toISOString(),
-        duringGrace: inGrace,
-      },
-      ip: ctx.ip ?? null,
+      await this.audit.record(
+        {
+          admin: ctx.admin,
+          action: 'subscription.extend',
+          targetType: 'Company',
+          targetId: id,
+          targetLabel: before.company.name,
+          reason: input.reason ?? null,
+          before: this.snapshot(before),
+          after: {
+            ...this.snapshot(after),
+            months: input.months,
+            renewal,
+            renewalDueAt: renewal ? null : before.currentPeriodEnd?.toISOString() ?? null,
+            trialEndsAt: trialEndsAt?.toISOString() ?? null,
+            extendedFrom: from.toISOString(),
+            duringGrace: inGrace,
+          },
+          ip: ctx.ip ?? null,
+        },
+        tx,
+      );
+      return { after };
     });
     // A new period may now be in force for what was paid for during an ended trial (D176).
     await this.trialEnd.applyIfDue(id);

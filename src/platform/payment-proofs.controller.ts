@@ -1,7 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Header, HttpCode, HttpStatus, Param, Post, Query, Req, Res, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiExcludeController } from '@nestjs/swagger';
-import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { Type } from 'class-transformer';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -17,6 +17,12 @@ import { MAX_PROOF_BYTES, PaymentProofsService } from './payment-proofs.service'
 export class RefuseProofDto {
   @IsString() @MinLength(1) confirmPassword!: string;
   @IsString() @MinLength(1) @MaxLength(500) reason!: string;
+}
+
+export class ProofRecoveryDto {
+  @IsString() @MinLength(1) confirmPassword!: string;
+  @IsString() @MinLength(1) @MaxLength(500) reason!: string;
+  @IsOptional() @IsBoolean() closeWithoutPeriod?: boolean;
 }
 
 export class ApproveProofDto {
@@ -112,5 +118,30 @@ export class PaymentProofsController {
   async approve(@Param('id') id: string, @Body() dto: ApproveProofDto, @Req() req: AdminRequest) {
     await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
     return this.proofs.approve(id, dto, { admin: req.platformAdmin!, ip: req.ip });
+  }
+
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Get('payment-proofs/:id/recovery')
+  recovery(@Param('id') id: string) {
+    return this.proofs.recovery(id);
+  }
+
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('payment-proofs/:id/recovery/complete')
+  @HttpCode(HttpStatus.OK)
+  async completeRecovery(@Param('id') id: string, @Body() dto: ProofRecoveryDto, @Req() req: AdminRequest) {
+    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    return this.proofs.completeRecovery(id, dto, { admin: req.platformAdmin!, ip: req.ip });
+  }
+
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('payment-proofs/:id/recovery/release')
+  @HttpCode(HttpStatus.OK)
+  async releaseRecovery(@Param('id') id: string, @Body() dto: ProofRecoveryDto, @Req() req: AdminRequest) {
+    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    return this.proofs.releaseRecovery(id, dto.reason, { admin: req.platformAdmin!, ip: req.ip });
   }
 }

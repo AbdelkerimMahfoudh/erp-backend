@@ -5,7 +5,8 @@ import { AppClsStore } from '../common/context/request-context';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
 import { TenantPrisma } from '../prisma/tenant.extension';
 import { TenantContext } from '../common/tenant/tenant-context.service';
-import { binToUuid } from '../common/utils/uuid.util';
+import { binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
+import { cartHash } from './cart-hash';
 import { PricingService } from '../pricing/pricing.service';
 import {
   assertLookupIdentifier,
@@ -124,6 +125,46 @@ export class SaleSelectionService {
       cost: unit.cost === null ? null : Number(unit.cost),
       dateIn: unit.dateIn,
     };
+  }
+
+  /**
+   * The basket as the server sees it now, before anyone confirms it (D227). Reads only and reserves nothing, so a line can
+   * still be taken before Charge; the sale decides again under its locks. `charged` is what `POST /sales` would use: the
+   * price sent, else the set price. A line that cannot be sold names why, so the screen can show exactly that line.
+   */
+  async checkCart(input: { lines: { identifier?: string; productId?: string; quantity?: number; price?: number }[]; saleDiscount?: number }) {
+    const branchId = this.tenant.requireBranchId();
+    const lines = [];
+    for (const [index, line] of input.lines.entries()) {
+      const quantity = line.identifier ? 1 : line.quantity ?? 1;
+      let setPrice: number | null = null;
+      let problem: 'unavailable' | 'not_enough' | 'price_required' | null = null;
+      let quantityAvailable: number | null = null;
+      if (line.identifier) {
+        const found = await this.select(line.identifier).catch((e: unknown) => {
+          if (e instanceof NotFoundException) return null;
+          throw e;
+        });
+        if (!found || found.availability !== 'available') problem = 'unavailable';
+        else setPrice = found.price;
+      } else if (line.productId && isUuid(line.productId)) {
+        const stock = await this.db.stockItem.findFirst({
+          where: { productId: uuidToBin(line.productId), branchId },
+          select: { quantity: true, reservedQuantity: true },
+        });
+        quantityAvailable = stock ? stock.quantity - stock.reservedQuantity : 0;
+        if (quantityAvailable < quantity) problem = quantityAvailable > 0 ? 'not_enough' : 'unavailable';
+        else setPrice = (await this.pricing.getProductPricing(line.productId)).price;
+      } else {
+        problem = 'unavailable';
+      }
+      const charged = line.price ?? setPrice;
+      if (!problem && charged == null) problem = 'price_required';
+      lines.push({ index, ok: problem === null, problem, setPrice, charged: charged ?? null, quantity, quantityAvailable, lineTotal: Math.round((charged ?? 0) * quantity * 100) / 100 });
+    }
+    const subtotal = Math.round(lines.reduce((sum, l) => sum + l.lineTotal, 0) * 100) / 100;
+    const discount = input.saleDiscount ?? 0;
+    return { ok: lines.every((l) => l.ok), lines, subtotal, discount, total: Math.round((subtotal - discount) * 100) / 100, cartHash: cartHash(input.lines, input.saleDiscount) };
   }
 
   /**

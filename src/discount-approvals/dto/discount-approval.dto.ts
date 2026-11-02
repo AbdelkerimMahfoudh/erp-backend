@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsInt, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsBoolean, IsInt, IsNumber, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 import { IsMoney } from '../../common/money/is-money.decorator';
 
 /** Ask the Owner to allow one sale below the configured selling price. */
@@ -26,6 +27,21 @@ export class RequestDiscountApprovalDto {
   @IsOptional()
   @IsUUID()
   clientUuid?: string;
+}
+
+class CartApprovalLineDto {
+  @IsOptional() @IsString() @MaxLength(64) identifier?: string;
+  @IsOptional() @IsUUID() productId?: string;
+  @IsOptional() @IsInt() @Min(1) quantity?: number;
+  @IsOptional() @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @IsMoney({ min: 0 }) price?: number;
+}
+
+/** The lines exactly as the sale will send them: the server works out the cart's hash from them. */
+export class RequestCartApprovalDto {
+  @IsUUID() clientUuid!: string;
+  @IsString() @MaxLength(255) reason!: string;
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(100) @ValidateNested({ each: true }) @Type(() => CartApprovalLineDto) lines!: CartApprovalLineDto[];
+  @IsOptional() @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @IsMoney({ min: 0 }) saleDiscount?: number;
 }
 
 export class DecideDiscountApprovalDto {

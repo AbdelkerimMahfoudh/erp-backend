@@ -1,3 +1,4 @@
+import { cartHash } from './cart-hash';
 import { PrismaService } from '../prisma/prisma.service';
 import { CATEGORY_VISUAL_SELECT, categoryVisualOf } from '../categories/category-visual';
 import {
@@ -357,6 +358,7 @@ export class SalesService {
          * total still looks positive. The configured price is a decision about
          * one product, so it has to be enforced about one product.
          */
+        const saleCartHash = cartHash(dto.lines, dto.saleDiscount);
         for (const [index, line] of prepared.entries()) {
           /*
            * An approval is spent HERE, inside the sale's transaction, by a
@@ -374,6 +376,7 @@ export class SalesService {
                   currentCost: line.cost,
                   currentBranchId: branchId,
                   saleId,
+                  cartHash: saleCartHash,
                 })
               : null;
           this.policy.assertPriceAllowed({
@@ -386,6 +389,7 @@ export class SalesService {
               index,
               unitId: line.unitId ? binToUuid(line.unitId) : null,
               identifier: dto.lines[index]?.identifier ?? null,
+              cartHash: saleCartHash,
             },
           });
         }

@@ -1,3 +1,4 @@
+import { CheckCartDto } from './dto/create-sale.dto';
 import { Body, Controller, Get, GoneException, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
@@ -78,6 +79,15 @@ export class SalesController {
   @ApiOperation({ summary: 'Find the existing item to sell — by IMEI, serial or product barcode — with its availability and selling price' })
   selectPhone(@Param('identifier') identifier: string) {
     return this.selection.select(identifier);
+  }
+
+  /** Reads only: what this basket would charge now, line by line, before anyone confirms it (D227). */
+  @Post('check')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions('sale.create')
+  @ApiOperation({ summary: 'Check a basket before confirming it; changes nothing and holds nothing' })
+  checkCart(@Body() dto: CheckCartDto) {
+    return this.selection.checkCart(dto);
   }
 
   /**

@@ -5289,6 +5289,11 @@ model DiscountApproval {
   clientUuid        Bytes?  @map("client_uuid") @db.Binary(16)
   clientRequestHash String? @map("client_request_hash") @db.VarChar(64)
 
+  /// One asking for a whole sale (0122): the same group for every device in it, decided together, and spendable only by
+  /// the exact cart it was given for. Null for an approval of one device, as before.
+  cartGroupId Bytes?  @map("cart_group_id") @db.Binary(16)
+  cartHash    String? @map("cart_hash") @db.Char(64)
+
   company   Company @relation(fields: [companyId], references: [id])
   branch    Branch  @relation(fields: [branchId], references: [id])
   unit      Unit    @relation(fields: [unitId], references: [id])
@@ -5298,6 +5303,7 @@ model DiscountApproval {
   @@unique([companyId, clientUuid], name: "discount_approval_client_uuid")
   /// The Owner's queue: pending work in this company, oldest first.
   @@index([companyId, status, createdAt])
+  @@index([companyId, cartGroupId], map: "ix_discount_approvals_cart_group")
   /// Voiding by unit, when stock moves or sells.
   @@index([unitId, status])
   @@map("discount_approvals")
@@ -6511,6 +6517,8 @@ model PaymentProof {
   refusalReason  String?            @map("refusal_reason") @db.VarChar(500)
   months         Int?
   appliedAt      DateTime?          @map("applied_at") @db.DateTime(6)
+  applyRequest   Json?              @map("apply_request")
+  periodAppliedAt DateTime?         @map("period_applied_at") @db.DateTime(6)
   decidedAt      DateTime?          @map("decided_at") @db.DateTime(6)
   purgedAt       DateTime?          @map("purged_at") @db.DateTime(6)
   company        Company            @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_proofs_company")

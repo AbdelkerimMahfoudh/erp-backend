@@ -57,7 +57,8 @@ export async function finishDraft(
 
   try {
     if (basis.kind === 'grant') {
-      // A grant counts its days from now, so a resume must not lengthen one that already went through.
+      // A grant counts its days from now, so a resume must not lengthen one that already went through. Its trail, period
+      // and audit committed with it (`activateByGrant`), so there is nothing left to repair when this finds it done.
       const sub = await prisma.subscription.findFirst({ where: { companyId }, select: { status: true, isComplimentary: true } });
       if (!(sub?.status === 'activated' && sub.isComplimentary)) {
         await lifecycle.activateByGrant(companyUuid, { days: basis.days!, reason: basis.reason }, ctx);

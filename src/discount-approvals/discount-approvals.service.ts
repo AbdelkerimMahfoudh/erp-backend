@@ -1,3 +1,5 @@
+import { cartHash } from '../sales/cart-hash';
+import { normalizeIdentifier } from '../sales/sale-selection-rules';
 import {
   BadRequestException,
   ConflictException,
@@ -60,7 +62,8 @@ export type VoidReason =
   | 'cost_changed'
   | 'unit_sold'
   | 'unit_transferred'
-  | 'expired';
+  | 'expired'
+  | 'cart_changed';
 
 export interface RequestApprovalInput {
   unitId: string;
@@ -225,6 +228,124 @@ export class DiscountApprovalsService {
   }
 
   /**
+   * One asking for a whole sale (D227): every device below its cost in this cart, one reason, one notification, one
+   * decision. Asking again for a changed cart replaces what the same person asked before for these devices, so an old
+   * answer can never be mistaken for the new question. Nothing about stock or the sale is touched.
+   */
+  async requestCart(input: {
+    clientUuid: string;
+    reason: string;
+    lines: { identifier?: string; productId?: string; quantity?: number; price?: number }[];
+    saleDiscount?: number;
+  }) {
+    const companyId = this.tenant.companyId();
+    const branchId = this.tenant.requireBranchId();
+    const requesterId = this.tenant.userId();
+    if (!requesterId) throw new ForbiddenException('Not signed in');
+    const reason = input.reason?.trim();
+    if (!reason) throw new BadRequestException('A reason is required to request a price below cost');
+
+    const hash = cartHash(input.lines, input.saleDiscount);
+    const clientUuid = uuidToBin(input.clientUuid);
+    const replay = await this.db.discountApproval.findFirst({ where: { companyId, clientUuid } });
+    if (replay) {
+      if (replay.cartHash !== hash) {
+        throw new ConflictException({ code: 'idempotency_conflict', message: 'That request id was already used with different details' });
+      }
+      return this.presentGroup(replay.cartGroupId!, hash);
+    }
+
+    const asked: { unit: Awaited<ReturnType<DiscountApprovalsService['cartUnit']>>; price: number }[] = [];
+    for (const line of input.lines) {
+      if (!line.identifier || line.price == null) continue;
+      const unit = await this.cartUnit(line.identifier);
+      if (unit.cost !== null && line.price < Number(unit.cost)) asked.push({ unit, price: line.price });
+    }
+    if (asked.length === 0) {
+      throw new BadRequestException({ code: 'approval_not_needed', message: 'No device in this sale is below cost, so no approval is needed' });
+    }
+
+    const groupId = newUuidV7Bin();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + APPROVAL_TTL_MINUTES * 60_000);
+    await this.db.discountApproval.updateMany({
+      where: { requesterId, unitId: { in: asked.map((a) => a.unit.id) }, status: { in: [DiscountApprovalStatus.pending, DiscountApprovalStatus.approved] }, cartGroupId: { not: null } },
+      data: { status: DiscountApprovalStatus.voided, voidReason: 'cart_changed', version: { increment: 1 } },
+    });
+    let first: Buffer | null = null;
+    for (const [i, { unit, price }] of asked.entries()) {
+      const resolved = await this.pricing.resolveForSaleTx(
+        this.db as never,
+        { kind: 'unit', unitId: unit.id, productId: unit.productId, unitBranchId: unit.branchId, productDefault: unit.product?.defaultPrice != null ? Number(unit.product.defaultPrice) : null },
+        branchId,
+      );
+      const configured = resolved.price ?? price;
+      const id = newUuidV7Bin();
+      first ??= id;
+      await this.db.discountApproval.create({
+        data: {
+          id,
+          companyId,
+          branchId,
+          unitId: unit.id,
+          productId: unit.productId,
+          variant: unit.product?.variant ?? null,
+          configuredPrice: new Prisma.Decimal(configured.toFixed(2)),
+          priceSource: resolved.source,
+          priceVersion: resolved.version ?? 0,
+          unitCost: new Prisma.Decimal(Number(unit.cost).toFixed(2)),
+          requestedPrice: new Prisma.Decimal(price.toFixed(2)),
+          discountAmount: new Prisma.Decimal(Math.max(configured - price, 0).toFixed(2)),
+          belowCost: true,
+          unitBranchId: unit.branchId,
+          requesterId,
+          reason,
+          status: DiscountApprovalStatus.pending,
+          expiresAt,
+          // The first row holds the key; the group is what a retry is answered with.
+          clientUuid: i === 0 ? clientUuid : null,
+          clientRequestHash: i === 0 ? hash : null,
+          cartGroupId: groupId,
+          cartHash: hash,
+        },
+      });
+      await this.audit.record({
+        entityType: 'discount_approval',
+        entityId: id,
+        action: 'create',
+        after: { event: 'discount_approval_requested', belowCost: true, cartItems: asked.length },
+      });
+    }
+    await this.notify({
+      recipients: await this.approvers(),
+      approvalId: first!,
+      branchId,
+      event: 'requested',
+      title: 'A price needs your approval',
+      body: null,
+      payload: { belowCost: true, cartItems: asked.length },
+    });
+    return this.presentGroup(groupId, hash);
+  }
+
+  private async cartUnit(identifier: string) {
+    const code = normalizeIdentifier(identifier);
+    const unit = await this.db.unit.findFirst({
+      where: { OR: [{ imeiPrimary: code }, { imeiSecondary: code }, { serialNo: code }] },
+      include: { product: { select: { id: true, variant: true, defaultPrice: true } } },
+    });
+    if (!unit) throw new NotFoundException('No such unit');
+    if (unit.status !== 'in_stock') throw new ConflictException('That unit is not in stock');
+    if (!unit.branchId.equals(this.tenant.requireBranchId())) throw new ConflictException('That unit is not at this branch');
+    return unit;
+  }
+
+  private async presentGroup(groupId: Buffer, hash: string) {
+    const rows = await this.db.discountApproval.findMany({ where: { cartGroupId: groupId }, orderBy: { id: 'asc' } });
+    return { cartHash: hash, rows: rows.map((r) => this.present(r)) };
+  }
+
+  /**
    * The Owner's decision.
    *
    * `expectedVersion` makes two Owners deciding at once produce one winner and
@@ -291,6 +412,38 @@ export class DiscountApprovalsService {
       });
     }
 
+    // One sale, one answer: the rest of its devices take the same decision, at their own frozen prices.
+    if (current.cartGroupId) {
+      const siblings = await this.db.discountApproval.findMany({
+        where: { cartGroupId: current.cartGroupId, status: DiscountApprovalStatus.pending },
+      });
+      for (const sibling of siblings) {
+        await this.db.discountApproval.updateMany({
+          where: { id: sibling.id, status: DiscountApprovalStatus.pending },
+          data: {
+            status: next,
+            approverId,
+            decidedAt: new Date(),
+            approvedPrice: input.approve ? sibling.requestedPrice : null,
+            decisionNote: input.note?.trim() || null,
+            version: { increment: 1 },
+          },
+        });
+        await this.audit.record({
+          entityType: 'discount_approval',
+          entityId: sibling.id,
+          action: 'status_change',
+          before: { status: DiscountApprovalStatus.pending },
+          after: {
+            event: input.approve ? 'discount_approval_approved' : 'discount_approval_rejected',
+            status: next,
+            approvedPrice: input.approve ? Number(sibling.requestedPrice) : null,
+            decidedWith: id,
+          },
+        });
+      }
+    }
+
     const updated = await this.db.discountApproval.findFirstOrThrow({ where: { id: approvalId } });
     await this.audit.record({
       entityType: 'discount_approval',
@@ -333,7 +486,9 @@ export class DiscountApprovalsService {
       return this.present(current);
     }
     await this.db.discountApproval.updateMany({
-      where: { id: approvalId, status: DiscountApprovalStatus.pending },
+      where: current.cartGroupId
+        ? { cartGroupId: current.cartGroupId, status: DiscountApprovalStatus.pending }
+        : { id: approvalId, status: DiscountApprovalStatus.pending },
       data: { status: DiscountApprovalStatus.voided, voidReason: 'cancelled', version: { increment: 1 } },
     });
     const updated = await this.db.discountApproval.findFirstOrThrow({ where: { id: approvalId } });
@@ -429,6 +584,8 @@ export class DiscountApprovalsService {
       currentCost: number;
       currentBranchId: Buffer;
       saleId: Buffer;
+      /** This sale's cart: an approval given for another cart does not apply to it. */
+      cartHash?: string;
     },
   ): Promise<{ approvedPrice: number; belowCost: boolean } | null> {
     const rows = await tx.discountApproval.findMany({
@@ -440,6 +597,7 @@ export class DiscountApprovalsService {
     for (const row of rows) {
       if (row.expiresAt.getTime() <= Date.now()) continue;
       if (Math.abs(Number(row.approvedPrice ?? 0) - params.requestedPrice) > 0.005) continue;
+      if (row.cartHash && row.cartHash !== params.cartHash) continue;
 
       // Every snapshot re-checked. A decision made about a different world is
       // not a decision about this sale.
@@ -628,6 +786,8 @@ export class DiscountApprovalsService {
       expiresAt: row.expiresAt.toISOString(),
       createdAt: row.createdAt.toISOString(),
       version: row.version,
+      cartGroupId: row.cartGroupId ? binToUuid(row.cartGroupId) : null,
+      cartHash: row.cartHash ?? null,
       /*
        * The cost, named so the gate already governing it strips it.
        *
@@ -713,6 +873,8 @@ interface PresentableApproval {
     product?: { brand: string; model: string; variant: string | null } | null;
   } | null;
   branch?: { name: string; nameAr: string | null } | null;
+  cartGroupId?: Buffer | null;
+  cartHash?: string | null;
   requester?: { name: string; nameAr: string | null } | null;
   approver?: { name: string; nameAr: string | null } | null;
 }
@@ -729,6 +891,8 @@ function reasonMessage(reason: VoidReason): string {
       return 'That unit has already been sold.';
     case 'expired':
       return 'That approval has expired.';
+    case 'cart_changed':
+      return 'The sale changed after this was approved. Ask again.';
   }
 }
 
