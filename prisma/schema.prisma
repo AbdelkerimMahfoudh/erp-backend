@@ -3265,7 +3265,10 @@ model ReturnRequest {
   branchId   Bytes @map("branch_id") @db.Binary(16)
   saleId     Bytes @map("sale_id") @db.Binary(16)
   saleItemId Bytes @map("sale_item_id") @db.Binary(16)
-  unitId     Bytes @map("unit_id") @db.Binary(16)
+  /// Null for a counted line (0123), which has no one physical thing.
+  unitId     Bytes? @map("unit_id") @db.Binary(16)
+  /// How many of a counted line come back. Null for a device, which is always the one.
+  returnedQuantity Int? @map("returned_quantity")
 
   status ReturnStatus @default(pending_investigation)
 
@@ -3314,7 +3317,7 @@ model ReturnRequest {
   branch      Branch   @relation(fields: [branchId], references: [id])
   sale        Sale     @relation(fields: [saleId], references: [id])
   saleItem    SaleItem @relation(fields: [saleItemId], references: [id])
-  unit        Unit     @relation(fields: [unitId], references: [id])
+  unit        Unit?     @relation(fields: [unitId], references: [id])
   requestedBy User?    @relation("ReturnRequestedBy", fields: [requestedById], references: [id])
   reviewedBy  User?    @relation("ReturnReviewedBy", fields: [reviewedById], references: [id])
   decidedBy   User?    @relation("ReturnDecidedBy", fields: [decidedById], references: [id])
@@ -3369,7 +3372,8 @@ model ReturnReversal {
   branchId        Bytes @map("branch_id") @db.Binary(16)
   saleId          Bytes @map("sale_id") @db.Binary(16)
   saleItemId      Bytes @map("sale_item_id") @db.Binary(16)
-  unitId          Bytes @map("unit_id") @db.Binary(16)
+  unitId          Bytes? @map("unit_id") @db.Binary(16)
+  returnedQuantity Int?  @map("returned_quantity")
   returnRequestId Bytes @map("return_request_id") @db.Binary(16)
 
   lineRevenue Decimal  @map("line_revenue") @db.Decimal(14, 2)
@@ -3390,7 +3394,7 @@ model ReturnReversal {
   branch     Branch        @relation(fields: [branchId], references: [id])
   sale       Sale          @relation(fields: [saleId], references: [id])
   saleItem   SaleItem      @relation(fields: [saleItemId], references: [id])
-  unit       Unit          @relation(fields: [unitId], references: [id])
+  unit       Unit?         @relation(fields: [unitId], references: [id])
   request    ReturnRequest @relation(fields: [returnRequestId], references: [id])
   approvedBy User?         @relation("ReturnApprovedBy", fields: [approvedById], references: [id])
   payout     RefundPayout?

@@ -323,3 +323,25 @@ describe('isProvisionalMoney', () => {
     expect(isProvisionalMoney('rejected')).toBe(true);
   });
 });
+
+describe('part of a counted line comes back (D227)', () => {
+  // Through the service's own rule: a refund is the returned share of what the line actually brought in.
+  const { returnedShare } = jest.requireActual('./returns.service');
+
+  it('a device is the whole line', () => {
+    expect(returnedShare(4000, { returnedQuantity: null, saleItem: { quantity: 1 } })).toBe(4000);
+  });
+
+  it('2 of 5 refund two fifths of the line', () => {
+    expect(returnedShare(500, { returnedQuantity: 2, saleItem: { quantity: 5 } })).toBe(200);
+  });
+
+  it('all of them refund the line exactly', () => {
+    expect(returnedShare(333.33, { returnedQuantity: 3, saleItem: { quantity: 3 } })).toBe(333.33);
+  });
+
+  it('never refunds more than the share, whatever the rounding', () => {
+    expect(returnedShare(100, { returnedQuantity: 1, saleItem: { quantity: 3 } })).toBe(33.33);
+    expect(returnedShare(0.01, { returnedQuantity: 1, saleItem: { quantity: 2 } })).toBe(0);
+  });
+});

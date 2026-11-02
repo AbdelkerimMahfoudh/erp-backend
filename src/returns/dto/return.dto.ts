@@ -35,11 +35,20 @@ export class CreateReturnRequestDto {
    * The server checks it resolves to the exact unit on that sale line, so a
    * request cannot be raised against a phone nobody looked at.
    */
-  @ApiProperty({ example: '353285110000015', maxLength: 64 })
+  @ApiPropertyOptional({ example: '353285110000015', maxLength: 64 })
+  @IsOptional()
   @IsString()
   @IsNotEmpty()
   @MaxLength(64)
-  identifier: string;
+  identifier?: string;
+
+  /** For a counted line, which has no identifier: how many come back. */
+  @ApiPropertyOptional({ minimum: 1 })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(9999)
+  quantity?: number;
 
   @ApiProperty({ maxLength: 255, description: 'What the customer says is wrong' })
   @IsString()

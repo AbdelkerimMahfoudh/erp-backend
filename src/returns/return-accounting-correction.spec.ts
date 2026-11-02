@@ -177,7 +177,7 @@ describe('the locked closing carries every component', () => {
 
 describe('what approval and rejection each do', () => {
   it('approval snapshots the ORIGINAL line cost into the reversal', () => {
-    expect(service).toMatch(/lineCost: request\.saleItem\.cost === null \? null : num\(request\.saleItem\.cost\) \* request\.saleItem\.quantity/);
+    expect(service).toMatch(/lineCost: request\.saleItem\.cost === null \? null : num\(request\.saleItem\.cost\) \* \(request\.returnedQuantity \?\? request\.saleItem\.quantity\)/);
   });
 
   /**

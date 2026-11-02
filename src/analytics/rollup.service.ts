@@ -266,7 +266,7 @@ export class RollupService {
              COALESCE(SUM(adjustment_total), 0) AS adjustments,
              COALESCE(SUM(line_cost), 0)        AS cogs_credited,
              COALESCE(SUM(CASE WHEN line_cost IS NOT NULL THEN gross_refund - adjustment_total - line_cost END), 0) AS effect_known,
-             COUNT(*)                           AS returns_count
+             COALESCE(SUM(COALESCE(returned_quantity, 1)), 0) AS returns_count
       FROM return_reversals
       WHERE company_id = ${companyId}
         AND branch_id = ${branchId}

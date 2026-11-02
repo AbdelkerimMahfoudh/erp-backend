@@ -50,6 +50,18 @@ import {
   settleRefund,
 } from './return-workflow';
 
+/** A counted line's refund is the share of it that came back; a device is the whole line. Rounded down to the cent, in the shop's favour by at most one. */
+export function returnedShare(lineGross: number, request: { returnedQuantity: number | null; saleItem: { quantity: number } }): number {
+  if (request.returnedQuantity === null) return lineGross;
+  return Math.floor((Math.round(lineGross * 100) * request.returnedQuantity) / request.saleItem.quantity) / 100;
+}
+
+type NamedProduct = { brand: string | null; model: string | null; variant: string | null } | null | undefined;
+function productOfReturn(r: { unit?: { product?: NamedProduct } | null; saleItem?: { product?: NamedProduct } | null }): string {
+  const product = r.unit?.product ?? r.saleItem?.product;
+  return [product?.brand, product?.model, product?.variant].filter(Boolean).join(' ');
+}
+
 const RETURN_STATUSES = [
   'pending_investigation',
   'under_review',
@@ -106,7 +118,8 @@ export class ReturnsService {
 
     const fingerprint = fingerprintRequest({
       saleItemId: dto.saleItemId,
-      unitId: dto.identifier,
+      unitId: dto.identifier ?? '',
+      ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
       requestReason: dto.requestReason,
       conditionNotes: dto.conditionNotes,
       custody: dto.custody as ReturnCustody,
@@ -142,10 +155,10 @@ export class ReturnsService {
     // Unknown, another company's, another branch's — one answer for all three.
     if (!line) throw new NotFoundException('Sale line not found');
 
-    if (!line.unitId || !line.unit) {
-      throw new BadRequestException(
-        'Only phones and other serialized items can be returned in this version. Accessories are not yet supported.',
-      );
+    // A counted line (D227): no identifier to read, a number of pieces instead, and no unit to move.
+    const counted = !line.unitId || !line.unit;
+    if (counted && !(Number.isInteger(dto.quantity) && dto.quantity! >= 1 && dto.quantity! <= line.quantity)) {
+      throw new BadRequestException({ code: 'return_quantity_invalid', message: 'Say how many of this item come back.' });
     }
     if (line.voided) throw new ConflictException('That sale line was removed from the sale.');
     // A cancelled sale should never have been recorded (0079): its phone is back in stock, not with a customer.
@@ -158,11 +171,12 @@ export class ReturnsService {
      * whole catalogue would let a request be raised by reading any phone in the
      * shop — the physical presentation is the entire point of the rule.
      */
-    const presented = dto.identifier.trim();
+    const presented = dto.identifier?.trim() ?? '';
     const matches =
-      line.unit.imeiPrimary === presented ||
-      line.unit.imeiSecondary === presented ||
-      line.unit.serialNo === presented;
+      counted ||
+      line.unit!.imeiPrimary === presented ||
+      line.unit!.imeiSecondary === presented ||
+      line.unit!.serialNo === presented;
     if (!matches) {
       throw new BadRequestException({
         code: 'identifier_mismatch',
@@ -193,7 +207,8 @@ export class ReturnsService {
             branchId,
             saleId: line.saleId,
             saleItemId: line.id,
-            unitId: line.unitId!,
+            unitId: line.unitId,
+            returnedQuantity: counted ? dto.quantity! : null,
             status: 'pending_investigation',
             clientUuid: uuidToBin(dto.clientUuid),
             clientRequestHash: fingerprint,
@@ -212,8 +227,8 @@ export class ReturnsService {
           },
         });
 
-        if (takesCustody) {
-          await this.moveUnitForCustody(tx, line.unitId!, 'sold', 'returned');
+        if (takesCustody && line.unitId) {
+          await this.moveUnitForCustody(tx, line.unitId, 'sold', 'returned');
         }
 
         await this.audit.recordTx(tx, {
@@ -228,10 +243,10 @@ export class ReturnsService {
           },
           branchId,
         });
-        if (takesCustody) {
+        if (takesCustody && line.unitId) {
           await this.audit.recordTx(tx, {
             entityType: 'Unit',
-            entityId: line.unitId!,
+            entityId: line.unitId,
             action: 'status_change',
             before: { status: 'sold' },
             after: { status: 'returned', reason: 'return custody intake' },
@@ -280,6 +295,7 @@ export class ReturnsService {
 
     const presented = dto.identifier.trim();
     const matches =
+      !request.unit ||
       request.unit.imeiPrimary === presented ||
       request.unit.imeiSecondary === presented ||
       request.unit.serialNo === presented;
@@ -301,7 +317,7 @@ export class ReturnsService {
       });
       if (moved.count === 0) throw this.staleWrite();
 
-      await this.moveUnitForCustody(tx, request.unitId, 'sold', 'returned');
+      if (request.unitId) await this.moveUnitForCustody(tx, request.unitId, 'sold', 'returned');
 
       await this.audit.recordTx(tx, {
         entityType: 'ReturnRequest',
@@ -311,7 +327,7 @@ export class ReturnsService {
         after: { custody: 'store_holds' },
         branchId,
       });
-      await this.audit.recordTx(tx, {
+      if (request.unitId) await this.audit.recordTx(tx, {
         entityType: 'Unit',
         entityId: request.unitId,
         action: 'status_change',
@@ -399,7 +415,7 @@ export class ReturnsService {
     assertEditable(request.status);
 
     const { totalAmount } = priceAdjustment(dto);
-    const gross = grossRefundOf(request.saleItemId, await this.saleBasis(request.saleId));
+    const gross = returnedShare(grossRefundOf(request.saleItemId, await this.saleBasis(request.saleId)), request);
 
     // Validated against everything already drafted, so the ceiling holds for
     // the SET of lines rather than for each one in isolation.
@@ -515,7 +531,7 @@ export class ReturnsService {
 
     // Money, from the immutable sale and the drafted adjustments. Never from
     // the request.
-    const gross = grossRefundOf(request.saleItemId, await this.saleBasis(request.saleId));
+    const gross = returnedShare(grossRefundOf(request.saleItemId, await this.saleBasis(request.saleId)), request);
     const adjustments = await this.db.returnAdjustment.findMany({
       where: { returnRequestId: request.id },
       select: { totalAmount: true },
@@ -569,11 +585,12 @@ export class ReturnsService {
           saleId: request.saleId,
           saleItemId: request.saleItemId,
           unitId: request.unitId,
+          returnedQuantity: request.returnedQuantity,
           returnRequestId: request.id,
           lineRevenue: gross,
           // An unknown cost (0107) stays unknown: nothing is credited back, and the line had no profit to reverse.
-          lineCost: request.saleItem.cost === null ? null : num(request.saleItem.cost) * request.saleItem.quantity,
-          lineMargin: request.saleItem.cost === null ? 0 : gross - num(request.saleItem.cost) * request.saleItem.quantity,
+          lineCost: request.saleItem.cost === null ? null : num(request.saleItem.cost) * (request.returnedQuantity ?? request.saleItem.quantity),
+          lineMargin: request.saleItem.cost === null ? 0 : gross - num(request.saleItem.cost) * (request.returnedQuantity ?? request.saleItem.quantity),
           grossRefund: gross,
           adjustmentTotal,
           netRefundDue,
@@ -583,7 +600,7 @@ export class ReturnsService {
       });
 
       // Unsellable, and staying that way until somebody inspects it.
-      await this.moveUnitForCustody(tx, request.unitId, 'returned', 'faulty');
+      if (request.unitId) await this.moveUnitForCustody(tx, request.unitId, 'returned', 'faulty');
 
       await this.audit.recordTx(tx, {
         entityType: 'ReturnRequest',
@@ -606,7 +623,7 @@ export class ReturnsService {
         after: { grossRefund: gross, adjustmentTotal, netRefundDue, approvalDate: approvalDay },
         branchId,
       });
-      await this.audit.recordTx(tx, {
+      if (request.unitId) await this.audit.recordTx(tx, {
         entityType: 'Unit',
         entityId: request.unitId,
         action: 'status_change',
@@ -684,8 +701,8 @@ export class ReturnsService {
       if (moved.count === 0) throw this.staleWrite();
 
       if (handingBack) {
-        await this.moveUnitForCustody(tx, request.unitId, 'returned', 'sold');
-        await this.audit.recordTx(tx, {
+        if (request.unitId) await this.moveUnitForCustody(tx, request.unitId, 'returned', 'sold');
+        if (request.unitId) await this.audit.recordTx(tx, {
           entityType: 'Unit',
           entityId: request.unitId,
           action: 'status_change',
@@ -1098,10 +1115,8 @@ export class ReturnsService {
       reference: `R-${request.sale.invoiceNo}-${binToUuid(request.id).slice(0, 8).toUpperCase()}`,
       originalInvoiceNo: request.sale.invoiceNo,
       confirmedAt: payout.confirmedAt,
-      product: [request.unit.product?.brand, request.unit.product?.model, request.unit.product?.variant]
-        .filter(Boolean)
-        .join(' '),
-      identifier: request.unit.imeiPrimary ?? request.unit.serialNo,
+      product: productOfReturn(request),
+      identifier: request.unit ? request.unit.imeiPrimary ?? request.unit.serialNo : null,
       grossRefund: num(reversal?.grossRefund),
       adjustments: adjustments.map((a) => ({
         label: a.label,
@@ -1281,6 +1296,7 @@ export class ReturnsService {
       include: {
         sale: { select: { invoiceNo: true } },
         unit: { select: { imeiPrimary: true, serialNo: true, product: { select: { brand: true, model: true, variant: true } } } },
+        saleItem: { select: { quantity: true, product: { select: { brand: true, model: true, variant: true } } } },
         requestedBy: { select: { name: true, nameAr: true } },
         adjustments: { select: { totalAmount: true } },
       },
@@ -1293,7 +1309,7 @@ export class ReturnsService {
     const bases = await this.saleBases(page.map((r) => r.saleId));
     return {
       rows: page.map((r) => {
-        const gross = grossRefundOf(r.saleItemId, bases.get(r.saleId.toString('hex'))!);
+        const gross = returnedShare(grossRefundOf(r.saleItemId, bases.get(r.saleId.toString('hex'))!), r);
         const adjustmentTotal = r.adjustments.reduce((s, a) => s + num(a.totalAmount), 0);
         return {
           id: binToUuid(r.id),
@@ -1301,10 +1317,8 @@ export class ReturnsService {
           custody: r.custody,
           responsibility: r.responsibility,
           invoiceNo: r.sale.invoiceNo,
-          product: [r.unit.product?.brand, r.unit.product?.model, r.unit.product?.variant]
-            .filter(Boolean)
-            .join(' '),
-          identifier: r.unit.imeiPrimary ?? r.unit.serialNo,
+          product: productOfReturn(r),
+          identifier: r.unit ? r.unit.imeiPrimary ?? r.unit.serialNo : null,
           requestedBy: r.requestedBy?.name ?? null,
           requestedByAr: r.requestedBy?.nameAr ?? null,
           requestedAt: r.createdAt,
@@ -1324,7 +1338,7 @@ export class ReturnsService {
     const branchId = this.tenant.requireBranchId();
     const r = await this.load(idStr, branchId);
 
-    const gross = grossRefundOf(r.saleItemId, await this.saleBasis(r.saleId));
+    const gross = returnedShare(grossRefundOf(r.saleItemId, await this.saleBasis(r.saleId)), r);
     const adjustments = await this.db.returnAdjustment.findMany({
       where: { returnRequestId: r.id },
       orderBy: { id: 'asc' },
@@ -1377,15 +1391,15 @@ export class ReturnsService {
         soldAt: r.sale.soldAt,
       },
       phone: {
-        unitId: binToUuid(r.unitId),
-        imei: r.unit.imeiPrimary,
-        serialNo: r.unit.serialNo,
-        product: [r.unit.product?.brand, r.unit.product?.model, r.unit.product?.variant]
-          .filter(Boolean)
-          .join(' '),
+        unitId: r.unitId ? binToUuid(r.unitId) : null,
+        imei: r.unit?.imeiPrimary ?? null,
+        serialNo: r.unit?.serialNo ?? null,
+        product: productOfReturn(r),
+        // How many of a counted line come back; null for a device.
+        returnedQuantity: r.returnedQuantity,
         // So a screen can say "held, not sellable" from the same fact the
         // inventory uses.
-        unitStatus: r.unit.status,
+        unitStatus: r.unit?.status ?? null,
       },
       policy: {
         windowHours: r.policyWindowHours,
@@ -1409,7 +1423,7 @@ export class ReturnsService {
         netRefundDue: Math.round((gross - adjustmentTotal) * 100) / 100,
         // The line's cost and margin ride the standard gating: named so the
         // interceptor strips them without `cost.view`.
-        cost: r.saleItem.cost === null ? null : num(r.saleItem.cost) * r.saleItem.quantity,
+        cost: r.saleItem.cost === null ? null : num(r.saleItem.cost) * (r.returnedQuantity ?? r.saleItem.quantity),
       },
       adjustments: adjustments.map((a) => ({
         id: binToUuid(a.id),
@@ -1523,7 +1537,7 @@ export class ReturnsService {
       where: { id: uuidToBin(idStr) },
       include: {
         sale: true,
-        saleItem: true,
+        saleItem: { include: { product: { select: { brand: true, model: true, variant: true } } } },
         unit: {
           select: {
             id: true,
@@ -1593,6 +1607,8 @@ export class ReturnsService {
         { unit: { product: { brand: { contains: q } } } },
         { unit: { product: { model: { contains: q } } } },
         { unit: { product: { variant: { contains: q } } } },
+        { saleItem: { product: { brand: { contains: q } } } },
+        { saleItem: { product: { model: { contains: q } } } },
         { requestedBy: { name: { contains: q } } },
         { requestReason: { contains: q } },
       ],

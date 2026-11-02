@@ -52,9 +52,8 @@ describe('the units-sold goal takes returned units off on their approval day (D3
   });
 
 
-  it('a return is one identified unit, so returns_count is the units returned', () => {
-    const returns = read('returns', 'returns.service.ts');
-    expect(returns).toMatch(/if \(!line\.unitId \|\| !line\.unit\) \{/);
+  it('returns_count is the units returned: a device is one, a counted return its pieces (D227)', () => {
+    expect(read('analytics', 'rollup.service.ts')).toMatch(/SUM\(COALESCE\(returned_quantity, 1\)\), 0\) AS returns_count/);
     expect(read('sales', 'sales.service.ts')).toMatch(/unitId: unit\.id,\s+productId: unit\.productId,\s+quantity: 1,/);
   });
 });
