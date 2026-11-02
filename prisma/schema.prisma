@@ -316,6 +316,7 @@ enum SyncStatus {
 // ------------------------- Tenancy & Access --------------------------------
 
 model Company {
+  paymentProofs PaymentProof[]
   ownerIdentities OwnerIdentity[]
   notificationPreferences NotificationPreference[]
   notificationReads       NotificationRead[]
@@ -6482,4 +6483,40 @@ model RegistrationHold {
   createdAt   DateTime  @default(now()) @map("created_at") @db.DateTime(6)
 
   @@map("registration_holds")
+}
+
+enum PaymentProofStatus {
+  submitted
+  under_review
+  approved
+  refused
+}
+
+/// D227: an Owner's payment proof from the web portal. Asking changes nothing; only an administrator's approval records a payment.
+model PaymentProof {
+  id             Bytes              @id @db.Binary(16)
+  companyId      Bytes              @map("company_id") @db.Binary(16)
+  idempotencyKey String             @map("idempotency_key") @db.VarChar(80)
+  status         PaymentProofStatus @default(submitted)
+  amount         Decimal            @db.Decimal(14, 2)
+  paidAt         DateTime           @map("paid_at") @db.DateTime(6)
+  reference      String?            @db.VarChar(120)
+  note           String?            @db.VarChar(500)
+  contentType    String             @map("content_type") @db.VarChar(40)
+  byteSize       Int                @map("byte_size")
+  sha256         String             @db.Char(64)
+  file           Bytes?             @db.MediumBlob
+  submittedBy    Bytes              @map("submitted_by") @db.Binary(16)
+  submittedAt    DateTime           @default(now()) @map("submitted_at") @db.DateTime(6)
+  refusalReason  String?            @map("refusal_reason") @db.VarChar(500)
+  months         Int?
+  appliedAt      DateTime?          @map("applied_at") @db.DateTime(6)
+  decidedAt      DateTime?          @map("decided_at") @db.DateTime(6)
+  purgedAt       DateTime?          @map("purged_at") @db.DateTime(6)
+  company        Company            @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_proofs_company")
+
+  @@unique([companyId, idempotencyKey], map: "ux_payment_proofs_key")
+  @@index([status, submittedAt], map: "ix_payment_proofs_status")
+  @@index([companyId, sha256], map: "ix_payment_proofs_sha")
+  @@map("payment_proofs")
 }

@@ -1,3 +1,5 @@
+import { PaymentProofsController } from './payment-proofs.controller';
+import { PaymentProofsService } from './payment-proofs.service';
 import { Module, OnModuleInit } from '@nestjs/common';
 import { PlatformNamesController } from './platform-names.controller';
 import { PlatformNamesService } from './platform-names.service';
@@ -111,6 +113,7 @@ export function selectContactDelivery(
 @Module({
   imports: [PrismaModule, EntitlementModule, AuthModule],
   controllers: [
+    PaymentProofsController,
     PlatformController,
     AccountProvisioningController,
     // D225: the console's edit of a business's, a store's and a person's two names.
@@ -136,6 +139,7 @@ export function selectContactDelivery(
     ReferralInvitationsController,
   ],
   providers: [
+    PaymentProofsService,
     HashingService,
     AccountSetupCodeService,
     AccountProvisioningService,
