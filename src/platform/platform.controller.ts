@@ -227,7 +227,8 @@ export class CreateBusinessDto {
   @IsOptional() @NormalizeOptionalName() @IsLatinName() businessName?: string | null;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() businessNameAr?: string | null;
   /** The first store's names. No Latin name is "Main Store" / "المتجر الرئيسي". */
-  @IsOptional() @NormalizeName() @IsLatinName() branchName?: string;
+  // D227: a completed Owner account has at least one store, so its first store is required here too.
+  @IsString() @NormalizeName() @IsLatinName() branchName!: string;
   @IsOptional() @NormalizeOptionalName() @IsArabicName() branchNameAr?: string | null;
   /** What the first branch does (D154): electronics when not said. */
   @IsOptional() @IsIn(ACTIVITIES) activity?: Activity;
@@ -895,7 +896,7 @@ export class PlatformController {
       ownerNameAr: dto.ownerNameAr,
       businessName: dto.businessName,
       businessNameAr: dto.businessNameAr,
-      branchName: dto.branchName ?? '',
+      branchName: dto.branchName,
       branchNameAr: dto.branchNameAr,
       activity: dto.activity,
       city: dto.city,

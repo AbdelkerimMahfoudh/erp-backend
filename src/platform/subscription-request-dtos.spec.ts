@@ -83,7 +83,7 @@ describe('registering, by the shop or by the platform', () => {
     expect(await problems(plainToInstance(RegisterDto, { ...registration, activity: 'both' }))).toEqual([]);
     expect(await problems(plainToInstance(RegisterDto, { ...registration, activity: 'warehouse' }))).not.toEqual([]);
 
-    const admin = { idempotencyKey: 'k-2', ownerName: 'Aicha', ownerNameAr: 'عائشة', businessName: 'Boutique', businessNameAr: 'بوتيك', language: 'fr', reason: 'Signed up by phone' };
+    const admin = { idempotencyKey: 'k-2', branchName: 'Main', ownerName: 'Aicha', ownerNameAr: 'عائشة', businessName: 'Boutique', businessNameAr: 'بوتيك', language: 'fr', reason: 'Signed up by phone' };
     expect(await problems(plainToInstance(CreateBusinessDto, admin))).toEqual([]);
     // D227: the Latin names are required; the Arabic ones are optional, and blank is none.
     const { ownerNameAr, businessNameAr, ...latinOnly } = admin;
@@ -91,6 +91,14 @@ describe('registering, by the shop or by the platform', () => {
     expect([ownerNameAr, businessNameAr]).toEqual(['عائشة', 'بوتيك']);
     expect(await problems(plainToInstance(CreateBusinessDto, { ...admin, activity: 'money_agent' }))).toEqual([]);
     expect(await problems(plainToInstance(CreateBusinessDto, { ...admin, activity: 'agent' }))).not.toEqual([]);
+  });
+
+  it('D227: no account is created without a first store, by the shop or by the platform', async () => {
+    const admin = { idempotencyKey: 'k-3', ownerName: 'Aicha', branchName: 'Main', phone: '+22236000001', language: 'en', reason: 'asked', confirmPassword: 'x', access: { kind: 'grant', days: 30, reason: 'pilot' } };
+    for (const blank of [undefined, '', '   ']) {
+      expect(await problems(plainToInstance(RegisterDto, { ...registration, branchName: blank }))).not.toEqual([]);
+      expect(await problems(plainToInstance(CreateBusinessDto, { ...admin, branchName: blank }))).not.toEqual([]);
+    }
   });
 });
 

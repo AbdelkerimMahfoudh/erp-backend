@@ -217,6 +217,21 @@ run('a store free until renewal, through the real renewal', () => {
     expect(Number(third[2].assessedBranchFee)).toBe(mark ? fee * 2 : fee);
   });
 
+  it('D227: a refused basis or a wrong request id opens nothing and leaves the exact request pending', async () => {
+    const { uuid, id } = await paidShop();
+    const asked = await a.seats.requestStore(id, { name: 'Halfway', requestedBy: 'owner@example.test' });
+    const open = (access: unknown, requestId: string) => a.provisioning.openStore(uuid, { name: 'Halfway', reason: 'pilot', access: access as never, requestId }, CTX);
+
+    await expect(open({ kind: 'grant', reason: 'goodwill' }, '00000000-0000-7000-8000-000000000000')).rejects.toMatchObject({ response: { code: 'pending_request_exists', pendingRequestId: asked.allocation.id } });
+    await expect(open({ kind: 'grant', reason: '' }, asked.allocation.id)).rejects.toBeDefined();
+    await expect(open({ kind: 'payment', amount: '0', paidAt: new Date().toISOString(), reference: 'R-1', months: 1 }, asked.allocation.id)).rejects.toBeDefined();
+
+    const still = await root.seatAllocation.findUniqueOrThrow({ where: { id: uuidToBin(asked.allocation.id) } });
+    expect(still.status).toBe('pending_payment');
+    expect(await root.branch.count({ where: { companyId: id, name: 'Halfway' } })).toBe(0);
+    expect(await root.subscriptionPayment.count({ where: { companyId: id, reference: 'R-1' } })).toBe(0);
+  });
+
   it('a name never withdraws somebody else’s request: only its exact id acts on it', async () => {
     const { uuid, id } = await paidShop();
     const owners = await a.seats.requestStore(id, { name: 'Annex', requestedBy: 'owner@example.test' });

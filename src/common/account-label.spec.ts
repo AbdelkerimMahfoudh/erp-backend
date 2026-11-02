@@ -160,7 +160,7 @@ describe('registration needs no business name', () => {
   });
 
   it('the administrator’s form too', () => {
-    const body = { idempotencyKey: 'k-12345678', ownerName: 'Aicha', language: 'fr', reason: 'by phone', access: { kind: 'grant', days: 30, reason: 'pilot' } };
+    const body = { idempotencyKey: 'k-12345678', ownerName: 'Aicha', branchName: 'Main', language: 'fr', reason: 'by phone', access: { kind: 'grant', days: 30, reason: 'pilot' } };
     expect(problems(CreateBusinessDto as never, body)).toEqual([]);
   });
 
