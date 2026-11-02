@@ -222,7 +222,7 @@ run('a store free until renewal, through the real renewal', () => {
     const owners = await a.seats.requestStore(id, { name: 'Annex', requestedBy: 'owner@example.test' });
     expect(owners.allocation.status).toBe('pending_payment');
 
-    await expect(grant(uuid, 'Annex')).rejects.toMatchObject({ response: { code: 'pending_request_exists', requestId: owners.allocation.id } });
+    await expect(grant(uuid, 'Annex')).rejects.toMatchObject({ response: { code: 'pending_request_exists', pendingRequestId: owners.allocation.id } });
     const still = await root.seatAllocation.findUniqueOrThrow({ where: { id: uuidToBin(owners.allocation.id) } });
     expect(still.status).toBe('pending_payment');
     expect(await root.branch.count({ where: { companyId: id, name: 'Annex' } })).toBe(0);

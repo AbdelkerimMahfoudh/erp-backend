@@ -5,8 +5,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+  NotFoundException, Logger } from '@nestjs/common';
 import { PaymentMethod, Prisma, Sale, SalePayStatus } from '@prisma/client';
 import { ClsService } from 'nestjs-cls';
 import { TENANT_PRISMA } from '../prisma/prisma.module';
@@ -38,6 +37,8 @@ import { debtDueDays, dueDateFor, parseCustomerPhone, phoneRefusal } from './cus
 import { assertMayStartDealing } from '../consignment/dealing-authorization';
 import { paymentSelect, toPaymentView } from './sale-payments.service';
 import { describeProduct, parseDateRange, parseEnumList } from './sale-query';
+import { isRetryableLockConflict, withLockRetry } from '../common/db/deadlock-retry';
+import { lineConflict, refusedLine, seenTwice, type RefusedLine } from './sale-line-conflict';
 import { DiscountApprovalsService } from '../discount-approvals/discount-approvals.service';
 import { MagnitudeReads, MagnitudeService, SALE_PRICE_MIN_SAMPLE } from '../common/warnings/magnitude.service';
 import { magnitudeWarning } from '../common/warnings/magnitude';
@@ -86,6 +87,8 @@ class WarningsPending extends Error {
 
 @Injectable()
 export class SalesService {
+  private readonly logger = new Logger(SalesService.name);
+
   constructor(
     @Inject(TENANT_PRISMA) private readonly db: TenantPrisma,
     private readonly tenant: TenantContext,
@@ -170,10 +173,14 @@ export class SalesService {
     const business = await this.system.company.findUnique({ where: { id: companyId }, select: { name: true, nameAr: true } });
 
     try {
-      result = await this.db.$transaction(async (tx) => {
+      const sell = () => this.db.$transaction(async (tx) => {
         const prepared: PreparedLine[] = [];
+        // Every refused line at once, by its place in the basket: the counter fixes them together (D227).
+        const refused: RefusedLine[] = [];
+        const units = new Set<string>();
 
-        for (const l of dto.lines) {
+        for (const [lineIndex, l] of dto.lines.entries()) {
+          try {
           const discount = l.discount ?? 0;
           if (l.identifier) {
             const unit = await tx.unit.findFirst({
@@ -188,7 +195,14 @@ export class SalesService {
               },
               include: { product: { select: { defaultPrice: true } } },
             });
-            if (!unit) throw new NotFoundException(`Unit not found: ${l.identifier}`);
+            if (!unit) {
+              refused.push({ line: lineIndex, reason: 'not_found' });
+              continue;
+            }
+            if (seenTwice(units, unit.id)) {
+              refused.push({ line: lineIndex, reason: 'duplicate' });
+              continue;
+            }
             this.policy.assertSellable(unit, branchId);
             /**
              * The counter may still type the price actually agreed with the
@@ -237,10 +251,11 @@ export class SalesService {
              * once at the counter and once into a branch expecting it.
              */
             const available = stock ? stock.quantity - stock.reservedQuantity : 0;
-            if (!stock || available < quantity) {
-              throw new ConflictException(
-                `Only ${Math.max(available, 0)} available to sell`,
-              );
+            // The same product on two lines shares one shelf.
+            const already = prepared.filter((p) => !p.unitId && p.productId.equals(productId)).reduce((n, p) => n + p.quantity, 0);
+            if (!stock || available - already < quantity) {
+              refused.push({ line: lineIndex, reason: 'insufficient_quantity', available: Math.max(available - already, 0) });
+              continue;
             }
             // Quantity stock keeps its own branch price; the resolver returns it
             // with an honest `stock_item` source rather than a second source.
@@ -283,7 +298,13 @@ export class SalesService {
               configuredPrice: resolved.price,
             });
           }
+          } catch (failure) {
+            // The unit's own refusal: not sellable, or at another store. Anything else is not about this line.
+            if (!(failure instanceof ConflictException)) throw failure;
+            refused.push(refusedLine(lineIndex));
+          }
         }
+        if (refused.length > 0) throw lineConflict(refused);
 
         /*
          * A missing or extra zero, caught BEFORE the first write (A1).
@@ -532,9 +553,7 @@ export class SalesService {
               data: { status: 'sold', dateSold: new Date() },
             });
             if (claimed.count === 0) {
-              throw new ConflictException(
-                'That item was taken while you were selling — it is no longer available',
-              );
+              throw lineConflict([refusedLine(prepared.indexOf(p))]);
             }
             await this.audit.recordTx(tx, {
               entityType: 'Unit',
@@ -571,14 +590,14 @@ export class SalesService {
               },
             });
             if (taken.count === 0) {
-              throw new ConflictException('That stock was taken while you were selling');
+              throw lineConflict([{ line: prepared.indexOf(p), reason: 'insufficient_quantity' }]);
             }
             const after = await tx.stockItem.findUnique({
               where: { companyId_productId_branchId: { companyId, productId: p.productId, branchId } },
               select: { quantity: true, reservedQuantity: true },
             });
             if (after && after.quantity < after.reservedQuantity) {
-              throw new ConflictException('That stock is reserved for a transfer');
+              throw lineConflict([{ line: prepared.indexOf(p), reason: 'insufficient_quantity' }]);
             }
           }
         }
@@ -744,6 +763,13 @@ export class SalesService {
           customer: named?.name?.trim() ? { name: named.name.trim(), phone: named.phone?.trim() || null } : null,
         };
       });
+      /*
+       * A write conflict rolled everything back, so running again is safe, but only with a key: a racing twin that
+       * committed is then found below, and answered with its own sale. Without one nothing could tell two sales apart.
+       */
+      result = dto.clientUuid
+        ? await withLockRetry(sell, { onRetry: (attempt) => this.logger.warn(`POST /sales: write conflict, retrying (attempt ${attempt})`) })
+        : await sell();
     } catch (e) {
       /*
        * Not an error. The transaction was abandoned on purpose so that a sale
@@ -765,7 +791,9 @@ export class SalesService {
        * that made nothing is a real conflict: a unit in this sale was taken by
        * another sale at the same moment.
        */
-      if (dto.clientUuid && (keyTaken || e instanceof ConflictException)) {
+      // Out of retries is the same question: a twin may have committed while this one kept losing.
+      const outOfRetries = isRetryableLockConflict(e);
+      if (dto.clientUuid && (keyTaken || outOfRetries || e instanceof ConflictException)) {
         const twin = await this.db.sale.findFirst({ where: { companyId, clientUuid: uuidToBin(dto.clientUuid) } });
         if (twin) {
           await this.assertReplayMatches(twin, dto);

@@ -98,6 +98,41 @@ describe('a different sale under the same key is refused', () => {
   it('a discount that was not there', () => conflicts({ ...base, saleDiscount: 50 }));
 });
 
+describe('a write conflict (injected)', () => {
+  const conflict = () => new Prisma.PrismaClientKnownRequestError('deadlock', { code: 'P2034', clientVersion: 'test' });
+
+  it('with a key: retried, bounded, and answered with the sale a twin committed', async () => {
+    const { service, db } = harness(null);
+    db.$transaction.mockImplementation(async () => { throw conflict(); });
+    db.sale.findFirst.mockImplementationOnce(async () => null).mockImplementation(async () => sale);
+    const r = (await service.createSale(base as never)) as { invoiceNo: string };
+    expect(db.$transaction).toHaveBeenCalledTimes(3);
+    // Out of retries, but the twin's sale exists: that is the answer, never "try again".
+    expect(r.invoiceNo).toBe('00042');
+  });
+
+  it('with a key and no twin: exhausted after three attempts, and the conflict reaches the caller', async () => {
+    const { service, db } = harness(null);
+    db.$transaction.mockImplementation(async () => { throw conflict(); });
+    await expect(service.createSale(base as never)).rejects.toMatchObject({ code: 'P2034' });
+    expect(db.$transaction).toHaveBeenCalledTimes(3);
+  });
+
+  it('without a key: never retried, because nothing could tell two sales apart', async () => {
+    const { service, db } = harness(null);
+    db.$transaction.mockImplementation(async () => { throw conflict(); });
+    await expect(service.createSale({ ...base, clientUuid: undefined } as never)).rejects.toMatchObject({ code: 'P2034' });
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused line is never retried', async () => {
+    const { service, db } = harness(null);
+    db.$transaction.mockImplementation(async () => { throw new ConflictException({ code: 'sale_line_conflict', lines: [] }); });
+    await expect(service.createSale(base as never)).rejects.toBeInstanceOf(ConflictException);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('two identical submissions racing', () => {
   /**
    * The unique key on (company, client_uuid) rejects the loser inside its

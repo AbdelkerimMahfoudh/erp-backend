@@ -332,7 +332,7 @@ export class ProvisioningService {
           code: 'access_basis_required',
           message: 'This store is not covered by the business\u2019s access. Record the payment received.',
           amount: result.allocation.monthlyAmount,
-          requestId: result.allocation.id,
+          pendingRequestId: result.allocation.id,
         });
       }
       // A request that already existed may be somebody else's with the same name: only its exact id may act on it.
@@ -341,7 +341,7 @@ export class ProvisioningService {
           code: 'pending_request_exists',
           message: 'A priced request with this name already exists. Confirm that exact request, or choose another name.',
           amount: result.allocation.monthlyAmount,
-          requestId: result.allocation.id,
+          pendingRequestId: result.allocation.id,
         });
       }
       const basis = parseBasis(input.access, false, new Date(), { store: true });

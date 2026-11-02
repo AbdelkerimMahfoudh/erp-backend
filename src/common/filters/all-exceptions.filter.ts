@@ -76,7 +76,7 @@ interface ErrorBody {
  * exception body may carry internals, and passing whatever a service happened
  * to attach would give that back.
  */
-const DETAIL_KEYS = [
+const DETAIL_KEYS = ['lines', 'amount', 'pendingRequestId', 
   'problems',
   'units',
   /*

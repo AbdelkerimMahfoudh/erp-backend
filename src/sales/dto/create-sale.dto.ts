@@ -3,6 +3,7 @@ import { PaymentMethod } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { RETURN_WINDOW_MAX_HOURS, RETURN_WINDOW_NONE } from '../../settings/settings.constants';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsEnum,
@@ -127,6 +128,7 @@ export class CreateSaleDto {
   @ApiProperty({ type: [SaleLineDto] })
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => SaleLineDto)
   lines: SaleLineDto[];
