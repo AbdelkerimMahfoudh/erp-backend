@@ -184,7 +184,7 @@ function apply(row: Row, data: Row): void {
 }
 
 export interface BusinessOptions {
-  name?: string;
+  name?: string | null;
   /** The contacts given at registration. */
   contacts?: 'email' | 'phone' | 'both';
   /** Which of them the Owner has verified. */
@@ -452,7 +452,7 @@ export function makeTrialWorld(options: WorldOptions = {}) {
     const phone = contactsGiven !== 'email' ? `+22236${String(100000 + counter).padStart(6, '0')}` : null;
     t.companies.push({
       id: companyId,
-      name: opts.name ?? `Shop ${counter}`,
+      name: opts.name === undefined ? `Shop ${counter}` : opts.name,
       timezone: opts.timezone ?? 'Africa/Nouakchott',
       isActive: !opts.closed,
       closedAt: opts.closed ? REGISTERED_AT : null,

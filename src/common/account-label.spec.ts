@@ -1,28 +1,124 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { CreateBusinessDto } from '../platform/platform.controller';
 import { RegisterDto } from '../platform/registration.dto';
 import { UpdateNamesDto } from '../names/dto/update-names.dto';
 import { receiptNamesOf } from '../sales/sales.service';
-import { labelArOf, labelOf } from './account-label';
+import {
+  LEGACY_OLDEST_STORE,
+  adminAccountLabel,
+  legacyLabel,
+  legacyLabelAr,
+  neutralAccount,
+  participantLabel,
+  participantLabelAr,
+  storesOfUser,
+  storesText,
+  storesTextAr,
+} from './account-label';
 
-/** An account needs no company name (D227). What people read comes from the store, never from an invented name. */
-describe('what an account is called', () => {
-  const store = { name: 'Boutique Centre', nameAr: 'متجر المركز' };
+/** An account needs no company name (D227), and what people read depends on what they are reading about. */
+const CENTRE = { name: 'Boutique Centre', nameAr: 'متجر المركز' };
+const PORT = { name: 'Boutique Port', nameAr: null };
 
-  it('its trading name when it has one, and that name alone', () => {
-    expect(labelOf({ name: 'SARL Kiffa', nameAr: null, branches: [store] })).toBe('SARL Kiffa');
-    expect(labelArOf({ name: 'SARL Kiffa', nameAr: null, branches: [store] })).toBeNull();
+describe('something about one store names that store', () => {
+  it('the exact store, not another of the same Owner, when there is no trading name', () => {
+    expect(participantLabel({ name: null }, PORT)).toBe('Boutique Port');
+    expect(participantLabel({ name: null }, CENTRE)).toBe('Boutique Centre');
+    expect(participantLabelAr({ name: null }, CENTRE)).toBe('متجر المركز');
   });
 
-  it('otherwise its first store, in both scripts', () => {
-    expect(labelOf({ name: null, branches: [store] })).toBe('Boutique Centre');
-    expect(labelArOf({ name: null, branches: [store] })).toBe('متجر المركز');
+  it('the trading name when there is one', () => {
+    expect(participantLabel({ name: 'SARL Kiffa' }, PORT)).toBe('SARL Kiffa');
+    expect(participantLabelAr({ name: 'SARL Kiffa', nameAr: null }, CENTRE)).toBeNull();
   });
 
-  it('never a placeholder when there is nothing to say', () => {
-    expect(labelOf({ name: null, branches: [] })).toBe('');
-    expect(labelOf(null)).toBe('');
+  it('nothing rather than a placeholder', () => {
+    expect(participantLabel({ name: null }, null)).toBe('');
+  });
+});
+
+describe('something about the whole account is neutral', () => {
+  it.each([
+    ['en', 'your Dukan account', 'Your Dukan account'],
+    ['fr', 'votre compte Dukan', 'Votre compte Dukan'],
+    ['ar', 'حسابك في دكان', 'حسابك في دكان'],
+  ] as const)('%s', (language, within, opening) => {
+    expect(neutralAccount(language)).toBe(within);
+    expect(neutralAccount(language, true)).toBe(opening);
+  });
+});
+
+describe('the stores a person may choose among', () => {
+  it('are theirs, active, in a stable order', async () => {
+    const asked: unknown[] = [];
+    const db = {
+      userBranch: {
+        findMany: async (args: unknown) => {
+          asked.push(args);
+          return [{ branch: CENTRE }, { branch: PORT }];
+        },
+      },
+    };
+    const user = Buffer.alloc(16, 7);
+    expect(await storesOfUser(db as never, user)).toEqual([CENTRE, PORT]);
+    expect(asked[0]).toMatchObject({ where: { userId: user, branch: { isActive: true } }, orderBy: [{ id: 'asc' }] });
+  });
+
+  it('are written out for an older build, every one of them', () => {
+    expect(storesText([CENTRE, PORT])).toBe('Boutique Centre, Boutique Port');
+    expect(storesTextAr([CENTRE, PORT])).toBe('متجر المركز، Boutique Port');
+    expect(storesTextAr([PORT])).toBeNull();
+  });
+});
+
+describe('the console’s label, presentation only', () => {
+  it('one store, several, and the exceptional account with none', () => {
+    expect(adminAccountLabel('Aicha', [CENTRE])).toEqual({ owner: 'Aicha', store: 'Boutique Centre', moreStores: 0 });
+    expect(adminAccountLabel('Aicha', [CENTRE, PORT, PORT])).toEqual({ owner: 'Aicha', store: 'Boutique Centre', moreStores: 2 });
+    expect(adminAccountLabel('Aicha', [])).toEqual({ owner: 'Aicha', store: null, moreStores: 0 });
+  });
+});
+
+describe('the one legacy path, a connection', () => {
+  it('asks in an explicit, stable order, and only for active stores', () => {
+    expect(LEGACY_OLDEST_STORE.branches).toMatchObject({ where: { isActive: true }, take: 1, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    expect(legacyLabel({ name: null, branches: [CENTRE] })).toBe('Boutique Centre');
+    expect(legacyLabelAr({ name: 'SARL', nameAr: null, branches: [CENTRE] })).toBeNull();
+    expect(legacyLabel({ name: null, branches: [] })).toBe('');
+  });
+});
+
+describe('source scan: no store is ever picked arbitrarily', () => {
+  const ROOT = join(__dirname, '..');
+  const sources = (dir: string): string[] =>
+    readdirSync(dir).flatMap((name) => {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) return sources(p);
+      return name.endsWith('.ts') && !name.endsWith('.spec.ts') ? [p] : [];
+    });
+  const rel = (f: string) => relative(ROOT, f).split(sep).join('/');
+  const all = sources(ROOT).map((f) => [rel(f), readFileSync(f, 'utf8')] as const);
+
+  it('the legacy fallback is used for connections alone', () => {
+    const users = all.filter(([f, s]) => f !== 'common/account-label.ts' && /LEGACY_OLDEST_STORE|legacyLabel/.test(s)).map(([f]) => f).sort();
+    expect(users).toEqual(['consignment/connections.service.ts', 'consignment/discovery.ts']);
+  });
+
+  it('no account is named from the first of an array of stores', () => {
+    const offending = all.filter(([f, s]) => f !== 'common/account-label.ts' && /\bbranches\??\.?\[0\]\??\.name/.test(s)).map(([f]) => f);
+    expect(offending).toEqual([]);
+  });
+
+  it('every read of one branch for its name is ordered, or by its own id', () => {
+    const unordered = all.flatMap(([f, s]) =>
+      [...s.matchAll(/\.branch\.findFirst\(\{([\s\S]*?)\}\);/g)]
+        .filter((m) => /select:\s*\{[^}]*\bname: true/.test(m[1]) && !/orderBy/.test(m[1]) && !/\bid\b|\bname\b\s*[:,}]/.test(m[1].split('select')[0]))
+        .map(() => f),
+    );
+    expect(unordered).toEqual([]);
   });
 });
 
@@ -62,7 +158,7 @@ describe('a receipt keeps the answer its sale recorded', () => {
 
   it('no trading name at the sale: none on the receipt, even after one is added later', () => {
     const names = receiptNamesOf({ ...sale, company: { name: 'Added Later', nameAr: null } });
-    expect(names.business).toEqual({ name: null, nameAr: null });
+    expect(names.business).toBeNull();
     expect(names.branch?.name).toBe('Centre');
   });
 

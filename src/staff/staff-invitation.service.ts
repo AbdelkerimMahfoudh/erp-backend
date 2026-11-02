@@ -1,4 +1,4 @@
-import { accountLabel } from '../common/account-label';
+import { storesOfUser, storesText, type NamedStore } from '../common/account-label';
 import {
   BadRequestException,
   ConflictException,
@@ -98,7 +98,10 @@ export interface StaffInvitationResult {
 
 /** What an employee sees on opening a usable invitation: enough to recognise it, never the number. */
 export interface OpenedInvitation {
+  /** The trading name, or the assigned stores written out, for builds up to 1.0.0 (3). */
   business: string;
+  /** The stores this person is being given (D227). */
+  stores: NamedStore[];
   name: string;
   /** The last two digits of the number the Owner entered — a hint, not the number. */
   numberEnding: string;
@@ -107,7 +110,10 @@ export interface OpenedInvitation {
 
 export interface JoinConfirmResult {
   verified: true;
+  /** The trading name, or the assigned stores written out, for builds up to 1.0.0 (3). */
   business: string;
+  /** The stores this person is being given (D227). */
+  stores: NamedStore[];
   name: string;
   activated: boolean;
   pending: PendingReason[];
@@ -378,11 +384,17 @@ export class StaffInvitationService {
 
   // ── the employee activates their account ─────────────────────────────────
 
+  /** Where an invitation leads: the exact stores it assigns, never another store of the same Owner (D227). */
+  private async whereInvited(invitation: { userId: Buffer; company: { name: string | null } }) {
+    const stores = await storesOfUser(this.prisma, invitation.userId);
+    return { business: invitation.company.name ?? storesText(stores), stores };
+  }
+
   /** The employee opens an invitation: whose it is, and a hint of the number — or the one answer for every unusable reference. */
   async open(reference: string): Promise<OpenedInvitation> {
     const invitation = await this.usable(this.prisma, reference, new Date());
     return {
-      business: invitation.company.name ?? (await accountLabel(this.prisma, invitation.companyId)),
+      ...(await this.whereInvited(invitation)),
       name: invitation.user.name,
       numberEnding: invitation.user.phone!.slice(-2),
       expiresAt: invitation.expiresAt.toISOString(),
@@ -508,7 +520,7 @@ export class StaffInvitationService {
     const final = outcome.activated ? outcome : await this.activation.tryActivate(invitation.userId, actor);
     return {
       verified: true,
-      business: invitation.company.name ?? (await accountLabel(this.prisma, invitation.companyId)),
+      ...(await this.whereInvited(invitation)),
       name: invitation.user.name,
       activated: final.activated,
       pending: final.pending,

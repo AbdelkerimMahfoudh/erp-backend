@@ -1704,7 +1704,7 @@ export function receiptNamesOf(sale: {
   return {
     // D227: a sale since 0111 recorded its own answer, and "no trading name" is one. A later name is never read into it.
     business: sale.branchNameSnapshot !== null
-      ? { name: sale.businessNameSnapshot, nameAr: sale.businessNameArSnapshot }
+      ? (sale.businessNameSnapshot === null ? null : { name: sale.businessNameSnapshot, nameAr: sale.businessNameArSnapshot })
       : of(sale.businessNameSnapshot, sale.businessNameArSnapshot, sale.company ?? undefined),
     branch: of(sale.branchNameSnapshot, sale.branchNameArSnapshot, sale.branch),
     seller: of(sale.sellerNameSnapshot, sale.sellerNameArSnapshot, sale.user),

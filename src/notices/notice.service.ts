@@ -1,4 +1,4 @@
-import { FIRST_STORE, labelOf } from '../common/account-label';
+import { neutralAccount } from '../common/account-label';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma, type SubscriptionNotice, type SubscriptionNoticeKind } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -78,7 +78,8 @@ const LANGUAGES: readonly MessageLanguage[] = ['en', 'fr', 'ar'];
 
 /** The business as a message needs it: the timeline's facts, its name and zone, and the decision recorded at its end. */
 interface SubjectRow {
-  name: string;
+  /** The optional trading name; without one, the message says so in neutral words (D227). */
+  name: string | null;
   timezone: string;
   subscriptionId: Buffer;
   subject: NoticeSubject;
@@ -640,7 +641,6 @@ export class NoticeService {
       where: { id: companyId },
       select: {
         name: true,
-        ...FIRST_STORE,
         timezone: true,
         isActive: true,
         closedAt: true,
@@ -654,7 +654,7 @@ export class NoticeService {
       ? await this.prisma.graceEpisode.findFirst({ where: { companyId, periodEnd: sub.currentPeriodEnd }, select: { decision: true, usesBefore: true } })
       : null;
     return {
-      name: labelOf(company),
+      name: company.name,
       timezone: company.timezone,
       subscriptionId: sub.id,
       usesBefore: episode?.usesBefore ?? null,
@@ -687,8 +687,10 @@ export class NoticeService {
 
   /** The template's variables, composed here in the message's language from the facts re-read for this attempt. */
   private variablesOf(n: SubscriptionNotice, row: SubjectRow, slot: NoticeSlot | null, language: MessageLanguage): Record<string, string> {
-    const business = row.name.trim().replace(/\s+/g, ' ').slice(0, 100);
-    if (n.kind === 'portal_instructions' || !slot) return { business };
+    // Only this message opens with the name. A subscription concerns the whole account, so no store stands in for it.
+    const opensWithName = n.kind === 'portal_instructions' || !slot;
+    const business = (row.name?.trim().replace(/\s+/g, ' ').slice(0, 100) || neutralAccount(language, opensWithName));
+    if (opensWithName) return { business };
     const zone = this.entitlement.trialZone(n.companyId, row.timezone);
     const instant = (d: Date) => formatNoticeInstant(d, zone, language);
     switch (slot.kind) {

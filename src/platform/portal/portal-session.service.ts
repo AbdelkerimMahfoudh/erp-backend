@@ -1,4 +1,4 @@
-import { FIRST_STORE, labelOf, type LabelledAccount } from '../../common/account-label';
+import { storesOfUser, type NamedStore } from '../../common/account-label';
 import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppConfigService } from '../../common/config/app-config.service';
@@ -29,7 +29,7 @@ import type { PortalChooseAccountDto, PortalSignInDto } from './portal.dto';
 /** Who the portal is signed in as, as the page shows it — and the token its unsafe requests carry. */
 export interface PortalSessionView {
   owner: { name: string };
-  business: { name: string };
+  business: { name: string | null; stores: NamedStore[] };
   /** Sent back in `x-csrf-token` on every POST: bound to this session, useless to anybody else. */
   csrfToken: string;
 }
@@ -81,7 +81,7 @@ export class PortalSessionService {
   async current(userId: string, companyId: string, sessionId: string): Promise<PortalSessionView> {
     const owner = await this.ownerOf(uuidToBin(userId), uuidToBin(companyId));
     if (!owner) throw new ForbiddenException(OWNER_ONLY);
-    return this.viewOf(owner, sessionId);
+    return await this.viewOf(owner, sessionId);
   }
 
   /**
@@ -111,21 +111,22 @@ export class PortalSessionService {
       await this.sessions.revoke(userId, uuidToBin(sessionId));
       throw new ForbiddenException(OWNER_ONLY);
     }
-    return { accessToken: t.accessToken, accessTtlSeconds: t.expiresIn, refreshToken: t.refreshToken, session: this.viewOf(owner, sessionId) };
+    return { accessToken: t.accessToken, accessTtlSeconds: t.expiresIn, refreshToken: t.refreshToken, session: await this.viewOf(owner, sessionId) };
   }
 
   /** An active, undeleted person of this company holding the Owner role — the role itself, as the trial reads it. */
   private ownerOf(userId: Buffer, companyId: Buffer) {
     return this.prisma.user.findFirst({
       where: { id: userId, companyId, isActive: true, deletedAt: null, userBranches: { some: { role: { key: 'owner' } } } },
-      select: { name: true, company: { select: { name: true, ...FIRST_STORE } } },
+      select: { id: true, name: true, company: { select: { name: true } } },
     });
   }
 
-  private viewOf(owner: { name: string; company: LabelledAccount }, sessionId: string): PortalSessionView {
+  private async viewOf(owner: { id: Buffer; name: string; company: { name: string | null } }, sessionId: string): Promise<PortalSessionView> {
     return {
       owner: { name: owner.name },
-      business: { name: labelOf(owner.company) },
+      // D227: the trading name, null without one, and the stores the page lists instead of inventing a parent.
+      business: { name: owner.company.name, stores: await storesOfUser(this.prisma, owner.id) },
       csrfToken: portalCsrfToken(this.config.jwtAccessSecret, sessionId),
     };
   }

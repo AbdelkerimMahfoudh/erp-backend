@@ -29,6 +29,21 @@ function paidBusiness(w: TrialWorld, end: Date, extra: Parameters<TrialWorld['bu
   return w.business({ status: 'activated', currentPeriodEnd: end, eligibilityClosed: 'approved', timezone: 'UTC', ...extra });
 }
 
+describe('an account with no trading name (D227)', () => {
+  it('an account-wide reminder says so in neutral words, never naming one of its stores', async () => {
+    const w = makeTrialWorld();
+    const end = new Date(NOW.getTime() + 71 * HOUR);
+    const shop = paidBusiness(w, end, { name: null, timezone: 'Asia/Dubai' } as never);
+    await tick(w, shop);
+    expect(sent(w)).toEqual([
+      expect.objectContaining({
+        template: 'subscription.paid_reminder',
+        variables: expect.objectContaining({ business: 'your Dukan account' }),
+      }),
+    ]);
+  });
+});
+
 describe('a paid period’s reminders', () => {
   it('72 hours before the end: one WhatsApp message saying 3 days and the exact end in the business’s zone', async () => {
     const w = makeTrialWorld();

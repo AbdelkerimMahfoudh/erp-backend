@@ -111,7 +111,14 @@ function makeWorld(
       findMany: async ({ where }: any) => (where.id.in.some((id: Buffer) => id.equals(MAIN)) ? [{ id: MAIN, name: 'Main' }] : []),
     },
     role: { findFirst: async () => ({ id: ROLE }) },
-    userBranch: { create: async ({ data }: any) => (userBranches.push(data), data) },
+    userBranch: {
+      create: async ({ data }: any) => (userBranches.push(data), data),
+      // The stores assigned to this person alone, in assignment order, each by its own name.
+      findMany: async ({ where }: any) =>
+        userBranches
+          .filter((ub) => ub.userId.equals(where.userId))
+          .map((ub) => ({ branch: { name: ub.branchId.equals(MAIN) ? 'Main' : 'Branch 2', nameAr: null } })),
+    },
     seatAllocation: { findMany: async () => seatRequests.map((r) => ({ id: r.id })) },
     contactVerification: {
       updateMany: async ({ where }: any) => {
@@ -216,6 +223,9 @@ function makeWorld(
     records,
   );
   return {
+    renameCompany: (id: Buffer, name: string | null) => companies.set(binToUuid(id), name as string),
+    /** A further store for this person, as an assignment beside the first. */
+    assign: (userId: Buffer, branchId: Buffer) => userBranches.push({ userId, branchId }),
     service,
     records,
     consents: messaging.whatsAppConsent.rows,
@@ -339,9 +349,28 @@ describe('the employee opens the invitation', () => {
     const { reference } = await invite(w);
     const typed = reference.toLowerCase().replace(/-/g, ' ').replace(/0/g, 'o').replace(/1/g, 'l');
     const opened = await w.service.open(typed);
-    expect(opened).toEqual({ business: 'Shop', name: 'Fatima', numberEnding: '66', expiresAt: expect.any(String) });
+    expect(opened).toEqual({ business: 'Shop', stores: [{ name: 'Main', nameAr: null }], name: 'Fatima', numberEnding: '66', expiresAt: expect.any(String) });
     expect(JSON.stringify(opened)).not.toContain('33445566');
     expect(w.started).toEqual([]);
+  });
+
+  it('with no trading name: the stores being assigned, each of them, and no other store of that Owner', async () => {
+    const w = makeWorld();
+    const { reference } = await invite(w);
+    w.renameCompany(COMPANY, null);
+    const opened = await w.service.open(reference);
+    expect(opened.business).toBe('Main');
+    expect(opened.stores).toEqual([{ name: 'Main', nameAr: null }]);
+  });
+
+  it('an invitation to several stores lists exactly those, in the order they were assigned', async () => {
+    const w = makeWorld();
+    const { id, reference } = await invite(w);
+    w.renameCompany(COMPANY, null);
+    w.assign(uuidToBin(id), Buffer.alloc(16, 42));
+    const opened = await w.service.open(reference);
+    expect(opened.business).toBe('Main, Branch 2');
+    expect(opened.stores).toEqual([{ name: 'Main', nameAr: null }, { name: 'Branch 2', nameAr: null }]);
   });
 
   it('unknown, malformed, expired, revoked and used references all answer the same', async () => {
@@ -481,7 +510,7 @@ describe('the employee confirms the code', () => {
     expect(w.invitations[0].usedAt).toBeInstanceOf(Date);
     expect(w.inTx).toHaveLength(1);
     expect(w.activations).toEqual([]);
-    expect(r).toEqual({ verified: true, business: 'Shop', name: 'Fatima', activated: true, pending: [] });
+    expect(r).toEqual({ verified: true, business: 'Shop', stores: [{ name: 'Main', nameAr: null }], name: 'Fatima', activated: true, pending: [] });
     expect(await w.records.contactState(FATIMA)).toMatchObject({ consented: true, consent: 'active' });
   });
 

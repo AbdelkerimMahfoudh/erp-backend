@@ -1,4 +1,4 @@
-import { FIRST_STORE, labelOf } from '../common/account-label';
+import { LEGACY_OLDEST_STORE, legacyLabel } from '../common/account-label';
 import {
   BadRequestException,
   ConflictException,
@@ -134,7 +134,7 @@ export class ConnectionsService {
         id: true,
         publicStoreId: true,
         name: true,
-        ...FIRST_STORE,
+        ...LEGACY_OLDEST_STORE,
         nameAr: true,
         city: true,
         logoRef: true,
@@ -194,8 +194,8 @@ export class ConnectionsService {
     const rows = await this.prisma.storeConnection.findMany({
       where: { OR: [{ requesterCompanyId: me }, { addresseeCompanyId: me }] },
       include: {
-        requesterCompany: { select: { id: true, publicStoreId: true, name: true, nameAr: true, ...FIRST_STORE, city: true, logoRef: true, publicPhone: true } },
-        addresseeCompany: { select: { id: true, publicStoreId: true, name: true, nameAr: true, ...FIRST_STORE, city: true, logoRef: true, publicPhone: true } },
+        requesterCompany: { select: { id: true, publicStoreId: true, name: true, nameAr: true, ...LEGACY_OLDEST_STORE, city: true, logoRef: true, publicPhone: true } },
+        addresseeCompany: { select: { id: true, publicStoreId: true, name: true, nameAr: true, ...LEGACY_OLDEST_STORE, city: true, logoRef: true, publicPhone: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
@@ -247,7 +247,7 @@ export class ConnectionsService {
 
     const company = await this.prisma.company.findFirst({
       where: { publicStoreId: code, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
-      select: { id: true, publicStoreId: true, name: true, nameAr: true, ...FIRST_STORE, city: true, logoRef: true },
+      select: { id: true, publicStoreId: true, name: true, nameAr: true, ...LEGACY_OLDEST_STORE, city: true, logoRef: true },
     });
     if (!company) throw new NotFoundException('No such store');
 
@@ -419,7 +419,7 @@ export class ConnectionsService {
     const [company, consignments, loans] = await Promise.all([
       this.prisma.company.findUnique({
         where: { id: themId },
-        select: { publicStoreId: true, name: true, nameAr: true, ...FIRST_STORE, city: true, logoRef: true, publicPhone: true },
+        select: { publicStoreId: true, name: true, nameAr: true, ...LEGACY_OLDEST_STORE, city: true, logoRef: true, publicPhone: true },
       }),
       this.prisma.consignment.findMany({
         where: {
@@ -807,7 +807,7 @@ export class ConnectionsService {
       if (existing) continue;
       const company = await this.prisma.company.findUnique({
         where: { id: other },
-        select: { name: true, ...FIRST_STORE, city: true, publicPhone: true },
+        select: { name: true, ...LEGACY_OLDEST_STORE, city: true, publicPhone: true },
       });
       await this.prisma.counterparty.create({
         data: {
@@ -817,7 +817,7 @@ export class ConnectionsService {
           connectedCompanyId: other,
           connectionId,
           // Snapshotted, so a rename on their side cannot retitle our records.
-          name: labelOf(company) || 'Connected store',
+          name: legacyLabel(company) || 'Connected store',
           phone: company?.publicPhone ?? null,
           city: company?.city ?? null,
         },

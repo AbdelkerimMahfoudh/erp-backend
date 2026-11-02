@@ -1,4 +1,4 @@
-import { labelArOf, labelOf } from '../common/account-label';
+import { legacyLabel, legacyLabelAr } from '../common/account-label';
 /**
  * Finding another shop, without letting anybody enumerate the platform
  * (Milestone H, H-CP2).
@@ -132,8 +132,8 @@ export function toPublicPreview(company: {
 }): PublicStorePreview {
   return {
     publicStoreId: company.publicStoreId,
-    name: labelOf(company),
-    nameAr: labelArOf(company),
+    name: legacyLabel(company),
+    nameAr: legacyLabelAr(company),
     city: company.city,
     logoRef: company.logoRef,
     verification: 'Verified badge coming soon',

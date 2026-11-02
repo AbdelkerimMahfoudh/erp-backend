@@ -1,6 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { IsUUID } from 'class-validator';
-import { FIRST_STORE } from '../common/account-label';
+import { adminAccountLabel } from '../common/account-label';
 import { claimedBy } from './owner-identity/owner-identity';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 import { AccessBasisDto, parseBasis, type ParsedBasis } from './access-basis';
@@ -602,8 +602,14 @@ export class PlatformController {
           subscription: true,
           ...TRIAL_FACTS,
           _count: { select: { branches: true, users: true } },
-          ...FIRST_STORE,
-          users: { where: { deletedAt: null }, orderBy: { createdAt: 'asc' }, take: 1, select: { name: true } },
+          // For the label only: the Owner by role and every active store, each in an explicit, stable order.
+          branches: { where: { isActive: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { name: true } },
+          users: {
+            where: { deletedAt: null, userBranches: { some: { role: { key: 'owner' } } } },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: 1,
+            select: { name: true },
+          },
         },
       }),
       this.prisma.company.count({ where }),
@@ -620,8 +626,8 @@ export class PlatformController {
         id: binToUuid(c.id),
         name: c.name,
         nameAr: c.nameAr,
-        // D227: for this list only, and never stored: an account with no trading name, by its Owner and store.
-        label: c.name ?? [c.users[0]?.name, c.branches[0]?.name].filter(Boolean).join(' — '),
+        // D227: for this list only, and never stored. The console words it in the operator's language.
+        accountLabel: adminAccountLabel(c.users[0]?.name ?? null, c.branches),
         publicStoreId: c.publicStoreId,
         city: c.city,
         createdAt: c.createdAt.toISOString(),

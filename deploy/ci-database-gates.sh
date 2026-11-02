@@ -120,6 +120,10 @@ echo "== 9b0. one basket, one sale, through the real API (D227), each race repea
 SALE_REPEAT=5 SALE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) SALE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
   npx jest --ci src/sales/sale-basket.mysql.spec.ts
 
+echo "== 9b0a. an account with no company name, through the real API (D227, 0118)"
+SALE_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) SALE_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
+  npx jest --ci src/common/account-names.mysql.spec.ts
+
 echo "== 9b1. the D227 real-MySQL spec (a store free until renewal, through the real renewal)"
 PROVISIONING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) PROVISIONING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/platform/store-grant-renewal.mysql.spec.ts

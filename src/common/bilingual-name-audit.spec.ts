@@ -207,8 +207,12 @@ function scan(): { uncovered: Finding[]; covered: number } {
 
 /** Classified occurrences that stay without their Arabic twin. Generated from the dump, then reviewed by hand. */
 const ALLOWED: Record<string, [Cls, string]> = {
-  'common/account-label.ts :: accountLabel :: select company.findUnique.select': ['latin', 'a single fallback label for a message; the Arabic has labelArOf'],
   'platform/platform.controller.ts :: businesses :: select users.select': ['latin', 'platform console: the Owner in an account label, never stored'],
+  'common/account-label.ts :: participantLabel :: read store.name': ['latin', 'the Latin half of a pair: participantLabelAr gives the Arabic'],
+  'notices/notice.service.ts :: readSubject :: read company.name': ['latin', 'the optional trading name in a message; without one, neutral words in the message’s language'],
+  'platform/platform.controller.ts :: businesses :: select branches.select': ['latin', 'platform console: the stores in an account label, never stored'],
+  'platform/portal/portal-session.service.ts :: viewOf :: read owner.company.name': ['latin', 'platform console, provisioning, invitation or billing text: read in the portal, null without a trading name'],
+  'staff/staff-invitation.service.ts :: whereInvited :: read invitation.company.name': ['latin', 'for builds up to 1.0.0 (3); the assigned stores carry both names'],
   'acquisition/acquisition.service.ts :: report :: select inviterCompany.select': ['latin', 'platform acquisition report, read in the console'],
   'acquisition/acquisition.service.ts :: report :: read company.name': ['latin', 'platform acquisition report, read in the console'],
   'acquisition/acquisition.service.ts :: report :: read a.inviterCompany.name': ['latin', 'platform acquisition report, read in the console'],
@@ -334,9 +338,7 @@ const ALLOWED: Record<string, [Cls, string]> = {
   'staff/staff-invitation.service.ts :: invite :: select user.findFirst.select': ['latin', 'WhatsApp invitation template variable and its audit record'],
   'staff/staff-invitation.service.ts :: cancel :: select user.findUniqueOrThrow.select': ['latin', 'WhatsApp invitation template variable and its audit record'],
   'staff/staff-invitation.service.ts :: cancel :: read actor.name': ['latin', 'WhatsApp invitation template variable and its audit record'],
-  'staff/staff-invitation.service.ts :: open :: read invitation.company.name': ['latin', 'WhatsApp invitation template variable and its audit record'],
   'staff/staff-invitation.service.ts :: open :: read invitation.user.name': ['latin', 'WhatsApp invitation template variable and its audit record'],
-  'staff/staff-invitation.service.ts :: confirm :: read invitation.company.name': ['latin', 'WhatsApp invitation template variable and its audit record'],
   'staff/staff-invitation.service.ts :: confirm :: read invitation.user.name': ['latin', 'WhatsApp invitation template variable and its audit record'],
   'staff/staff-invitation.service.ts :: usable :: select company.select': ['latin', 'WhatsApp invitation template variable and its audit record'],
   'staff/staff-invitation.service.ts :: usable :: select user.select': ['latin', 'WhatsApp invitation template variable and its audit record'],

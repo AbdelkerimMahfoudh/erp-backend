@@ -112,6 +112,10 @@ function makeService(opts: {
     enroll: jest.fn(async () => ({ deviceId: 'new-device-id', deviceSecret: 'ISSUED-SECRET', trustMethod: 'password' })),
   };
   const prisma = {
+    // Each person's own stores: the chooser lists these, never a parent made from one of them.
+    userBranch: {
+      findMany: jest.fn(async ({ where }: any) => (opts as any).storesOf?.(where.userId) ?? [{ branch: { name: 'Centre', nameAr: null } }]),
+    },
     company: {
       findUnique: jest.fn(async ({ where }: any) => {
         if (where.publicStoreId) return companies[where.publicStoreId] ?? null;
@@ -219,6 +223,7 @@ describe('tenant resolution from the credential (CP3)', () => {
     expect('status' in result && result.status).toBe('choose_account');
     if (!('status' in result)) throw new Error('expected a chooser');
     expect(result.accounts).toHaveLength(2);
+    expect(result.accounts[0].stores).toEqual([{ name: 'Centre', nameAr: null }]);
     // Purpose-bound and short-lived: it names shops, so it must not linger.
     expect(result.continuationToken).toBeTruthy();
     expect(result.expiresIn).toBeLessThanOrEqual(300);

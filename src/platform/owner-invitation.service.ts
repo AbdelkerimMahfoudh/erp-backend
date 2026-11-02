@@ -1,4 +1,4 @@
-import { accountLabel } from '../common/account-label';
+import { storesOfUser, storesText } from '../common/account-label';
 import { BadRequestException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -213,6 +213,6 @@ export class OwnerInvitationService {
       ip: meta.ip ?? null,
     });
 
-    return { publicStoreId: invitation.company.publicStoreId, businessName: invitation.company.name ?? (await accountLabel(this.prisma, invitation.companyId)) };
+    return { publicStoreId: invitation.company.publicStoreId, businessName: invitation.company.name ?? storesText(await storesOfUser(this.prisma, invitation.userId)) };
   }
 }

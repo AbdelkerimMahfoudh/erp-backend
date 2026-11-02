@@ -60,9 +60,10 @@ function world() {
   const prisma = {
     user: {
       findFirst: jest.fn(async ({ where }: { where: { id: Buffer; userBranches: unknown } }) =>
-        where.id.equals(OWNER) ? { name: 'Aicha', company: { name: 'Boutique Aicha' } } : null,
+        where.id.equals(OWNER) ? { id: OWNER, name: 'Aicha', company: { name: 'Boutique Aicha' } } : null,
       ),
     },
+    userBranch: { findMany: jest.fn(async () => [{ branch: { name: 'Centre', nameAr: null } }]) },
   };
   const service = new PortalSessionService(prisma as never, auth as never, sessions as never, tokenService as never, { jwtAccessSecret: SECRET } as never);
   return { service, auth, sessions, revoked };
@@ -106,7 +107,7 @@ describe('the portal session, through the real pipeline', () => {
     expect(res.headers['cache-control']).toBe('no-store');
     expect(res.body).toEqual({
       status: 'signed_in',
-      session: { owner: { name: 'Aicha' }, business: { name: 'Boutique Aicha' }, csrfToken: portalCsrfToken(SECRET, SID) },
+      session: { owner: { name: 'Aicha' }, business: { name: 'Boutique Aicha', stores: [{ name: 'Centre', nameAr: null }] }, csrfToken: portalCsrfToken(SECRET, SID) },
     });
     expect(JSON.stringify(res.body)).not.toMatch(/access\.|refresh-secret/);
     const [access, refresh] = cookiesOf(res);
@@ -161,7 +162,7 @@ describe('the portal session, through the real pipeline', () => {
   it('the session route names who is signed in, with the token — the Owner checked again', async () => {
     const res = await request(app.getHttpServer()).get('/api/v1/platform/portal/session');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ owner: { name: 'Aicha' }, business: { name: 'Boutique Aicha' }, csrfToken: portalCsrfToken(SECRET, SID) });
+    expect(res.body).toEqual({ owner: { name: 'Aicha' }, business: { name: 'Boutique Aicha', stores: [{ name: 'Centre', nameAr: null }] }, csrfToken: portalCsrfToken(SECRET, SID) });
   });
 
   it('sign-out revokes the session the refresh cookie proves and clears both cookies — and clears them whatever it proves', async () => {

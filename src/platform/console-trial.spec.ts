@@ -84,7 +84,7 @@ describe('the console sees each business’s trial by the shop’s own rules', (
       timezone: 'Africa/Casablanca',
       subscription: { ...sub, version: 1 },
       ...company,
-      _count: { branches: 1, users: 1 },
+      _count: { branches: 1, users: 1 }, users: [], branches: [],
     }));
     const prisma = { graceEpisode, company: { findMany: async () => rows, count: async () => rows.length } };
     const platform = platformWith({ prisma, entitlement: zones });
@@ -106,7 +106,7 @@ describe('the console sees each business’s trial by the shop’s own rules', (
       timezone: zonesOf[i],
       subscription: { ...sub, version: 1 },
       ...company,
-      _count: { branches: 1, users: 1 },
+      _count: { branches: 1, users: 1 }, users: [], branches: [],
     }));
     // The last row's trial is in its zone nobody knows: shown in UTC, as its own trial view shows it.
     rows[4] = { ...rows[4], trialEligibility: { closedAt: null }, trialClaim: running };

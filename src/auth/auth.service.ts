@@ -1,4 +1,4 @@
-import { FIRST_STORE, labelArOf, labelOf } from '../common/account-label';
+import { storesOfUser, storesText, storesTextAr, type NamedStore } from '../common/account-label';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { User } from '@prisma/client';
 import { UsersService } from '../users/users.service';
@@ -50,7 +50,11 @@ export interface AccountChoiceResponse {
    */
   continuationToken: string;
   expiresIn: number;
-  accounts: { accountRef: string; companyName: string; companyNameAr: string | null; userName: string; userNameAr: string | null }[];
+  /**
+   * One entry per person the password matched. `stores` is what they choose among (D227). `companyName` stays for builds
+   * up to 1.0.0 (3): the trading name, or those stores written out, never a parent invented from one of them.
+   */
+  accounts: { accountRef: string; companyName: string; companyNameAr: string | null; userName: string; userNameAr: string | null; stores: NamedStore[] }[];
 }
 
 export type LoginResult = AuthTokenResponse | AccountChoiceResponse;
@@ -345,13 +349,12 @@ export class AuthService {
   ): Promise<AccountChoiceResponse> {
     const companies = await this.prisma.company.findMany({
       where: { id: { in: matches.map((m) => m.companyId) }, isActive: true },
-      select: { id: true, name: true, nameAr: true, ...FIRST_STORE },
+      select: { id: true, name: true, nameAr: true },
     });
-    const nameOf = new Map(companies.map((c) => [c.id.toString('hex'), labelOf(c)]));
-    const nameArOf = new Map(companies.map((c) => [c.id.toString('hex'), labelArOf(c)]));
+    const companyOf = new Map(companies.map((c) => [c.id.toString('hex'), c]));
 
     // A company that has since been deactivated is dropped rather than named.
-    const usable = matches.filter((m) => nameOf.has(m.companyId.toString('hex')));
+    const usable = matches.filter((m) => companyOf.has(m.companyId.toString('hex')));
     if (usable.length === 0) throw new UnauthorizedException('Invalid credentials');
 
     const continuationToken = this.tokens.signContinuation(
@@ -363,14 +366,21 @@ export class AuthService {
       status: 'choose_account',
       continuationToken,
       expiresIn: ACCOUNT_CHOICE_TTL_SECONDS,
-      accounts: usable.map((m, index) => ({
-        accountRef: String(index),
-        companyName: nameOf.get(m.companyId.toString('hex'))!,
-        // D225: the shop and the person in Arabic too, for an Arabic sign-in screen. Null until given.
-        companyNameAr: nameArOf.get(m.companyId.toString('hex')) ?? null,
-        userName: m.name,
-        userNameAr: m.nameAr,
-      })),
+      accounts: await Promise.all(
+        usable.map(async (m, index) => {
+          const company = companyOf.get(m.companyId.toString('hex'))!;
+          const stores = await storesOfUser(this.prisma, m.id);
+          return {
+            accountRef: String(index),
+            companyName: company.name ?? storesText(stores),
+            // D225: the shop and the person in Arabic too, for an Arabic sign-in screen. Null until given.
+            companyNameAr: company.name ? company.nameAr : storesTextAr(stores),
+            userName: m.name,
+            userNameAr: m.nameAr,
+            stores,
+          };
+        }),
+      ),
     };
   }
 

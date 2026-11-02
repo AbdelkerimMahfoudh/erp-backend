@@ -1,4 +1,4 @@
-import { accountLabel } from '../common/account-label';
+import { storesOfUser, storesText } from '../common/account-label';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { createHmac, randomBytes } from 'node:crypto';
@@ -158,7 +158,7 @@ export class AccountSetupCodeService {
         })
       : true;
     await this.recordRedemption(row.companyId, row.company.name, row.userId, 'used', meta.ip, activated);
-    return { spent: true, companyId: row.companyId, userId: row.userId, business: row.company.name ?? (await accountLabel(this.prisma, row.companyId)), publicStoreId: row.company.publicStoreId, activated };
+    return { spent: true, companyId: row.companyId, userId: row.userId, business: row.company.name ?? storesText(await storesOfUser(this.prisma, row.userId)), publicStoreId: row.company.publicStoreId, activated };
   }
 
   private async recordRedemption(companyId: Buffer, company: string | null, userId: Buffer, outcome: 'used' | 'expired' | 'refused', ip?: string | null, activated?: boolean): Promise<void> {
