@@ -128,6 +128,8 @@ export class AuthController {
       isActive: found.isActive,
       // D225: "Acting as Owner until …" — the appointment in force now, if any. Null otherwise.
       actingOwner: await this.actingOwnerOf(found.id),
+      // D227: for wording before a store is chosen. It grants nothing.
+      account: await this.access.accountStanding(found.id),
     };
   }
 

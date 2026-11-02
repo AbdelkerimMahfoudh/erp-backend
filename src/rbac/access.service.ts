@@ -23,6 +23,18 @@ import { ACTING_OWNER_PERMISSIONS } from '../acting-owner/acting-owner-rules';
 export class AccessService {
   constructor(@Inject(TENANT_PRISMA) private readonly db: TenantPrisma) {}
 
+  /**
+   * Who this person is on the account, before any store is chosen (D227). For wording only: it grants nothing, and
+   * every action is still authorised against the chosen store.
+   */
+  async accountStanding(userId: Buffer): Promise<{ isOwner: boolean; activeStores: number }> {
+    const assignments = await this.db.userBranch.findMany({
+      where: { userId, branch: { isActive: true } },
+      select: { role: { select: { key: true } } },
+    });
+    return { isOwner: assignments.some((a) => a.role.key === 'owner'), activeStores: assignments.length };
+  }
+
   async getEffectivePermissions(userId: Buffer, branchId?: Buffer): Promise<Set<string>> {
     const assignments = await this.db.userBranch.findMany({
       where: branchId ? { userId, branchId } : { userId },
