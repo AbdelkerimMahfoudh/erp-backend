@@ -1053,6 +1053,8 @@ export class ConsignmentsService {
       otherParty: side === 'source' ? c.counterparty.name : participantLabel(c.sourceCompany, c.sourceBranch),
       /** D225: the other business's Arabic name when it is a connected business; a hand-typed party has one name. */
       otherPartyAr: side === 'source' ? (c.counterparty.connectedCompany?.nameAr ?? null) : participantLabelAr(c.sourceCompany, c.sourceBranch),
+      /** D227: context only, beside the store; a hand-typed or own side has none. */
+      otherPartyTradingName: side === 'source' ? null : c.sourceCompany.name,
       phones: c.lines.length,
       proposedAmount: c.proposedAmount == null ? null : num(c.proposedAmount as number),
       counterAmount: c.counterAmount == null ? null : num(c.counterAmount as number),

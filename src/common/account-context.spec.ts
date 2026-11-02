@@ -51,8 +51,8 @@ describe('a loan, read by the other side', () => {
     expect(summariseLoan(loan(NO_NAME, PORT))).toMatchObject({ otherParty: 'Boutique Port', otherPartyAr: 'متجر الميناء' });
   });
 
-  it('prefers the trading name, as an existing account has', () => {
-    expect(summariseLoan(loan({ name: 'SARL Kiffa', nameAr: null }, PORT))).toMatchObject({ otherParty: 'SARL Kiffa', otherPartyAr: null });
+  it('still names the store when a trading name exists, which comes beside it', () => {
+    expect(summariseLoan(loan({ name: 'SARL Kiffa', nameAr: null }, PORT))).toMatchObject({ otherParty: 'Boutique Port', otherPartyAr: 'متجر الميناء', otherPartyTradingName: 'SARL Kiffa' });
   });
 
   it('a loan that recorded no store says nothing rather than guessing one', () => {

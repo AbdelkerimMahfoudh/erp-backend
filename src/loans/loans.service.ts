@@ -732,6 +732,8 @@ export class LoansService {
        * typed by hand has one name, the one the shop gave it.
        */
       otherPartyAr: iAmOwner ? (loan.counterparty.connectedCompany?.nameAr ?? null) : participantLabelAr(loan.company, loan.branch),
+      /** D227: context only, beside the store; a hand-typed or own side has none. */
+      otherPartyTradingName: iAmOwner ? null : loan.company.name,
       proposedAmount: num(loan.proposedAmount),
       counterAmount: loan.counterAmount == null ? null : num(loan.counterAmount),
       principal: loan.principal == null ? null : num(loan.principal),

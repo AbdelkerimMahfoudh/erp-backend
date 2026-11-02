@@ -3,10 +3,10 @@
  * Nothing here is stored as a company name, and none of it is the Owner's personal name as a shop's identity.
  *
  * The rules, in order:
- *  1. something about one store (a consignment, a loan, an invitation) names that store;
+ *  1. something about one store (a consignment, a loan, an invitation) names that store, whatever else is set;
  *  2. something about the whole account says so in neutral words ({@link neutralAccount});
  *  3. after sign-in, a person chooses among the stores they can reach ({@link storesOfUser}), never a made-up parent;
- *  4. only a connection, which records no store at all, falls back to {@link LEGACY_OLDEST_STORE}.
+ *  4. a connection joins whole accounts, so it shows the account: {@link accountView}.
  */
 
 export interface NamedStore {
@@ -15,43 +15,50 @@ export interface NamedStore {
 }
 
 /**
- * LEGACY ONLY: a connection is between two accounts and records no participating store, and the app has no designated
- * primary store. So the other side of a connection is its oldest active store, in an explicit, stable order. Not for
- * anything that knows its store. `source-scan` in the spec pins where this may be used.
+ * Every active store of an account, in an explicit, stable order. A connection joins whole accounts: this order decides
+ * only which name a compact label shows first. That store did not "participate" in anything, and is never said to.
  */
-export const LEGACY_OLDEST_STORE = {
+export const ACTIVE_STORES = {
   branches: {
     where: { isActive: true },
     orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
-    take: 1,
     select: { name: true, nameAr: true },
   },
 };
 
-export interface LegacyLabelled {
-  name: string | null;
-  nameAr?: string | null;
-  branches?: NamedStore[];
+const MORE: Record<'en' | 'fr' | 'ar', (n: number) => string> = {
+  en: (n) => `+ ${n} more`,
+  fr: (n) => `+ ${n} autre${n > 1 ? 's' : ''}`,
+  ar: (n) => `+ ${n} أخرى`,
+};
+
+/** `Store A + 2 more`: a presentation label over the full list, for a field one string must fill. */
+export function compactStores(stores: readonly NamedStore[], language: 'en' | 'fr' | 'ar'): string {
+  if (stores.length === 0) return '';
+  const first = language === 'ar' ? (stores[0].nameAr ?? stores[0].name) : stores[0].name;
+  return stores.length === 1 ? first : `${first} ${MORE[language](stores.length - 1)}`;
 }
 
-export function legacyLabel(account: LegacyLabelled | null | undefined): string {
-  return account?.name || account?.branches?.[0]?.name || '';
+/** An account as another account reads it: a connection is account-level, with its stores beneath. */
+export function accountView(account: { name: string | null; nameAr?: string | null; branches?: NamedStore[] }) {
+  const stores = account.branches ?? [];
+  return {
+    // One string, for builds up to 1.0.0 (3): the trading name, or the compact label.
+    name: account.name || compactStores(stores, 'en'),
+    nameAr: account.name ? (account.nameAr ?? null) : stores.length ? compactStores(stores, 'ar') : null,
+    tradingName: account.name,
+    tradingNameAr: account.nameAr ?? null,
+    stores,
+  };
 }
 
-export function legacyLabelAr(account: LegacyLabelled | null | undefined): string | null {
-  // A trading name with no Arabic twin is shown as it is, never replaced by a store's.
-  if (account?.name) return account.nameAr ?? null;
-  return account?.nameAr || account?.branches?.[0]?.nameAr || null;
-}
-
-/** One party to something that knows its store: the trading name when there is one, otherwise that exact store. */
+/** A record's exact store. A trading name is secondary context, sent beside it, and never replaces it. */
 export function participantLabel(account: { name: string | null }, store: { name: string } | null | undefined): string {
-  return account.name || store?.name || '';
+  return store?.name || account.name || '';
 }
 
 export function participantLabelAr(account: { name: string | null; nameAr?: string | null }, store: { nameAr: string | null } | null | undefined): string | null {
-  if (account.name) return account.nameAr ?? null;
-  return account.nameAr || store?.nameAr || null;
+  return store ? store.nameAr : (account.nameAr ?? null);
 }
 
 const NEUTRAL: Record<'en' | 'fr' | 'ar', string> = {

@@ -97,13 +97,13 @@ describe('the phone number is withheld until acceptance', () => {
     expect(toConnectedDetail(company, true).phone).toBe('+22200000000');
   });
 
-  it('adds nothing else on acceptance', () => {
+  it('adds only the phone and the account’s stores on acceptance (D227)', () => {
     /**
      * Acceptance is permission to do business, not permission to inspect a
      * business.
      */
     expect(Object.keys(toConnectedDetail(company, true)).sort()).toEqual(
-      ['city', 'logoRef', 'name', 'nameAr', 'phone', 'publicStoreId', 'verification'].sort(),
+      ['city', 'logoRef', 'name', 'nameAr', 'phone', 'publicStoreId', 'stores', 'tradingName', 'tradingNameAr', 'verification'].sort(),
     );
   });
 });

@@ -1,4 +1,4 @@
-import { legacyLabel, legacyLabelAr } from '../common/account-label';
+import { accountView, type NamedStore } from '../common/account-label';
 /**
  * Finding another shop, without letting anybody enumerate the platform
  * (Milestone H, H-CP2).
@@ -126,14 +126,15 @@ export function toPublicPreview(company: {
   publicStoreId: string;
   name: string | null;
   nameAr?: string | null;
-  branches?: { name: string; nameAr: string | null }[];
+  branches?: NamedStore[];
   city: string | null;
   logoRef: string | null;
 }): PublicStorePreview {
   return {
     publicStoreId: company.publicStoreId,
-    name: legacyLabel(company),
-    nameAr: legacyLabelAr(company),
+    // The compact label only. A stranger does not get an account's list of stores.
+    name: accountView(company).name,
+    nameAr: accountView(company).nameAr,
     city: company.city,
     logoRef: company.logoRef,
     verification: 'Verified badge coming soon',
@@ -172,10 +173,14 @@ export function isVisibleInSearch(input: {
  */
 export interface ConnectedStoreDetail extends PublicStorePreview {
   phone: string | null;
+  /** Only once accepted (D227). */
+  tradingName?: string | null;
+  tradingNameAr?: string | null;
+  stores?: NamedStore[];
 }
 
 export function toConnectedDetail(
-  company: { publicStoreId: string; name: string | null; branches?: { name: string; nameAr: string | null }[]; nameAr?: string | null; city: string | null; logoRef: string | null; publicPhone: string | null },
+  company: { publicStoreId: string; name: string | null; branches?: NamedStore[]; nameAr?: string | null; city: string | null; logoRef: string | null; publicPhone: string | null },
   accepted: boolean,
 ): ConnectedStoreDetail {
   return {
@@ -183,5 +188,7 @@ export function toConnectedDetail(
     // Withheld until acceptance, so a connection request cannot be used as a
     // way to harvest phone numbers.
     phone: accepted ? company.publicPhone : null,
+    // An accepted connection joins whole accounts: their stores, with any trading name (D227).
+    ...(accepted ? { tradingName: company.name, tradingNameAr: company.nameAr ?? null, stores: company.branches ?? [] } : {}),
   };
 }

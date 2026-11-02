@@ -7,10 +7,10 @@ import { RegisterDto } from '../platform/registration.dto';
 import { UpdateNamesDto } from '../names/dto/update-names.dto';
 import { receiptNamesOf } from '../sales/sales.service';
 import {
-  LEGACY_OLDEST_STORE,
+  ACTIVE_STORES,
+  accountView,
+  compactStores,
   adminAccountLabel,
-  legacyLabel,
-  legacyLabelAr,
   neutralAccount,
   participantLabel,
   participantLabelAr,
@@ -24,18 +24,14 @@ const CENTRE = { name: 'Boutique Centre', nameAr: 'متجر المركز' };
 const PORT = { name: 'Boutique Port', nameAr: null };
 
 describe('something about one store names that store', () => {
-  it('the exact store, not another of the same Owner, when there is no trading name', () => {
+  it('the exact store, whether or not a trading name exists', () => {
     expect(participantLabel({ name: null }, PORT)).toBe('Boutique Port');
-    expect(participantLabel({ name: null }, CENTRE)).toBe('Boutique Centre');
-    expect(participantLabelAr({ name: null }, CENTRE)).toBe('متجر المركز');
+    expect(participantLabel({ name: 'SARL Kiffa' }, PORT)).toBe('Boutique Port');
+    expect(participantLabelAr({ name: 'SARL Kiffa', nameAr: 'شركة' }, CENTRE)).toBe('متجر المركز');
   });
 
-  it('the trading name when there is one', () => {
-    expect(participantLabel({ name: 'SARL Kiffa' }, PORT)).toBe('SARL Kiffa');
-    expect(participantLabelAr({ name: 'SARL Kiffa', nameAr: null }, CENTRE)).toBeNull();
-  });
-
-  it('nothing rather than a placeholder', () => {
+  it('a record with no store: the trading name, or nothing rather than a guess', () => {
+    expect(participantLabel({ name: 'SARL Kiffa' }, null)).toBe('SARL Kiffa');
     expect(participantLabel({ name: null }, null)).toBe('');
   });
 });
@@ -82,12 +78,38 @@ describe('the console’s label, presentation only', () => {
   });
 });
 
-describe('the one legacy path, a connection', () => {
-  it('asks in an explicit, stable order, and only for active stores', () => {
-    expect(LEGACY_OLDEST_STORE.branches).toMatchObject({ where: { isActive: true }, take: 1, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
-    expect(legacyLabel({ name: null, branches: [CENTRE] })).toBe('Boutique Centre');
-    expect(legacyLabelAr({ name: 'SARL', nameAr: null, branches: [CENTRE] })).toBeNull();
-    expect(legacyLabel({ name: null, branches: [] })).toBe('');
+describe('a connection joins whole accounts', () => {
+  const STORES = [CENTRE, PORT, { name: 'Boutique Marche', nameAr: 'متجر السوق' }];
+
+  it.each([
+    ['en', 'Boutique Centre + 2 more'],
+    ['fr', 'Boutique Centre + 2 autres'],
+    ['ar', 'متجر المركز + 2 أخرى'],
+  ] as const)('the compact label in %s', (language, label) => expect(compactStores(STORES, language)).toBe(label));
+
+  it('one more is singular where the language says so, and one store has no suffix', () => {
+    expect(compactStores([CENTRE, PORT], 'fr')).toBe('Boutique Centre + 1 autre');
+    expect(compactStores([CENTRE], 'en')).toBe('Boutique Centre');
+    expect(compactStores([], 'en')).toBe('');
+  });
+
+  it('with no trading name: the compact string for build 3, the whole ordered list for new clients', () => {
+    expect(accountView({ name: null, branches: STORES })).toEqual({
+      name: 'Boutique Centre + 2 more',
+      nameAr: 'متجر المركز + 2 أخرى',
+      tradingName: null,
+      tradingNameAr: null,
+      stores: STORES,
+    });
+  });
+
+  it('with one: the trading name, and the stores underneath', () => {
+    expect(accountView({ name: 'SARL Kiffa', nameAr: null, branches: STORES })).toMatchObject({ name: 'SARL Kiffa', nameAr: null, tradingName: 'SARL Kiffa', stores: STORES });
+  });
+
+  it('the order is explicit and stable, and every active store is listed', () => {
+    expect(ACTIVE_STORES.branches).toEqual(expect.objectContaining({ where: { isActive: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }));
+    expect(ACTIVE_STORES.branches).not.toHaveProperty('take');
   });
 });
 
@@ -102,9 +124,10 @@ describe('source scan: no store is ever picked arbitrarily', () => {
   const rel = (f: string) => relative(ROOT, f).split(sep).join('/');
   const all = sources(ROOT).map((f) => [rel(f), readFileSync(f, 'utf8')] as const);
 
-  it('the legacy fallback is used for connections alone', () => {
-    const users = all.filter(([f, s]) => f !== 'common/account-label.ts' && /LEGACY_OLDEST_STORE|legacyLabel/.test(s)).map(([f]) => f).sort();
+  it('nothing is called a participating store on the strength of being oldest', () => {
+    const users = all.filter(([f, s]) => f !== 'common/account-label.ts' && /accountView|ACTIVE_STORES/.test(s)).map(([f]) => f).sort();
     expect(users).toEqual(['consignment/connections.service.ts', 'consignment/discovery.ts']);
+    expect(all.some(([, s]) => /LEGACY_OLDEST_STORE|legacyLabel/.test(s))).toBe(false);
   });
 
   it('no account is named from the first of an array of stores', () => {

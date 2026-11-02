@@ -213,6 +213,8 @@ const ALLOWED: Record<string, [Cls, string]> = {
   'platform/platform.controller.ts :: businesses :: select branches.select': ['latin', 'platform console: the stores in an account label, never stored'],
   'platform/portal/portal-session.service.ts :: viewOf :: read owner.company.name': ['latin', 'platform console, provisioning, invitation or billing text: read in the portal, null without a trading name'],
   'staff/staff-invitation.service.ts :: whereInvited :: read invitation.company.name': ['latin', 'for builds up to 1.0.0 (3); the assigned stores carry both names'],
+  'consignment/consignments.service.ts :: summarise :: read c.sourceCompany.name': ['latin', 'the optional trading name, context beside the store; the store carries both names'],
+  'loans/loans.service.ts :: summarise :: read loan.company.name': ['latin', 'the optional trading name, context beside the store; the store carries both names'],
   'acquisition/acquisition.service.ts :: report :: select inviterCompany.select': ['latin', 'platform acquisition report, read in the console'],
   'acquisition/acquisition.service.ts :: report :: read company.name': ['latin', 'platform acquisition report, read in the console'],
   'acquisition/acquisition.service.ts :: report :: read a.inviterCompany.name': ['latin', 'platform acquisition report, read in the console'],
