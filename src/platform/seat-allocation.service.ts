@@ -762,6 +762,7 @@ export class SeatAllocationService {
           confirmedAt: now,
           reason: `Opened under the administrative grant: ${reason}`.slice(0, 500),
           freeUntilPeriodId: freePeriod?.id ?? null,
+          freeUntilAt: freePeriod?.periodEnd ?? null,
         },
       });
       const branchId = await this.openStoreTx(tx, {
@@ -778,6 +779,30 @@ export class SeatAllocationService {
     });
 
     return { allocation: await this.present(await this.load(outcome.rowId)), created: outcome.created };
+  }
+
+  /**
+   * Lengthen a store's free time (D227): the one way it moves, an administrator's explicit act. Within the same billing
+   * period only, and only forward; the renewal still bills the store. The caller audits it.
+   */
+  async extendStoreGrant(companyId: Buffer, allocationId: Buffer, until: Date): Promise<{ before: Date; after: Date }> {
+    return this.prisma.$transaction(async (tx) => {
+      await lockSubscription(tx, companyId);
+      const row = await tx.seatAllocation.findFirst({
+        where: { id: allocationId, companyId, kind: 'store', status: 'granted', freeUntilPeriodId: { not: null } },
+        select: { freeUntilAt: true, freeUntilPeriodId: true },
+      });
+      if (!row?.freeUntilAt) throw new NotFoundException('That store grant was not found.');
+      const period = await this.billing.runningPeriodId(companyId, tx);
+      if (!period || !period.id.equals(row.freeUntilPeriodId!)) {
+        throw new ConflictException({ code: 'grant_period_over', message: 'That billing period is over: this store is billed normally.' });
+      }
+      if (until.getTime() <= row.freeUntilAt.getTime() || until.getTime() > period.periodEnd.getTime()) {
+        throw new BadRequestException({ code: 'grant_until_invalid', message: 'Choose a later date within the current billing period.' });
+      }
+      await tx.seatAllocation.updateMany({ where: { id: allocationId, companyId }, data: { freeUntilAt: until } });
+      return { before: row.freeUntilAt, after: until };
+    });
   }
 
   /**

@@ -42,8 +42,10 @@ function isLockConflict(e: unknown): boolean {
   // P2034 is Prisma's own "transaction conflict or deadlock, please retry".
   if (e.code === 'P2034') return true;
   // A raw statement surfaces as P2010 carrying the MySQL error number.
-  const detail = `${e.code} ${JSON.stringify(e.meta ?? {})} ${e.message}`;
-  return detail.includes(DEADLOCK) || detail.includes(LOCK_TIMEOUT);
+  // Matched as a whole number, on that error alone: a value that happens to contain these digits is no deadlock.
+  if (e.code !== 'P2010') return false;
+  const detail = `${JSON.stringify(e.meta ?? {})} ${e.message}`;
+  return new RegExp(`\\b(${DEADLOCK}|${LOCK_TIMEOUT})\\b`).test(detail);
 }
 
 /**
@@ -59,7 +61,8 @@ function isLockConflict(e: unknown): boolean {
  */
 export async function withLockRetry<T>(
   work: () => Promise<T>,
-  opts: { attempts?: number; baseDelayMs?: number } = {},
+  /** `onRetry` is told only which attempt failed: never the query, its values or the error's text. */
+  opts: { attempts?: number; baseDelayMs?: number; onRetry?: (attempt: number) => void } = {},
 ): Promise<T> {
   const attempts = opts.attempts ?? 3;
   const base = opts.baseDelayMs ?? 15;
@@ -69,6 +72,7 @@ export async function withLockRetry<T>(
       return await work();
     } catch (e) {
       if (attempt >= attempts || !isLockConflict(e)) throw e;
+      opts.onRetry?.(attempt);
       const delay = base * attempt + Math.floor(Math.random() * base);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }

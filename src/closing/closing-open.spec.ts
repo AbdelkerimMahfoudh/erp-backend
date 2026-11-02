@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { withLockRetry } from '../common/db/deadlock-retry';
 import { ClosingService } from './closing.service';
 import { dateValue } from '../common/business-day/business-day.service';
 
@@ -62,6 +63,7 @@ function build(descriptions: object[], opts: BuildOptions = {}) {
     ...(opts.owner ? ['money.anchor.record'] : []),
   ]);
   const svc = Object.create(ClosingService.prototype) as ClosingService & Record<string, unknown>;
+  Object.assign(svc, { logger: { warn: () => undefined } });
   Object.assign(svc, {
     db,
     audit,
@@ -106,6 +108,23 @@ describe('Open the boutique before 06:00 (docs/56)', () => {
     built.db.$transaction.mockImplementation(original);
     await built.svc.open({ mode: 'keep' } as never).catch(() => undefined);
     expect(built.db.$transaction.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('retries only a recognised conflict, a bounded number of times, and a duplicate is refused at once', async () => {
+    const conflict = (code: string, message = 'x', meta = {}) => new Prisma.PrismaClientKnownRequestError(message, { code, clientVersion: 'test', meta });
+    const runs = async (error: unknown) => {
+      let calls = 0;
+      await withLockRetry(async () => { calls += 1; throw error; }, { baseDelayMs: 1 }).catch(() => undefined);
+      return calls;
+    };
+    expect(await runs(conflict('P2034'))).toBe(3);
+    expect(await runs(conflict('P2010', 'Deadlock', { code: '1213' }))).toBe(3);
+    expect(await runs(conflict('P2002'))).toBe(1);
+    expect(await runs(conflict('P2010', 'value 12130 too large'))).toBe(1);
+    expect(await runs(new Error('1213'))).toBe(1);
+    const attempts: number[] = [];
+    await withLockRetry(async () => { throw conflict('P2034', 'secret detail'); }, { baseDelayMs: 1, onRetry: (a) => attempts.push(a) }).catch(() => undefined);
+    expect(attempts).toEqual([1, 2]);
   });
 
   it('a start_new after 06:00 is refused by name: not_before_day_start', async () => {

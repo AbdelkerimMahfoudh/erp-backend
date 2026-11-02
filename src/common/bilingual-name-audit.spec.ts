@@ -280,6 +280,7 @@ const ALLOWED: Record<string, [Cls, string]> = {
   'platform/provisioning.service.ts :: assertMayTakePayment :: read company.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/provisioning.service.ts :: setTestStatus :: read company.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/provisioning.service.ts :: openStore :: read company.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
+  'platform/provisioning.service.ts :: extendStoreGrant :: read company.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/provisioning.service.ts :: status :: select user.findFirst.select': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/provisioning.service.ts :: status :: read owner.name': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],
   'platform/seat-allocation.service.ts :: INCLUDE :: select branch.select': ['latin', 'platform console, provisioning, invitation or billing text: read by the platform team, not the Arabic interface'],

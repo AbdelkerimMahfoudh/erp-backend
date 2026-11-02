@@ -369,6 +369,31 @@ export class ProvisioningService {
     });
   }
 
+  /** A store's free time lengthened: explicit, with a reason, audited (D227). */
+  async extendStoreGrant(companyUuid: string, requestId: string, input: { until: Date; reason: string }, ctx: ProvisioningActor) {
+    const companyId = this.companyIdOf(companyUuid);
+    const company = await this.companyOf(companyId);
+    const target = { id: company.id, label: company.name };
+    const reason = (input.reason ?? '').trim();
+    return this.audited(ctx, 'business.store_grant_extend', target, async () => {
+      if (!reason) throw new BadRequestException('Say why \u2014 the reason is the whole record.');
+      if (Number.isNaN(input.until.getTime())) throw new BadRequestException('Give a real date.');
+      const moved = await this.seats.extendStoreGrant(companyId, uuidToBin(requestId), input.until);
+      await this.audit.record({
+        admin: ctx.admin,
+        action: 'business.store_grant_extend',
+        targetType: 'Company',
+        targetId: companyId,
+        targetLabel: company.name,
+        reason,
+        before: { freeUntil: moved.before.toISOString() },
+        after: { freeUntil: moved.after.toISOString(), request: requestId, outcome: 'applied' },
+        ip: ctx.ip ?? null,
+      });
+      return { freeUntil: moved.after.toISOString() };
+    });
+  }
+
   /** Where the business stands: its provisioning and its activation, separately (D217). Never a credential. */
   async status(companyId: Buffer): Promise<ProvisioningStatus> {
     const [company, attempt, owner, invitation, sub] = await Promise.all([

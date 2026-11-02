@@ -407,6 +407,10 @@ const PINNED: { at: string; count?: number; why: string }[] = [
     why: 'The priced request a free grant answers is withdrawn (D227). A scheduled request is already paid for, so it is left alone.',
   },
   {
+    at: 'src/platform/seat-allocation.service.ts SeatAllocationService.extendStoreGrant = granted',
+    why: 'Only a granted store has a free date to lengthen (D227). A scheduled request has no store yet.',
+  },
+  {
     at: 'src/platform/seat-allocation.service.ts SeatAllocationService.grantStore = granted',
     why: 'The store already opened under a test business’s grant, for a retry with the same name (D217). It is granted and has its branch; a scheduled request has neither, and a test business is never paid for, so it never has one.',
   },

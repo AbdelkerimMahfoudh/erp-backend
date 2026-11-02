@@ -2215,7 +2215,7 @@ export class ClosingService {
           after: { businessDate: day, at: now.toISOString(), nth: n, ...(choice ? { choice, calendarDate: described.localDate } : {}) },
           branchId,
         });
-      }));
+      }), { onRetry: (attempt) => this.logger.warn(`closings/open: write conflict, retrying (attempt ${attempt})`) });
     } catch (e) {
       if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
       // The same attempt twice at once: the first opened the boutique; this one answers with it.

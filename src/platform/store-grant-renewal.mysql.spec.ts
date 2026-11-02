@@ -148,6 +148,45 @@ run('a store free until renewal, through the real renewal', () => {
     expect(mark.freeUntilPeriodId?.equals(after[1].id)).toBe(false);
   });
 
+  it('correcting the period does not move the free date; only the audited extension does', async () => {
+    const { uuid, id } = await paidShop();
+    const [before] = await periods(id);
+    await grant(uuid, 'Fixed');
+    const row = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, label: 'Fixed', status: 'granted' } });
+    const original = row.freeUntilAt!;
+    expect(original.getTime()).toBe(before.periodEnd!.getTime());
+
+    const later = new Date(original.getTime() + 10 * 24 * 60 * 60 * 1000);
+    await a.lifecycle.setPeriodEnd(uuid, { periodEnd: later, reason: 'typo' }, CTX);
+    const kept = await root.seatAllocation.findUniqueOrThrow({ where: { id: row.id } });
+    expect(kept.freeUntilAt!.getTime()).toBe(original.getTime());
+
+    // Past the recorded date, inside the re-dated period: the store is charged.
+    offset = original.getTime() - Date.now() + 60_000;
+    await a.billing.assessNow(id);
+    const [charged] = await periods(id);
+    expect(Number(charged.assessedBranchFee)).toBe(Number(before.assessedBranchFee) * 2);
+  });
+
+  it('the extension is explicit, audited, forward and inside the period', async () => {
+    const { uuid, id } = await paidShop();
+    const [before] = await periods(id);
+    await grant(uuid, 'Longer');
+    const row = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, label: 'Longer', status: 'granted' } });
+    const end = row.freeUntilAt!.getTime();
+    const later = new Date(end + 5 * 24 * 60 * 60 * 1000);
+    const rid = binToUuid(row.id);
+    await expect(a.provisioning.extendStoreGrant(uuid, rid, { until: later, reason: 'x' }, CTX)).rejects.toMatchObject({ response: { code: 'grant_until_invalid' } });
+    await a.lifecycle.setPeriodEnd(uuid, { periodEnd: new Date(end + 10 * 24 * 60 * 60 * 1000), reason: 'corrected' }, CTX);
+    await a.provisioning.extendStoreGrant(uuid, rid, { until: later, reason: 'goodwill' }, CTX);
+    expect((await root.seatAllocation.findUniqueOrThrow({ where: { id: row.id } })).freeUntilAt!.getTime()).toBe(later.getTime());
+    expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'business.store_grant_extend' } })).toBeGreaterThan(0);
+    offset = end - Date.now() + 60_000;
+    await a.billing.assessNow(id);
+    const [still] = await periods(id);
+    expect(Number(still.assessedBranchFee)).toBe(Number(before.assessedBranchFee));
+  });
+
   it('a grant racing a due renewal cannot double-charge or extend the exemption', async () => {
     const { uuid, id } = await paidShop();
     const [before] = await periods(id);

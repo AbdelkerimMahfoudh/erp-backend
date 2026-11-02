@@ -302,6 +302,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
   private mapPrismaError(e: Prisma.PrismaClientKnownRequestError): {
     status: number;
     message: string;
+    code?: string;
   } {
     switch (e.code) {
       case 'P2002':
@@ -312,7 +313,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         return { status: HttpStatus.CONFLICT, message: 'Related record constraint failed' };
       // A deadlock is nobody's bad request: nothing was saved, and trying again works.
       case 'P2034':
-        return { status: HttpStatus.CONFLICT, message: 'This could not be saved just now. Please try again.' };
+        return { status: HttpStatus.CONFLICT, message: 'This could not be saved just now. Please try again.', code: 'write_conflict' };
       case 'P2000':
         return { status: HttpStatus.BAD_REQUEST, message: 'Value too long for column' };
       default:

@@ -271,6 +271,12 @@ class ConsoleStoreDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
 }
 
+class StoreGrantExtendDto {
+  @IsString() @MaxLength(40) until: string;
+  @IsString() @MinLength(1) @MaxLength(500) reason: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+}
+
 class InvitationDto {
   @IsOptional() @IsString() @MaxLength(500) reason?: string;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
@@ -1024,6 +1030,17 @@ export class PlatformController {
       { name: dto.name, nameAr: dto.nameAr, activity: dto.activity, reason: dto.reason, access: dto.access, requestId: dto.requestId },
       { admin, ip: req.ip },
     );
+  }
+
+  /** A store's free time lengthened: the one way it moves (D227). */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/stores/:requestId/extend-grant')
+  @HttpCode(HttpStatus.OK)
+  async extendStoreGrant(@Param('id') id: string, @Param('requestId') requestId: string, @Body() dto: StoreGrantExtendDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    return this.provisioning.extendStoreGrant(id, requestId, { until: new Date(dto.until), reason: dto.reason }, { admin, ip: req.ip });
   }
 
   /** A fresh invitation for the Owner. Every unspent one is revoked by it. */

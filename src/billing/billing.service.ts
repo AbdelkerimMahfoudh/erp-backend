@@ -500,7 +500,7 @@ export class BillingService {
       },
       // A store that took an archived one's place this period is charged only what that location was not paid (D158).
       await this.creditsOf(period.id, db),
-      await this.freeStoresOf(companyId, period.id, db),
+      await this.freeStoresOf(companyId, period.id, db, now),
     );
 
     if (assessment.addedThisPeriod === 0) {
@@ -531,18 +531,18 @@ export class BillingService {
   }
 
   /** Stores granted free for exactly this period (D227): a renewal's new period does not match, and bills them. */
-  private async freeStoresOf(companyId: Buffer, periodId: Buffer, db: BillingDb): Promise<Set<string>> {
+  private async freeStoresOf(companyId: Buffer, periodId: Buffer, db: BillingDb, now: Date = this.clock.now()): Promise<Set<string>> {
     const rows = await db.seatAllocation.findMany({
-      where: { companyId, kind: 'store', status: 'granted', freeUntilPeriodId: periodId, branchId: { not: null } },
+      where: { companyId, kind: 'store', status: 'granted', freeUntilPeriodId: periodId, freeUntilAt: { gt: now }, branchId: { not: null } },
       select: { branchId: true },
     });
     return new Set(rows.map((r) => binToUuid(r.branchId!)));
   }
 
   /** The running paid period in force, under the caller's lock; null when there is none. */
-  async runningPeriodId(companyId: Buffer, db: BillingDb, now: Date = this.clock.now()): Promise<{ id: Buffer } | null> {
+  async runningPeriodId(companyId: Buffer, db: BillingDb, now: Date = this.clock.now()): Promise<{ id: Buffer; periodEnd: Date } | null> {
     const period = await db.billingPeriod.findFirst({ where: { companyId }, orderBy: NEWEST_PERIOD_FIRST });
-    return period && periodRunning(period, now) ? { id: period.id } : null;
+    return period?.periodEnd && periodRunning(period, now) ? { id: period.id, periodEnd: period.periodEnd } : null;
   }
 
   /**
