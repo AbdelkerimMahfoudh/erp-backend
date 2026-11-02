@@ -599,6 +599,10 @@ export class ClosingService {
     const agentCash = await this.agentCashOn(branchId, dayDate);
     const agentCashIn = agentCash.in;
     const agentCashOut = agentCash.out;
+    /** A repair's cash on the day (D227): what the customer paid into the drawer, and what the repair took from it. */
+    const cashRepairs = built.report.money.channels.find((c) => c.channel === 'cash');
+    const maintenanceCashIn = cashRepairs?.in.maintenance ?? 0;
+    const maintenanceCashOut = cashRepairs?.out.maintenance ?? 0;
     /**
      * What the drawer held when the day began (0076, D4): the counted cash at the
      * last close whose drawer was counted, plus the net cash movement since.
@@ -620,11 +624,12 @@ export class ClosingService {
      *            + the set amount's adjustment, when the Owner set the drawer today
      *              (the amount − the day's net at that instant − the opening balance)
      *            + the agent counter's cash in − its cash out (D154)
+     *            + a repair's cash in − its cash out (D227)
      *
      * Pending reports appear nowhere — only confirmed movements are here.
      */
     const expectedCash = round2(
-      openingCash + num(cash._sum.amount) - refundedCash - supplierPaid.cash - expensesCash + correctedCash + setCash + agentCashIn - agentCashOut,
+      openingCash + num(cash._sum.amount) - refundedCash - supplierPaid.cash - expensesCash + correctedCash + setCash + agentCashIn - agentCashOut + maintenanceCashIn - maintenanceCashOut,
     );
     if (Math.abs(expectedCash - built.report.expected.cash.expected) >= 0.005) {
       throw new ConflictException({
@@ -854,6 +859,8 @@ export class ClosingService {
             correctionsOut: ch.correctionsOut,
             agentIn: ch.agentIn,
             agentOut: ch.agentOut,
+            maintenanceIn: ch.maintenanceIn,
+            maintenanceOut: ch.maintenanceOut,
             openingBalance: ch.openingBalance,
             expected: ch.expected,
             counted,
@@ -2475,8 +2482,8 @@ export class ClosingService {
         label: ch.labelSnapshot,
         isUnattributed: ch.isUnattributed,
         // The drawer's in and out carry the agent counter's cash (D154); an account's agent legs are always 0.
-        moneyIn: round2(ch.salesIn + ch.correctionsIn + ch.agentIn),
-        moneyOut: round2(ch.refundsOut + ch.supplierOut + ch.expensesOut + ch.correctionsOut + ch.agentOut),
+        moneyIn: round2(ch.salesIn + ch.correctionsIn + ch.agentIn + ch.maintenanceIn),
+        moneyOut: round2(ch.refundsOut + ch.supplierOut + ch.expensesOut + ch.correctionsOut + ch.agentOut + ch.maintenanceOut),
         net: ch.expected,
       })),
     };
@@ -3003,6 +3010,8 @@ export class ClosingService {
         correctionsOut: target.correctionsOut,
         agentIn: target.agentIn,
         agentOut: target.agentOut,
+        maintenanceIn: target.maintenanceIn,
+        maintenanceOut: target.maintenanceOut,
         openingBalance: target.openingBalance,
         expected: target.expected,
         counted,
@@ -3762,6 +3771,22 @@ export class ClosingService {
       WHERE m.company_id = ${companyId} AND m.branch_id = ${branchId}
         AND m.account_kind = 'cash' AND m.business_date BETWEEN ${fromDay} AND ${toDay}
       GROUP BY m.direction
+
+      UNION ALL
+      -- A repair's money (D227): what the customer paid on the channel it reached, what it cost on the one it left. A
+      -- reversal is the same row with the opposite sign, so it nets on its own day.
+      SELECT IF(mr.paid_method = 'cash', 'cash', 'account'), IF(mr.paid_method = 'cash', NULL, mr.paid_account_id), 'maintenanceIn', SUM(mr.customer_paid)
+      FROM maintenance_records mr
+      WHERE mr.company_id = ${companyId} AND mr.branch_id = ${branchId} AND mr.paid_method IS NOT NULL
+        AND mr.business_date BETWEEN ${fromDay} AND ${toDay}
+      GROUP BY mr.paid_method, mr.paid_account_id
+
+      UNION ALL
+      SELECT IF(mr.cost_method = 'cash', 'cash', 'account'), IF(mr.cost_method = 'cash', NULL, mr.cost_account_id), 'maintenanceOut', SUM(mr.repair_cost)
+      FROM maintenance_records mr
+      WHERE mr.company_id = ${companyId} AND mr.branch_id = ${branchId} AND mr.cost_method IS NOT NULL
+        AND mr.business_date BETWEEN ${fromDay} AND ${toDay}
+      GROUP BY mr.cost_method, mr.cost_account_id
     `);
 
     return rows

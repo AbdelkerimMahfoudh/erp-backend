@@ -47,6 +47,8 @@ describe('the signs match the cash equation exactly', () => {
       supplierOut: -1,
       expensesOut: -1,
       correctionsIn: 1,
+      maintenanceIn: 1,
+      maintenanceOut: -1,
       correctionsOut: -1,
       // D154 (docs/73 §4.5): the agent counter's cash is the drawer's — received for credit sent it is added,
       // given for credit received it is subtracted, in the one table every path reads.

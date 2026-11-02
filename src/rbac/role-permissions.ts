@@ -89,6 +89,7 @@ export const PERMISSIONS: { key: string; label: string }[] = [
    * change it for a branch they are assigned to (the assignment is checked by
    * the service), audited, for future sales only.
    */
+  { key: 'maintenance.record',  label: 'Record maintenance income' },
   { key: 'return.policy.edit',  label: 'Edit the return policy of a branch you work in' },
   { key: 'unit.add',            label: 'Add inventory units' },
   { key: 'unit.transfer',       label: 'Transfer stock between branches' },
@@ -245,6 +246,7 @@ const ADMIN_KEYS = ALL_PERMISSION_KEYS.filter(
     k !== 'sale.below_cost' &&
     k !== 'cost.complete' &&
     k !== 'return.policy.edit' &&
+    k !== 'maintenance.record' &&
     k !== 'price.edit' &&
     k !== 'import.run' &&
     // 0076: starting a shop's day early is the Owner's call alone.
@@ -288,6 +290,7 @@ export const ROLE_PERMISSIONS: Record<RoleKey, string[]> = {
     // 0107: and enters a buying cost that was not known when the stock was received.
     'cost.complete',
     // 0108: and edits the return policy of the branches they are assigned to.
+    'maintenance.record',
     'return.policy.edit',
     /**
      * I1: reading sale history, and changing the return policy AT SALE TIME.

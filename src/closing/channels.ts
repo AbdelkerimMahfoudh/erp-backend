@@ -25,7 +25,7 @@
 export type Channel = 'cash' | 'account';
 
 /** The movements, named exactly as the cash equation names them. */
-export type Component = 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut' | 'agentIn' | 'agentOut';
+export type Component = 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut' | 'agentIn' | 'agentOut' | 'maintenanceIn' | 'maintenanceOut';
 
 /** How each component enters `expected`. The single source of the signs. */
 export const COMPONENT_SIGN: Record<Component, 1 | -1> = {
@@ -37,6 +37,8 @@ export const COMPONENT_SIGN: Record<Component, 1 | -1> = {
   correctionsOut: -1,
   agentIn: 1,
   agentOut: -1,
+  maintenanceIn: 1,
+  maintenanceOut: -1,
 };
 
 /**
@@ -92,6 +94,9 @@ export interface ChannelRow {
    */
   agentIn: number;
   agentOut: number;
+  /** A repair's money (D227), on the channel it actually reached or left. */
+  maintenanceIn: number;
+  maintenanceOut: number;
   /**
    * Cash only (0076): what the drawer held when the business day began — the
    * counted cash at the last locked close plus the net cash movement of any
@@ -109,7 +114,7 @@ export interface ChannelRow {
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
-const empty = () => ({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0, correctionsOut: 0, agentIn: 0, agentOut: 0 });
+const empty = () => ({ salesIn: 0, refundsOut: 0, supplierOut: 0, expensesOut: 0, correctionsIn: 0, correctionsOut: 0, agentIn: 0, agentOut: 0, maintenanceIn: 0, maintenanceOut: 0 });
 
 /**
  * Which channels this branch has to account for today, and what each is
@@ -180,7 +185,9 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
         COMPONENT_SIGN.correctionsIn * sums.correctionsIn +
         COMPONENT_SIGN.correctionsOut * sums.correctionsOut +
         COMPONENT_SIGN.agentIn * sums.agentIn +
-        COMPONENT_SIGN.agentOut * sums.agentOut,
+        COMPONENT_SIGN.agentOut * sums.agentOut +
+        COMPONENT_SIGN.maintenanceIn * sums.maintenanceIn +
+        COMPONENT_SIGN.maintenanceOut * sums.maintenanceOut,
     );
 
     rows.push({
@@ -208,6 +215,8 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
       correctionsOut: round2(sums.correctionsOut),
       agentIn: round2(sums.agentIn),
       agentOut: round2(sums.agentOut),
+      maintenanceIn: round2(sums.maintenanceIn),
+      maintenanceOut: round2(sums.maintenanceOut),
       openingBalance,
       setAdjustment,
       expected,
@@ -267,8 +276,8 @@ export interface MethodMoney {
  */
 export function moneyByMethod(channels: ChannelRow[]): { channels: MethodMoney[]; total: { moneyIn: number; moneyOut: number; net: number } } {
   const rows = channels.map((c) => {
-    const moneyIn = round2(c.salesIn + c.correctionsIn + c.agentIn);
-    const moneyOut = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut + c.agentOut);
+    const moneyIn = round2(c.salesIn + c.correctionsIn + c.agentIn + c.maintenanceIn);
+    const moneyOut = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut + c.agentOut + c.maintenanceOut);
     return { channel: c.channel, accountId: c.accountId, label: c.labelSnapshot, isUnattributed: c.isUnattributed, moneyIn, moneyOut, net: round2(moneyIn - moneyOut) };
   });
   return {

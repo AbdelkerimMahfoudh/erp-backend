@@ -2054,6 +2054,9 @@ model ClosingChannelCount {
   /// D154: the agent counter's cash legs on the day — the same drawer, two more components of its equation.
   agentIn        Decimal @default(0) @map("agent_in") @db.Decimal(14, 2)
   agentOut       Decimal @default(0) @map("agent_out") @db.Decimal(14, 2)
+  /// D227: a repair's money, on its own lines.
+  maintenanceIn  Decimal @default(0) @map("maintenance_in") @db.Decimal(14, 2)
+  maintenanceOut Decimal @default(0) @map("maintenance_out") @db.Decimal(14, 2)
   /// Cash only (0076): what the drawer held at the start of the business day —
   /// the counted cash at the last locked close plus the net cash movement of
   /// any unclosed day between. Carried forward as a balance, never as income.
@@ -6559,4 +6562,31 @@ model CredentialChange {
 
   @@index([userId, stage], map: "ix_credential_changes_user")
   @@map("credential_changes")
+}
+
+/// Money from a repair (0126): not a sale, not stock; its own lines in the closing. Reversed by a row of opposite sign.
+model MaintenanceRecord {
+  id            Bytes    @id @db.Binary(16)
+  companyId     Bytes    @map("company_id") @db.Binary(16)
+  branchId      Bytes    @map("branch_id") @db.Binary(16)
+  businessDate  DateTime @map("business_date") @db.Date
+  description   String   @db.VarChar(200)
+  repairCost    Decimal  @map("repair_cost") @db.Decimal(14, 2)
+  customerPaid  Decimal  @map("customer_paid") @db.Decimal(14, 2)
+  paidMethod    String?  @map("paid_method") @db.VarChar(8)
+  paidAccountId Bytes?   @map("paid_account_id") @db.Binary(16)
+  paidLabel     String?  @map("paid_label") @db.VarChar(80)
+  costMethod    String?  @map("cost_method") @db.VarChar(8)
+  costAccountId Bytes?   @map("cost_account_id") @db.Binary(16)
+  costLabel     String?  @map("cost_label") @db.VarChar(80)
+  note          String?  @db.VarChar(500)
+  createdById   Bytes?   @map("created_by") @db.Binary(16)
+  clientUuid    Bytes    @map("client_uuid") @db.Binary(16)
+  requestHash   String   @map("request_hash") @db.VarChar(64)
+  reversesId    Bytes?   @unique(map: "ux_maintenance_reverses") @map("reverses_id") @db.Binary(16)
+  createdAt     DateTime @default(now()) @map("created_at") @db.DateTime(6)
+
+  @@unique([companyId, clientUuid], map: "ux_maintenance_client")
+  @@index([branchId, businessDate], map: "ix_maintenance_day")
+  @@map("maintenance_records")
 }

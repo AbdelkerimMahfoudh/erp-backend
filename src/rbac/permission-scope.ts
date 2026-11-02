@@ -17,7 +17,7 @@
  * permissions are company-scoped. Everything operational (sales, units, imports,
  * purchases, discounts, closing, cost view, pricing) is branch-scoped.
  */
-export const COMPANY_PERMISSIONS: ReadonlySet<string> = new Set<string>([
+export const COMPANY_PERMISSIONS: ReadonlySet<string> = new Set<string>(['maintenance.record', 
   'user.manage',
   'settings.manage',
   'branch.manage',
@@ -55,6 +55,8 @@ export function isDelegatable(key: string): boolean {
  */
 export const DELEGATION_ELIGIBLE_ROLES: Readonly<Record<string, readonly string[]>> = {
   'price.edit': ['store_manager'],
+  // D227: an Employee may record repairs through a per-store grant.
+  'maintenance.record': ['store_manager', 'store_employee'],
   'closing.perform': ['store_manager', 'store_employee'],
 };
 

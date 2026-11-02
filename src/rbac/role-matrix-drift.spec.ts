@@ -174,6 +174,8 @@ describe('role matrix — SQL and TypeScript must agree', () => {
     sqlOf('0107_unknown_cost'),
     // 0108: `return.policy.edit` to the Store Manager and the Store Employee.
     sqlOf('0108_branch_return_policy'),
+    // 0126: `maintenance.record` to the Store Manager (an Employee by per-store grant).
+    sqlOf('0126_maintenance_income'),
   ];
   /**
    * Revocations, applied AFTER the grants. 0031 takes `unit.transfer` away from

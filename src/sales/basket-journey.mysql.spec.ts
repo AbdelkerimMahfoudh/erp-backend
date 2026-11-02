@@ -296,6 +296,61 @@ run('a basket from counter to returns', () => {
     expect(Number(rollup._sum.lineCost)).toBe(40);
   });
 
+  it('maintenance income: once per request, its own lines in the closing, never a sale or stock, reversed by an entry', async () => {
+    const s = await shop();
+    const key = randomUUID();
+    const body = { clientUuid: key, description: 'Screen replaced', repairCost: 300, customerPaid: 800, paidMethod: 'account', paidAccountId: s.accountId, costMethod: 'cash' };
+    const first = await s.owner.post('maintenance', body);
+    if (first.status !== 201) throw new Error(JSON.stringify(first.body));
+    expect(first.body).toMatchObject({ customerPaid: 800, repairAmount: 300, profit: 500, paidMethod: 'account', costMethod: 'cash' });
+    const again = await s.owner.post('maintenance', body);
+    expect(again.body.id).toBe(first.body.id);
+    expect((await s.owner.post('maintenance', { ...body, customerPaid: 900 })).body.code).toBe('idempotency_conflict');
+    // Rules: each money leg needs its channel; both zero needs saying.
+    expect((await s.owner.post('maintenance', { clientUuid: randomUUID(), description: 'x', repairCost: 0, customerPaid: 10 })).body.code).toBe('paid_destination_required');
+    expect((await s.owner.post('maintenance', { clientUuid: randomUUID(), description: 'x', repairCost: 10, customerPaid: 0 })).body.code).toBe('cost_source_required');
+    expect((await s.owner.post('maintenance', { clientUuid: randomUUID(), description: 'x', repairCost: 0, customerPaid: 0 })).body.code).toBe('zero_needs_confirmation');
+    // An Employee has it only by grant.
+    expect((await s.staff.post('maintenance', { ...body, clientUuid: randomUUID() })).status).toBe(403);
+
+    expect(await root.sale.count({ where: { companyId: s.companyId } })).toBe(0);
+    let report = (await s.owner.get('closings/report')).body;
+    expect(report.sales.value).toBe(0);
+    expect(report.result.maintenanceNet).toBe(500);
+    const row = (channel: string) => report.money.channels.find((c: { channel: string }) => c.channel === channel);
+    expect(row('account').in.maintenance).toBe(800);
+    expect(row('cash').out.maintenance).toBe(300);
+    expect(report.expected.cash.expected).toBe(-300);
+
+    const list = await s.owner.get('maintenance');
+    expect(list.body.totals).toEqual({ revenue: 800, cost: 300, profit: 500 });
+
+    const reversal = await s.owner.post(`maintenance/${first.body.id}/reverse`, { clientUuid: randomUUID(), reason: 'wrong shop' });
+    if (reversal.status >= 300) throw new Error(JSON.stringify(reversal.body));
+    const twice = await s.owner.post(`maintenance/${first.body.id}/reverse`, { clientUuid: randomUUID(), reason: 'again' });
+    expect(twice.body.id).toBe(reversal.body.id);
+    report = (await s.owner.get('closings/report')).body;
+    expect(report.result.maintenanceNet).toBe(0);
+    expect((await s.owner.get('maintenance')).body.totals).toEqual({ revenue: 0, cost: 0, profit: 0 });
+  });
+
+  it('a day with cash repairs and part-returned accessories really closes, and refuses anything after', async () => {
+    const { s, coverLine } = await soldBasket();
+    const r = await raise(s, coverLine.id, 2);
+    if ((await approve(s, r.body, 'sellable')).status >= 300) throw new Error('approve');
+    await s.owner.post('maintenance', { clientUuid: randomUUID(), description: 'Battery', repairCost: 100, customerPaid: 350, paidMethod: 'cash', costMethod: 'cash' });
+    const report = (await s.owner.get('closings/report')).body;
+    expect(report.result.maintenanceNet).toBe(250);
+    const closed = await s.owner.post('closings', { countedCash: report.expected.cash.expected, acknowledgeUnverified: true, reason: 'accounts checked tomorrow' });
+    if (closed.status >= 300) throw new Error(JSON.stringify(closed.body));
+    const later = await s.owner.post('maintenance', { clientUuid: randomUUID(), description: 'Late', repairCost: 0, customerPaid: 10, paidMethod: 'cash' });
+    expect(later.status).toBeGreaterThanOrEqual(400);
+    expect(await root.maintenanceRecord.count({ where: { companyId: s.companyId } })).toBe(1);
+    const frozen = await root.closingChannelCount.findFirstOrThrow({ where: { companyId: s.companyId, channel: 'cash' } });
+    expect(Number(frozen.maintenanceIn)).toBe(350);
+    expect(Number(frozen.maintenanceOut)).toBe(100);
+  });
+
   it('a rejected return gives its pieces back to what may be returned', async () => {
     const { s, coverLine } = await soldBasket();
     const all = await raise(s, coverLine.id, 5);

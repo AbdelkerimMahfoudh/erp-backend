@@ -135,14 +135,14 @@ describe('a worked day, recomputed independently', () => {
     // Every row carries the agent counter's two lines since D154 (docs/73 §4.5): 0 on an electronics-only day, and the
     // version of such a day is unchanged by them (proved below).
     const c = report.money.channels.find((x) => x.key === 'cash:NONE')!;
-    expect(c.in).toEqual({ todaysSales: 15_000, olderDebts: 4_000, correctionsIn: 0, agentIn: 0, total: of((r) => isCash(r) && IN(r)) });
+    expect(c.in).toEqual({ todaysSales: 15_000, olderDebts: 4_000, correctionsIn: 0, agentIn: 0, maintenance: 0, total: of((r) => isCash(r) && IN(r)) });
     expect(c.out.total).toBe(of((r) => isCash(r) && !IN(r)));
-    expect(c.out).toEqual({ refunds: 6_000, stockPurchases: 0, expenses: 1_200, correctionsOut: 3_000, agentOut: 0, total: 10_200 });
+    expect(c.out).toEqual({ refunds: 6_000, stockPurchases: 0, expenses: 1_200, correctionsOut: 3_000, agentOut: 0, maintenance: 0, total: 10_200 });
     expect(c.net).toBe(19_000 - 10_200);
 
     const b = report.money.channels.find((x) => x.accountId === BANKILY)!;
-    expect(b.in).toEqual({ todaysSales: 10_500, olderDebts: 0, correctionsIn: 3_000, agentIn: 0, total: 13_500 });
-    expect(b.out).toEqual({ refunds: 0, stockPurchases: 12_000, expenses: 0, correctionsOut: 0, agentOut: 0, total: 12_000 });
+    expect(b.in).toEqual({ todaysSales: 10_500, olderDebts: 0, correctionsIn: 3_000, agentIn: 0, maintenance: 0, total: 13_500 });
+    expect(b.out).toEqual({ refunds: 0, stockPurchases: 12_000, expenses: 0, correctionsOut: 0, agentOut: 0, maintenance: 0, total: 12_000 });
     expect(b.net).toBe(1_500);
 
     const m = report.money.channels.find((x) => x.accountId === MASRIVI)!;
@@ -494,8 +494,8 @@ describe('the agent counter in the one closing (D154)', () => {
 
   it('the drawer’s row carries the two agent lines; its in, out, net and expected figure include them; an account’s never do', () => {
     const c = report.money.channels.find((x) => x.key === 'cash:NONE')!;
-    expect(c.in).toEqual({ todaysSales: 15_000, olderDebts: 4_000, correctionsIn: 0, agentIn: 20_200, total: 39_200 });
-    expect(c.out).toEqual({ refunds: 6_000, stockPurchases: 0, expenses: 1_200, correctionsOut: 3_000, agentOut: 15_000, total: 25_200 });
+    expect(c.in).toEqual({ todaysSales: 15_000, olderDebts: 4_000, correctionsIn: 0, agentIn: 20_200, maintenance: 0, total: 39_200 });
+    expect(c.out).toEqual({ refunds: 6_000, stockPurchases: 0, expenses: 1_200, correctionsOut: 3_000, agentOut: 15_000, maintenance: 0, total: 25_200 });
     expect(c.net).toBe(14_000);
     expect(report.expected.cash).toMatchObject({ in: 39_200, out: 25_200, expected: 34_000 });
     for (const a of report.money.channels.filter((x) => x.channel === 'account')) expect([a.in.agentIn, a.out.agentOut]).toEqual([0, 0]);

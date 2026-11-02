@@ -105,6 +105,7 @@ export const PUBLISHED_AFTER_CATALOGUE: ReadonlyMap<string, string> = new Map([
   ['sale.below_cost', '0105_sale_below_cost_permission'],
   ['cost.complete', '0107_unknown_cost'],
   ['return.policy.edit', '0108_branch_return_policy'],
+  ['maintenance.record', '0126_maintenance_income'],
 ]);
 
 function committedSql(): string {

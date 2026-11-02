@@ -1,3 +1,4 @@
+import { MaintenanceModule } from './maintenance/maintenance.module';
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ClsModule } from 'nestjs-cls';
@@ -63,6 +64,7 @@ import { ActingOwnerModule } from './acting-owner/acting-owner.module';
 
 @Module({
   imports: [
+    MaintenanceModule,
     AppConfigModule,
 
     // AsyncLocalStorage per request. Sets `requestId` and the active branch;

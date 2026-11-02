@@ -30,7 +30,7 @@ describe('period movements', () => {
     // cash payments, account payments, refunds, settlements, purchase payments, expenses, the older
     // corrections, every other correction's legs through one ledger (0078's two arms folded in, 0079),
     // and the agent counter's cash legs (D154): nine reads of the range, each on a stored date.
-    expect((movements.match(/BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(9);
+    expect((movements.match(/BETWEEN \$\{fromDay\} AND \$\{toDay\}/g) ?? []).length).toBe(11);
     // The agent legs: the drawer's channel, no account, in and out by the leg's direction; a float leg never arrives here.
     expect(movements).toMatch(/SELECT 'cash', NULL, IF\(m\.direction = 'inflow', 'agentIn', 'agentOut'\), SUM\(m\.amount\)\s+FROM agent_movements m\s+WHERE m\.company_id = \$\{companyId\} AND m\.branch_id = \$\{branchId\}\s+AND m\.account_kind = 'cash' AND m\.business_date BETWEEN \$\{fromDay\} AND \$\{toDay\}\s+GROUP BY m\.direction/);
     expect(movements).toMatch(/fc\.correction_date BETWEEN \$\{fromDay\} AND \$\{toDay\}\s+GROUP BY l\.method, l\.receiving_account_id, l\.direction/);
@@ -74,8 +74,8 @@ describe('period movements', () => {
   it('in and out are the closing components, and net is its expected figure', () => {
     const block = service.slice(service.indexOf('async periodMovements('), service.indexOf('async openView('));
     // The drawer's in and out carry the agent counter's cash since D154, so net = in − out still holds for the drawer.
-    expect(block).toMatch(/moneyIn: round2\(ch\.salesIn \+ ch\.correctionsIn \+ ch\.agentIn\)/);
-    expect(block).toMatch(/moneyOut: round2\(ch\.refundsOut \+ ch\.supplierOut \+ ch\.expensesOut \+ ch\.correctionsOut \+ ch\.agentOut\)/);
+    expect(block).toMatch(/moneyIn: round2\(ch\.salesIn \+ ch\.correctionsIn \+ ch\.agentIn \+ ch\.maintenanceIn\)/);
+    expect(block).toMatch(/moneyOut: round2\(ch\.refundsOut \+ ch\.supplierOut \+ ch\.expensesOut \+ ch\.correctionsOut \+ ch\.agentOut \+ ch\.maintenanceOut\)/);
     expect(block).toMatch(/net: ch\.expected/);
     expect(block).toMatch(/requireBranchId\(\)/);
   });

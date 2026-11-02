@@ -76,6 +76,8 @@ const TERMS = [
     sign: '+',
     why: 'cash received for digital credit sent, a commission paid in cash, and the cash a reversal or a rebalancing brought back to the drawer',
   },
+  { name: 'maintenanceCashIn', sign: '+', why: 'what a customer paid in cash for a repair (D227)' },
+  { name: 'maintenanceCashOut', sign: '-', why: 'what a repair cost, paid from the drawer (D227)' },
   { name: 'agentCashOut', sign: '-', why: 'cash given for digital credit received, and the cash a reversal or a rebalancing took out of the drawer' },
 ] as const;
 

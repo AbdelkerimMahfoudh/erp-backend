@@ -55,7 +55,7 @@ export interface MethodMovement {
   net: number;
 }
 
-const INFLOW: ReadonlySet<MovementRow['component']> = new Set(['salesIn', 'correctionsIn', 'agentIn']);
+const INFLOW: ReadonlySet<MovementRow['component']> = new Set(['salesIn', 'correctionsIn', 'agentIn', 'maintenanceIn']);
 
 /** The day's movement of one method from its component rows, with the closing's signs. */
 export function movementOf(businessDate: string, rows: readonly Pick<MovementRow, 'component' | 'amount'>[]): MethodMovement {
@@ -72,7 +72,7 @@ export function movementOf(businessDate: string, rows: readonly Pick<MovementRow
 
 /** The drawer's day rows from its closing channel row — the same sums the Daily closing shows. */
 export function cashDayRows(
-  row: Pick<ChannelRow, 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut' | 'agentIn' | 'agentOut'> | null | undefined,
+  row: Pick<ChannelRow, 'salesIn' | 'refundsOut' | 'supplierOut' | 'expensesOut' | 'correctionsIn' | 'correctionsOut' | 'agentIn' | 'agentOut' | 'maintenanceIn' | 'maintenanceOut'> | null | undefined,
 ): MovementRow[] {
   if (!row) return [];
   const parts: [MovementRow['component'], number][] = [
@@ -84,6 +84,8 @@ export function cashDayRows(
     ['correctionsOut', row.correctionsOut],
     ['agentIn', row.agentIn],
     ['agentOut', row.agentOut],
+    ['maintenanceIn', row.maintenanceIn],
+    ['maintenanceOut', row.maintenanceOut],
   ];
   return parts.filter(([, amount]) => amount !== 0).map(([component, amount]) => ({ channel: 'cash', accountId: null, component, amount }));
 }

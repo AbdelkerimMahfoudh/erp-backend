@@ -287,8 +287,8 @@ export interface ReportChannel {
   isUnattributed: boolean;
   countable: boolean;
   /** `agentIn` / `agentOut` (D154): the agent counter's cash on the drawer's row; always 0 on an account. */
-  in: { todaysSales: number; olderDebts: number; correctionsIn: number; agentIn: number; total: number };
-  out: { refunds: number; stockPurchases: number; expenses: number; correctionsOut: number; agentOut: number; total: number };
+  in: { todaysSales: number; olderDebts: number; correctionsIn: number; agentIn: number; maintenance: number; total: number };
+  out: { refunds: number; stockPurchases: number; expenses: number; correctionsOut: number; agentOut: number; maintenance: number; total: number };
   net: number;
 }
 
@@ -304,6 +304,8 @@ export interface ReportResult {
   grossProfit: number | null;
   variableExpenses: number;
   fixedExpenses: number;
+  /** A repair's profit on the day (D227): apart from sales and gross profit, and in the result. */
+  maintenanceNet: number;
   resultBeforeFixed: number | null;
   resultAfterExpenses: number | null;
   /** Fixed costs are counted in full on their due date (Milestone D), never spread over the month. */
@@ -445,8 +447,8 @@ export function assembleReport(i: ReportInputs): ClosingReport {
   const channels: ReportChannel[] = i.channels.map((c) => {
     const key = keyOfChannel(c);
     const split = i.splits.get(key) ?? { todaysSales: 0, olderDebts: 0 };
-    const inTotal = round2(c.salesIn + c.correctionsIn + c.agentIn);
-    const outTotal = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut + c.agentOut);
+    const inTotal = round2(c.salesIn + c.correctionsIn + c.agentIn + c.maintenanceIn);
+    const outTotal = round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut + c.agentOut + c.maintenanceOut);
     return {
       key,
       channel: c.channel,
@@ -454,8 +456,8 @@ export function assembleReport(i: ReportInputs): ClosingReport {
       label: c.labelSnapshot,
       isUnattributed: c.isUnattributed,
       countable: isCountable(c),
-      in: { todaysSales: round2(split.todaysSales), olderDebts: round2(split.olderDebts), correctionsIn: c.correctionsIn, agentIn: c.agentIn, total: inTotal },
-      out: { refunds: c.refundsOut, stockPurchases: c.supplierOut, expenses: c.expensesOut, correctionsOut: c.correctionsOut, agentOut: c.agentOut, total: outTotal },
+      in: { todaysSales: round2(split.todaysSales), olderDebts: round2(split.olderDebts), correctionsIn: c.correctionsIn, agentIn: c.agentIn, maintenance: c.maintenanceIn, total: inTotal },
+      out: { refunds: c.refundsOut, stockPurchases: c.supplierOut, expenses: c.expensesOut, correctionsOut: c.correctionsOut, agentOut: c.agentOut, maintenance: c.maintenanceOut, total: outTotal },
       net: round2(inTotal - outTotal),
     };
   });
@@ -504,6 +506,7 @@ export function assembleReport(i: ReportInputs): ClosingReport {
   const grossProfit = round2(netSalesValue - costOfUnitsSold);
   const variableNet = round2(expenses.variable - reversedBy((l) => l.expenseClass === 'variable'));
   const fixedNet = round2(expenses.fixed - reversedBy((l) => l.expenseClass === 'fixed'));
+  const maintenanceNet = round2(i.channels.reduce((n, c) => n + c.maintenanceIn - c.maintenanceOut, 0));
   const result: ReportResult = {
     status: calculable ? 'ok' : 'cannot_calculate',
     reason: calculable ? null : 'cost_missing',
@@ -515,8 +518,9 @@ export function assembleReport(i: ReportInputs): ClosingReport {
     grossProfit: calculable ? grossProfit : null,
     variableExpenses: variableNet,
     fixedExpenses: fixedNet,
-    resultBeforeFixed: calculable ? round2(grossProfit - variableNet) : null,
-    resultAfterExpenses: calculable ? round2(grossProfit - expenses.total) : null,
+    maintenanceNet,
+    resultBeforeFixed: calculable ? round2(grossProfit + maintenanceNet - variableNet) : null,
+    resultAfterExpenses: calculable ? round2(grossProfit + maintenanceNet - expenses.total) : null,
     scope: 'fixed_costs_on_due_date',
   };
 
@@ -712,7 +716,7 @@ export function reportInvariants(
   }
   if (r.result.status === 'ok') {
     if (!eq(r.result.grossProfit!, r.sales.netSalesValue - r.result.costOfUnitsSold!)) fail.push('gross profit = net sales − cost');
-    if (!eq(r.result.resultAfterExpenses!, r.result.grossProfit! - r.expenses.total)) fail.push('result = gross profit − expenses');
+    if (!eq(r.result.resultAfterExpenses!, r.result.grossProfit! + r.result.maintenanceNet - r.expenses.total)) fail.push('result = gross profit + repairs − expenses');
   }
   // A float's difference is counted − expected, and exists only when both are known: unknown is never read as zero.
   for (const f of r.expected.floats ?? []) {
@@ -768,8 +772,11 @@ export function reportVersion(r: ClosingReport, moneyVersion = 0): string {
 
 /** The side of a money line without its agent field while that field holds nothing — the shape every earlier closing was hashed on. */
 function withoutZero<T extends Record<string, number>>(side: T, key: 'agentIn' | 'agentOut'): Record<string, number> {
-  if (side[key]) return side;
-  const { [key]: _zero, ...rest } = side;
+  // A repair's line (D227) is hashed the same way: a day with none keeps the version it was closed on.
+  const { maintenance, ...sides } = side as Record<string, number>;
+  const kept: Record<string, number> = maintenance ? (side as Record<string, number>) : sides;
+  if (kept[key]) return kept;
+  const { [key]: _zero, ...rest } = kept;
   return rest;
 }
 

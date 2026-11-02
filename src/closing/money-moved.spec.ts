@@ -196,7 +196,9 @@ describe('the report version and the day’s money version', () => {
   /** `reportVersion` as it stood before D159, copied verbatim. */
   function before(r: ClosingReport): string {
     const floats = r.expected.floats ?? [];
-    const withoutZero = (side: Record<string, number>, key: string) => {
+    // As every earlier close was hashed: before D227 a side had no repair line.
+    const withoutZero = (full: Record<string, number>, key: string) => {
+      const { maintenance: _none, ...side } = full;
       if (side[key]) return side;
       const { [key]: _zero, ...rest } = side;
       return rest;
