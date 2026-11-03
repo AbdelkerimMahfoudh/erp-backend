@@ -97,6 +97,8 @@ export interface ChannelRow {
   /** A repair's money (D227), on the channel it actually reached or left. */
   maintenanceIn: number;
   maintenanceOut: number;
+  /** Not tracked as a dedicated store balance (D227): money still moves here, with no balance claimed. */
+  untracked?: boolean;
   /**
    * Cash only (0076): what the drawer held when the business day began — the
    * counted cash at the last locked close plus the net cash movement of any
@@ -241,8 +243,9 @@ export function buildChannels(movements: MovementRow[], accounts: AccountRow[], 
  * balance to compare a count against. Reporting it and asking somebody to
  * confirm it are different things, and only the first one is honest.
  */
-export function isCountable(row: Pick<ChannelRow, 'isUnattributed'>): boolean {
-  return !row.isUnattributed;
+export function isCountable(row: Pick<ChannelRow, 'isUnattributed'> & { untracked?: boolean }): boolean {
+  // Untracked (D227): the store makes no claim about what this location holds, so there is no balance to count.
+  return !row.isUnattributed && !row.untracked;
 }
 
 /**
@@ -251,7 +254,7 @@ export function isCountable(row: Pick<ChannelRow, 'isUnattributed'>): boolean {
  * outstanding, not agreed.
  */
 export function countingComplete(
-  rows: { isUnattributed: boolean; counted: number | null; isSkipped: boolean }[],
+  rows: { isUnattributed: boolean; untracked?: boolean; counted: number | null; isSkipped: boolean }[],
 ): boolean {
   return rows.filter(isCountable).every((r) => r.counted !== null || r.isSkipped);
 }

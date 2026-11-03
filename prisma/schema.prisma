@@ -6590,3 +6590,20 @@ model MaintenanceRecord {
   @@index([branchId, businessDate], map: "ix_maintenance_day")
   @@map("maintenance_records")
 }
+
+/// A store's choice to treat a money location as dedicated (0127). No row, or off, makes no claim about what it holds.
+model MoneyLocationTracking {
+  id            Bytes     @id @db.Binary(16)
+  companyId     Bytes     @map("company_id") @db.Binary(16)
+  branchId      Bytes     @map("branch_id") @db.Binary(16)
+  location      String    @db.VarChar(36)
+  isOn          Boolean   @default(false) @map("is_on")
+  openingAmount Decimal?  @map("opening_amount") @db.Decimal(14, 2)
+  effectiveDate DateTime? @map("effective_date") @db.Date
+  version       Int       @default(0)
+  updatedById   Bytes?    @map("updated_by") @db.Binary(16)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(6)
+
+  @@unique([branchId, location], map: "ux_money_tracking_location")
+  @@map("money_location_tracking")
+}

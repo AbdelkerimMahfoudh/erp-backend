@@ -351,6 +351,61 @@ run('a basket from counter to returns', () => {
     expect(Number(frozen.maintenanceOut)).toBe(100);
   });
 
+  describe('dedicated money balances (D227)', () => {
+    const track = (s: Awaited<ReturnType<typeof shop>>, location: string, openingAmount: number, effectiveDate: string) => s.owner.post('money/tracking', { location, on: true, openingAmount, effectiveDate });
+    const sell = (s: Awaited<ReturnType<typeof shop>>, payments: unknown[]) => s.owner.post('sales', { clientUuid: randomUUID(), lines: [{ identifier: s.serial, price: 1000 }], payments });
+    const today = (s: Awaited<ReturnType<typeof shop>>) => s.owner.get('closings/business-day').then((r) => r.body.businessDate as string);
+
+    it('every location off by default: money is reported, no balance is claimed, no count is asked', async () => {
+      const s = await shop();
+      expect((await sell(s, [{ method: 'cash', amount: 1000 }])).status).toBe(201);
+      const balances = (await s.owner.get('money/tracking')).body;
+      expect(balances.locations.every((l: { on: boolean }) => !l.on)).toBe(true);
+      expect(JSON.stringify(balances)).not.toContain('expected');
+      const report = (await s.owner.get('closings/report')).body;
+      expect(report.money.channels.find((c: { channel: string }) => c.channel === 'cash')).toMatchObject({ countable: false, in: { todaysSales: 1000 } });
+      expect(report.close.unverified).toEqual([]);
+      expect((await s.owner.post('closings', {})).status).toBeLessThan(300);
+    });
+
+    it('dedicated cash with a personal Bankily: only the cash is claimed, and needs its count', async () => {
+      const s = await shop();
+      expect((await s.owner.post('money/tracking', { location: 'cash', on: true })).body.code).toBe('opening_required');
+      await track(s, 'cash', 200, await today(s));
+      expect((await sell(s, [{ method: 'cash', amount: 400 }, { method: 'bank', amount: 600, receivingAccountId: s.accountId }])).status).toBe(201);
+      const { locations } = (await s.owner.get('money/tracking')).body;
+      expect(locations.find((l: { location: string }) => l.location === 'cash')).toMatchObject({ on: true, moneyIn: 400, expected: 600 });
+      expect(locations.find((l: { location: string }) => l.location === s.accountId)).toEqual(expect.objectContaining({ on: false }));
+      expect((await s.owner.get('closings/report')).body.close.unverified).toEqual(['cash:NONE']);
+    });
+
+    it('dedicated Bankily with personal cash: the reverse', async () => {
+      const s = await shop();
+      await track(s, s.accountId, 50, await today(s));
+      await sell(s, [{ method: 'cash', amount: 400 }, { method: 'bank', amount: 600, receivingAccountId: s.accountId }]);
+      const { locations } = (await s.owner.get('money/tracking')).body;
+      expect(locations.find((l: { location: string }) => l.location === s.accountId)).toMatchObject({ on: true, expected: 650 });
+      expect(locations.find((l: { location: string }) => l.location === 'cash').on).toBe(false);
+    });
+
+    it('off keeps the history and hides the claim; on again needs a new opening, never the stale one', async () => {
+      const s = await shop();
+      await track(s, 'cash', 200, await today(s));
+      await s.owner.post('money/tracking', { location: 'cash', on: false });
+      expect((await s.owner.get('money/tracking')).body.locations[0]).toEqual(expect.objectContaining({ on: false }));
+      expect((await s.owner.post('money/tracking', { location: 'cash', on: true })).body.code).toBe('opening_required');
+      await track(s, 'cash', 75, await today(s));
+      expect((await s.owner.get('money/tracking')).body.locations[0]).toMatchObject({ on: true, expected: 75 });
+      expect(await root.moneyLocationTracking.count({ where: { companyId: s.companyId } })).toBe(1);
+    });
+
+    it('is the Owner’s, not an Employee’s', async () => {
+      const s = await shop();
+      expect((await s.staff.post('money/tracking', { location: 'cash', on: true, openingAmount: 1, effectiveDate: '2026-01-01' })).status).toBe(403);
+      expect((await s.staff.get('money/tracking')).status).toBe(403);
+    });
+  });
+
   it('a rejected return gives its pieces back to what may be returned', async () => {
     const { s, coverLine } = await soldBasket();
     const all = await raise(s, coverLine.id, 5);

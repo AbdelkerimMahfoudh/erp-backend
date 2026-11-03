@@ -1,3 +1,4 @@
+import { CASH_LOCATION, locationOf, MoneyTrackingStore } from './money-tracking.service';
 import {
   BadRequestException,
   ConflictException,
@@ -6,6 +7,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { Prisma, type ClosingEventKind } from '@prisma/client';
@@ -376,7 +378,32 @@ export class ClosingService {
     private readonly notices: ClosingNoticeService,
     private readonly cls: ClsService<AppClsStore>,
     private readonly moneyAnchors: MoneyAnchorsService,
+    @Optional() private readonly tracking?: MoneyTrackingStore,
   ) {}
+
+  /** What this store has chosen to track, for the balances screen: the location, its opening, and its figure since. */
+  async trackedBalances() {
+    const branchId = this.tenant.requireBranchId();
+    const companyId = this.tenant.companyId();
+    const tracked = (await this.tracking?.tracked(branchId)) ?? new Map<string, { openingAmount: number; effectiveDate: string; version: number }>();
+    const today = await this.businessDay.today(branchId);
+    const accounts = await this.db.receivingAccount.findMany({ where: { isActive: true }, orderBy: { sortOrder: 'asc' }, select: { id: true, label: true } });
+    const locations = [{ location: CASH_LOCATION, label: null as string | null }, ...accounts.map((a) => ({ location: binToUuid(a.id), label: a.label }))];
+    return {
+      asOf: today,
+      locations: await Promise.all(
+        locations.map(async ({ location, label }) => {
+          const on = tracked.get(location);
+          if (!on) return { location, label, on: false as const };
+          const channels = await this.expectedChannels(companyId, branchId, on.effectiveDate, today, 0, 0);
+          const row = channels.find((c) => locationOf({ channel: c.channel, accountId: c.accountId }) === location);
+          const moneyIn = row ? round2(row.salesIn + row.correctionsIn + row.agentIn + row.maintenanceIn) : 0;
+          const moneyOut = row ? round2(row.refundsOut + row.supplierOut + row.expensesOut + row.correctionsOut + row.agentOut + row.maintenanceOut) : 0;
+          return { location, label, on: true as const, openingAmount: on.openingAmount, effectiveDate: on.effectiveDate, moneyIn, moneyOut, expected: round2(on.openingAmount + moneyIn - moneyOut), version: on.version };
+        }),
+      ),
+    };
+  }
 
   // ── The business day itself ─────────────────────────────────────────────
 
@@ -2042,10 +2069,14 @@ export class ClosingService {
       { opening: drawer.opening, expected: cash?.expected ?? 0, opened: openedAnchorOf(drawer.declaredToday ?? drawer.carriedFrom), dayRows: cashDayRows(cash) },
       isOwner,
     );
+    // Nothing tracked, nothing to ask (D227): no opening amount for a location the store makes no claim about.
+    const tracked = await this.tracking?.tracked(branchId);
+    const asked = tracked ? money.methods.filter((m) => tracked.has(locationOf({ channel: m.channel, accountId: m.accountId }))) : money.methods;
+    if (asked.length === 0) return null;
     return {
       mayDecide: isOwner,
       branchCount: money.branchCount,
-      methods: money.methods.map((m) => ({
+      methods: asked.map((m) => ({
         key: m.key,
         channel: m.channel,
         accountId: m.accountId,
@@ -3320,7 +3351,7 @@ export class ClosingService {
     const byKey = new Map(saved.map((c) => [keyOf({ channel: c.channel, accountId: c.receivingAccountId ? binToUuid(c.receivingAccountId) : null }), c]));
     const rows = a.channels.map((ch) => {
       const c = byKey.get(keyOf(ch));
-      return { key: keyOf(ch), isUnattributed: ch.isUnattributed, countable: isCountable(ch), counted: c?.counted == null ? null : num(c.counted), isSkipped: c?.isSkipped ?? false, countedAt: c?.countedAt ?? null };
+      return { key: keyOf(ch), isUnattributed: ch.isUnattributed, untracked: ch.untracked, countable: isCountable(ch), counted: c?.counted == null ? null : num(c.counted), isSkipped: c?.isSkipped ?? false, countedAt: c?.countedAt ?? null };
     });
     const floats = await this.listedFloatsAt(tx, a.branchId, a.closingId);
     return countingComplete(rows) && freshCounts(rows, a.reopenedAt).complete && floatsToCount(floats.providers, floats.counts).length === 0;
@@ -3605,6 +3636,9 @@ export class ClosingService {
     const [chain, declaredToday] = await Promise.all([this.openingChain(companyId, branchId, day), this.drawerDecisionOn(branchId, day)]);
     const adjustment = declaredToday ? setAdjustment(declaredToday, chain.opening.amount) : 0;
     const channels = await this.expectedChannels(companyId, branchId, day, day, chain.opening.amount, adjustment);
+    // Not chosen as a dedicated store balance (D227): the money is still reported, with no balance to count or close against.
+    const tracked = await this.tracking?.tracked(branchId);
+    if (tracked) for (const c of channels) if (!c.isUnattributed && !tracked.has(locationOf({ channel: c.channel, accountId: c.accountId }))) c.untracked = true;
     return { opening: chain.opening, carriedFrom: chain.declared, declaredToday, adjustment, channels };
   }
 
