@@ -11,6 +11,7 @@ import {
   ACCOUNT_DELETION_TEMPLATE,
   ALL_TEMPLATES,
   AUTH_OTP_TEMPLATE,
+  PORTAL_INSTRUCTIONS_TEMPLATE,
   SUBSCRIPTION_TEMPLATES,
   assertLanguageSupported,
   getTemplate,
@@ -219,11 +220,14 @@ describe('the portal instructions and the subscription messages (0099)', () => {
     }
   });
 
-  it('take no link, token or identifier: the portal’s one address is part of the approved text', () => {
+  it('take no link, token or identifier in the body: the portal’s address is part of the approved text', () => {
     for (const t of SUBSCRIPTION_TEMPLATES) {
       expect({ key: t.key, bad: t.variables.filter((v) => /link|url|token|id$|code/i.test(v)) }).toEqual({ key: t.key, bad: [] });
-      expect(() => validateTemplateVariables(t, { ...Object.fromEntries(t.variables.map((v) => [v, 'x'])), link: 'https://x' })).toThrow(/does not accept: link/);
+      expect(() => validateTemplateVariables(t, { ...Object.fromEntries(t.variables.map((v) => [v, 'x'])), ...(t.linkVariable ? { [t.linkVariable]: 'y' } : {}), link: 'https://x' })).toThrow(/does not accept: link/);
     }
+    // Post-Build-4: exactly one carries a per-recipient button — the account-ready message's single-use link — and it is required.
+    expect(SUBSCRIPTION_TEMPLATES.filter((t) => t.linkVariable).map((t) => [t.key, t.linkVariable])).toEqual([['portal.instructions', 'claim']]);
+    expect(() => validateTemplateVariables(PORTAL_INSTRUCTIONS_TEMPLATE, { business: 'x' })).toThrow(/requires a non-empty "claim"/);
     // Every template's keys are unique across the registry.
     expect(new Set(ALL_TEMPLATES.map((t) => t.key)).size).toBe(ALL_TEMPLATES.length);
     expect(new Set(ALL_TEMPLATES.map((t) => t.configKey)).size).toBe(ALL_TEMPLATES.length);

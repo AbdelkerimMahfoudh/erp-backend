@@ -94,11 +94,13 @@ export function describeGraphCode(code?: number, subcode?: number): string {
 /**
  * A utility template's components: its body parameters, in the registry's declared order. A button an approved
  * utility template carries is static — the portal's one address is written into the template (0099) — so nothing is
- * sent for it.
+ * sent for it; except the one template whose URL button takes a suffix (`linkVariable`, post-Build-4), sent as that
+ * button's only parameter.
  */
 function utilityComponents(template: TemplateDefinition, variables: Record<string, string>): object[] {
-  if (template.variables.length === 0) return [];
-  return [{ type: 'body', parameters: template.variables.map((name) => ({ type: 'text', text: variables[name] })) }];
+  const body = template.variables.length === 0 ? [] : [{ type: 'body', parameters: template.variables.map((name) => ({ type: 'text', text: variables[name] })) }];
+  if (!template.linkVariable) return body;
+  return [...body, { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: variables[template.linkVariable] }] }];
 }
 
 export class CloudApiWhatsAppChannel implements WhatsAppChannel {

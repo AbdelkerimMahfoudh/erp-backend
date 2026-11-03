@@ -61,7 +61,7 @@ describe('sent automatically, once, when the Owner’s WhatsApp number is verifi
     await sendAutomatic(w, shop);
 
     expect(sentWhatsApp(w)).toEqual([
-      expect.objectContaining({ to: shop.phone, template: 'portal.instructions', language: 'ar', variables: { business: 'Boutique Aicha' } }),
+      expect.objectContaining({ to: shop.phone, template: 'portal.instructions', language: 'ar', variables: { business: 'Boutique Aicha', claim: w.claimLinks.issued[0].token } }),
     ]);
     // Same key on every attempt: a provider never delivers it twice.
     const [notice] = w.noticesOf(shop);
@@ -172,25 +172,24 @@ describe('WhatsApp first; email only for a recorded reason, to a verified addres
     return { w, shop, notice: w.noticesOf(shop)[0] };
   }
 
-  it('the template not approved: email, with the reason — the portal’s address as its one link', async () => {
+  it('the template not approved (post-Build-4): held — nothing sent by either channel, no link issued; it goes once approved', async () => {
     const { w, shop, notice } = await fallback({ templates: {} });
     expect(sentWhatsApp(w)).toEqual([]);
-    expect(sentEmail(w)).toEqual([
-      expect.objectContaining({
-        to: shop.email,
-        template: 'portal.instructions',
-        variables: { business: 'Shop 1', link: PORTAL_URL },
-        idempotencyKey: `notice:${binToUuid(notice.id)}:email`,
-      }),
-    ]);
-    expect(notice).toMatchObject({
-      state: 'accepted',
-      channel: 'email',
-      whatsappOutcome: 'unavailable',
-      fallbackReason: 'template_unavailable',
-      emailOutcome: 'accepted',
-      destinationMasked: 'o•••@shop.test',
-    });
+    expect(sentEmail(w)).toEqual([]);
+    expect(w.claimLinks.issued).toEqual([]);
+    expect(notice).toMatchObject({ state: 'pending', whatsappOutcome: 'held_template', fallbackReason: null, attempts: 0 });
+    void shop;
+  });
+
+  it('the portal not yet live (post-Build-4): held the same way, and sent with its link once it is', async () => {
+    const { w, shop, notice } = await fallback({ portalLive: false });
+    expect(sentWhatsApp(w)).toEqual([]);
+    expect(notice).toMatchObject({ state: 'pending', whatsappOutcome: 'held_portal', attempts: 0 });
+    (w.config as { portalLive: boolean }).portalLive = true;
+    w.clock.advance(61 * 60_000);
+    await w.notices.deliverNow();
+    expect(sentWhatsApp(w)).toEqual([expect.objectContaining({ to: shop.phone, template: 'portal.instructions', variables: { business: 'Shop 1', claim: w.claimLinks.issued[0].token } })]);
+    expect(w.claimLinks.issued).toHaveLength(1);
   });
 
   it('WhatsApp disabled, or closed until its delivery is proven: email, whatsapp_disabled', async () => {
@@ -283,11 +282,11 @@ describe('WhatsApp first; email only for a recorded reason, to a verified addres
   });
 
   it('a reason to fall back but no verified email, or no email to send with: failed — honestly, with the destination masked', async () => {
-    const w = makeTrialWorld({ templates: {} });
+    const w = makeTrialWorld({ whatsapp: new DisabledWhatsAppChannel() });
     const unverified = w.business({ contacts: 'both', verified: ['phone'] });
     await sendAutomatic(w, unverified);
-    expect(w.noticesOf(unverified)[0]).toMatchObject({ state: 'failed', fallbackReason: 'template_unavailable', emailOutcome: 'not_applicable', failureReason: 'no_email' });
-    const noPortal = makeTrialWorld({ templates: {}, portalUrl: '' });
+    expect(w.noticesOf(unverified)[0]).toMatchObject({ state: 'failed', fallbackReason: 'whatsapp_disabled', emailOutcome: 'not_applicable', failureReason: 'no_email' });
+    const noPortal = makeTrialWorld({ whatsapp: new DisabledWhatsAppChannel(), portalUrl: '' });
     const shop = noPortal.business({ contacts: 'both' });
     await sendAutomatic(noPortal, shop);
     expect(noPortal.noticesOf(shop)[0]).toMatchObject({ state: 'failed', failureReason: 'email_unavailable', destinationMasked: 'o•••@shop.test' });

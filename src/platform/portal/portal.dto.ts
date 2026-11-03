@@ -26,3 +26,8 @@ export class EmailCodeDto {
 export class EmailVerifyStartDto {
   @IsIn(['en', 'fr', 'ar']) language: 'en' | 'fr' | 'ar';
 }
+
+/** The account-ready message's single-use link (post-Build-4): its shape only; the database decides the rest. */
+export class PortalClaimLinkDto {
+  @IsString() @Matches(/^[A-Za-z0-9_-]{43}$/) token: string;
+}

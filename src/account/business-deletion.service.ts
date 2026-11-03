@@ -118,6 +118,7 @@ export class BusinessDeletionService {
 
         await tx.company.update({ where: { id: companyId }, data: { isActive: false } });
         const sessions = await tx.authSession.updateMany({ where: { companyId, revokedAt: null }, data: { revokedAt: now } });
+        await tx.portalClaimLink.updateMany({ where: { companyId, usedAt: null, revokedAt: null }, data: { revokedAt: now } });
         await tx.subscriptionNotice.updateMany({
           where: { companyId, state: { in: ['pending', 'sending'] } },
           data: { state: 'cancelled', cancelReason: 'closed', claimToken: null, claimedUntil: null, completedAt: now },

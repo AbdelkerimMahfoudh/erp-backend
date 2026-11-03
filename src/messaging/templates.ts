@@ -68,6 +68,11 @@ export interface TemplateDefinition {
   readonly use: TemplateUse;
   /** The environment variable holding the provider's approved template name. */
   readonly configKey: string;
+  /**
+   * The one variable sent as a URL button's suffix rather than in the body (post-Build-4: the account-ready message's
+   * single-use portal link). Required like the others; never written into a row or a log line.
+   */
+  readonly linkVariable?: string;
 }
 
 /**
@@ -176,7 +181,8 @@ export const DELIVERY_CHECK_TEMPLATE: TemplateDefinition = {
  *
  * Utility templates, transactional and short. Each approved text carries the portal's one address in its own body —
  * https://dukan.tsxmr.com/subscription, written into the template at approval, never a variable — so no token, no
- * identifier and no link built per person ever goes out. The variables are the business's display name, the time left
+ * identifier and no link built per person goes out; the one exception is the account-ready message's single-use link
+ * (`PORTAL_INSTRUCTIONS_TEMPLATE`, post-Build-4), opaque and spent once. The variables are the business's display name, the time left
  * in words and exact instants in the business's zone (`notices/notice-copy.ts`), and, after a paid expiry, the grace
  * uses left: never an internal id, a price, an amount or a payment instruction. Optional in production: without an
  * approved name, WhatsApp cannot carry that message, the recorded email fallback is tried, and the status says so.
@@ -192,8 +198,13 @@ const subscriptionTemplate = (key: string, variables: readonly string[], configK
   configKey,
 });
 
-/** After the mandatory WhatsApp number is verified: the business may start one 7-day trial, on the portal. */
-export const PORTAL_INSTRUCTIONS_TEMPLATE = subscriptionTemplate('portal.instructions', ['business'], 'WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS');
+/**
+ * The account-ready message (post-Build-4; the owner's brief of 2026-11-03), sent once the mandatory WhatsApp number is
+ * verified: neutral and transactional — the account is ready, and the button opens Dukan to complete the setup and manage
+ * the subscription. It promises no trial: the portal's page shows whether the business may claim one. The button is the
+ * portal's `/claim/` address with the single-use link as its suffix (`claim`, `notices/claim-links.service.ts`).
+ */
+export const PORTAL_INSTRUCTIONS_TEMPLATE: TemplateDefinition = { ...subscriptionTemplate('portal.instructions', ['business'], 'WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS'), linkVariable: 'claim' };
 /** 72, 48 and 24 hours before a free trial ends — which has no grace. */
 export const TRIAL_REMINDER_TEMPLATE = subscriptionTemplate('subscription.trial_reminder', ['business', 'remaining', 'ends'], 'WHATSAPP_TEMPLATE_TRIAL_REMINDER');
 /** The free trial ended: read-only, no grace. */
@@ -261,7 +272,9 @@ export function validateTemplateVariables(
 ): Record<string, string> {
   const provided = Object.keys(variables);
 
-  for (const required of template.variables) {
+  const accepted = template.linkVariable ? [...template.variables, template.linkVariable] : template.variables;
+
+  for (const required of accepted) {
     const value = variables[required];
     if (typeof value !== 'string' || value.trim().length === 0) {
       throw new BadRequestException(
@@ -270,7 +283,7 @@ export function validateTemplateVariables(
     }
   }
 
-  const unexpected = provided.filter((k) => !template.variables.includes(k));
+  const unexpected = provided.filter((k) => !accepted.includes(k));
   if (unexpected.length > 0) {
     throw new BadRequestException(
       `Template "${template.key}" does not accept: ${unexpected.join(', ')}`,

@@ -9,6 +9,7 @@ import { stateOf } from '../../entitlement/entitlement-rules';
 import { lockSubscription } from '../../billing/renewal';
 import { NoticeService } from '../../notices/notice.service';
 import { PlatformAuditService } from '../platform-audit.service';
+import type { PlatformAdminIdentity } from '../platform-admin.service';
 import { mayClaimNow, readFacts, readOwner, subscriptionRecordOf, type TrialFactsRow, type TrialPrincipal } from './trial-facts';
 import { TrialRefusal } from './trial-refusal';
 import {
@@ -129,7 +130,7 @@ export class TrialSetupService {
    * nothing is queued). Otherwise the request is queued and audited, and the answer is the `setup` object once the
    * message was handed to a provider — or `sending`, when that took longer than `SETUP_DELIVERY_WAIT_MS`.
    */
-  async resend(who: TrialPrincipal): Promise<WebsiteSetup> {
+  async resend(who: TrialPrincipal, by?: { admin: PlatformAdminIdentity; ip: string | null }): Promise<WebsiteSetup> {
     const now = this.clock.now();
     const owner = await readOwner(this.prisma, who);
     // Read before the lock — the providers' state and the person's own WhatsApp records — so the lock holds no lookup.
@@ -151,13 +152,13 @@ export class TrialSetupService {
       });
       await this.audit.record(
         {
-          admin: null,
-          actor: actorRef(binToUuid(who.userId)),
+          admin: by?.admin ?? null,
+          ...(by ? { ip: by.ip } : { actor: actorRef(binToUuid(who.userId)) }),
           action: 'trial.instructions_resend',
           targetType: 'Company',
           targetId: who.companyId,
           targetLabel: ready.row.name,
-          after: { trigger: 'resend' },
+          after: { trigger: by ? 'admin_resend' : 'resend' },
           at,
         },
         tx,
@@ -168,6 +169,21 @@ export class TrialSetupService {
     const row = after ? await readFacts(this.prisma, who.companyId) : null;
     if (!after || !row?.trialEligibility) throw new TrialRefusal('owner_only');
     return this.websiteSetup(who, after, row.trialEligibility.registrationMethod, now);
+  }
+
+  /**
+   * The account-ready message again, from the console (post-Build-4): for an Owner whose link was delayed, expired or
+   * lost and who cannot sign in. The same checks and the same daily limit as the portal's resend; a new message carries
+   * a new link and revokes the earlier ones. Audited as the administrator's.
+   */
+  async adminResend(companyId: Buffer, ctx: { admin: PlatformAdminIdentity; ip: string | null }): Promise<WebsiteSetup> {
+    const owner = await this.prisma.user.findFirst({
+      where: { companyId, isActive: true, deletedAt: null, userBranches: { some: { role: { key: 'owner' } } } },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    if (!owner) throw new TrialRefusal('owner_only');
+    return this.resend({ companyId, userId: owner.id }, ctx);
   }
 
   /**

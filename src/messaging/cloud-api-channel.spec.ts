@@ -135,6 +135,20 @@ describe('the request the provider receives', () => {
     expect(JSON.stringify(body)).not.toMatch(/https?:|button/);
   });
 
+  it('fills the account-ready message (post-Build-4): the name in the body, the single-use link as the URL button’s only parameter', async () => {
+    const { calls, fetchImpl } = fakeFetch(() => json(200, { messages: [{ id: 'wamid.6' }] }));
+    const claim = 'A'.repeat(43);
+    const result = await new CloudApiWhatsAppChannel(config({ fetchImpl })).send({ ...otp, template: PORTAL_INSTRUCTIONS_TEMPLATE.key, language: 'fr', variables: { business: 'Boutique Aicha', claim } });
+    expect(result).toMatchObject({ status: 'accepted' });
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.template.components).toEqual([
+      { type: 'body', parameters: [{ type: 'text', text: 'Boutique Aicha' }] },
+      { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: claim }] },
+    ]);
+    // Never a whole address: the template's approved URL holds the portal's /claim/ path.
+    expect(JSON.stringify(body)).not.toMatch(/https?:/);
+  });
+
   it('refuses a subscription template sent without one of its variables, or with one more, without a network call', async () => {
     const { calls, fetchImpl } = fakeFetch(() => json(200, {}));
     const channel = new CloudApiWhatsAppChannel(config({ fetchImpl }));

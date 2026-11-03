@@ -191,7 +191,7 @@ describe('the session service on its own', () => {
       expect({ file, reads: code.match(/origin|referer|referrer/gi) }).toEqual({ file, reads: null });
     }
     const controller = readFileSync('src/platform/portal/portal-session.controller.ts', 'utf8');
-    // Every answer that opens a session returns the view alone: the tokens went into the cookies.
-    expect(controller.match(/return \{ status: 'signed_in', session: (answer|opened)\.session \}/g)).toHaveLength(3);
+    // Every answer that opens a session returns the view alone: the tokens went into the cookies — sign-in, account choice, refresh and (post-Build-4) the account-ready link.
+    expect(controller.match(/return \{ status: 'signed_in', session: (answer|opened)\.session \}/g)).toHaveLength(4); // sign-in, account choice, refresh, the account-ready link
   });
 });

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpException, HttpStatus, Post, Req, Res } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
@@ -13,13 +13,20 @@ import {
   readCookie,
 } from '../../common/http/cookies';
 import { PORTAL_SESSION_TTL_HOURS } from '../portal-handoff.service';
-import { PortalChooseAccountDto, PortalSignInDto } from './portal.dto';
+import { PortalChooseAccountDto, PortalClaimLinkDto, PortalSignInDto } from './portal.dto';
 import { PortalSessionService, type PortalOpened } from './portal-session.service';
 
 /*
  * The sign-in limit, read the way `auth.controller.ts` reads it: a decorator is evaluated before anything is injected,
  * the Joi schema validates the variable, and the fallback is the schema's own default.
  */
+/** What the page is told when a link cannot open the portal: no detail of whose it was. */
+const CLAIM_REFUSALS = {
+  invalid: 'This link is not valid. Sign in with your account instead.',
+  expired: 'This link has expired. Sign in with your account, or ask for a new link.',
+  used: 'This link was already used. Sign in with your account.',
+} as const;
+
 const SIGN_IN_THROTTLE = { default: { limit: Number(process.env.AUTH_THROTTLE_LIMIT) || 10, ttl: 60_000 } };
 
 const COOKIE = { httpOnly: true, sameSite: 'strict' as const };
@@ -69,6 +76,26 @@ export class PortalSessionController {
   async chooseAccount(@Body() dto: PortalChooseAccountDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     res.setHeader('Cache-Control', 'no-store');
     const opened = await this.portal.chooseAccount(dto, { ip: req.ip, userAgent: req.headers['user-agent'] });
+    setCookies(res, opened);
+    return { status: 'signed_in', session: opened.session };
+  }
+
+  /**
+   * The account-ready message's link (post-Build-4): the token comes in the body — the page took it from its address and
+   * dropped it from there — and is spent once for the Owner's portal session, set as cookies like a sign-in. Refused
+   * plainly: invalid, expired or already used, each with what to do next on the page.
+   */
+  @Public()
+  @Throttle(SIGN_IN_THROTTLE)
+  @Post('claim-link')
+  @HttpCode(HttpStatus.OK)
+  async claimLink(@Body() dto: PortalClaimLinkDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    res.setHeader('Cache-Control', 'no-store');
+    const opened = await this.portal.openWithClaimLink(dto.token, { ip: req.ip, userAgent: req.headers['user-agent'] });
+    if ('refused' in opened) {
+      const status = opened.refused === 'expired' ? HttpStatus.GONE : opened.refused === 'used' ? HttpStatus.CONFLICT : HttpStatus.BAD_REQUEST;
+      throw new HttpException({ code: `claim_link_${opened.refused}`, message: CLAIM_REFUSALS[opened.refused] }, status);
+    }
     setCookies(res, opened);
     return { status: 'signed_in', session: opened.session };
   }

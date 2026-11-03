@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { NoticeService } from './notice.service';
+import { ClaimLinkService } from './claim-links.service';
 import { NoticeWorker } from './notice.worker';
 
 /**
@@ -8,7 +9,7 @@ import { NoticeWorker } from './notice.worker';
  */
 @Global()
 @Module({
-  providers: [NoticeService, NoticeWorker],
-  exports: [NoticeService],
+  providers: [NoticeService, NoticeWorker, ClaimLinkService],
+  exports: [NoticeService, ClaimLinkService],
 })
 export class NoticesModule {}

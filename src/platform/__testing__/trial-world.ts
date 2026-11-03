@@ -222,6 +222,8 @@ export interface WorldOptions {
   templates?: Record<string, string>;
   /** `<PORTAL_ORIGIN>/subscription`; `''` means no email can carry a message. */
   portalUrl?: string;
+  /** PORTAL_LIVE (post-Build-4): false holds the account-ready message. */
+  portalLive?: boolean;
   /** WHATSAPP_MODE. The consent rule is the same in both (D213). */
   whatsappMode?: 'test' | 'live';
 }
@@ -427,6 +429,8 @@ export function makeTrialWorld(options: WorldOptions = {}) {
   const config = {
     whatsappMode: options.whatsappMode ?? 'test',
     portalSubscriptionUrl: options.portalUrl ?? PORTAL_URL,
+    // Post-Build-4: the account-ready message is held until the portal is live; the world's portal is, unless told.
+    portalLive: options.portalLive ?? true,
     templates: options.templates ?? (Object.fromEntries(SUBSCRIPTION_TEMPLATES.map((x) => [x.configKey, `erp_${x.key.replace('.', '_')}`])) as Record<string, string>),
     whatsappTemplateName(configKey: string): string {
       return this.templates[configKey] ?? '';
@@ -436,7 +440,9 @@ export function makeTrialWorld(options: WorldOptions = {}) {
   const hasher = { hash: (value: string) => `hash:${value.trim().toLowerCase()}` };
   const email = options.email ?? new TestEmailChannel();
   const whatsapp = options.whatsapp ?? new TestWhatsAppChannel();
-  const notices = new NoticeService(db as never, config as never, entitlement, records as never, hasher as never, whatsapp, email, clock);
+  // The account-ready message's single-use links (post-Build-4), recorded so a test can read what each message carried.
+  const claimLinks = { issued: [] as { companyId: Buffer; userId: Buffer; noticeId?: Buffer | null; token: string }[], async issue(p: { companyId: Buffer; userId: Buffer; noticeId?: Buffer | null }) { const token = `link${String(this.issued.length).padStart(39, '0')}`; this.issued.push({ ...p, token }); return { token, expiresAt: new Date(clock.now().getTime() + 72 * 3_600_000) }; } };
+  const notices = new NoticeService(db as never, config as never, entitlement, records as never, hasher as never, whatsapp, email, clock, claimLinks as never);
   const setup = new TrialSetupService(db as never, entitlement, audit, notices, clock);
   const service = new TrialService(db as never, entitlement, audit, setup, clock);
 
@@ -531,6 +537,7 @@ export function makeTrialWorld(options: WorldOptions = {}) {
     locks,
     hooks,
     config,
+    claimLinks,
     /** What the WhatsApp records know about a number. */
     contact: (phone: string, state: Partial<ContactState>) => contacts.set(phone, { ...REGISTERED_CONTACT, ...state }),
     /** The decision recorded at the business's current paid period end, as the sweeper would write it. */

@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { IsUUID } from 'class-validator';
 import { adminAccountLabel } from '../common/account-label';
 import { claimedBy } from './owner-identity/owner-identity';
@@ -50,6 +50,7 @@ import {
   type AdminRequest,
 } from './platform-admin.guard';
 import { STEP_UP_TTL_MS } from './platform-mfa.service';
+import { TrialSetupService } from './trial/trial-setup.service';
 import { PlatformAdminService, ADMIN_SESSION_TTL_HOURS } from './platform-admin.service';
 import { AllowPendingMfa } from './platform-admin.guard';
 import { PortalHandoffService, HANDOFF_TTL_SECONDS, PORTAL_SESSION_TTL_HOURS } from './portal-handoff.service';
@@ -342,6 +343,7 @@ export class PlatformController {
     private readonly flow: RegistrationFlowService,
     private readonly provisioning: ProvisioningService,
     private readonly testProvisioning: AccountProvisioningService,
+    @Optional() private readonly trialSetup?: TrialSetupService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -1076,6 +1078,22 @@ export class PlatformController {
     const admin = req.platformAdmin!;
     await this.admins.requireStepUp(admin);
     return this.provisioning.extendStoreGrant(id, requestId, { until: new Date(dto.until), reason: dto.reason }, { admin, ip: req.ip });
+  }
+
+  /**
+   * The account-ready message again, with a new single-use link (post-Build-4): for an Owner whose link was delayed,
+   * expired or lost. The portal's checks and daily limit apply; the earlier links stop working.
+   */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('businesses/:id/account-ready/resend')
+  @HttpCode(HttpStatus.OK)
+  async resendAccountReady(@Param('id') id: string, @Body() _dto: InvitationDto, @Req() req: AdminRequest) {
+    const admin = req.platformAdmin!;
+    await this.admins.requireStepUp(admin);
+    if (!isUuid(id)) throw new NotFoundException('No business has that id.');
+    if (!this.trialSetup) throw new ServiceUnavailableException('The account-ready message is not available on this server.');
+    return this.trialSetup.adminResend(uuidToBin(id), { admin, ip: req.ip ?? null });
   }
 
   /** A fresh invitation for the Owner. Every unspent one is revoked by it. */

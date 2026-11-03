@@ -159,6 +159,8 @@ export const envValidationSchema = Joi.object({
   // check rests on one. Empty: no portal message can be sent, and the status says so. Production refuses anything but
   // an https:// origin with no path, and APP_ENV=production anything but https://dukan.tsxmr.com (production-guard.ts).
   PORTAL_ORIGIN: Joi.string().allow('').default(''),
+  // Post-Build-4: set only once the portal is published and verified on its real hostname; holds the account-ready message until then.
+  PORTAL_LIVE: Joi.string().valid('enabled', 'disabled', '').default(''),
 
   // ── Customer activation (0102; D217) ──────────────────────────────────────
   // "closed": the console's owner setup invitation, and the actions that give a business access, are allowed for test

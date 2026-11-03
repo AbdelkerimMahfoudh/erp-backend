@@ -1,7 +1,8 @@
 import { neutralAccount } from '../common/account-label';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Prisma, type SubscriptionNotice, type SubscriptionNoticeKind } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ClaimLinkService } from './claim-links.service';
 import { AppConfigService } from '../common/config/app-config.service';
 import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 import { CLOCK, type Clock } from '../entitlement/clock';
@@ -70,6 +71,8 @@ import {
 
 /** How long a worker holds a message it is sending. */
 const LEASE_MS = 2 * 60_000;
+/** How long the account-ready message waits before looking again at a portal not yet live or a template not yet approved. */
+const HOLD_MS = 60 * 60_000;
 /** Messages claimed per batch. */
 const BATCH_SIZE = 50;
 /** Unexpected errors before a message is parked as failed (`internal_error`). */
@@ -185,6 +188,7 @@ export class NoticeService {
     @Inject(WHATSAPP_CHANNEL) private readonly whatsapp: WhatsAppChannel,
     @Inject(EMAIL_CHANNEL) private readonly email: EmailChannel,
     @Inject(CLOCK) private readonly clock: Clock,
+    @Optional() private readonly claimLinks?: ClaimLinkService,
   ) {}
 
   // ── Scheduling ───────────────────────────────────────────────────────────
@@ -378,6 +382,14 @@ export class NoticeService {
     const language = (LANGUAGES as readonly string[]).includes(n.language) ? (n.language as MessageLanguage) : 'en';
     const variables = this.variablesOf(n, row, slot, language);
 
+    // The account-ready message waits for the portal and its template (post-Build-4): held, not spent, while either is
+    // missing — its button would open nothing, or nothing could carry it. Only when WhatsApp could reach the Owner at all;
+    // with no verified number the attempt below records why nothing was sent.
+    if (template.linkVariable && n.fallbackReason === null && recipient.phone && recipient.phoneVerifiedAt) {
+      const held = !this.config.portalLive ? 'held_portal' : isRealChannel(this.whatsapp) && this.config.whatsappTemplateName(template.configKey) === '' ? 'held_template' : null;
+      if (held) return { state: 'pending', whatsappOutcome: held, nextAttemptAt: new Date(now.getTime() + HOLD_MS), attempts: Math.max(0, n.attempts - 1) };
+    }
+
     if (n.fallbackReason === null) {
       const step = await this.tryWhatsApp(n, recipient, template, language, variables);
       if (step.done) return step.transition;
@@ -410,9 +422,17 @@ export class NoticeService {
     const destination = phone ? { destinationMasked: maskForOwner('phone', phone), destinationHash: this.hasher.hash(phone) } : {};
     if (plan.action === 'fallback') return { done: false, reason: plan.reason, whatsappOutcome: 'unavailable' };
 
+    // The single-use portal link, issued only now that the message can go: the raw token goes into the button and nowhere
+    // else. A retry issues one more for the same message; a resend's message revokes this one (`claim-links.service.ts`).
+    let sent = variables;
+    if (template.linkVariable) {
+      if (!this.claimLinks) return { done: false, reason: 'whatsapp_disabled', whatsappOutcome: 'unavailable' };
+      const { token } = await this.claimLinks.issue({ companyId: n.companyId, userId: to.id, noticeId: n.id }, now);
+      sent = { ...variables, [template.linkVariable]: token };
+    }
     let result: DeliveryResult;
     try {
-      result = await this.whatsapp.send({ to: phone!, template: template.key, language, variables, idempotencyKey: whatsappKeyOf(binToUuid(n.id)) });
+      result = await this.whatsapp.send({ to: phone!, template: template.key, language, variables: sent, idempotencyKey: whatsappKeyOf(binToUuid(n.id)) });
     } catch {
       result = { status: 'failed', reason: 'temporary', detail: 'The channel raised an unexpected error', provider: this.whatsapp.name };
     }

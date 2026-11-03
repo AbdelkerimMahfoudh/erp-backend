@@ -1,9 +1,10 @@
 import { storesOfUser, type NamedStore } from '../../common/account-label';
-import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, Injectable, UnauthorizedException, Optional } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { ClaimLinkService, type ClaimRefusal } from '../../notices/claim-links.service';
 import { AppConfigService } from '../../common/config/app-config.service';
 import { portalCsrfToken } from '../../common/http/portal-csrf';
-import { uuidToBin } from '../../common/utils/uuid.util';
+import { binToUuid, uuidToBin } from '../../common/utils/uuid.util';
 import { AuthService, type AuthTokenResponse } from '../../auth/auth.service';
 import { SessionsService } from '../../auth/sessions.service';
 import { TokensService } from '../../auth/tokens.service';
@@ -27,6 +28,9 @@ import type { PortalChooseAccountDto, PortalSignInDto } from './portal.dto';
  */
 
 /** Who the portal is signed in as, as the page shows it — and the token its unsafe requests carry. */
+/** A link whose Owner or business can no longer open the portal: the transaction is undone, the link not spent. */
+class ClaimLinkUnusable extends Error {}
+
 export interface PortalSessionView {
   owner: { name: string };
   business: { name: string | null; stores: NamedStore[] };
@@ -59,6 +63,7 @@ export class PortalSessionService {
     private readonly sessions: SessionsService,
     private readonly tokens: TokensService,
     private readonly config: AppConfigService,
+    @Optional() private readonly claimLinks?: ClaimLinkService,
   ) {}
 
   async signIn(dto: PortalSignInDto, meta: { ip?: string; userAgent?: string }): Promise<PortalSignInAnswer> {
@@ -69,6 +74,35 @@ export class PortalSessionService {
 
   async chooseAccount(dto: PortalChooseAccountDto, meta: { ip?: string; userAgent?: string }): Promise<PortalOpened> {
     return this.opened(await this.auth.chooseAccount(dto.continuationToken, dto.accountRef, {} as LoginDto, meta));
+  }
+
+  /**
+   * The account-ready message's link (post-Build-4): spent once, for a normal portal session of the business's Owner —
+   * re-checked now, not trusted from when it was sent: an active Owner of an active, undeleted business. The link is
+   * spent only if the session opens. Nothing else is granted: the trial is the page's to claim, by that Owner.
+   */
+  async openWithClaimLink(token: string, meta: { ip?: string; userAgent?: string }): Promise<PortalOpened | { refused: ClaimRefusal }> {
+    if (!this.claimLinks) return { refused: 'invalid' };
+    const spent = await this.claimLinks.redeem(token, async (tx, link) => {
+      const owner = await tx.user.findFirst({
+        where: { id: link.userId, companyId: link.companyId, isActive: true, deletedAt: null, company: { isActive: true, deletedAt: null }, userBranches: { some: { role: { key: 'owner' } } } },
+        select: { id: true, companyId: true },
+      });
+      if (!owner) throw new ClaimLinkUnusable();
+      const secret = this.tokens.generateRefreshSecret();
+      const sessionId = await this.sessions.create({ companyId: owner.companyId, userId: owner.id, secret, userAgent: meta.userAgent, ip: meta.ip });
+      return { owner, sessionId, secret };
+    }).catch((e) => {
+      if (e instanceof ClaimLinkUnusable) return { ok: false as const, reason: 'invalid' as const };
+      throw e;
+    });
+    if (!spent.ok) return { refused: spent.reason };
+    const { owner, sessionId, secret } = spent.result;
+    const access = this.tokens.signAccessToken(binToUuid(owner.id), binToUuid(owner.companyId), binToUuid(sessionId));
+    const refreshToken = this.tokens.buildRefreshToken(binToUuid(sessionId), secret);
+    const named = await this.ownerOf(owner.id, owner.companyId);
+    if (!named) throw new ForbiddenException(OWNER_ONLY);
+    return { accessToken: access.token, accessTtlSeconds: access.expiresIn, refreshToken, session: await this.viewOf(named, binToUuid(sessionId)) };
   }
 
   /** The refresh cookie, rotated: a new pair of cookies for the same session — and the Owner checked again. */

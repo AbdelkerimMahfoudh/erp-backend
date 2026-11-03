@@ -6634,3 +6634,20 @@ model BusinessDeletion {
 
   @@map("business_deletions")
 }
+
+/// Post-Build-4 (0129): the account-ready message's portal link. Only the SHA-256 of its 256 random bits is kept; spent once.
+model PortalClaimLink {
+  id        Bytes     @id @db.Binary(16)
+  companyId Bytes     @map("company_id") @db.Binary(16)
+  userId    Bytes     @map("user_id") @db.Binary(16)
+  /// The message that carried it, when one did.
+  noticeId  Bytes?    @map("notice_id") @db.Binary(16)
+  tokenHash String    @unique(map: "ux_portal_claim_links_token") @map("token_hash") @db.Char(64)
+  createdAt DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  expiresAt DateTime  @map("expires_at") @db.DateTime(6)
+  usedAt    DateTime? @map("used_at") @db.DateTime(6)
+  revokedAt DateTime? @map("revoked_at") @db.DateTime(6)
+
+  @@index([companyId, usedAt, revokedAt], map: "ix_portal_claim_links_company")
+  @@map("portal_claim_links")
+}

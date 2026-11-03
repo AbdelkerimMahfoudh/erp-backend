@@ -530,6 +530,8 @@ export class AccountDeletionService {
     const people = await tx.user.findMany({ where: { companyId, deletedAt: null }, select: { id: true, email: true, phone: true } });
     // D227: a closed business's contacts are free again. A claim, not history.
     await tx.ownerIdentity.deleteMany({ where: { companyId } });
+    // Post-Build-4 (0129): no portal link of a closed business opens anything.
+    await tx.portalClaimLink.updateMany({ where: { companyId, usedAt: null, revokedAt: null }, data: { revokedAt: now } });
     const forgotten = await this.forgetPeople(tx, companyId, people, now, request.userId);
     // People already removed before the closure — a cancelled invitation keeps its name — are forgotten too (review F11).
     await tx.user.updateMany({ where: { companyId, deletedAt: { not: null } }, data: { name: DELETED_USER_NAME, email: null, phone: null } });

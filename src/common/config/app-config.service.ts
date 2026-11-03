@@ -194,6 +194,15 @@ export class AppConfigService {
     return (this.config.get<string>('PORTAL_ORIGIN') ?? '').trim().replace(/\/+$/, '');
   }
 
+  /**
+   * Whether the portal is published and verified live (post-Build-4): `PORTAL_LIVE=enabled`, set by the operator only
+   * after the HTTPS checks on the real hostname. Until then the account-ready message is held, never sent: its button
+   * would open nothing.
+   */
+  get portalLive(): boolean {
+    return (this.config.get<string>('PORTAL_LIVE') ?? '').trim() === 'enabled' && this.portalOrigin !== '';
+  }
+
   /** `<portal>/subscription` — generic: no token, no identifier, nothing about who it is for. Empty with no portal. */
   get portalSubscriptionUrl(): string {
     return this.portalOrigin ? `${this.portalOrigin}/subscription` : '';
