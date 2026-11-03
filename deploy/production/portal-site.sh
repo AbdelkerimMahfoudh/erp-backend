@@ -67,12 +67,12 @@ check_live() {
   local code allowed
   code=$(edge_curl "$HOST" /subscription -o /dev/null -w '%{http_code}' || true)
   [ "$code" = 200 ] || die "$ORIGIN/subscription answered $code (expected 200)."
-  edge_curl "$HOST" /subscription -o /dev/null -D - | tr -d '' | grep -qi '^x-robots-tag: .*noindex' || die "$ORIGIN/subscription does not say noindex."
+  edge_curl "$HOST" /subscription -o /dev/null -D - | tr -d '' | grep -qi '^x-robots-tag: .*noindex' || die "$ORIGIN/subscription does not say noindex."
   code=$(edge_curl "$HOST" /claim/check -o /dev/null -w '%{http_code}' || true)
   [ "$code" = 200 ] || die "$ORIGIN/claim/ answered $code (expected the page, 200)."
   code=$(edge_curl "$HOST" /admin -o /dev/null -w '%{http_code}' || true)
   [ "$code" = 404 ] || die "$ORIGIN/admin answered $code (expected 404)."
-  allowed=$(edge_curl "$API_HOST" /api/v1/platform/portal/session -o /dev/null -D - -X OPTIONS -H "Origin: $ORIGIN"     -H 'Access-Control-Request-Method: GET' | tr -d '' | sed -n 's/^[Aa]ccess-[Cc]ontrol-[Aa]llow-[Oo]rigin: //p')
+  allowed=$(edge_curl "$API_HOST" /api/v1/platform/portal/session -o /dev/null -D - -X OPTIONS -H "Origin: $ORIGIN"     -H 'Access-Control-Request-Method: GET' | tr -d '' | sed -n 's/^[Aa]ccess-[Cc]ontrol-[Aa]llow-[Oo]rigin: //p')
   [ "$allowed" = "$ORIGIN" ] || die "the API grants \"${allowed:-nothing}\" to $ORIGIN."
   code=$(edge_curl "$API_HOST" /api/v1/platform/admin/me -o /dev/null -w '%{http_code}' -H "Origin: $ORIGIN")
   [ "$code" = 403 ] || die "the API answered $code to the portal on an administrator route (expected 403)."
