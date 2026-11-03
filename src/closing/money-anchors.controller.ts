@@ -34,6 +34,14 @@ export class MoneyAnchorsController {
     return this.closing.trackedBalances();
   }
 
+  /** Anyone who reads the store's reports (Owner, Manager): this store's tracked cash only, read-only (D227 option A). */
+  @Get('money/tracking/cash')
+  @RequirePermissions('report.view')
+  @ApiOperation({ summary: "This store's tracked cash, expected from Dukan records; nothing when cash is not tracked" })
+  trackedCash() {
+    return this.closing.trackedCash();
+  }
+
   @Post('money/tracking')
   @RequirePermissions('money.anchor.record')
   async setTracking(@Body() dto: SetMoneyTrackingDto) {

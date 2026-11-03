@@ -410,6 +410,17 @@ export class ClosingService {
     };
   }
 
+  /**
+   * The Manager's card (D227, owner's option A): this store's tracked cash and nothing else. The same figure and label
+   * as the Owner's Store balances, read-only, never an account and never the settings. Untracked cash claims nothing.
+   */
+  async trackedCash() {
+    const view = await this.trackedBalances();
+    const cash = view.locations.find((l) => l.location === CASH_LOCATION);
+    if (!cash || !cash.on) return { asOf: view.asOf, on: false as const };
+    return { asOf: view.asOf, on: true as const, effectiveDate: cash.effectiveDate, expected: cash.expected };
+  }
+
   // ── The business day itself ─────────────────────────────────────────────
 
   /** Which day it is at this branch, and how the previous one stands. */

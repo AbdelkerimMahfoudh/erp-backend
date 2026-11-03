@@ -57,14 +57,14 @@ run('a basket from counter to returns', () => {
     const branchId = uuidToBin(reg.branchId);
     await root.subscription.updateMany({ where: { companyId }, data: { status: 'activated', currentPeriodEnd: new Date(Date.now() + 30 * 86400000) } });
 
-    const client = async (userId: string) => {
+    const client = async (userId: string, branch: string = reg.branchId) => {
       const secret = app.get(TokensService).generateRefreshSecret();
       const sessionId = await app.get(SessionsService).create({ companyId, userId: uuidToBin(userId), secret });
       const token = app.get(TokensService).signAccessToken(userId, reg.companyId, binToUuid(sessionId)).token;
       const send = async (method: string, path: string, body?: unknown) => {
         const r = await fetch(`${base}/api/v1/${path}`, {
           method,
-          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-branch-id': reg.branchId, 'user-agent': 'basket-journey' },
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-branch-id': branch, 'user-agent': 'basket-journey' },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
         const text = await r.text();
@@ -86,6 +86,16 @@ run('a basket from counter to returns', () => {
     await root.userBranch.create({ data: { id: newUuidV7Bin(), companyId, userId: staffId, branchId, roleId: role.id } });
     const staff = await client(binToUuid(staffId));
 
+    // A Manager of this store only, and a second store of the same business it is not assigned to (D227 option A).
+    const managerId = newUuidV7Bin();
+    const managerRole = await root.role.findFirstOrThrow({ where: { companyId, key: 'store_manager' } });
+    await root.user.create({ data: { id: managerId, companyId, name: 'Manager', login: `m-${t}`, personalId: `M-${t.slice(0, 8)}`, passwordHash: 'x', isActive: true } as never });
+    await root.userBranch.create({ data: { id: newUuidV7Bin(), companyId, userId: managerId, branchId, roleId: managerRole.id } });
+    const manager = await client(binToUuid(managerId));
+    const otherStore = newUuidV7Bin();
+    await root.branch.create({ data: { id: otherStore, companyId, name: `Other ${t}` } as never });
+    const managerElsewhere = await client(binToUuid(managerId), binToUuid(otherStore));
+
     const product = async (model: string, trackingType: 'serial' | 'quantity', defaultPrice: number) => {
       const id = newUuidV7Bin();
       await root.product.create({ data: { id, companyId, brand: 'Test', model: `${model}${t}`, trackingType, defaultPrice } as never });
@@ -106,7 +116,7 @@ run('a basket from counter to returns', () => {
     await root.receivingAccount.create({ data: { id: accountId, companyId, provider: 'bankily', label: `Bankily ${t}` } });
     const opened = await owner.post('closings/open', openingMoney ? { openingMoney } : {});
     if (opened.status >= 300) throw new Error(JSON.stringify(opened.body));
-    return { companyId, branchId, owner, staff, serial, covers, cables, accountId: binToUuid(accountId) };
+    return { companyId, branchId, owner, staff, manager, managerElsewhere, serial, covers, cables, accountId: binToUuid(accountId) };
   }
 
   const shelf = async (s: { companyId: Buffer }, productId: Buffer) => {
@@ -388,6 +398,31 @@ run('a basket from counter to returns', () => {
       const { locations } = (await s.owner.get('money/tracking')).body;
       expect(locations.find((l: { location: string }) => l.location === s.accountId)).toMatchObject({ on: true, expected: 650 });
       expect(locations.find((l: { location: string }) => l.location === 'cash').on).toBe(false);
+    });
+
+    it('a Manager sees this store’s tracked cash only, read-only; nothing once tracking is off (option A)', async () => {
+      const s = await shop();
+      // Untracked: the card claims nothing.
+      expect((await s.manager.get('money/tracking/cash')).body).toEqual({ asOf: expect.any(String), on: false });
+      await track(s, 'cash', 200, await today(s));
+      await track(s, s.accountId, 50, await today(s));
+      await sell(s, [{ method: 'cash', amount: 400 }, { method: 'bank', amount: 600, receivingAccountId: s.accountId }]);
+      const card = (await s.manager.get('money/tracking/cash')).body;
+      // The Owner's figure, and nothing about the account, its label or the settings.
+      const owners = (await s.owner.get('money/tracking')).body.locations.find((l: { location: string }) => l.location === 'cash');
+      expect(card).toEqual({ asOf: expect.any(String), on: true, effectiveDate: owners.effectiveDate, expected: owners.expected });
+      expect(JSON.stringify(card)).not.toMatch(new RegExp(`${s.accountId}|Bankily|version|opening`, 'i'));
+      // Configuration stays the Owner's.
+      expect((await s.manager.get('money/tracking')).status).toBe(403);
+      expect((await s.manager.post('money/tracking', { location: 'cash', on: false })).status).toBe(403);
+      expect((await s.manager.post('money/anchors', { accountId: s.accountId, amount: 1 })).status).toBe(403);
+      // Another store of the same business, not assigned to this Manager: refused.
+      expect((await s.managerElsewhere.get('money/tracking/cash')).status).toBe(403);
+      // An Employee has no card.
+      expect((await s.staff.get('money/tracking/cash')).status).toBe(403);
+      // The Owner turns cash tracking off: the card goes.
+      await s.owner.post('money/tracking', { location: 'cash', on: false });
+      expect((await s.manager.get('money/tracking/cash')).body).toEqual({ asOf: expect.any(String), on: false });
     });
 
     it('off keeps the history and hides the claim; on again needs a new opening, never the stale one', async () => {
