@@ -10,6 +10,7 @@ import { assertProductionConfig, productionConfigProblems } from './production-g
  */
 
 /** A production environment with nothing wrong with it. */
+
 const SAFE = {
   NODE_ENV: 'production',
   API_INGRESS: 'loopback',
@@ -699,5 +700,19 @@ describe('the production environment proper (APP_ENV=production, D200)', () => {
 
   it.each(['net', 'tls,net', 'http'])('refuses Node debug tracing (NODE_DEBUG=%s): it bypasses the log redaction', (value) => {
     expect(productionConfigProblems({ ...SAFE, NODE_DEBUG: value }).join('\n')).toMatch(/NODE_DEBUG is set/);
+  });
+});
+
+describe('ADMIN_ORIGINS in production', () => {
+  const base = { ...SAFE, CORS_ORIGINS: 'https://admin.tsxmr.com,https://dukan.example.com' };
+  const about = (env: object) => productionConfigProblems(env).filter((p) => p.startsWith('ADMIN_ORIGINS'));
+
+  it('may be absent, or name an exact https origin that CORS allows', () => {
+    expect(about(base)).toEqual([]);
+    expect(about({ ...base, ADMIN_ORIGINS: 'https://admin.tsxmr.com' })).toEqual([]);
+  });
+
+  it.each(['http://admin.tsxmr.com', 'https://admin.tsxmr.com/', 'https://other.tsxmr.com', 'https://dukan.example.com'])('refuses %s', (origin) => {
+    expect(about({ ...base, ADMIN_ORIGINS: origin }).length).toBeGreaterThan(0);
   });
 });
