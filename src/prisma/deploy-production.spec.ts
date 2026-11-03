@@ -302,7 +302,7 @@ describe('the production package', () => {
       }
       expect({ name, shebang: body.startsWith('#!/usr/bin/env bash\n') }).toEqual({ name, shebang: true });
       // Run on the operator's machine, or by tests, without stack.env (D227): strict by themselves, never tracing.
-      if (name === 'backup-receipt.sh' || name === 'backup-offhost.sh') {
+      if (name === 'backup-receipt.sh' || name === 'backup-offhost.sh' || name === 'schema-for-rehearsal.sh') {
         expect(body).toMatch(/^set -euo pipefail$/m);
         expect(/set -[a-z]*x|bash -x/.test(body)).toBe(false);
         continue;
