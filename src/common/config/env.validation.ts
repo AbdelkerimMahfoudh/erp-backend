@@ -22,6 +22,8 @@ export const envValidationSchema = Joi.object({
 
   // HTTP hardening.
   CORS_ORIGINS: Joi.string().allow('').default(''),
+  // The only browser origins that may use the administrator's session; blank: not enforced (common/http/admin-origin.ts).
+  ADMIN_ORIGINS: Joi.string().allow('').default(''),
   SWAGGER_ENABLED: Joi.boolean().default(true),
   THROTTLE_TTL_SECONDS: Joi.number().integer().min(1).default(60),
   THROTTLE_LIMIT: Joi.number().integer().min(1).default(120),

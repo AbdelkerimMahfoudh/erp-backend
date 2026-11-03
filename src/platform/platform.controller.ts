@@ -45,7 +45,7 @@ import { buildEntitlement, type EntitlementState, type SubscriptionStatus } from
 import { graceEpisodesOf, graceFactsFrom, type GraceEpisodeRow } from '../entitlement/grace-facts';
 import {
   ADMIN_SESSION_COOKIE,
-  PlatformAdminGuard,
+  AdminOriginGuard, PlatformAdminGuard,
   readCookie,
   type AdminRequest,
 } from './platform-admin.guard';
@@ -383,6 +383,7 @@ export class PlatformController {
   // ── Administrator sign-in ────────────────────────────────────────────────
 
   @Public()
+  @UseGuards(AdminOriginGuard)
   @Throttle(PUBLIC_THROTTLE)
   @Post('admin/sign-in')
   @HttpCode(HttpStatus.OK)
