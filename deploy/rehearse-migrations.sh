@@ -9,8 +9,8 @@
 #    (default 0115_platform_admin_invitation, production's head) — the dry run.
 # 2. A full dump of the base, then every pending migration applied with `prisma migrate deploy`; a second deploy
 #    must apply nothing.
-# 3. A fresh database built from every migration; the two schemas must be identical (tables, columns, indexes,
-#    foreign keys, triggers), AUTO_INCREMENT counters aside.
+# 3. A fresh database built from every migration; the two schemas must be identical as information_schema describes
+#    them: tables, columns (type, charset, collation, nullability, default), indexes, foreign keys, CHECKs, triggers.
 # 4. The restore proof: the base dump restored into a new database gives back the base's row counts and CHECKSUMs.
 # The databases are dropped at the end unless KEEP=1. Every step is printed, so the run is the record (docs/113).
 set -euo pipefail
@@ -43,8 +43,20 @@ trap cleanup EXIT
 create() { q "CREATE DATABASE \`$1\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"; }
 counts() { q "SELECT table_name FROM information_schema.tables WHERE table_schema='$1' AND table_type='BASE TABLE' ORDER BY table_name" | while read -r t; do
   echo "$t $(q "SELECT COUNT(*) FROM \`$1\`.\`$t\`") $(q "CHECKSUM TABLE \`$1\`.\`$t\`" | awk '{print $2}')"; done; }
-schema() { "${D[@]}" --no-data --skip-comments --routines --triggers --skip-dump-date "$1" 2>/dev/null | tr -d '\r' \
-  | sed -E 's/ AUTO_INCREMENT=[0-9]+//; s/DEFINER=`[^`]+`@`[^`]+` //; s/`'"$1"'`\.//g'; }
+# What the server says the schema is, not how a dump prints it: SHOW CREATE TABLE writes a column's CHARACTER SET or
+# not depending on how the column was first declared, so two identical schemas can print differently.
+schema() { q "
+  SELECT 'T', table_name, engine, table_collation FROM information_schema.tables WHERE table_schema='$1' ORDER BY 2;
+  SELECT 'C', table_name, column_name, ordinal_position, column_type, IFNULL(character_set_name,''), IFNULL(collation_name,''), is_nullable, IFNULL(column_default,'<null>'), extra
+    FROM information_schema.columns WHERE table_schema='$1' ORDER BY 2, 4;
+  SELECT 'I', table_name, index_name, non_unique, seq_in_index, column_name, IFNULL(sub_part,'') FROM information_schema.statistics WHERE table_schema='$1' ORDER BY 2, 3, 5;
+  SELECT 'F', r.table_name, r.constraint_name, r.referenced_table_name, r.update_rule, r.delete_rule, k.column_name, k.referenced_column_name
+    FROM information_schema.referential_constraints r JOIN information_schema.key_column_usage k
+      ON k.constraint_schema = r.constraint_schema AND k.constraint_name = r.constraint_name AND k.table_name = r.table_name
+    WHERE r.constraint_schema='$1' ORDER BY 2, 3, k.ordinal_position;
+  SELECT 'K', table_name, constraint_name, check_clause FROM information_schema.check_constraints c JOIN information_schema.table_constraints t USING (constraint_schema, constraint_name)
+    WHERE constraint_schema='$1' ORDER BY 2, 3;
+  SELECT 'G', trigger_name, event_object_table, action_timing, event_manipulation, REPLACE(action_statement, '\`$1\`.', '') FROM information_schema.triggers WHERE trigger_schema='$1' ORDER BY 2;"; }
 
 echo "=== rehearsal $STAMP on $HOST:$PORT, base $([ -n "${PROD_SCHEMA:-}" ] && echo "production schema $PROD_SCHEMA" || echo "repository at $BASE")"
 create "$UP"
@@ -78,7 +90,7 @@ echo "=== fresh install and schema comparison"
 create "$FRESH"
 deploy "$FRESH" "$HERE" | tail -1
 schema "$UP" > "$WORK/up.schema"; schema "$FRESH" > "$WORK/fresh.schema"
-if diff -u "$WORK/fresh.schema" "$WORK/up.schema" > "$WORK/schema.diff"; then echo "schemas identical ($(grep -c '^CREATE TABLE' "$WORK/up.schema") tables)"; else
+if diff -u "$WORK/fresh.schema" "$WORK/up.schema" > "$WORK/schema.diff"; then echo "schemas identical ($(grep -c '^T' "$WORK/up.schema") tables, $(grep -c '^C' "$WORK/up.schema") columns, $(grep -c '^G' "$WORK/up.schema") triggers)"; else
   echo "FAIL: upgraded schema differs from a fresh install"; head -80 "$WORK/schema.diff"; exit 1; fi
 
 echo "=== restore proof"
