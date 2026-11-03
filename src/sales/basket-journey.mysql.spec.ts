@@ -39,7 +39,7 @@ run('a basket from counter to returns', () => {
     await app?.close();
   });
 
-  async function shop() {
+  async function shop(openingMoney: unknown = { decision: 'set', cashAmount: 0 }) {
     const { RegistrationService } = await import('../platform/registration.service');
     const { SessionsService } = await import('../auth/sessions.service');
     const { TokensService } = await import('../auth/tokens.service');
@@ -104,7 +104,7 @@ run('a basket from counter to returns', () => {
 
     const accountId = newUuidV7Bin();
     await root.receivingAccount.create({ data: { id: accountId, companyId, provider: 'bankily', label: `Bankily ${t}` } });
-    const opened = await owner.post('closings/open', { openingMoney: { decision: 'set', cashAmount: 0 } });
+    const opened = await owner.post('closings/open', openingMoney ? { openingMoney } : {});
     if (opened.status >= 300) throw new Error(JSON.stringify(opened.body));
     return { companyId, branchId, owner, staff, serial, covers, cables, accountId: binToUuid(accountId) };
   }
@@ -357,7 +357,8 @@ run('a basket from counter to returns', () => {
     const today = (s: Awaited<ReturnType<typeof shop>>) => s.owner.get('closings/business-day').then((r) => r.body.businessDate as string);
 
     it('every location off by default: money is reported, no balance is claimed, no count is asked', async () => {
-      const s = await shop();
+      const s = await shop(null);
+      // Opened above with no amount: an Owner tracking nothing is asked for none.
       expect((await sell(s, [{ method: 'cash', amount: 1000 }])).status).toBe(201);
       const balances = (await s.owner.get('money/tracking')).body;
       expect(balances.locations.every((l: { on: boolean }) => !l.on)).toBe(true);
@@ -365,6 +366,7 @@ run('a basket from counter to returns', () => {
       const report = (await s.owner.get('closings/report')).body;
       expect(report.money.channels.find((c: { channel: string }) => c.channel === 'cash')).toMatchObject({ countable: false, in: { todaysSales: 1000 } });
       expect(report.close.unverified).toEqual([]);
+      expect(report.warnings.map((w: { code: string }) => w.code)).not.toContain('no_counted_opening');
       expect((await s.owner.post('closings', {})).status).toBeLessThan(300);
     });
 

@@ -607,12 +607,13 @@ export function assembleReport(i: ReportInputs): ClosingReport {
   }
   if (!calculable) warnings.push({ code: 'cost_missing', severity: 'warning', section: 'result', params: { count: missingCostLines } });
   // A drawer the Owner set today is anchored by that amount: how the opening was carried no longer decides it.
-  if (!cashSet) {
+  // Untracked cash (D227) claims no drawer, so nothing is said about how one started.
+  if (!cashSet && cashRow.countable) {
     if (i.opening.anchorDate === null) warnings.push({ code: 'no_counted_opening', severity: 'info', section: 'money' });
     else if (i.opening.carriedDays > 0) warnings.push({ code: 'opening_not_verified', severity: 'info', section: 'money', params: { anchorDate: i.opening.anchorDate, days: i.opening.carriedDays } });
   }
   // An account's movement may be negative (more paid out than received); the drawer cannot hold less than nothing.
-  if (cashExpected < 0) {
+  if (cashExpected < 0 && cashRow.countable) {
     warnings.push({ code: 'negative_expected', severity: 'warning', section: 'money', params: { amount: cashExpected } });
   }
   if (i.openDiscrepancies > 0) warnings.push({ code: 'open_discrepancies', severity: 'info', section: 'money', params: { count: i.openDiscrepancies } });

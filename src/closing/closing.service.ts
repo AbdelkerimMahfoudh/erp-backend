@@ -1722,7 +1722,7 @@ export class ClosingService {
     const branchId = this.tenant.requireBranchId();
     const userId = this.tenant.requireUserId();
     const now = new Date();
-    const verdict = this.openingVerdictFor(dto.openingMoney, this.isOwner());
+    const verdict = this.openingVerdictFor(dto.openingMoney, dto.openingMoney ? this.isOwner() : await this.decidesOpeningMoney());
     const request = this.openingRequest(dto.date ?? null, dto.mode ?? 'continue', dto.openingMoney, verdict);
     // A retry of a reopen already recorded answers with the day as it stands.
     const replay = await this.openingReplay(request);
@@ -1888,6 +1888,13 @@ export class ClosingService {
   /** The Owner — who may record money positions — decides what a shop opens with. */
   private isOwner(): boolean {
     return this.cls.get('permissions')?.has('money.anchor.record') ?? false;
+  }
+
+  /** Who is asked (D227): nobody, while this store tracks nothing, because no amount is claimed for what opens. */
+  private async decidesOpeningMoney(): Promise<boolean> {
+    if (!this.isOwner()) return false;
+    const tracked = await this.tracking?.tracked(this.tenant.requireBranchId());
+    return !tracked || tracked.size > 0;
   }
 
   /** The opening decision for this person, or the refusal the phone acts on (docs/63). */
@@ -2169,7 +2176,7 @@ export class ClosingService {
     const userId = this.tenant.requireUserId();
     const now = new Date();
     // The money the shop opens with (docs/63): the Owner decides it; anybody else opens with the tracked amounts.
-    const verdict = this.openingVerdictFor(dto.openingMoney, this.isOwner());
+    const verdict = this.openingVerdictFor(dto.openingMoney, dto.openingMoney ? this.isOwner() : await this.decidesOpeningMoney());
     const request = this.openingRequest(dto.date ?? null, dto.mode ?? 'continue', dto.openingMoney, verdict);
     // A retry of an opening already recorded answers with the day as it stands.
     const replay = await this.openingReplay(request);
