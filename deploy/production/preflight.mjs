@@ -90,6 +90,10 @@ check(val('SWAGGER_ENABLED') === 'false', 'SWAGGER_ENABLED must be "false".');
 check(!/^(1|true|yes)$/i.test(val('SEED_DEMO')), 'SEED_DEMO must not be on.');
 check(['info', 'warn', 'error'].includes(val('LOG_LEVEL') || 'info'), 'LOG_LEVEL must be info, warn or error (debug logs carry request detail).');
 check(!val('PLATFORM_ADMIN_KEY'), 'PLATFORM_ADMIN_KEY must be empty: the first administrator is created from the shell, with MFA.');
+for (const origin of val('ADMIN_ORIGINS').split(',').map((o) => o.trim()).filter(Boolean)) {
+  check(val('CORS_ORIGINS').split(',').map((o) => o.trim()).includes(origin), `ADMIN_ORIGINS names ${origin}, which CORS_ORIGINS does not.`);
+  check(origin !== val('PORTAL_ORIGIN'), "ADMIN_ORIGINS must not name the customers' portal.");
+}
 check(present('CORS_ORIGINS'), 'CORS_ORIGINS must be stated (empty = no browser origin may call the API; the mobile app needs none).');
 for (const origin of val('CORS_ORIGINS').split(',').map((o) => o.trim()).filter(Boolean)) {
   let ok = false;

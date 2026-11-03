@@ -1,4 +1,5 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
+import { AdminOriginGuard } from './platform-admin.guard';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { IsString, MaxLength } from 'class-validator';
@@ -28,6 +29,7 @@ export class PlatformAdminSetupController {
   constructor(private readonly invitations: PlatformAdminInvitationService) {}
 
   @Public()
+  @UseGuards(AdminOriginGuard)
   @Throttle(SETUP_THROTTLE)
   @Post('setup')
   @HttpCode(HttpStatus.OK)

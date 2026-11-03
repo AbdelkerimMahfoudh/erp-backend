@@ -1,8 +1,9 @@
-import { CanActivate, ExecutionContext, Injectable, Optional, SetMetadata, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, Optional, SetMetadata, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ClsService } from 'nestjs-cls';
 import type { Request } from 'express';
 import type { AppClsStore } from '../common/context/request-context';
+import { ADMIN_ORIGIN_REFUSED, adminOriginAllowed, adminOrigins } from '../common/http/admin-origin';
 import { PlatformAdminService, type PlatformAdminIdentity } from './platform-admin.service';
 
 /**
@@ -44,6 +45,19 @@ export interface AdminRequest extends Request {
  * meaning comes from matching a hash in the database.
  */
 
+function assertAdminOrigin(req: Request): void {
+  if (!adminOriginAllowed(req.method, req.headers.origin, adminOrigins())) throw new ForbiddenException(ADMIN_ORIGIN_REFUSED);
+}
+
+/** The origin rule alone, for the console's routes that have no session yet: sign-in and an invited administrator's setup. */
+@Injectable()
+export class AdminOriginGuard implements CanActivate {
+  canActivate(context: ExecutionContext): boolean {
+    assertAdminOrigin(context.switchToHttp().getRequest<Request>());
+    return true;
+  }
+}
+
 /**
  * The wall between the platform and every shop.
  *
@@ -73,6 +87,7 @@ export class PlatformAdminGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<AdminRequest>();
+    assertAdminOrigin(req);
 
     let token = readCookie(req.headers.cookie, ADMIN_SESSION_COOKIE);
     if (!token && process.env.NODE_ENV !== 'production') {

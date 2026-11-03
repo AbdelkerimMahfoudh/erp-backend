@@ -117,6 +117,7 @@ services:
       # The private test sites (D217; docs/100 §16): empty unless deploy/production/test-sites.sh enables them.
       TEST_APP_HOST: ${TEST_APP_HOST:-}
       TEST_CONSOLE_HOST: ${TEST_CONSOLE_HOST:-}
+      ADMIN_CONSOLE_HOST: ${ADMIN_CONSOLE_HOST:-}
       TEST_WEB_USER: ${TEST_WEB_USER:-}
       TEST_WEB_PASSWORD_HASH: ${TEST_WEB_PASSWORD_HASH:-}
     volumes:
