@@ -207,6 +207,11 @@ function scan(): { uncovered: Finding[]; covered: number } {
 
 /** Classified occurrences that stay without their Arabic twin. Generated from the dump, then reviewed by hand. */
 const ALLOWED: Record<string, [Cls, string]> = {
+  'account/business-deletion.service.ts :: prepare :: select company.findUniqueOrThrow.select': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],
+  'account/business-deletion.service.ts :: read :: select company.findUnique.select': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],
+  'account/business-deletion.service.ts :: read :: select branch.findFirst.select': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],
+  'account/business-deletion.service.ts :: read :: read company.name': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],
+  'account/business-deletion.service.ts :: read :: read store.name': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],
   'platform/platform.controller.ts :: businesses :: select users.select': ['latin', 'platform console: the Owner in an account label, never stored'],
   'common/account-label.ts :: participantLabel :: read store.name': ['latin', 'the Latin half of a pair: participantLabelAr gives the Arabic'],
   'notices/notice.service.ts :: readSubject :: read company.name': ['latin', 'the optional trading name in a message; without one, neutral words in the message’s language'],

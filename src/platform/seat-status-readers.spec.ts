@@ -368,6 +368,10 @@ const UNREAD_PINNED: { at: string; why: string }[] = [];
  * reads; `count` when the same reading appears more than once there.
  */
 const PINNED: { at: string; count?: number; why: string }[] = [
+  {
+    at: 'src/account/business-deletion.service.ts BusinessDeletionService.read = pending_payment',
+    why: 'A seat still awaiting its payment stops a deletion (post-Build-4). A scheduled seat was paid for: nothing is pending about it.',
+  },
   // ── what is in force: a scheduled request counts nowhere until it starts (I2) ──
   {
     at: "src/entitlement/seat-census.ts seatCensus SQL in [paid, granted]",
