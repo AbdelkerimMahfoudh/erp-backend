@@ -118,6 +118,8 @@ services:
       TEST_APP_HOST: ${TEST_APP_HOST:-}
       TEST_CONSOLE_HOST: ${TEST_CONSOLE_HOST:-}
       ADMIN_CONSOLE_HOST: ${ADMIN_CONSOLE_HOST:-}
+      # Post-Build-4: the customers' portal's hostname, for deploy/production/customer-portal.caddy (portal-site.sh).
+      PORTAL_HOST: ${PORTAL_HOST:-}
       TEST_WEB_USER: ${TEST_WEB_USER:-}
       TEST_WEB_PASSWORD_HASH: ${TEST_WEB_PASSWORD_HASH:-}
     volumes:

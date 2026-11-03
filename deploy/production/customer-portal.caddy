@@ -1,0 +1,17 @@
+# The customers' portal (https://dukan.tsxmr.com): erp-control-web's portal surface, a production build.
+#
+# Installed into the edge only by deploy/production/portal-site.sh; without it the import matches nothing.
+#
+# - Its own hostname, DNS only, so the edge obtains its own certificate. Never the console, never a test site.
+# - The release holds no console: no /admin route and none of its code (scripts/caddy-portal-release.mjs refuses it).
+# - /claim/<link> carries a single-use link (post-Build-4): those requests are never written to a log.
+{$PORTAL_HOST} {
+	log_skip /claim/*
+	header {
+		X-Robots-Tag "noindex, nofollow, noarchive"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	root * /srv/erp-web/portal/current/site
+	import /srv/erp-web/portal/current/routes.caddy
+}
