@@ -32,7 +32,7 @@ export class PlatformNamesController {
   @Patch('businesses/:id/names')
   @HttpCode(HttpStatus.OK)
   async business(@Param('id') id: string, @Body() dto: PlatformNamesDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.names.renameBusiness(id, dto, { admin: req.platformAdmin!, ip: req.ip, reason: dto.reason });
   }
 
@@ -41,7 +41,7 @@ export class PlatformNamesController {
   @Patch('businesses/:id/stores/:storeId/names')
   @HttpCode(HttpStatus.OK)
   async store(@Param('id') id: string, @Param('storeId') storeId: string, @Body() dto: PlatformNamesDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.names.renameStore(id, storeId, dto, { admin: req.platformAdmin!, ip: req.ip, reason: dto.reason });
   }
 
@@ -50,7 +50,7 @@ export class PlatformNamesController {
   @Patch('businesses/:id/accounts/:userId/names')
   @HttpCode(HttpStatus.OK)
   async person(@Param('id') id: string, @Param('userId') userId: string, @Body() dto: PlatformNamesDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.names.renamePerson(id, userId, dto, { admin: req.platformAdmin!, ip: req.ip, reason: dto.reason });
   }
 }

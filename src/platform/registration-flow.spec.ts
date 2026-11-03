@@ -221,7 +221,7 @@ describe('the shared flow', () => {
   it('the Super Admin’s console never makes a business eligible', async () => {
     const seen: Record<string, unknown>[] = [];
     const platform = platformWith({
-      admins: { confirmPassword: async () => undefined },
+      admins: { requireStepUp: async () => undefined },
       registration: {
         register: async (input: Record<string, unknown>) => {
           seen.push(input);

@@ -260,7 +260,7 @@ export class SeatRequestsController {
     @Req() req: AdminRequest,
   ) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     const companyId = idOf(id, 'business');
     const allocationId = idOf(rid, 'request');
     await this.assertBelongs(companyId, allocationId);
@@ -299,7 +299,7 @@ export class SeatRequestsController {
     @Req() req: AdminRequest,
   ) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     const allocationId = idOf(rid, 'request');
     await this.assertBelongs(idOf(id, 'business'), allocationId);
     return this.allocations.refuse(
@@ -320,7 +320,7 @@ export class SeatRequestsController {
     @Req() req: AdminRequest,
   ) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     const allocationId = idOf(rid, 'request');
     await this.assertBelongs(idOf(id, 'business'), allocationId);
     return this.allocations.release(

@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
@@ -90,6 +90,15 @@ export class PlatformMfaController {
     return { expiresAt: expiresAt.toISOString() };
   }
 
+  /** The open window's end, and nothing else: what "Verified for 4:32" counts down to. Null when none is open. */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Get('step-up')
+  async stepUpWindow(@Req() req: AdminRequest) {
+    const window = await this.mfa.stepUpWindow(req.platformSessionId);
+    return { expiresAt: window ? window.expiresAt.toISOString() : null };
+  }
+
   @Public()
   @UseGuards(PlatformAdminGuard)
   @Throttle(MFA_THROTTLE)
@@ -97,7 +106,7 @@ export class PlatformMfaController {
   @HttpCode(HttpStatus.OK)
   async regenerate(@Body() dto: RecoveryCodesDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.mfa.regenerateRecoveryCodes(admin, req.platformSessionId!, req.ip ?? null);
   }
 }

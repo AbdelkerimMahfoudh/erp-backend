@@ -57,7 +57,7 @@ export interface AdminSession {
 
 /** The interval within which a password-and-code step-up stays good, checked on the session. */
 export interface StepUpCheck {
-  assertFreshStepUp(sessionId: Buffer | undefined): Promise<void>;
+  assertFreshStepUp(sessionId: Buffer | undefined, now?: Date, use?: { admin: PlatformAdminIdentity; action: string }): Promise<void>;
 }
 
 @Injectable()
@@ -177,7 +177,7 @@ export class PlatformAdminService {
     if (!token) return;
     await this.prisma.platformAdminSession.updateMany({
       where: { refreshTokenHash: this.hashToken(token), revokedAt: null },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: new Date(), stepUpAt: null },
     });
   }
 
@@ -185,7 +185,7 @@ export class PlatformAdminService {
   async revokeAllFor(adminId: Buffer): Promise<number> {
     const res = await this.prisma.platformAdminSession.updateMany({
       where: { adminId, revokedAt: null },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: new Date(), stepUpAt: null },
     });
     return res.count;
   }
@@ -198,36 +198,15 @@ export class PlatformAdminService {
    * ordinary case, not the exotic one. The password is re-typed and verified
    * against the acting administrator, and nothing about it is stored or logged.
    *
-   * Since 0094 the password alone is not enough: THIS session must also hold a step-up — the password and a
-   * fresh code from the authenticator — made within the last five minutes (`PlatformMfaService.stepUp`).
+   * Since 0094 THIS session must hold a step-up — the password and a fresh code from the authenticator — and since
+   * the post-Build-4 change (owner, 2026-11-03) that step-up is the whole proof: while its five absolute minutes run
+   * (`PlatformMfaService.stepUpWindow`), an action asks for neither again and the password is no longer sent with it.
+   * A `confirmPassword` an older console still sends is accepted by the DTOs and ignored. Each use is audited.
    */
-  async confirmPassword(adminId: Buffer, password: string | undefined): Promise<void> {
-    if (!password) {
-      throw new ForbiddenException({
-        code: 'password_confirmation_required',
-        message: 'Confirm your password to complete this action.',
-      });
-    }
-
-    const admin = await this.prisma.platformAdmin.findUnique({
-      where: { id: adminId },
-      select: { passwordHash: true },
-    });
-
-    const ok = admin
-      ? await this.hashing.verify(admin.passwordHash, password)
-      : await this.hashing.verifyDummy(password);
-
-    if (!ok) {
-      throw new ForbiddenException({
-        code: 'password_confirmation_failed',
-        message: 'That password did not match.',
-      });
-    }
-
+  async requireStepUp(admin: PlatformAdminIdentity): Promise<void> {
     // No checker wired is no step-up: refused, never waved through.
     if (!this.stepUps) throw new ForbiddenException({ code: 'step_up_required', message: 'Administrator MFA is not available.' });
-    await this.stepUps.assertFreshStepUp(this.cls?.get('platformSessionId'));
+    await this.stepUps.assertFreshStepUp(this.cls?.get('platformSessionId'), new Date(), { admin, action: this.cls?.get('platformRoute') ?? 'unknown' });
   }
 
   /**

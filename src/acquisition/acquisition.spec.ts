@@ -334,7 +334,7 @@ describe('the routes', () => {
     const console = source.slice(source.indexOf('export class PromotersController'), source.indexOf('export class ReferralInvitationsController'));
     const mutations = [...console.matchAll(/@(Post|Patch)\('[^']+'\)[\s\S]*?\n  }\n/g)].map((m) => m[0]);
     expect(mutations).toHaveLength(5);
-    for (const m of mutations) expect(m).toMatch(/await this\.admins\.confirmPassword\(admin\.id, dto\.confirmPassword\)/);
+    for (const m of mutations) expect(m).toMatch(/await this\.admins\.requireStepUp\(admin\)/);
   });
 
   it('the public lookups are POST on both doors — a code or token never sits in a URL — and there is no list', () => {

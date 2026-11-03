@@ -49,6 +49,7 @@ import {
   readCookie,
   type AdminRequest,
 } from './platform-admin.guard';
+import { STEP_UP_TTL_MS } from './platform-mfa.service';
 import { PlatformAdminService, ADMIN_SESSION_TTL_HOURS } from './platform-admin.service';
 import { AllowPendingMfa } from './platform-admin.guard';
 import { PortalHandoffService, HANDOFF_TTL_SECONDS, PORTAL_SESSION_TTL_HOURS } from './portal-handoff.service';
@@ -435,8 +436,13 @@ export class PlatformController {
   @Post('admin/sign-out')
   @HttpCode(HttpStatus.NO_CONTENT)
   async adminSignOut(@Req() req: AdminRequest, @Res({ passthrough: true }) res: Response) {
-    // The session that authenticated THIS request, whichever way it arrived.
+    // The session that authenticated THIS request, whichever way it arrived. An open step-up window ends with it.
+    const window = req.platformSessionId ? await this.prisma.platformAdminSession.findUnique({ where: { id: req.platformSessionId }, select: { stepUpAt: true } }) : null;
     await this.admins.signOut(req.platformSessionToken);
+    if (window?.stepUpAt && req.platformAdmin && Date.now() - window.stepUpAt.getTime() < STEP_UP_TTL_MS) {
+      const admin = req.platformAdmin;
+      await this.audit.record({ admin, action: 'admin.step_up.revoked', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, reason: 'Signed out', ip: req.ip ?? null });
+    }
     res.clearCookie(ADMIN_SESSION_COOKIE, { path: '/' });
   }
 
@@ -886,7 +892,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.CREATED)
   async createBusiness(@Body() dto: CreateBusinessDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     const isTest = dto.isTest === true;
     await this.provisioning.assertMayCreate(isTest, { admin, ip: req.ip }, dto.businessName ?? dto.branchName ?? dto.ownerName);
     const basis = parseBasis(dto.access, isTest, new Date());
@@ -968,7 +974,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async resumeProvisioning(@Param('id') id: string, @Body() dto: ResumeProvisioningDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     const result = await this.registration.describe(uuidToBin(id), false);
     return this.finishProvisioning(result, dto.reason, { admin, sessionId: req.platformSessionId, ip: req.ip ?? null });
   }
@@ -1039,7 +1045,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async testStatus(@Param('id') id: string, @Body() dto: TestStatusDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.provisioning.setTestStatus(id, { isTest: dto.isTest, reason: dto.reason }, { admin, ip: req.ip });
   }
 
@@ -1053,7 +1059,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async consoleStore(@Param('id') id: string, @Body() dto: ConsoleStoreDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.provisioning.openStore(
       id,
       { name: dto.name, nameAr: dto.nameAr, activity: dto.activity, reason: dto.reason, access: dto.access, requestId: dto.requestId },
@@ -1068,7 +1074,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async extendStoreGrant(@Param('id') id: string, @Param('requestId') requestId: string, @Body() dto: StoreGrantExtendDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.provisioning.extendStoreGrant(id, requestId, { until: new Date(dto.until), reason: dto.reason }, { admin, ip: req.ip });
   }
 
@@ -1079,7 +1085,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.CREATED)
   async ownerInvitation(@Param('id') id: string, @Body() dto: InvitationDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     await this.provisioning.assertMayActivate(id, 'owner_invitation.issue', { admin, ip: req.ip });
     const invitation = await this.invitations.issue(id, { admin, ip: req.ip, reason: dto.reason });
     return {
@@ -1120,7 +1126,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async approve(@Param('id') id: string, @Body() dto: ApproveDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     await this.provisioning.assertMayActivate(id, 'subscription.approve', { admin, ip: req.ip });
     const r = await this.lifecycle.approve(
       id,
@@ -1146,7 +1152,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async reject(@Param('id') id: string, @Body() dto: ReasonDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     const r = await this.lifecycle.reject(
       id,
       { reason: dto.reason, expectedVersion: dto.expectedVersion },
@@ -1161,7 +1167,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async setPeriod(@Param('id') id: string, @Body() dto: PeriodDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     await this.provisioning.assertMayActivate(id, 'subscription.period', { admin, ip: req.ip });
     const r = await this.lifecycle.setPeriodEnd(
       id,
@@ -1182,7 +1188,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async activateGrant(@Param('id') id: string, @Body() dto: GrantDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     await this.provisioning.assertMayActivate(id, 'subscription.activate_grant', { admin, ip: req.ip });
     const r = await this.lifecycle.activateByGrant(
       id,
@@ -1198,7 +1204,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async extend(@Param('id') id: string, @Body() dto: ExtendDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     await this.provisioning.assertMayActivate(id, 'subscription.extend', { admin, ip: req.ip });
     const r = await this.lifecycle.extend(
       id,
@@ -1218,7 +1224,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async suspend(@Param('id') id: string, @Body() dto: ReasonDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     const r = await this.lifecycle.suspend(
       id,
       { reason: dto.reason, expectedVersion: dto.expectedVersion },
@@ -1233,7 +1239,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async reinstate(@Param('id') id: string, @Body() dto: ReasonDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     await this.provisioning.assertMayActivate(id, 'subscription.reinstate', { admin, ip: req.ip });
     const r = await this.lifecycle.reinstate(
       id,
@@ -1249,7 +1255,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.OK)
   async cancel(@Param('id') id: string, @Body() dto: ReasonDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     const r = await this.lifecycle.cancel(
       id,
       { reason: dto.reason, expectedVersion: dto.expectedVersion },
@@ -1264,7 +1270,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.CREATED)
   async payment(@Param('id') id: string, @Body() dto: PaymentDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     if (isUuid(id)) await this.provisioning.assertMayTakePayment(uuidToBin(id), 'subscription.payment', { admin, ip: req.ip });
     const { payment: p, applied } = await this.lifecycle.recordPayment(
       id,
@@ -1541,7 +1547,7 @@ export class PlatformController {
   @HttpCode(HttpStatus.CREATED)
   async schedulePlan(@Body() dto: PlanVersionDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
 
     const created = await this.billing.schedulePlanVersion({
       branchMonthly: dto.branchMonthly,

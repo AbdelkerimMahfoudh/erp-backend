@@ -1115,7 +1115,7 @@ describe('14. correct company/store isolation', () => {
     new SeatRequestsController(
       w.db as never,
       { companyId: () => as.companyId, requireUserId: () => as.ownerId } as never,
-      { confirmPassword: async () => undefined } as never,
+      { requireStepUp: async () => undefined } as never,
       w.billing,
       w.seats,
       w.activation,

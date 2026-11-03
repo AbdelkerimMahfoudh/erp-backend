@@ -20,6 +20,8 @@ export interface AppClsStore extends ClsStore {
   permissions?: ReadonlySet<string>;
   /** The platform administrator session that authenticated this request (0094): where a step-up is recorded. */
   platformSessionId?: Buffer;
+  /** Which administrator route that session called (`POST businesses/:id/suspend`): what a step-up's use is recorded for. */
+  platformRoute?: string;
 }
 
 export const CLS_KEY = {

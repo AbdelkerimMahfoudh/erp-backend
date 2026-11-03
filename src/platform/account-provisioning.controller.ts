@@ -83,7 +83,7 @@ export class AccountProvisioningController {
   @Post('businesses/:id/provisioned-staff')
   @HttpCode(HttpStatus.CREATED)
   async createStaff(@Param('id') id: string, @Body() dto: ProvisionStaffDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.provisioning.createStaff(id, dto, this.actor(req));
   }
 
@@ -92,7 +92,7 @@ export class AccountProvisioningController {
   @Post('businesses/:id/accounts/:userId/require-verification')
   @HttpCode(HttpStatus.OK)
   async requireVerification(@Param('id') id: string, @Param('userId') userId: string, @Body() dto: ReasonDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.provisioning.requireVerification(id, userId, dto.reason, this.actor(req));
   }
 
@@ -101,7 +101,7 @@ export class AccountProvisioningController {
   @Post('businesses/:id/accounts/:userId/deferral')
   @HttpCode(HttpStatus.OK)
   async updateDeferral(@Param('id') id: string, @Param('userId') userId: string, @Body() dto: DeferralUpdateDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.provisioning.updateDeferral(id, userId, { reason: dto.reason, reviewAt: dto.reviewAt }, this.actor(req));
   }
 
@@ -110,7 +110,7 @@ export class AccountProvisioningController {
   @Post('businesses/:id/accounts/:userId/setup-code')
   @HttpCode(HttpStatus.OK)
   async reissueCode(@Param('id') id: string, @Param('userId') userId: string, @Body() dto: ConfirmDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.provisioning.reissueCode(id, userId, this.actor(req));
   }
 
@@ -119,7 +119,7 @@ export class AccountProvisioningController {
   @Post('businesses/:id/accounts/:userId/setup-code/revoke')
   @HttpCode(HttpStatus.OK)
   async revokeCode(@Param('id') id: string, @Param('userId') userId: string, @Body() dto: ConfirmDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.provisioning.revokeCode(id, userId, this.actor(req));
   }
 
@@ -128,7 +128,7 @@ export class AccountProvisioningController {
   @Post('businesses/:id/accounts/:userId/cancel')
   @HttpCode(HttpStatus.OK)
   async cancel(@Param('id') id: string, @Param('userId') userId: string, @Body() dto: ReasonDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.provisioning.cancelAccount(id, userId, dto.reason, this.actor(req));
   }
 }

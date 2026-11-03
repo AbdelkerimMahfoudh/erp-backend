@@ -111,6 +111,7 @@ export class PlatformAdminGuard implements CanActivate {
     req.platformSessionId = session.sessionId;
     req.platformMfaVerified = session.mfaVerified;
     this.cls?.set('platformSessionId', session.sessionId);
+    this.cls?.set('platformRoute', `${req.method} ${(req as { route?: { path?: string } }).route?.path ?? ''}`.trim());
     return true;
   }
 }

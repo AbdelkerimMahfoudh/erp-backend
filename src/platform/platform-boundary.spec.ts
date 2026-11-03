@@ -228,11 +228,11 @@ describe('the controller, from the platform’s side', () => {
     for (const name of TENANT) expect(bodyOf(name)).toMatch(/this\.tenant\.companyId\(\)/);
   });
 
-  it('every administrator mutation re-asks for the password, except signing out', () => {
+  it('every administrator mutation needs the open step-up window, except signing out', () => {
     for (const name of handlers) {
       if (PUBLIC_UNGUARDED.has(name) || TENANT.has(name) || name === 'adminSignOut') continue;
       if (methodOf(name) !== RequestMethod.POST) continue;
-      expect({ name, stepUp: /confirmPassword\(/.test(bodyOf(name)) }).toEqual({ name, stepUp: true });
+      expect({ name, stepUp: /requireStepUp\(/.test(bodyOf(name)) }).toEqual({ name, stepUp: true });
     }
   });
 
@@ -510,11 +510,11 @@ describe('the seat-requests controller keeps the same three realms (docs/21, 202
     }
   });
 
-  it('every administrator mutation re-asks for the password', () => {
+  it('every administrator mutation needs the open step-up window', () => {
     for (const name of handlers) {
       if (PUBLIC_UNGUARDED.has(name) || TENANT.has(name)) continue;
       if (methodOf(name) === RequestMethod.GET) continue;
-      expect({ name, ok: /confirmPassword\(admin\.id, dto\.confirmPassword\)/.test(bodyOf(name)) }).toEqual({ name, ok: true });
+      expect({ name, ok: /requireStepUp\(admin\)/.test(bodyOf(name)) }).toEqual({ name, ok: true });
     }
   });
 

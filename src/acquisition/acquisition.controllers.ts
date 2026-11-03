@@ -168,7 +168,7 @@ export class PromotersController {
   @HttpCode(HttpStatus.CREATED)
   async create(@Body() dto: PromoterCreateDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.promoters.create({ displayName: dto.displayName, whatsappNumber: dto.whatsappNumber, note: dto.note }, { admin, ip: req.ip });
   }
 
@@ -185,7 +185,7 @@ export class PromotersController {
   @HttpCode(HttpStatus.OK)
   async update(@Param('id') id: string, @Body() dto: PromoterUpdateDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.promoters.update(id, { displayName: dto.displayName, whatsappNumber: dto.whatsappNumber, note: dto.note }, { admin, ip: req.ip });
   }
 
@@ -196,7 +196,7 @@ export class PromotersController {
   @HttpCode(HttpStatus.OK)
   async code(@Param('id') id: string, @Body() dto: PromoterCodeDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.promoters.issueCode(id, { regenerate: dto.regenerate === true }, { admin, ip: req.ip });
   }
 
@@ -206,7 +206,7 @@ export class PromotersController {
   @HttpCode(HttpStatus.OK)
   async activate(@Param('id') id: string, @Body() dto: ConfirmDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.promoters.setActive(id, true, { admin, ip: req.ip });
   }
 
@@ -216,7 +216,7 @@ export class PromotersController {
   @HttpCode(HttpStatus.OK)
   async deactivate(@Param('id') id: string, @Body() dto: ConfirmDto, @Req() req: AdminRequest) {
     const admin = req.platformAdmin!;
-    await this.admins.confirmPassword(admin.id, dto.confirmPassword);
+    await this.admins.requireStepUp(admin);
     return this.promoters.setActive(id, false, { admin, ip: req.ip });
   }
 

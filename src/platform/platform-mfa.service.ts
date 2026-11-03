@@ -29,7 +29,8 @@ import { generateRecoveryCodes, looksLikeRecoveryCode, normaliseRecoveryCode } f
  *    factor for fifteen minutes (with the route throttle in front). Both hold under concurrency: every try is claimed
  *    atomically before its code is compared (`claimTry`), and a step is spent by a conditional write (`spendStep`).
  *  - **Step-up** for every high-impact action is the password *and* a fresh code, recorded on the session and
- *    honoured for five minutes, server-side (`assertFreshStepUp`).
+ *    honoured for five absolute minutes, server-side (`stepUpWindow`, `assertFreshStepUp`): inside that window an
+ *    action needs neither again.
  *  - **Audited:** enrolment, verification, every failure, the lock, recovery-code use and regeneration, resets.
  *    Never a secret, a code or a token in an audit row or a log line.
  */
@@ -96,7 +97,7 @@ export class PlatformMfaService {
         },
       });
       await tx.platformAdminRecoveryCode.updateMany({ where: { adminId: admin.id, usedAt: null, revokedAt: null }, data: { revokedAt: now } });
-      await tx.platformAdminSession.updateMany({ where: { adminId: admin.id, revokedAt: null }, data: { revokedAt: now } });
+      await tx.platformAdminSession.updateMany({ where: { adminId: admin.id, revokedAt: null }, data: { revokedAt: now, stepUpAt: null } });
     });
     await this.audit.record({ admin: null, actor: 'cli', action: 'admin.mfa.reset', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, reason: 'Enrolment token issued on the server' });
     return { token, expiresAt };
@@ -215,12 +216,37 @@ export class PlatformMfaService {
     return { expiresAt: new Date(now.getTime() + STEP_UP_TTL_MS) };
   }
 
-  /** Every high-impact action: a step-up on THIS session within the last five minutes. */
-  async assertFreshStepUp(sessionId: Buffer | undefined, now = new Date()): Promise<void> {
-    const session = sessionId ? await this.prisma.platformAdminSession.findUnique({ where: { id: sessionId }, select: { stepUpAt: true, mfaVerifiedAt: true, revokedAt: true } }) : null;
-    const fresh = session && !session.revokedAt && session.mfaVerifiedAt && session.stepUpAt && now.getTime() - session.stepUpAt.getTime() <= STEP_UP_TTL_MS;
-    if (!fresh) {
+  /**
+   * The window a step-up opened on THIS session (post-Build-4, owner 2026-11-03): five minutes from the verification,
+   * absolute — nothing done inside it moves its end. Null when there is none, it ran out, or the session or its
+   * administrator can no longer hold one (signed out, revoked, disabled, deleted). A new factor or password revokes
+   * every session (`issueEnrolmentToken`, `create-platform-admin.ts`), so it ends the window with it. Administrators
+   * have no roles to change. A window found ended is closed and audited, once.
+   */
+  async stepUpWindow(sessionId: Buffer | undefined, now = new Date()): Promise<{ expiresAt: Date } | null> {
+    if (!sessionId) return null;
+    const session = await this.prisma.platformAdminSession.findUnique({ where: { id: sessionId }, select: { adminId: true, stepUpAt: true, mfaVerifiedAt: true, revokedAt: true, expiresAt: true } });
+    if (!session?.stepUpAt) return null;
+    const admin = await this.prisma.platformAdmin.findUnique({ where: { id: session.adminId }, select: { id: true, email: true, name: true, isActive: true, deletedAt: true, adminState: true } });
+    const expiresAt = new Date(session.stepUpAt.getTime() + STEP_UP_TTL_MS);
+    const usable = !session.revokedAt && session.expiresAt > now && !!session.mfaVerifiedAt && !!admin?.isActive && !admin.deletedAt && admin.adminState === 'active';
+    if (usable && now < expiresAt) return { expiresAt };
+    // Closed by a conditional write, so two requests finding it ended record one event.
+    const closed = await this.prisma.platformAdminSession.updateMany({ where: { id: sessionId, stepUpAt: session.stepUpAt }, data: { stepUpAt: null } });
+    if (closed.count === 1 && admin) {
+      await this.audit.record({ admin: { id: admin.id, email: admin.email, name: admin.name }, action: usable ? 'admin.step_up.expired' : 'admin.step_up.revoked', targetType: 'PlatformAdmin', targetId: admin.id, targetLabel: admin.email, after: { openedAt: session.stepUpAt.toISOString(), endedAt: (usable ? expiresAt : now).toISOString() } });
+    }
+    return null;
+  }
+
+  /** Every high-impact action: an open window on THIS session. Its use is audited beside the action's own record. */
+  async assertFreshStepUp(sessionId: Buffer | undefined, now = new Date(), use?: { admin: PlatformAdminIdentity; action: string }): Promise<void> {
+    const window = await this.stepUpWindow(sessionId, now);
+    if (!window) {
       throw new ForbiddenException({ code: 'step_up_required', message: 'Confirm with your password and a code from your authenticator to complete this action.' });
+    }
+    if (use) {
+      await this.audit.record({ admin: use.admin, action: 'admin.step_up.used', targetType: 'PlatformAdmin', targetId: use.admin.id, targetLabel: use.admin.email, after: { for: use.action, expiresAt: window.expiresAt.toISOString() } });
     }
   }
 

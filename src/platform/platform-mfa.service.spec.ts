@@ -137,17 +137,74 @@ describe('step-up: the password and a fresh code, on this session, for five minu
     const h = harness();
     const { secret, first } = await h.enrolled();
     h.cls.set('platformSessionId', first.s.sessionId);
-    await expect(h.admins.confirmPassword(ADMIN, 'admin-pw')).rejects.toMatchObject({ response: { code: 'step_up_required' } });
+    await expect(h.admins.requireStepUp(h.identity)).rejects.toMatchObject({ response: { code: 'step_up_required' } });
     const now = new Date();
     await expect(h.mfa.stepUp(h.identity, first.s.sessionId, 'wrong-pw', h.code(secret, now), null, now)).rejects.toMatchObject({ response: { code: 'step_up_failed' } });
     await h.mfa.stepUp(h.identity, first.s.sessionId, 'admin-pw', h.code(secret, now), null, now);
-    await expect(h.admins.confirmPassword(ADMIN, 'admin-pw')).resolves.toBeUndefined();
-    // The existing password check stays: a step-up does not excuse a wrong password.
-    await expect(h.admins.confirmPassword(ADMIN, 'wrong-pw')).rejects.toMatchObject({ response: { code: 'password_confirmation_failed' } });
+    // Inside the window the action needs neither the password nor a code again.
+    await expect(h.admins.requireStepUp(h.identity)).resolves.toBeUndefined();
     await expect(h.mfa.assertFreshStepUp(first.s.sessionId, new Date(now.getTime() + STEP_UP_TTL_MS + 1))).rejects.toMatchObject({ response: { code: 'step_up_required' } });
     // Bound to the session: another session of the same administrator holds no step-up.
     const other = await h.signIn();
     await expect(h.mfa.assertFreshStepUp(other.s.sessionId, now)).rejects.toMatchObject({ response: { code: 'step_up_required' } });
+  });
+
+  it('the window is absolute: actions inside it never move its end, and it is exposed as that end alone', async () => {
+    const h = harness();
+    const { secret, first } = await h.enrolled();
+    const now = at(60_000);
+    await h.mfa.stepUp(h.identity, first.s.sessionId, 'admin-pw', h.code(secret, now), null, now);
+    const end = new Date(now.getTime() + STEP_UP_TTL_MS);
+    for (const minute of [1, 2, 3, 4]) {
+      await h.mfa.assertFreshStepUp(first.s.sessionId, new Date(now.getTime() + minute * 60_000), { admin: h.identity, action: 'POST businesses/:id/suspend' });
+      await expect(h.mfa.stepUpWindow(first.s.sessionId, new Date(now.getTime() + minute * 60_000))).resolves.toEqual({ expiresAt: end });
+    }
+    await expect(h.mfa.assertFreshStepUp(first.s.sessionId, new Date(end.getTime() - 1))).resolves.toBeUndefined();
+    await expect(h.mfa.assertFreshStepUp(first.s.sessionId, end)).rejects.toMatchObject({ response: { code: 'step_up_required' } });
+    await expect(h.mfa.stepUpWindow(first.s.sessionId, end)).resolves.toBeNull();
+  });
+
+  it('opening, each use and the end are audited — the end once — and never with the password or the code', async () => {
+    const h = harness();
+    const { secret, first } = await h.enrolled();
+    const now = at(60_000);
+    const code = h.code(secret, now);
+    await h.mfa.stepUp(h.identity, first.s.sessionId, 'admin-pw', code, null, now);
+    await h.mfa.assertFreshStepUp(first.s.sessionId, at(120_000), { admin: h.identity, action: 'POST businesses/:id/cancel' });
+    const after = new Date(now.getTime() + STEP_UP_TTL_MS + 1);
+    await expect(h.mfa.assertFreshStepUp(first.s.sessionId, after)).rejects.toBeDefined();
+    await expect(h.mfa.assertFreshStepUp(first.s.sessionId, after)).rejects.toBeDefined();
+    const events = h.prisma.rows('platformAuditEvent');
+    const actions = events.map((e) => e.action);
+    expect(actions.filter((a) => a === 'admin.step_up')).toHaveLength(1);
+    expect(actions.filter((a) => a === 'admin.step_up.used')).toHaveLength(1);
+    expect(actions.filter((a) => a === 'admin.step_up.expired')).toHaveLength(1);
+    expect(JSON.stringify(events.find((e) => e.action === 'admin.step_up.used'))).toContain('POST businesses/:id/cancel');
+    const all = JSON.stringify(events, (_k, v) => (typeof v === 'bigint' ? String(v) : v));
+    expect(all).not.toContain('admin-pw');
+    expect(all).not.toContain(code);
+  });
+
+  it('ends with the session or the administrator: sign-out, revocation, a disabled administrator', async () => {
+    for (const end of ['sign-out', 'revoke-all', 'disabled'] as const) {
+      const h = harness();
+      const { secret, first } = await h.enrolled();
+      const now = at(60_000);
+      await h.mfa.stepUp(h.identity, first.s.sessionId, 'admin-pw', h.code(secret, now), null, now);
+      if (end === 'sign-out') await h.admins.signOut(first.sessionToken);
+      if (end === 'revoke-all') await h.admins.revokeAllFor(ADMIN);
+      if (end === 'disabled') Object.assign(h.row(), { isActive: false });
+      await expect(h.mfa.assertFreshStepUp(first.s.sessionId, at(90_000))).rejects.toMatchObject({ response: { code: 'step_up_required' } });
+    }
+  });
+
+  it('a new authenticator ends it: the reset revokes every session', async () => {
+    const h = harness();
+    const { secret, first } = await h.enrolled();
+    const now = at(60_000);
+    await h.mfa.stepUp(h.identity, first.s.sessionId, 'admin-pw', h.code(secret, now), null, now);
+    await h.mfa.issueEnrolmentToken('ops@tsx.mr', at(90_000));
+    await expect(h.mfa.assertFreshStepUp(first.s.sessionId, at(100_000))).rejects.toMatchObject({ response: { code: 'step_up_required' } });
   });
 
   it('new recovery codes need a fresh step-up, and revoke the old set', async () => {

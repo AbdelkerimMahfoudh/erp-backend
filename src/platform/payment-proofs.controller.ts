@@ -15,18 +15,18 @@ import { PlatformAdminService } from './platform-admin.service';
 import { MAX_PROOF_BYTES, PaymentProofsService } from './payment-proofs.service';
 
 export class RefuseProofDto {
-  @IsString() @MinLength(1) confirmPassword!: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
   @IsString() @MinLength(1) @MaxLength(500) reason!: string;
 }
 
 export class ProofRecoveryDto {
-  @IsString() @MinLength(1) confirmPassword!: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
   @IsString() @MinLength(1) @MaxLength(500) reason!: string;
   @IsOptional() @IsBoolean() closeWithoutPeriod?: boolean;
 }
 
 export class ApproveProofDto {
-  @IsString() @MinLength(1) confirmPassword!: string;
+  @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
   @IsString() @MinLength(1) @MaxLength(500) reason!: string;
   @IsString() @MaxLength(20) amount!: string;
   @IsString() paidAt!: string;
@@ -107,7 +107,7 @@ export class PaymentProofsController {
   @Post('payment-proofs/:id/refuse')
   @HttpCode(HttpStatus.OK)
   async refuse(@Param('id') id: string, @Body() dto: RefuseProofDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.proofs.refuse(id, dto.reason, { admin: req.platformAdmin!, ip: req.ip });
   }
 
@@ -116,7 +116,7 @@ export class PaymentProofsController {
   @Post('payment-proofs/:id/approve')
   @HttpCode(HttpStatus.OK)
   async approve(@Param('id') id: string, @Body() dto: ApproveProofDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.proofs.approve(id, dto, { admin: req.platformAdmin!, ip: req.ip });
   }
 
@@ -132,7 +132,7 @@ export class PaymentProofsController {
   @Post('payment-proofs/:id/recovery/complete')
   @HttpCode(HttpStatus.OK)
   async completeRecovery(@Param('id') id: string, @Body() dto: ProofRecoveryDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.proofs.completeRecovery(id, dto, { admin: req.platformAdmin!, ip: req.ip });
   }
 
@@ -141,7 +141,7 @@ export class PaymentProofsController {
   @Post('payment-proofs/:id/recovery/release')
   @HttpCode(HttpStatus.OK)
   async releaseRecovery(@Param('id') id: string, @Body() dto: ProofRecoveryDto, @Req() req: AdminRequest) {
-    await this.admins.confirmPassword(req.platformAdmin!.id, dto.confirmPassword);
+    await this.admins.requireStepUp(req.platformAdmin!);
     return this.proofs.releaseRecovery(id, dto.reason, { admin: req.platformAdmin!, ip: req.ip });
   }
 }

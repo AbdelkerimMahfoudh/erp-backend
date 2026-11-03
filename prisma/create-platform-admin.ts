@@ -67,7 +67,7 @@ async function main() {
     // A password reset that left old sessions alive would not be a reset.
     const revoked = await prisma.platformAdminSession.updateMany({
       where: { adminId: existing.id, revokedAt: null },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: new Date(), stepUpAt: null },
     });
     console.log(`✓ Reset platform administrator ${email} — ${revoked.count} session(s) revoked.`);
     return;
