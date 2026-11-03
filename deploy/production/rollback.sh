@@ -30,6 +30,21 @@ if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migration
   [ "$unknown" = 0 ] || die "$target predates 0107 and cannot read a buying cost of unknown value; the database holds $unknown such row(s). Roll a fix forward instead (docs/100 §18)."
   echo "0107 floor: $target predates 0107, and the database holds no row of unknown cost: rollback allowed."
 fi
+# The D227 floors (docs/116 §6). Code built before 0118 reads a business's name as never null; code built before 0125
+# cannot read a code or intent whose purpose is `credential_change`. Such code is a rollback target only while no row
+# needs what it cannot read; afterwards the way back is a fix rolled forward, or the restore of docs/116 §6.
+if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migrations/0118_company_name_optional'; then
+  unnamed=$(db_root -e "SELECT (SELECT COUNT(*) FROM phonestore.companies WHERE name IS NULL)
+    + (SELECT COUNT(*) FROM phonestore.registration_attempts WHERE business_name IS NULL)" | tr -d '[:space:]')
+  [ "$unnamed" = 0 ] || die "$target predates 0118 and cannot read a business without a name; the database holds $unnamed such row(s). Roll a fix forward instead (docs/116 §6)."
+  echo "0118 floor: no business without a name: rollback allowed by this floor."
+fi
+if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migrations/0125_credential_changes'; then
+  changes=$(db_root -e "SELECT (SELECT COUNT(*) FROM phonestore.otp_challenges WHERE purpose = 'credential_change')
+    + (SELECT COUNT(*) FROM phonestore.verification_intents WHERE purpose = 'credential_change')" | tr -d '[:space:]')
+  [ "$changes" = 0 ] || die "$target predates 0125 and cannot read a sign-in change's code; the database holds $changes such row(s). Roll a fix forward instead (docs/116 §6)."
+  echo "0125 floor: no sign-in change code: rollback allowed by this floor."
+fi
 export API_IMAGE=$target
 # The tools image of the same commit when the host still has it (deploy.sh tags both alike), else the current one.
 tools=${target/erp-api:/erp-api-tools:}

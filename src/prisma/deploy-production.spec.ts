@@ -349,6 +349,23 @@ describe('the production package', () => {
     expect(rollback.indexOf('0107_unknown_cost')).toBeLessThan(rollback.indexOf('compose up -d --no-deps api'));
   });
 
+  it('refuses a code rollback below the D227 floors once a row needs them (docs/116 §6)', () => {
+    const rollback = script('rollback.sh');
+    // 0118: every column it made nullable is counted.
+    const nullable = [...read('prisma', 'migrations', '0118_company_name_optional', 'migration.sql').matchAll(/ALTER TABLE `(\w+)` MODIFY `(\w+)` [^;]* NULL;/g)];
+    expect(nullable.map(([, t]) => t).sort()).toEqual(['companies', 'registration_attempts']);
+    for (const [, table, column] of nullable) expect({ table, counted: rollback.includes(`phonestore.${table} WHERE ${column} IS NULL`) }).toEqual({ table, counted: true });
+    // 0125: every enum it widened with credential_change is counted.
+    const widened = [...read('prisma', 'migrations', '0125_credential_changes', 'migration.sql').matchAll(/ALTER TABLE `(\w+)` MODIFY `purpose` ENUM\([^)]*'credential_change'/g)].map(([, t]) => t);
+    expect(widened.sort()).toEqual(['otp_challenges', 'verification_intents']);
+    for (const table of widened) expect({ table, counted: rollback.includes(`phonestore.${table} WHERE purpose = 'credential_change'`) }).toEqual({ table, counted: true });
+    expect(rollback).toMatch(/\[ "\$unnamed" = 0 \] \|\| die /);
+    expect(rollback).toMatch(/\[ "\$changes" = 0 \] \|\| die /);
+    for (const floor of ['0118_company_name_optional', '0125_credential_changes']) {
+      expect(rollback.indexOf(floor)).toBeLessThan(rollback.indexOf('compose up -d --no-deps api'));
+    }
+  });
+
   it('asks for --confirm <host> on every command that changes the stack', () => {
     for (const name of ['deploy.sh', 'migrate.sh', 'rollback.sh', 'teardown-rehearsal.sh']) {
       expect({ name, confirm: /^require_confirm "\$@"$/m.test(script(name)) }).toEqual({ name, confirm: true });
