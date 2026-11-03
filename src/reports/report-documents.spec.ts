@@ -133,6 +133,7 @@ describe('the daily document', () => {
       variableExpenses: 1_200,
       resultBeforeFixed: net - cost - 1_200,
       fixedExpenses: 15_000,
+      maintenanceNet: 0,
       resultAfterExpenses: net - cost - 1_200 - 15_000,
     });
   });

@@ -15,7 +15,7 @@ import { translationDrift } from './report-i18n';
  * still shaped, and these tests exist to prove it does.
  */
 
-const OWNER = new Set([
+const OWNER = new Set([ 'maintenance.record',
   'report.view',
   'cost.view',
   'loan.view',
@@ -59,10 +59,13 @@ function harness(permissions: ReadonlySet<string>, seed: Seed = {}, branchId: Bu
       return { rows: seed.loans ?? [] };
     }),
   };
-  const tenant: any = { branchId: () => branchId, companyId: () => Buffer.alloc(16, 1) };
+  const tenant: any = { branchId: () => branchId, requireBranchId: () => branchId, companyId: () => Buffer.alloc(16, 1) };
   const audit: any = { record: jest.fn(async (p: Record<string, unknown>) => void audited.push(p)) };
   const cls: any = { get: (k: string) => (k === 'permissions' ? permissions : undefined) };
-  const db: any = { branch: { findFirst: jest.fn(async () => ({ name: 'Main Store' })) } };
+  const db: any = {
+    branch: { findFirst: jest.fn(async () => ({ name: 'Main Store' })) },
+    maintenanceRecord: { findMany: jest.fn(async () => [{ businessDate: new Date('2026-11-01T00:00:00Z'), description: 'Screen', customerPaid: 800, repairCost: 300 }]) },
+  };
 
   const service = new ReportsService(analytics, dashboard, loans, tenant, audit, cls, db);
   return { service, audited, analytics, dashboard, loans, db };

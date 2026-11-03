@@ -81,6 +81,7 @@ function harness(held: string[], over: { today?: string } = {}) {
       branch: { findFirst: jest.fn(async () => ({ name: 'Main Store' })) },
       sale: { aggregate: jest.fn(async () => ({ _sum: { balanceDue: 13_000 }, _count: 2 })) },
       $queryRaw: jest.fn(async () => []),
+      maintenanceRecord: { aggregate: jest.fn(async () => ({ _sum: { customerPaid: 0, repairCost: 0 } })) },
     } as never,
   );
   return { service, calls };

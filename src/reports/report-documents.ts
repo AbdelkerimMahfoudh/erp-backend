@@ -110,6 +110,8 @@ export type DailyResult =
       resultBeforeFixed: number;
       /** Fixed costs whose due date is this day (Milestone D), in full. */
       fixedExpenses: number;
+      /** A repair's profit on the day (D227): never sales, and in the result. */
+      maintenanceNet: number;
       resultAfterExpenses: number;
     };
 
@@ -301,6 +303,7 @@ function dailyResult(result: GatedReport['result']): DailyResult {
     variableExpenses: result.variableExpenses,
     resultBeforeFixed: result.resultBeforeFixed ?? 0,
     fixedExpenses: result.fixedExpenses,
+    maintenanceNet: result.maintenanceNet ?? 0,
     resultAfterExpenses: result.resultAfterExpenses ?? 0,
   };
 }
@@ -337,6 +340,8 @@ export interface MonthlyDocument {
   complete: boolean;
   generatedAt: string;
   sections: { result: boolean; refunds: boolean };
+  /** Money from repairs in the month (D227), net of reversals: apart from sales. */
+  maintenance: { revenue: number; cost?: number; profit?: number };
   sales: {
     invoices: { count: number; value: number; items: number };
     cancellations: { count: number; value: number; items: number };
@@ -372,6 +377,7 @@ export interface MonthlyDocumentInput {
   receivables: Receivables;
   costView: boolean;
   generatedAt: Date;
+  maintenance?: { revenue: number; cost: number };
 }
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -410,6 +416,7 @@ export function monthlyDocument(i: MonthlyDocumentInput): MonthlyDocument {
     complete: i.range.complete,
     generatedAt: i.generatedAt.toISOString(),
     sections: { result: i.costView, refunds: i.refunds !== null },
+    maintenance: i.costView ? { revenue: i.maintenance?.revenue ?? 0, cost: i.maintenance?.cost ?? 0, profit: round2((i.maintenance?.revenue ?? 0) - (i.maintenance?.cost ?? 0)) } : { revenue: i.maintenance?.revenue ?? 0 },
     sales: {
       invoices: { count: total.invoices.count, value: total.invoices.value, items: total.invoices.units },
       cancellations: { count: total.cancellations.count, value: total.cancellations.value, items: total.cancellations.units },

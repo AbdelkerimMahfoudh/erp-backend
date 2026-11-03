@@ -187,6 +187,17 @@ export class ReportsService {
 
       case 'debtors-creditors':
         return this.debtorsAndCreditors();
+
+      case 'maintenance-income': {
+        const rows = await this.db.maintenanceRecord.findMany({ where: { branchId: this.tenant.requireBranchId() }, orderBy: { id: 'asc' } });
+        return rows.map((r) => ({
+          businessDate: r.businessDate.toISOString().slice(0, 10),
+          description: r.description,
+          customerPaid: Number(r.customerPaid),
+          repairCost: Number(r.repairCost),
+          maintenanceProfit: Math.round((Number(r.customerPaid) - Number(r.repairCost)) * 100) / 100,
+        }));
+      }
     }
   }
 

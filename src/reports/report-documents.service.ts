@@ -77,6 +77,10 @@ export class ReportDocumentsService {
     } catch (e) {
       throw new BadRequestException(e instanceof Error ? e.message : 'month must be YYYY-MM');
     }
+    const repairs = await this.db.maintenanceRecord.aggregate({
+      where: { branchId, businessDate: { gte: new Date(`${range.from}T00:00:00.000Z`), lte: new Date(`${range.to}T00:00:00.000Z`) } },
+      _sum: { customerPaid: true, repairCost: true },
+    });
     const [identity, summary, days, refunds, receivables] = await Promise.all([
       this.identity(branchId, await this.businessDay.timezone(companyId)),
       this.summary.forPeriod(range.from, range.to),
@@ -93,6 +97,7 @@ export class ReportDocumentsService {
       receivables,
       costView: this.held('cost.view'),
       generatedAt: new Date(),
+      maintenance: { revenue: Number(repairs._sum.customerPaid ?? 0), cost: Number(repairs._sum.repairCost ?? 0) },
     });
     await this.served('monthly', { month: doc.month, complete: doc.complete }, doc.sections);
     return doc;

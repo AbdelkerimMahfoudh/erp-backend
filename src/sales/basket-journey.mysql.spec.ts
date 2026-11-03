@@ -399,6 +399,35 @@ run('a basket from counter to returns', () => {
       expect(await root.moneyLocationTracking.count({ where: { companyId: s.companyId } })).toBe(1);
     });
 
+    it('tracked cash has one figure: the balances screen and the closing agree, across days and after off and on again', async () => {
+      const s = await shop();
+      const day = await today(s);
+      const yesterday = new Date(Date.parse(`${day}T00:00:00.000Z`) - 86400000).toISOString().slice(0, 10);
+      const agree = async (figure: number) => {
+        const screen = (await s.owner.get('money/tracking')).body.locations[0].expected;
+        const closing = (await s.owner.get('closings/report')).body.expected.cash.expected;
+        expect({ screen, closing }).toEqual({ screen: figure, closing: figure });
+      };
+      await track(s, 'cash', 200, yesterday);
+      await agree(200);
+      // Recorded on the earlier day: it carries into today's opening on both.
+      expect((await s.owner.post('maintenance', { clientUuid: randomUUID(), description: 'Yesterday', repairCost: 0, customerPaid: 30, paidMethod: 'cash', businessDate: yesterday })).status).toBe(201);
+      await agree(230);
+      await sell(s, [{ method: 'cash', amount: 1000 }]);
+      await agree(1230);
+
+      await s.owner.post('money/tracking', { location: 'cash', on: false });
+      expect((await s.owner.get('closings/report')).body.money.channels.find((c: { channel: string }) => c.channel === 'cash').countable).toBe(false);
+      expect(JSON.stringify((await s.owner.get('money/tracking')).body)).not.toContain('expected');
+
+      // A new opening, today: everything earlier is gone from the figure.
+      await track(s, 'cash', 75, day);
+      await s.owner.post('maintenance', { clientUuid: randomUUID(), description: 'Today', repairCost: 0, customerPaid: 25, paidMethod: 'cash' });
+      await agree(1100);
+      const closed = await s.owner.post('closings', { countedCash: 1100 });
+      if (closed.status >= 300) throw new Error(JSON.stringify(closed.body));
+    });
+
     it('is the Owner’s, not an Employee’s', async () => {
       const s = await shop();
       expect((await s.staff.post('money/tracking', { location: 'cash', on: true, openingAmount: 1, effectiveDate: '2026-01-01' })).status).toBe(403);

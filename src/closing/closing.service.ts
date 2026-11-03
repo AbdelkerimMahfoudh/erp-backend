@@ -181,6 +181,11 @@ function storeClosed(day: string, operation: CounterOperation, reason: CounterRe
  */
 export type MoneyOperation = 'expense_confirmation' | 'refund_confirmation' | 'return_approval' | 'backdated_payment' | 'opening_review' | 'float_set';
 
+/** One channel's recorded movement, the same sums whichever figure reads them (D227). */
+const cashIn = (c: ChannelRow) => round2(c.salesIn + c.correctionsIn + c.agentIn + c.maintenanceIn);
+const cashOut = (c: ChannelRow) => round2(c.refundsOut + c.supplierOut + c.expensesOut + c.correctionsOut + c.agentOut + c.maintenanceOut);
+const previousDay = (day: string) => new Date(Date.parse(`${day}T00:00:00.000Z`) - 86_400_000).toISOString().slice(0, 10);
+
 /**
  * How a locked day refuses each of them: the writer's own rule, with the code and the message it has always answered
  * (the phone already handles each), now decided on the row the lock returns. A later payment dated on an earlier day
@@ -397,8 +402,8 @@ export class ClosingService {
           if (!on) return { location, label, on: false as const };
           const channels = await this.expectedChannels(companyId, branchId, on.effectiveDate, today, 0, 0);
           const row = channels.find((c) => locationOf({ channel: c.channel, accountId: c.accountId }) === location);
-          const moneyIn = row ? round2(row.salesIn + row.correctionsIn + row.agentIn + row.maintenanceIn) : 0;
-          const moneyOut = row ? round2(row.refundsOut + row.supplierOut + row.expensesOut + row.correctionsOut + row.agentOut + row.maintenanceOut) : 0;
+          const moneyIn = row ? cashIn(row) : 0;
+          const moneyOut = row ? cashOut(row) : 0;
           return { location, label, on: true as const, openingAmount: on.openingAmount, effectiveDate: on.effectiveDate, moneyIn, moneyOut, expected: round2(on.openingAmount + moneyIn - moneyOut), version: on.version };
         }),
       ),
@@ -3633,11 +3638,21 @@ export class ClosingService {
    * recorded after it.
    */
   private async dayChannels(companyId: Buffer, branchId: Buffer, day: string) {
+    const tracked = await this.tracking?.tracked(branchId);
+    const trackedCash = tracked?.get(CASH_LOCATION);
+    if (trackedCash && day >= trackedCash.effectiveDate) {
+      // Tracked cash (D227) has one figure: its opening, its date and what was recorded since. This chain does not also apply.
+      const before = day === trackedCash.effectiveDate ? null : (await this.expectedChannels(companyId, branchId, trackedCash.effectiveDate, previousDay(day), 0, 0)).find((c) => c.channel === 'cash');
+      const amount = round2(trackedCash.openingAmount + (before ? cashIn(before) - cashOut(before) : 0));
+      const channels = await this.expectedChannels(companyId, branchId, day, day, amount, 0);
+      for (const c of channels) if (!c.isUnattributed && !tracked!.has(locationOf({ channel: c.channel, accountId: c.accountId }))) c.untracked = true;
+      const opening: OpeningCash = { amount, anchorDate: trackedCash.effectiveDate, anchorVerified: false, carriedDays: 0, anchorKind: 'opening_set' };
+      return { opening, carriedFrom: null, declaredToday: null, adjustment: 0, channels };
+    }
     const [chain, declaredToday] = await Promise.all([this.openingChain(companyId, branchId, day), this.drawerDecisionOn(branchId, day)]);
     const adjustment = declaredToday ? setAdjustment(declaredToday, chain.opening.amount) : 0;
     const channels = await this.expectedChannels(companyId, branchId, day, day, chain.opening.amount, adjustment);
     // Not chosen as a dedicated store balance (D227): the money is still reported, with no balance to count or close against.
-    const tracked = await this.tracking?.tracked(branchId);
     if (tracked) for (const c of channels) if (!c.isUnattributed && !tracked.has(locationOf({ channel: c.channel, accountId: c.accountId }))) c.untracked = true;
     return { opening: chain.opening, carriedFrom: chain.declared, declaredToday, adjustment, channels };
   }

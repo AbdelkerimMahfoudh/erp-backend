@@ -37,6 +37,7 @@ export const REPORT_KINDS = [
   'movers',
   'dead-stock',
   'debtors-creditors',
+  'maintenance-income',
 ] as const;
 
 export type ReportKind = (typeof REPORT_KINDS)[number];
@@ -187,6 +188,21 @@ export const REPORTS: Record<ReportKind, ReportDefinition> = {
    *
    * The export is COMPLETE. The dashboard's ten is a card's worth.
    */
+  /** Money from repairs (D227), each entry and each reversal as recorded. Apart from every sales report. */
+  'maintenance-income': {
+    kind: 'maintenance-income',
+    scope: 'as_of',
+    requires: ['maintenance.record'],
+    ranking: null,
+    columns: [
+      { id: 'businessDate', key: 'businessDate', cell: (r) => String(r.businessDate) },
+      { id: 'description', key: 'description', cell: (r) => String(r.description) },
+      { id: 'customerPaid', key: 'customerPaid', currency: true, cell: (r) => money(num(r, 'customerPaid')) },
+      { id: 'repairCost', key: 'repairCost', currency: true, cell: (r) => money(num(r, 'repairCost')) },
+      { id: 'maintenanceProfit', key: 'maintenanceProfit', currency: true, cell: (r) => money(num(r, 'maintenanceProfit')) },
+    ],
+  },
+
   'dead-stock': {
     kind: 'dead-stock',
     scope: 'as_of',
