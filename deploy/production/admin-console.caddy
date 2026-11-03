@@ -1,0 +1,16 @@
+# The platform administrator's console (https://admin.tsxmr.com): erp-control-web's admin surface, a production build.
+#
+# Installed into the edge only by deploy/production/admin-site.sh; without it the import matches nothing.
+#
+# - Its own hostname, DNS only, so the edge obtains its own certificate. Never the customers' portal, never a test site.
+# - No password in front: the console's own sign-in, second factor and step-up are the authorisation, and the API
+#   accepts the administrator's session only from the origins in ADMIN_ORIGINS.
+# - The pages and their rules are a release written by erp-control-web scripts/caddy-admin-release.mjs.
+{$ADMIN_CONSOLE_HOST} {
+	header {
+		X-Robots-Tag "noindex, nofollow, noarchive"
+		-Server
+	}
+	root * /srv/erp-web/admin/current/site
+	import /srv/erp-web/admin/current/routes.caddy
+}

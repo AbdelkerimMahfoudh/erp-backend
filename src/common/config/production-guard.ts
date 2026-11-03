@@ -39,6 +39,7 @@ export interface ProductionGuardEnv {
   SWAGGER_ENABLED?: string;
   API_BIND?: string;
   CORS_ORIGINS?: string;
+  ADMIN_ORIGINS?: string;
   JWT_ACCESS_SECRET?: string;
   APP_DATABASE_URL?: string;
   WHATSAPP_CHANNEL?: string;
@@ -230,6 +231,13 @@ export function productionConfigProblems(env: ProductionGuardEnv): string[] {
   // A wildcard is never an origin: every browser origin is named exactly, or none is (D200).
   if ((env.CORS_ORIGINS ?? '').includes('*')) {
     problems.push('CORS_ORIGINS contains a wildcard. Name each https:// origin exactly, or leave it empty.');
+  }
+  // The administrator's origins: each exact, https, allowed by CORS, and never the customers' portal.
+  const corsOrigins = (env.CORS_ORIGINS ?? '').split(',').map((o) => o.trim());
+  for (const origin of (env.ADMIN_ORIGINS ?? '').split(',').map((o) => o.trim()).filter(Boolean)) {
+    if (!isHttpsOrigin(origin)) problems.push(`ADMIN_ORIGINS names ${origin}: every entry is an exact https:// origin.`);
+    else if (!corsOrigins.includes(origin)) problems.push(`ADMIN_ORIGINS names ${origin}, which CORS_ORIGINS does not: the console could not call the API.`);
+    if (origin === env.PORTAL_ORIGIN) problems.push(`ADMIN_ORIGINS names the customers' portal (${origin}).`);
   }
   // Node's own debug tracing (net, tls, http…) writes connection internals to the log, outside every redaction.
   if (env.NODE_DEBUG?.trim()) {
