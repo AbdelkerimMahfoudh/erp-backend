@@ -366,6 +366,14 @@ describe('the production package', () => {
     }
   });
 
+  it('refuses a code rollback below 0128 once any business deletion was started', () => {
+    const rollback = script('rollback.sh');
+    expect(read('prisma', 'migrations', '0128_business_deletion', 'migration.sql')).toMatch(/CREATE TABLE `business_deletions`/);
+    expect(rollback).toContain('SELECT COUNT(*) FROM phonestore.business_deletions');
+    expect(rollback).toMatch(/\[ "\$deletions" = 0 \] \|\| die /);
+    expect(rollback.indexOf('0128_business_deletion')).toBeLessThan(rollback.indexOf('compose up -d --no-deps api'));
+  });
+
   it('asks for --confirm <host> on every command that changes the stack', () => {
     for (const name of ['deploy.sh', 'migrate.sh', 'rollback.sh', 'teardown-rehearsal.sh']) {
       expect({ name, confirm: /^require_confirm "\$@"$/m.test(script(name)) }).toEqual({ name, confirm: true });

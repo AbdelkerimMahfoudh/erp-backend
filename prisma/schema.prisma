@@ -353,6 +353,9 @@ model Company {
   /// When the Owner closed the business through the account-deletion flow
   /// (0084, docs/64). Set exactly once; a closed company never reopens.
   closedAt     DateTime? @map("closed_at") @db.DateTime(6)
+  /// Post-Build-4 (0128): when an administrator's final deletion completed. Every record kept after it is de-identified
+  /// and belongs to a deleted business; `business_deletions` holds who, when and the retention policy.
+  deletedAt    DateTime? @map("deleted_at") @db.DateTime(6)
   /// A persistent test business (0102, D217): set and cleared only by a platform administrator. Kept out of the
   /// platform's customer counts, connected only to other test businesses, never paid for.
   isTest       Boolean   @default(false) @map("is_test")
@@ -473,6 +476,7 @@ model Company {
   agentRequestKeys               AgentRequestKey[]
   trialEligibility               TrialEligibility?
   trialClaim                     TrialClaim?
+  businessDeletion               BusinessDeletion?
   trialSetupLinks                TrialSetupLink[]
   trialSetupMessages             TrialSetupMessage[]
   graceEpisodes                  GraceEpisode[]
@@ -6606,4 +6610,27 @@ model MoneyLocationTracking {
 
   @@unique([branchId, location], map: "ux_money_tracking_location")
   @@map("money_location_tracking")
+}
+
+/// Post-Build-4 (0128): an administrator's staged deletion of one business — prepared, then completed once. Permanent.
+model BusinessDeletion {
+  id                 Bytes     @id @db.Binary(16)
+  companyId          Bytes     @unique(map: "ux_business_deletions_company") @map("company_id") @db.Binary(16)
+  /// `prepared` (subscription cancelled, business deactivated, sessions revoked) or `completed`.
+  stage              String    @db.VarChar(16)
+  preparedAt         DateTime  @map("prepared_at") @db.DateTime(6)
+  preparedByAdminId  Bytes     @map("prepared_by_admin_id") @db.Binary(16)
+  preparedBy         String    @map("prepared_by") @db.VarChar(160)
+  completedAt        DateTime? @map("completed_at") @db.DateTime(6)
+  completedByAdminId Bytes?    @map("completed_by_admin_id") @db.Binary(16)
+  completedBy        String?   @map("completed_by") @db.VarChar(160)
+  /// The retention policy the final deletion applied (`deleted-business-v1`, account-deletion.service.ts).
+  retentionPolicy    String?   @map("retention_policy") @db.VarChar(40)
+  /// Counts of what was de-identified and kept: never a name, a number or an amount.
+  summary            Json?
+  version            Int       @default(0)
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_business_deletions_company")
+
+  @@map("business_deletions")
 }

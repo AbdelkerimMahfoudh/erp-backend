@@ -139,6 +139,10 @@ echo "== 9d. the D225 real-MySQL spec (the Acting Owner: one at a time, on time 
 ACTING_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) ACTING_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/acting-owner/acting-owner.mysql.spec.ts
 
+echo "== 9d1. the post-Build-4 real-MySQL spec (a business's staged deletion: refusals, one prepare, de-identified and kept, permanent record), on the same disposable schema"
+DELETION_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) DELETION_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
+  npx jest --ci src/account/business-deletion.mysql.spec.ts
+
 echo "== 9e. the D225 real-MySQL spec (notifications: one push per device on retry, store-scoped audience, per-person reads, levels), on the same disposable schema"
 NOTIFY_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) NOTIFY_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/notifications/notifications.mysql.spec.ts

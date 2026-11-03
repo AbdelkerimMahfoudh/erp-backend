@@ -469,6 +469,19 @@ export class AccountDeletionService {
     return this.toView(fresh ?? done.request, null);
   }
 
+  /**
+   * The business's de-identification for an administrator's final deletion (post-Build-4, `business-deletion.service.ts`):
+   * exactly what an Owner's closure removes and keeps, inside the caller's transaction. The files come back, to be removed
+   * after the commit with {@link removeReceiptFiles}.
+   */
+  deidentifyBusiness(tx: Prisma.TransactionClient, companyId: Buffer, actorUserId: Buffer, now: Date) {
+    return this.closeCompany(tx, { companyId, userId: actorUserId } as RequestRow, now);
+  }
+
+  removeReceiptFiles(keys: string[], referenceId: Buffer): Promise<void> {
+    return this.removeFiles(keys, referenceId);
+  }
+
   /** One login: identity and contacts gone wherever they were copied, every credential revoked, records kept. */
   private async deleteLogin(
     tx: Prisma.TransactionClient,

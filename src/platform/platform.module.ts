@@ -203,6 +203,8 @@ export function selectContactDelivery(
   ],
   exports: [
     PlatformAdminService,
+    // For the account module's business deletion (post-Build-4): its two steps are audited like every admin action.
+    PlatformAuditService,
     PlatformMfaService,
     SubscriptionLifecycleService,
     RegistrationService,

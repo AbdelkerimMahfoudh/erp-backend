@@ -45,6 +45,13 @@ if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migration
   [ "$changes" = 0 ] || die "$target predates 0125 and cannot read a sign-in change's code; the database holds $changes such row(s). Roll a fix forward instead (docs/116 §6)."
   echo "0125 floor: no sign-in change code: rollback allowed by this floor."
 fi
+# The post-Build-4 floor (0128). Code built before it does not know a business prepared for deletion or deleted: it would
+# show one as merely cancelled and let a console act on it. A rollback target only while no deletion was ever started.
+if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migrations/0128_business_deletion'; then
+  deletions=$(db_root -e "SELECT COUNT(*) FROM phonestore.business_deletions" | tr -d '[:space:]')
+  [ "$deletions" = 0 ] || die "$target predates 0128 and does not know a business prepared for deletion or deleted; the database holds $deletions such row(s). Roll a fix forward instead."
+  echo "0128 floor: no business deletion started: rollback allowed by this floor."
+fi
 export API_IMAGE=$target
 # The tools image of the same commit when the host still has it (deploy.sh tags both alike), else the current one.
 tools=${target/erp-api:/erp-api-tools:}

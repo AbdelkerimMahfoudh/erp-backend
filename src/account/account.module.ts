@@ -5,6 +5,8 @@ import { PlatformModule } from '../platform/platform.module';
 import { AccountController } from './account.controller';
 import { AccountService } from './account.service';
 import { AccountDeletionService } from './account-deletion.service';
+import { BusinessDeletionController } from './business-deletion.controller';
+import { BusinessDeletionService } from './business-deletion.service';
 
 /**
  * The signed-in person's own account: identity, WhatsApp verification and
@@ -15,8 +17,8 @@ import { AccountDeletionService } from './account-deletion.service';
  */
 @Module({
   imports: [AuthModule, PlatformModule],
-  controllers: [AccountController],
-  providers: [AccountService, AccountDeletionService, AccountSecurityService],
+  controllers: [AccountController, BusinessDeletionController],
+  providers: [AccountService, AccountDeletionService, AccountSecurityService, BusinessDeletionService],
   exports: [AccountDeletionService],
 })
 export class AccountModule {}
