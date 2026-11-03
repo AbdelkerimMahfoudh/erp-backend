@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus, Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { HttpException, HttpStatus, Inject, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { normaliseEmail, normalisePhone } from '../auth/identifier';
 import { OtpService } from '../auth/otp/otp.service';
@@ -17,6 +17,8 @@ import { acceptedConsentVersion, consentLocaleOf, type ConsentLocale } from '../
 import type { DeletionPrincipal } from './account-deletion.service';
 
 export const CHANGE_TTL_MINUTES = 15;
+/** How often expired changes give up the contact they would have moved to (the privacy review's residual, D227). */
+const SWEEP_INTERVAL_MS = 60 * 60_000;
 const MIN_PASSWORD = 8;
 const MAX_PASSWORD = 128;
 
@@ -39,8 +41,9 @@ interface CodeRef {
  * password or contact working. Passwords, codes and full contacts never reach a log or an audit row.
  */
 @Injectable()
-export class AccountSecurityService {
+export class AccountSecurityService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(AccountSecurityService.name);
+  private timer?: NodeJS.Timeout;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -51,6 +54,31 @@ export class AccountSecurityService {
     @Optional() private readonly records?: WhatsAppRecords,
     @Optional() @Inject(EMAIL_CHANNEL) private readonly email?: EmailChannel,
   ) {}
+
+  onApplicationBootstrap(): void {
+    this.timer = setInterval(() => void this.sweepExpired().catch(() => this.logger.warn('Expired sign-in changes kept for the next pass')), SWEEP_INTERVAL_MS);
+    this.timer.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    if (this.timer) clearInterval(this.timer);
+  }
+
+  /**
+   * A change nobody finished: after its 15 minutes it is `expired`, and the contact it would have moved to — possibly
+   * somebody else's — is not kept. Ended changes holding a contact from before this rule are cleared too. Idempotent.
+   */
+  async sweepExpired(now: Date = new Date()): Promise<number> {
+    const expired = await this.prisma.credentialChange.updateMany({
+      where: { stage: { in: ['old_channel', 'new_channel'] }, expiresAt: { lte: now } },
+      data: { stage: 'expired', newContact: null },
+    });
+    await this.prisma.credentialChange.updateMany({
+      where: { stage: { notIn: ['old_channel', 'new_channel'] }, newContact: { not: null } },
+      data: { newContact: null },
+    });
+    return expired.count;
+  }
 
   private get emailOpen(): boolean {
     return Boolean(this.email?.isEnabled);

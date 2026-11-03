@@ -182,6 +182,20 @@ suite('changing how you sign in', () => {
       expect(await stored(done.changeId)).toBeNull();
     });
 
+    it('the sweep ends an expired change and drops its contact; an open change is left alone', async () => {
+      const w = await world();
+      const stored = async (changeId: string) => root.credentialChange.findUniqueOrThrow({ where: { id: uuidToBin(changeId) } });
+      const stale = await start(w, phoneNo());
+      await root.credentialChange.update({ where: { id: uuidToBin(stale.changeId) }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      const other = await world();
+      const open = await start(other, phoneNo());
+      expect(await w.service.sweepExpired()).toBeGreaterThanOrEqual(1);
+      expect(await stored(stale.changeId)).toMatchObject({ stage: 'expired', newContact: null });
+      expect(await stored(open.changeId)).toMatchObject({ stage: 'old_channel' });
+      expect((await stored(open.changeId)).newContact).not.toBeNull();
+      await expect(w.service.confirmOld(w.p as never, { changeId: stale.changeId, code: code(w) })).rejects.toMatchObject({ response: { code: 'invalid_code' } });
+    });
+
     it('with no verified channel there is nothing to prove it with', async () => {
       const w = await world();
       await root.user.update({ where: { id: w.p.userId }, data: { phoneVerifiedAt: null } });
