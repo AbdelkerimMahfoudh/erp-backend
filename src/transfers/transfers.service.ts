@@ -99,6 +99,23 @@ export class TransfersService {
    * second transfer could claim the same unit. Both existed because nothing was
    * reserved -- the clash only surfaced later, at ship.
    */
+  /**
+   * A transfer from someone who may approve and send it (D227): created already approved, then sent, as two recorded steps.
+   * Sent is never received: the destination still confirms what arrived. If sending fails the transfer stays approved, says
+   * so, and the ordinary Send retries it; a retried request with the same id tries the send again rather than a second
+   * transfer.
+   */
+  async createAndSend(dto: CreateTransferDto) {
+    const created = await this.create(dto);
+    if (created.status !== 'approved' || !this.has('transfer.approve') || !this.has('transfer.ship')) return { ...created, sent: false };
+    try {
+      await this.ship(created.id, { expectedVersion: created.version });
+      return { ...created, status: 'in_transit' as const, version: created.version + 1, sent: true };
+    } catch {
+      return { ...created, sent: false, sendFailed: true };
+    }
+  }
+
   async create(dto: CreateTransferDto) {
     const companyId = this.tenant.companyId();
     const fromBranchId = this.tenant.requireBranchId();

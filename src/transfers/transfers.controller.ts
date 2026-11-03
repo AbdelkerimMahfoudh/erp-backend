@@ -58,7 +58,7 @@ export class TransfersController {
       'Reserves every unit immediately. Starts pending_approval, or approved when the requester already holds transfer.approve here.',
   })
   create(@Body() dto: CreateTransferDto) {
-    return this.transfers.create(dto);
+    return this.transfers.createAndSend(dto);
   }
 
   @Post(':id/approve')

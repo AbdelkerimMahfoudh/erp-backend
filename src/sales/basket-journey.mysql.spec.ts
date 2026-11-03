@@ -437,6 +437,46 @@ run('a basket from counter to returns', () => {
     });
   });
 
+  describe('transfers (D227)', () => {
+    async function stores() {
+      const s = await shop();
+      const toId = newUuidV7Bin();
+      await root.branch.create({ data: { id: toId, companyId: s.companyId, name: 'Second store', type: 'store', isActive: true } as never });
+      const unit = await root.unit.findFirstOrThrow({ where: { companyId: s.companyId, serialNo: s.serial } });
+      return { s, to: binToUuid(toId), unit };
+    }
+    const body = (to: string, serial: string, clientUuid = randomUUID()) => ({ clientUuid, toBranchId: to, identifiers: [serial] });
+
+    it('an Owner who may approve and send: created approved and sent, never received; a retry is the same transfer', async () => {
+      const { s, to, unit } = await stores();
+      const key = randomUUID();
+      const first = await s.owner.post('transfers', body(to, s.serial, key));
+      if (first.status >= 300) throw new Error(JSON.stringify(first.body));
+      expect(first.body).toMatchObject({ status: 'in_transit', autoApproved: true, sent: true });
+      const again = await s.owner.post('transfers', body(to, s.serial, key));
+      expect(again.body.id).toBe(first.body.id);
+      expect(await root.stockTransfer.count({ where: { companyId: s.companyId } })).toBe(1);
+      expect((await root.unit.findUniqueOrThrow({ where: { id: unit.id } })).status).toBe('in_transit');
+      const row = await root.stockTransfer.findFirstOrThrow({ where: { companyId: s.companyId } });
+      expect(row.status).toBe('in_transit');
+      expect(row.receivedAt ?? null).toBeNull();
+    });
+
+    it('an Employee who may not approve: a pending request, nothing sent', async () => {
+      const { s, to, unit } = await stores();
+      const asked = await s.staff.post('transfers', body(to, s.serial));
+      if (asked.status >= 300) throw new Error(JSON.stringify(asked.body));
+      expect(asked.body).toMatchObject({ status: 'pending_approval', autoApproved: false, sent: false });
+      expect((await root.unit.findUniqueOrThrow({ where: { id: unit.id } })).status).toBe('reserved');
+    });
+
+    it('to the same store is refused', async () => {
+      const { s } = await stores();
+      const branch = (await root.branch.findFirstOrThrow({ where: { companyId: s.companyId, name: { startsWith: 'Centre' } } })).id;
+      expect((await s.owner.post('transfers', body(binToUuid(branch), s.serial))).status).toBe(400);
+    });
+  });
+
   it('a rejected return gives its pieces back to what may be returned', async () => {
     const { s, coverLine } = await soldBasket();
     const all = await raise(s, coverLine.id, 5);
