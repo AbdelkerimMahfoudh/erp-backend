@@ -180,7 +180,7 @@ export class AccountSecurityService {
     if (!isUuid(changeId)) return { cancelled: false };
     const { count } = await this.prisma.credentialChange.updateMany({
       where: { id: uuidToBin(changeId), userId: p.userId, companyId: p.companyId, stage: { in: ['old_channel', 'new_channel'] } },
-      data: { stage: 'cancelled' },
+      data: { stage: 'cancelled', newContact: null },
     });
     return { cancelled: count === 1 };
   }
@@ -230,8 +230,10 @@ export class AccountSecurityService {
     if (!channel) throw refuse(HttpStatus.CONFLICT, 'no_verified_channel', 'Verify your WhatsApp number first.');
     const destination = channel === 'phone' ? user.phone! : user.email!;
 
-    // One change at a time: a new one ends whatever was still waiting.
-    await this.prisma.credentialChange.updateMany({ where: { userId: p.userId, stage: { in: ['old_channel', 'new_channel'] } }, data: { stage: 'cancelled' } });
+    // One change at a time: a new one ends whatever was still waiting. An ended change keeps no contact (privacy review,
+    // D227): a number someone tried to move to may be somebody else's. Expired rows are cleared here too.
+    await this.prisma.credentialChange.updateMany({ where: { userId: p.userId, stage: { in: ['old_channel', 'new_channel'] } }, data: { stage: 'cancelled', newContact: null } });
+    await this.prisma.credentialChange.updateMany({ where: { userId: p.userId, newContact: { not: null } }, data: { newContact: null } });
     const code = await this.send(p, channel, destination, language);
     const id = newUuidV7Bin();
     await this.prisma.credentialChange.create({
@@ -309,7 +311,7 @@ export class AccountSecurityService {
   }
 
   private async complete(tx: Prisma.TransactionClient, id: Buffer) {
-    const { count } = await tx.credentialChange.updateMany({ where: { id, stage: { in: ['old_channel', 'new_channel'] } }, data: { stage: 'completed', completedAt: new Date() } });
+    const { count } = await tx.credentialChange.updateMany({ where: { id, stage: { in: ['old_channel', 'new_channel'] } }, data: { stage: 'completed', completedAt: new Date(), newContact: null } });
     if (count !== 1) throw wrongCode();
   }
 

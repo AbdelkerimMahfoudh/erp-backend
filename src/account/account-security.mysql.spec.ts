@@ -164,6 +164,24 @@ suite('changing how you sign in', () => {
       expect((await user(w)).phone).toBe(w.phone);
     });
 
+    it('an ended change keeps no contact: completed, cancelled, or superseded by the next one (privacy review)', async () => {
+      const w = await world();
+      const stored = async (changeId: string) => (await root.credentialChange.findUniqueOrThrow({ where: { id: uuidToBin(changeId) } })).newContact;
+      const cancelled = await start(w, phoneNo());
+      expect(await stored(cancelled.changeId)).not.toBeNull();
+      await w.service.cancel(w.p as never, cancelled.changeId);
+      expect(await stored(cancelled.changeId)).toBeNull();
+
+      const abandoned = await start(w, phoneNo());
+      const next = phoneNo();
+      const done = await start(w, next);
+      expect(await stored(abandoned.changeId)).toBeNull();
+      await w.service.confirmOld(w.p as never, { changeId: done.changeId, code: w.otp.sent[w.otp.sent.length - 1].code });
+      await w.service.confirmNew(w.p as never, { changeId: done.changeId, code: w.otp.sent[w.otp.sent.length - 1].code });
+      expect((await user(w)).phone).toBe(next);
+      expect(await stored(done.changeId)).toBeNull();
+    });
+
     it('with no verified channel there is nothing to prove it with', async () => {
       const w = await world();
       await root.user.update({ where: { id: w.p.userId }, data: { phoneVerifiedAt: null } });

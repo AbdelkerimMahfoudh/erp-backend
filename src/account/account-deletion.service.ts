@@ -652,6 +652,12 @@ export class AccountDeletionService {
     // Every code ever sent to them: the number it went to is masked. The rows stay, for rate limits and audits.
     await tx.otpChallenge.updateMany({ where: { userId: { in: ids } }, data: { destination: REDACTED_DESTINATION, candidatePhone: null } });
     await tx.verificationIntent.deleteMany({ where: { userId: { in: ids } } });
+    // A sign-in change (D227) ends, and the contact it would have moved to is not kept.
+    await tx.credentialChange.updateMany({
+      where: { userId: { in: ids }, stage: { in: ['old_channel', 'new_channel'] } },
+      data: { stage: 'cancelled' },
+    });
+    await tx.credentialChange.updateMany({ where: { userId: { in: ids } }, data: { newContact: null } });
     if (contacts.length > 0) {
       await tx.contactVerification.deleteMany({ where: { destination: { in: contacts } } });
       for (const column of ['requestedBy', 'confirmedBy', 'closedBy'] as const) {
