@@ -55,7 +55,19 @@ const SECRET_QUERY_KEYS = new Set([
   'phone',
   'email',
   'number',
+  // A device's identity (post-Build-4): an IMEI or a serial, and a partner store's code, wherever a query carries one.
+  'imei',
+  'serial',
+  'identifier',
+  'code',
 ]);
+
+/**
+ * The routes whose path itself holds a device's IMEI or serial (post-Build-4): `units/:identifier` (stock and pricing),
+ * `selection/:identifier` (a sale's scan), `recognition/:imei` (the catalogue). The segment after them is replaced, so a
+ * log line still says which route was called and never which phone.
+ */
+const IDENTIFIER_PATH = /(\/(?:units|selection|recognition)\/)([^/?#]+)/g;
 
 export const REDACTED = '[redacted]';
 
@@ -74,8 +86,9 @@ function isSecretParameter(name: string): boolean {
 /** `/x?t=abc&page=2` → `/x?t=[redacted]&page=2`. Untouched when there is nothing to hide. */
 export function scrubUrl(url: string): string;
 export function scrubUrl(url: unknown): unknown;
-export function scrubUrl(url: unknown): unknown {
-  if (typeof url !== 'string') return url;
+export function scrubUrl(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  const url = raw.replace(IDENTIFIER_PATH, (_m, route: string) => `${route}${REDACTED}`);
   const q = url.indexOf('?');
   if (q === -1) return url;
 

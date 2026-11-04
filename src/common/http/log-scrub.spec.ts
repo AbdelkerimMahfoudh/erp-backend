@@ -133,3 +133,15 @@ describe('log scrubbing of every other credential a request may carry (C16)', ()
     expect(scrubHeaders(undefined)).toBeUndefined();
   });
 });
+
+describe('a device identity never reaches a log line (post-Build-4)', () => {
+  it.each([
+    ['/api/v1/units/356938035643809', '/api/v1/units/[redacted]'],
+    ['/api/v1/pricing/units/PASS-SN-1/price', '/api/v1/pricing/units/[redacted]/price'],
+    ['/api/v1/sales/selection/356938035643809?branchId=x', '/api/v1/sales/selection/[redacted]?branchId=x'],
+    ['/api/v1/catalog/recognition/35693803', '/api/v1/catalog/recognition/[redacted]'],
+    ['/api/v1/stores/lookup?code=E397A00A79', '/api/v1/stores/lookup?code=[redacted]'],
+  ])('%s', (raw, logged) => expect(scrubUrl(raw)).toBe(logged));
+
+  it('a route without an identifier stays followable', () => expect(scrubUrl('/api/v1/units?page=2')).toBe('/api/v1/units?page=2'));
+});
