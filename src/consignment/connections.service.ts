@@ -252,11 +252,14 @@ export class ConnectionsService {
     }
     await this.refuseOwnCode(me, code);
 
+    // Post-Build-4: an exact code is shared on purpose, so it finds the store whether or not that store is listed in
+    // search (`isDiscoverable` gates only search, and nothing ever turned it on: every code read as unknown).
     const company = await this.prisma.company.findFirst({
-      where: { publicStoreId: code, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
-      select: { id: true, publicStoreId: true, name: true, nameAr: true, ...ACTIVE_STORES, city: true, logoRef: true },
+      where: { publicStoreId: code, isTest: await this.isTest(me) },
+      select: { id: true, publicStoreId: true, name: true, nameAr: true, ...ACTIVE_STORES, city: true, logoRef: true, isActive: true, closedAt: true, deletedAt: true },
     });
-    if (!company) throw new NotFoundException('No such store');
+    if (!company) throw new NotFoundException({ code: 'store_code_unknown', message: 'No store has that code.' });
+    if (!company.isActive || company.closedAt || company.deletedAt) throw new ConflictException({ code: 'store_unavailable', message: 'That store is not active.' });
 
     const existing = await this.pairRow(me, company.id);
     if (existing?.status === 'blocked') throw new NotFoundException('No such store');
@@ -290,7 +293,7 @@ export class ConnectionsService {
     await this.refuseOwnCode(me, code);
 
     const them = await this.prisma.company.findFirst({
-      where: { publicStoreId: code, isDiscoverable: true, isActive: true, isTest: await this.isTest(me) },
+      where: { publicStoreId: code, isActive: true, closedAt: null, deletedAt: null, isTest: await this.isTest(me) },
       select: { id: true },
     });
     /**

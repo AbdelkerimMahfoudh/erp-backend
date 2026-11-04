@@ -1,5 +1,9 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
+
+/** Post-Build-4: a code finds a store without opting into search, so guessing codes is held to this pace. */
+const CODE_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { ConnectionsService } from './connections.service';
 import { PartnerRankingService } from './partner-ranking.service';
@@ -62,6 +66,7 @@ export class ConnectionsController {
    * to before sending it. The same public preview as search, and the same
    * "no such store" for anything search would hide.
    */
+  @Throttle(CODE_THROTTLE)
   @Get('stores/lookup')
   @RequirePermissions('connection.manage')
   @ApiQuery({ name: 'code', description: 'The exact 10-character Store Account ID' })
@@ -77,6 +82,7 @@ export class ConnectionsController {
     return this.connections.list();
   }
 
+  @Throttle(CODE_THROTTLE)
   @Post('connections')
   @RequirePermissions('connection.manage')
   @ApiOperation({ summary: 'Ask another store to connect' })

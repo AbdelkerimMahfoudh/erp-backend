@@ -147,6 +147,10 @@ echo "== 9d2. the post-Build-4 real-MySQL spec (the account-ready link: hash onl
 CLAIM_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) CLAIM_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
   npx jest --ci src/notices/claim-links.mysql.spec.ts
 
+echo "== 9d3. the post-Build-4 real-MySQL spec (partner stores: a code finds the store, request, accept, retries, refusals), on the same disposable schema"
+CONNECT_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) CONNECT_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) LOG_LEVEL=silent \
+  npx jest --ci src/consignment/connections.mysql.spec.ts
+
 echo "== 9e. the D225 real-MySQL spec (notifications: one push per device on retry, store-scoped audience, per-person reads, levels), on the same disposable schema"
 NOTIFY_ROOT_URL=$(url root "${ROOT_PW:-}" grace_ci) NOTIFY_APP_URL=$(url phonestore_app "$APP_PW" grace_ci) \
   npx jest --ci src/notifications/notifications.mysql.spec.ts
