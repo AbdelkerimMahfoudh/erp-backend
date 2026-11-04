@@ -51,6 +51,7 @@ check_release() {
   local dir=$1
   [ -f "$dir/site/app-shell.html" ] && [ -f "$dir/site/404.html" ] && [ -f "$dir/routes.caddy" ]     || die "$dir is not a portal release (site/app-shell.html, site/404.html, routes.caddy)."
   [ -f "$dir/portal-release.txt" ] || die "$dir was not written by scripts/caddy-portal-release.mjs."
+  ! grep -qF 'audit build' "$dir/portal-release.txt" || die "$dir is a CI audit package, never a release."
   grep -qF "connect-src 'self' https://$API_HOST" "$dir/routes.caddy" || die "$dir was not built for https://$API_HOST."
   ! grep -qF '/admin' "$dir/routes.caddy" || die "$dir serves the console."
   ! grep -rqE 'platform/admin/|platform/businesses' "$dir/site" || die "$dir holds console code."
