@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -11,7 +10,12 @@ import { join } from 'node:path';
  */
 const ROOT = join(__dirname, '..', '..');
 const SCRIPT = join(ROOT, 'deploy', 'production', 'portal-site.sh');
-const run = process.platform === 'win32' ? describe.skip : describe;
+// Production keeps every path under /srv/erp-production (lib.sh), as CI provides it: never loosened for a test.
+const SRV = '/srv/erp-production';
+const writable = (() => { try { return process.platform !== 'win32' && existsSync(SRV) && (accessSync(SRV, constants.W_OK), true); } catch { return false; } })();
+const run = writable ? describe : describe.skip;
+// In CI the directory must be there: a skip would be a pass nobody earned.
+if (process.env.CI && !writable) throw new Error(`portal-site.spec needs a writable ${SRV} in CI (security.yml creates it)`);
 
 interface World {
   dir: string;
@@ -22,7 +26,7 @@ interface World {
 }
 
 function world(o: { host?: string; live?: Record<string, string> } = {}): World {
-  const dir = mkdtempSync(join(tmpdir(), 'portal-site-'));
+  const dir = mkdtempSync(join(SRV, 'ci-portal-site-'));
   const bin = join(dir, 'bin');
   const web = join(dir, 'web');
   mkdirSync(bin);

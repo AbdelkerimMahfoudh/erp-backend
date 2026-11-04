@@ -62,6 +62,8 @@ jobs:
       - run: npm ci
       - run: npx prisma validate
       - run: npx tsc --noEmit -p tsconfig.json
+      # portal-site.sh runs for real in its spec, and production keeps every path under /srv/erp-production (lib.sh).
+      - run: sudo mkdir -p /srv/erp-production && sudo chown "$USER" /srv/erp-production
       - run: npx jest --ci
       # A host starts the API with `npm run start:prod`: the file it names must be the one `npm run build` writes
       # (tsconfig includes prisma/, so the entry lands at dist/src/main.js, not dist/main.js).
