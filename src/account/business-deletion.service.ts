@@ -153,12 +153,30 @@ export class BusinessDeletionService {
         }
         const record = await tx.businessDeletion.findUniqueOrThrow({ where: { companyId } });
         const owner = await tx.user.findFirst({ where: { companyId }, orderBy: { createdAt: 'asc' }, select: { id: true } });
+        // Uploaded and generated files the closure does not reach: unit photos, the logo, report exports. Collected before
+        // their rows let go of them, removed from storage after the commit.
+        const [unitImages, logo, reports] = await Promise.all([
+          tx.unit.findMany({ where: { companyId, imageRef: { not: null } }, select: { imageRef: true } }),
+          tx.company.findUnique({ where: { id: companyId }, select: { logoRef: true } }),
+          tx.reportSnapshot.findMany({ where: { companyId, fileRef: { not: null } }, select: { fileRef: true } }),
+        ]);
+        const files = [...unitImages.map((u) => u.imageRef), logo?.logoRef, ...reports.map((r) => r.fileRef)].filter((k): k is string => !!k);
         const { summary, receiptKeys: keys } = await this.deletion.deidentifyBusiness(tx, companyId, owner?.id ?? companyId, now);
-        receiptKeys = keys;
+        receiptKeys = [...keys, ...files];
+        // Operational detail no record of money needs (owner, 2026-11-03): device identifiers and photos of the stock, and
+        // free text written about people — on repairs, transfers, consignments and closings. Amounts, dates, costs and the
+        // rows themselves stay; none of these tables refuses the change, and no protected table is written here.
+        const units = await tx.unit.updateMany({ where: { companyId }, data: { imeiPrimary: null, imeiSecondary: null, serialNo: null, imageRef: null } });
+        const repairs = await tx.maintenanceRecord.updateMany({ where: { companyId }, data: { description: 'Repair', note: null } });
+        await tx.stockTransfer.updateMany({ where: { companyId }, data: { decisionReason: null } });
+        // A consignment shared with another business is that business's record too: only its own, unshared ones.
+        await tx.consignment.updateMany({ where: { sourceCompanyId: companyId, destinationCompanyId: null }, data: { note: null, disputeReason: null } });
+        await tx.dailyClosing.updateMany({ where: { companyId }, data: { notes: null } });
+        await tx.reportSnapshot.updateMany({ where: { companyId }, data: { fileRef: null } });
         // The images an Owner uploaded as payment proof: people's bank screens. The proof's amount and decision stay.
         const proofs = await tx.paymentProof.updateMany({ where: { companyId, file: { not: null } }, data: { file: null, purgedAt: now } });
         await tx.company.update({ where: { id: companyId }, data: { name: null, nameAr: null, deletedAt: now } });
-        const kept = { ...summary, kind: 'business_deletion', paymentProofFilesRemoved: proofs.count, retentionPolicy: RETENTION_POLICY, retained: { ...((summary.retained as object) ?? {}), categories: RETAINED } };
+        const kept = { ...summary, kind: 'business_deletion', paymentProofFilesRemoved: proofs.count, unitsDeidentified: units.count, repairsDeidentified: repairs.count, filesRemoved: receiptKeys.length, retentionPolicy: RETENTION_POLICY, retained: { ...((summary.retained as object) ?? {}), categories: RETAINED } };
         const moved = await tx.businessDeletion.updateMany({
           where: { id: record.id, stage: 'prepared' },
           data: { stage: 'completed', completedAt: now, completedByAdminId: actor.admin.id, completedBy: actor.admin.email, retentionPolicy: RETENTION_POLICY, summary: kept as Prisma.InputJsonValue, version: { increment: 1 } },
