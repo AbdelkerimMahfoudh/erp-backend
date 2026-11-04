@@ -130,7 +130,7 @@ run('portal-site.sh, executed', () => {
   });
 
   it('fails the install when the live site answers wrongly: /admin served, or the API letting the portal into an administrator route', () => {
-    for (const live of [{ '/admin': '200' }, { admin_me: '401' }, { '/claim/check': '404' }]) {
+    for (const live of [{ '/admin': '200' }, { admin_me: '401' }, { '/claim/check': '404' }] as Record<string, string>[]) {
       const w = world({ live });
       const r = sh(w, 'install', w.release(), '--confirm', 'api.tsxmr.com');
       expect({ live, status: r.status }).toEqual({ live, status: 2 });
