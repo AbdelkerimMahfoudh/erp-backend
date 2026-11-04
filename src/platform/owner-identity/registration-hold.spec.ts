@@ -1,8 +1,12 @@
-import { ConflictException, BadRequestException } from '@nestjs/common';
+import { ConflictException } from '@nestjs/common';
 import { RegistrationFlowService } from '../registration-flow.service';
-import { hashIntentToken } from '../../auth/otp/otp-code.util';
+import { OwnerIdentityTakenError } from './owner-identity';
 
-/** A public registration for a number that already has an Owner (D227): nothing created, nothing said before the code. */
+/**
+ * A new account with a contact that already has one (post-Build-4, the owner's instruction of 2026-11-04, superseding
+ * the D227 hold): refused at the contact step, before any code is generated or sent, with one generic answer for the
+ * number and the email; nothing created; the refusal audited without the contact; a lost race gives the same answer.
+ */
 const PHONE = '+22240000001';
 const dto = { idempotencyKey: 'k-1', ownerName: 'A', businessName: 'B', branchName: 'C', phone: PHONE, password: 'password1', language: 'fr', whatsappConsentVersion: '1' };
 
@@ -11,23 +15,15 @@ jest.mock('../../messaging/whatsapp-consent', () => ({
   acceptedConsentVersion: () => '1',
 }));
 
-function world(confirm: 'ok' | 'wrong' = 'ok') {
-  const holds: Record<string, any>[] = [];
-  const registration = { register: jest.fn() };
+function world(taken: { phone?: string[]; email?: string[] } = {}, register: () => Promise<unknown> = async () => ({})) {
+  const registration = { register: jest.fn(register) };
+  const audit = { record: jest.fn(async () => undefined) };
+  const verification = { start: jest.fn(), latestChallengeFor: jest.fn(), confirmChallenge: jest.fn() };
+  const holds = { create: jest.fn() };
   const prisma = {
-    ownerIdentity: { findUnique: async () => ({ companyId: Buffer.alloc(16), userId: Buffer.alloc(16) }) },
+    ownerIdentity: { findUnique: async ({ where }: any) => ((taken[where.kind_value.kind as 'phone' | 'email'] ?? []).includes(where.kind_value.value) ? { companyId: Buffer.alloc(16), userId: Buffer.alloc(16) } : null) },
     registrationAttempt: { findUnique: async () => null },
-    registrationHold: {
-      create: async ({ data }: any) => (holds.push(data), data),
-      findUnique: async ({ where }: any) => holds.find((h) => h.tokenHash === where.tokenHash) ?? null,
-      update: async ({ where, data }: any) => Object.assign(holds.find((h) => h.id === where.id)!, data),
-      updateMany: async ({ where, data }: any) => (Object.assign(holds.find((h) => h.id === where.id)!, data), { count: 1 }),
-    },
-  };
-  const verification = {
-    start: jest.fn(async () => ({ delivery: 'sent' })),
-    latestChallengeFor: async () => Buffer.alloc(16, 1),
-    confirmChallenge: async () => confirm,
+    registrationHold: holds,
   };
   const flow = new RegistrationFlowService(
     registration as never,
@@ -38,33 +34,49 @@ function world(confirm: 'ok' | 'wrong' = 'ok') {
     prisma as never,
     { hash: jest.fn(async () => 'h') } as never,
     verification as never,
+    audit as never,
   );
-  return { flow, registration, holds, verification };
+  return { flow, registration, audit, verification, holds };
 }
 
-describe('a number that already has an Owner', () => {
-  it('answers like any registration, names no business, and creates nothing', async () => {
-    const { flow, registration, holds } = world();
-    const answer = await flow.register(dto as never, { source: 'mobile_registration' });
-    expect(registration.register).not.toHaveBeenCalled();
-    expect(answer).toMatchObject({ status: 'pending_activation', created: true, next: 'verify_contact', verification: { channel: 'phone' } });
-    expect(JSON.stringify(answer)).not.toContain(PHONE);
-    // Only the digest of the ticket is stored.
-    expect(holds[0].tokenHash).toBe(hashIntentToken(answer.continuation!.token));
+const refusal = { response: { code: 'CONTACT_UNAVAILABLE_FOR_SIGNUP', message: 'This number is already connected to a Dukan account. Sign in or recover access.' } };
+
+describe('a contact that already has an account stops the new account at the contact step', () => {
+  it.each([
+    ['the number as stored', PHONE],
+    ['spaces and the 00 prefix', '00222 40 00 00 01'],
+    ['hyphens and parentheses', '+222 (40) 00-00-01'],
+  ])('a taken number — %s: refused before any code, nothing created, audited without the number', async (_label, phone) => {
+    const w = world({ phone: [PHONE] });
+    const e = await w.flow.register({ ...dto, phone } as never, { source: 'mobile_registration', ip: '10.0.0.1' }).catch((x) => x);
+    expect(e).toBeInstanceOf(ConflictException);
+    expect(e).toMatchObject(refusal);
+    expect(w.registration.register).not.toHaveBeenCalled();
+    expect(w.verification.start).not.toHaveBeenCalled();
+    expect(w.holds.create).not.toHaveBeenCalled();
+    expect(w.audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'registration.contact_unavailable', after: { channel: 'phone' } }));
+    expect(JSON.stringify(w.audit.record.mock.calls)).not.toContain('40000001');
   });
 
-  it('sends the same code, and only the right code reveals the account', async () => {
-    const { flow, verification } = world();
-    const { continuation } = await flow.register(dto as never, { source: 'mobile_registration' });
-    await flow.startVerification({ continuation: continuation!.token, language: 'fr' });
-    expect(verification.start).toHaveBeenCalledWith(PHONE, 'fr');
-    await expect(flow.confirmVerification({ continuation: continuation!.token, code: '123456' }, {})).rejects.toBeInstanceOf(ConflictException);
+  it('a taken email, in any case: the same refusal, and the answer never says which contact or whose', async () => {
+    const w = world({ email: ['owner@shop.mr'] });
+    const e = await w.flow.register({ ...dto, phone: '+22240000099', email: ' Owner@Shop.MR ' } as never, { source: 'website_registration' }).catch((x) => x);
+    expect(e).toMatchObject(refusal);
+    expect(JSON.stringify(e.response)).not.toMatch(/owner@|business|company|status/i);
+    expect(w.registration.register).not.toHaveBeenCalled();
   });
 
-  it('a wrong code gets the ordinary refusal', async () => {
-    const { flow } = world('wrong');
-    const { continuation } = await flow.register(dto as never, { source: 'mobile_registration' });
-    await flow.startVerification({ continuation: continuation!.token, language: 'fr' });
-    await expect(flow.confirmVerification({ continuation: continuation!.token, code: '000000' }, {})).rejects.toThrow(BadRequestException);
+  it('a new number and email go on to the ordinary registration', async () => {
+    const w = world({ phone: [PHONE] });
+    await w.flow.register({ ...dto, phone: '+22240000002', email: 'new@shop.mr' } as never, { source: 'mobile_registration' }).catch(() => undefined);
+    expect(w.registration.register).toHaveBeenCalledTimes(1);
+  });
+
+  it('two attempts racing for the same new number: the unique index decides, and the loser gets the same refusal', async () => {
+    const w = world({}, async () => {
+      throw new OwnerIdentityTakenError('phone');
+    });
+    await expect(w.flow.register({ ...dto, phone: '+22240000003' } as never, { source: 'mobile_registration' })).rejects.toMatchObject(refusal);
+    expect(w.verification.start).not.toHaveBeenCalled();
   });
 });

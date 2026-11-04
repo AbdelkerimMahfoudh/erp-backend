@@ -82,7 +82,8 @@ export function normalisePhone(raw: string): string | null {
   const cleaned = trimmed.replace(/[\s\-().]/g, '');
   if (!/^\+?\d+$/.test(cleaned)) return null;
 
-  const digits = cleaned.replace(/^\+/, '');
+  // `00` is the international prefix written without the plus (post-Build-4): `00222…` is `+222…`, never a new number.
+  const digits = cleaned.replace(/^\+/, '').replace(/^00(?=\d{8,})/, '');
 
   // Local eight-digit form → assume the country the product is sold in.
   if (digits.length === 8) return `+222${digits}`;

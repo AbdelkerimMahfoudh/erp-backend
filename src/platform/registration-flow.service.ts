@@ -1,3 +1,5 @@
+import { normaliseEmail } from '../auth/identifier';
+import { PlatformAuditService } from './platform-audit.service';
 import { BadRequestException, ConflictException, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
 import type { ContactChannel } from '@prisma/client';
 import { normalisePhone } from '../auth/identifier';
@@ -36,28 +38,16 @@ export class RegistrationFlowService {
     @Optional() private readonly prisma?: PrismaService,
     @Optional() private readonly hashing?: HashingService,
     @Optional() private readonly verification?: ContactVerificationService,
+    @Optional() private readonly audit?: PlatformAuditService,
   ) {}
 
-  /**
-   * A number that already has an Owner (D227). The answer has the shape of any other registration and the same code goes
-   * out, so a caller who does not hold the phone learns nothing; nothing is created. The password is hashed only so this
-   * path costs what the other does.
-   */
-  private async held(dto: RegisterDto, phone: string) {
-    await this.hashing!.hash(dto.password);
-    const token = generateIntentToken();
-    const expiresAt = new Date(Date.now() + CONTINUATION_TTL_SECONDS * 1000);
-    await this.prisma!.registrationHold.create({ data: { id: newUuidV7Bin(), tokenHash: hashIntentToken(token), destination: phone, expiresAt } });
-    return {
-      status: 'pending_activation' as const,
-      created: true,
-      publicStoreId: randomBytes(5).toString('hex').toUpperCase(),
-      activity: dto.activity ?? 'electronics',
-      trialEligible: true,
-      verification: { destination: maskPhone(phone), channel: 'phone' as const },
-      continuation: { token, expiresAt: expiresAt.toISOString(), expiresInSeconds: CONTINUATION_TTL_SECONDS },
-      next: 'verify_contact',
-    };
+  /** The one refusal for a contact that already has an account: no detail of whose, nothing created, nothing sent. */
+  private async refuseTakenContact(channel: 'phone' | 'email', ip: string | null): Promise<never> {
+    await this.audit?.record({ admin: null, actor: 'registration', action: 'registration.contact_unavailable', targetType: 'Registration', after: { channel }, ip });
+    throw new ConflictException({
+      code: 'CONTACT_UNAVAILABLE_FOR_SIGNUP',
+      message: 'This number is already connected to a Dukan account. Sign in or recover access.',
+    });
   }
 
   private async holdOf(token: string) {
@@ -123,9 +113,14 @@ export class RegistrationFlowService {
     if (acquisition) this.acquisition!.assertMayClaim(door.ip);
 
     // A retry of a registration that already made its business is that business's, never a hold.
-    if (this.prisma && (await claimedBy(this.prisma, 'phone', phone))) {
+    // Post-Build-4 (owner, 2026-11-04; supersedes the D227 hold): a contact already attached to an account stops the new
+    // account here, before any code is generated or sent and before anything is created. One generic answer for the
+    // number and the email alike; the route's throttle limits the probing, and each refusal is audited without the contact.
+    if (this.prisma) {
       const seen = await this.prisma.registrationAttempt.findUnique({ where: { idempotencyKey: dto.idempotencyKey }, select: { companyId: true } });
-      if (!seen?.companyId) return this.held(dto, phone);
+      const email = dto.email?.trim() ? normaliseEmail(dto.email) : null;
+      const taken = !seen?.companyId && ((await claimedBy(this.prisma, 'phone', phone)) ? 'phone' : email && (await claimedBy(this.prisma, 'email', email)) ? 'email' : null);
+      if (taken) await this.refuseTakenContact(taken, door.ip ?? null);
     }
 
     const result = await this.registration.register({
@@ -148,10 +143,11 @@ export class RegistrationFlowService {
     }).catch((e: unknown) => {
       if (e instanceof AcquisitionUnavailableException) this.acquisition?.recordRefusedClaim(door.ip);
       // Lost the race for the number: the same answer as if it had been taken already.
+      // Lost a race for the contact: the unique index decided, and the answer is the same refusal.
       if (e instanceof OwnerIdentityTakenError) return null;
       throw e;
     });
-    if (!result) return this.held(dto, phone);
+    if (!result) return this.refuseTakenContact('phone', door.ip ?? null);
 
     /*
      * A continuation, never a session.
