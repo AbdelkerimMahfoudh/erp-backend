@@ -12,6 +12,9 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { HashingService } from '../common/security/hashing.service';
 import { PlatformController } from './platform.controller';
 import { SeatRequestsController } from './seat-requests.controller';
+import { BranchRequestsController } from './branch-requests.controller';
+import { BranchNoticeAdminController } from './branch-notice-admin.controller';
+import { BranchRequestsService } from './branch-requests.service';
 import { SeatAllocationService } from './seat-allocation.service';
 import { StaffActivationService } from './staff-activation.service';
 import { PlatformAdminService } from './platform-admin.service';
@@ -120,6 +123,7 @@ export function selectContactDelivery(
     // D225: the console's edit of a business's, a store's and a person's two names.
     PlatformNamesController,
     SeatRequestsController,
+    BranchRequestsController, BranchNoticeAdminController,
     PlatformMfaController,
     PlatformAdminSetupController,
     AppRegistrationController,
@@ -141,6 +145,7 @@ export function selectContactDelivery(
   ],
   providers: [
     PaymentProofsService,
+    BranchRequestsService,
     PaymentAlertService,
     HashingService,
     AccountSetupCodeService,

@@ -13,6 +13,7 @@ import { EMAIL_CHANNEL, type EmailChannel } from '../messaging/email-channel';
 import { RecipientHasher } from '../messaging/recipient-hash';
 import { WhatsAppRecords } from '../messaging/whatsapp-records';
 import {
+  BRANCH_ACTIVATION_TEMPLATE,
   GRACE_ENDED_TEMPLATE,
   GRACE_REMINDER_TEMPLATE,
   GRACE_STARTED_TEMPLATE,
@@ -155,7 +156,19 @@ const TEMPLATES: Record<Exclude<SubscriptionNoticeKind, 'paid_expired'>, Templat
   paid_reminder: PAID_REMINDER_TEMPLATE,
   grace_reminder: GRACE_REMINDER_TEMPLATE,
   grace_ended: GRACE_ENDED_TEMPLATE,
+  branch_activation: BRANCH_ACTIVATION_TEMPLATE,
 };
+
+/** A branch request's notice identity (0130): `branch:<request id hex>`. */
+export function branchNoticeKey(allocationId: Buffer): string {
+  return `branch:${allocationId.toString('hex')}`;
+}
+
+/** The request a branch notice is about, from its identity; null for any other notice. */
+export function branchRequestIdOf(periodKey: string): Buffer | null {
+  const m = /^branch:([0-9a-f]{32})$/.exec(periodKey);
+  return m ? Buffer.from(m[1], 'hex') : null;
+}
 
 /** The approved template a message is sent with; a paid period end says which it was. */
 export function templateOf(kind: SubscriptionNoticeKind, variant: string | null): TemplateDefinition {
@@ -208,7 +221,8 @@ export class NoticeService {
       await this.prisma.subscriptionNotice.updateMany({
         where: {
           companyId,
-          kind: { not: 'portal_instructions' },
+          // Not timeline messages: the portal instructions and a branch's activation notice (0130) are their own.
+          kind: { in: ['trial_reminder', 'trial_expired', 'paid_reminder', 'paid_expired', 'grace_reminder', 'grace_ended'] },
           state: 'pending',
           ...(slot ? { NOT: { kind: slot.kind, periodKey: slot.periodKey, threshold: slot.threshold } } : {}),
         },
@@ -290,6 +304,64 @@ export class NoticeService {
     return id;
   }
 
+  /**
+   * The Owner's WhatsApp notice that a branch requested in the app is ready for activation (0130). Called once the
+   * request committed — never inside its transaction, so a message can never roll the branch back. One per request: the
+   * notice's identity is the request (`period_key = branch:<id>`), so a retry, a double tap or a second call finds the
+   * one already made. Never throws: the request stands whatever happens here, and the worker sends it.
+   */
+  async enqueueBranchActivation(companyId: Buffer, allocationId: Buffer): Promise<{ created: boolean }> {
+    try {
+      const sub = await this.prisma.subscription.findFirst({ where: { companyId }, select: { id: true } });
+      if (!sub) return { created: false };
+      const now = this.clock.now();
+      await this.prisma.subscriptionNotice.create({
+        data: {
+          id: newUuidV7Bin(),
+          companyId,
+          subscriptionId: sub.id,
+          kind: 'branch_activation',
+          periodKey: branchNoticeKey(allocationId),
+          threshold: 'activation',
+          dueAt: now,
+          language: await this.languageOf(this.prisma, companyId),
+          nextAttemptAt: now,
+          createdAt: now,
+        },
+      });
+      void this.deliverNow();
+      return { created: true };
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') return { created: false };
+      this.log.warn(`Branch activation notice not queued for company ${binToUuid(companyId)}: ${describe(e)}`);
+      return { created: false };
+    }
+  }
+
+  /**
+   * Send a branch's activation notice again (an administrator's resend, audited by the caller): the same notice, made
+   * waiting again with its attempts reset — never a second notice and never a second branch. Only while the request
+   * still waits for activation, and not while a send is in flight.
+   */
+  async resendBranchActivation(companyId: Buffer, allocationId: Buffer): Promise<'queued' | 'not_pending' | 'sending'> {
+    const request = await this.prisma.seatAllocation.findFirst({ where: { id: allocationId, companyId, kind: 'store' }, select: { status: true } });
+    if (!request || request.status !== 'pending_payment') return 'not_pending';
+    const identity = { companyId, periodKey: branchNoticeKey(allocationId), kind: 'branch_activation' as const, threshold: 'activation' };
+    const existing = await this.prisma.subscriptionNotice.findFirst({ where: identity, select: { id: true, state: true } });
+    if (!existing) {
+      await this.enqueueBranchActivation(companyId, allocationId);
+      return 'queued';
+    }
+    if (existing.state === 'sending') return 'sending';
+    const now = this.clock.now();
+    await this.prisma.subscriptionNotice.updateMany({
+      where: { id: existing.id, state: { not: 'sending' } },
+      data: { state: 'pending', attempts: 0, nextAttemptAt: now, failureReason: null, cancelReason: null, completedAt: null, whatsappOutcome: null, fallbackReason: null },
+    });
+    void this.deliverNow();
+    return 'queued';
+  }
+
   // ── Delivery ─────────────────────────────────────────────────────────────
 
   /** One delivery pass at a time in this process; a call during a pass gets one more after it. Never rejects. */
@@ -367,7 +439,16 @@ export class NoticeService {
     const now = this.clock.now();
     const row = await this.readSubject(n.companyId);
     let slot: NoticeSlot | null = null;
-    if (n.kind === 'portal_instructions') {
+    let branchLabel: string | null = null;
+    if (n.kind === 'branch_activation') {
+      // Re-read now (0130): a request activated, withdrawn or refused meanwhile has nothing to announce.
+      const requestId = branchRequestIdOf(n.periodKey);
+      const request = requestId
+        ? await this.prisma.seatAllocation.findFirst({ where: { id: requestId, companyId: n.companyId, kind: 'store' }, select: { status: true, label: true } })
+        : null;
+      if (!request || request.status !== 'pending_payment') return { state: 'cancelled', cancelReason: 'branch_not_pending', completedAt: now };
+      branchLabel = (request.label ?? '').trim().replace(/\s+/g, ' ').slice(0, 100);
+    } else if (n.kind === 'portal_instructions') {
       const facts = await readFacts(this.prisma, n.companyId);
       if (!facts || !mayClaimNow(facts, now)) return { state: 'cancelled', cancelReason: 'trial_not_available', completedAt: now };
     } else {
@@ -382,12 +463,12 @@ export class NoticeService {
     if (!recipient) return { state: 'failed', failureReason: 'no_recipient', completedAt: now };
     const template = templateOf(n.kind, n.variant);
     const language = (LANGUAGES as readonly string[]).includes(n.language) ? (n.language as MessageLanguage) : 'en';
-    const variables = this.variablesOf(n, row, slot, language);
+    const variables = this.variablesOf(n, row, slot, language, branchLabel);
 
     // The account-ready message waits for the portal and its template (post-Build-4): held, not spent, while either is
     // missing — its button would open nothing, or nothing could carry it. Only when WhatsApp could reach the Owner at all;
     // with no verified number the attempt below records why nothing was sent.
-    if (template.linkVariable && n.fallbackReason === null && recipient.phone && recipient.phoneVerifiedAt) {
+    if ((template.linkVariable || n.kind === 'branch_activation') && n.fallbackReason === null && recipient.phone && recipient.phoneVerifiedAt) {
       const held = !this.config.portalLive ? 'held_portal' : isRealChannel(this.whatsapp) && this.config.whatsappTemplateName(template.configKey) === '' ? 'held_template' : null;
       if (held) return { state: 'pending', whatsappOutcome: held, nextAttemptAt: new Date(now.getTime() + HOLD_MS), attempts: Math.max(0, n.attempts - 1) };
     }
@@ -708,7 +789,11 @@ export class NoticeService {
   }
 
   /** The template's variables, composed here in the message's language from the facts re-read for this attempt. */
-  private variablesOf(n: SubscriptionNotice, row: SubjectRow, slot: NoticeSlot | null, language: MessageLanguage): Record<string, string> {
+  private variablesOf(n: SubscriptionNotice, row: SubjectRow, slot: NoticeSlot | null, language: MessageLanguage, branchLabel: string | null = null): Record<string, string> {
+    // A branch ready for activation (0130): its name, then the business's — opening with names, as the account-ready message does.
+    if (n.kind === 'branch_activation') {
+      return { branch: branchLabel ?? '', business: row.name?.trim().replace(/\s+/g, ' ').slice(0, 100) || neutralAccount(language, true) };
+    }
     // Only this message opens with the name. A subscription concerns the whole account, so no store stands in for it.
     const opensWithName = n.kind === 'portal_instructions' || !slot;
     const business = (row.name?.trim().replace(/\s+/g, ' ').slice(0, 100) || neutralAccount(language, opensWithName));
@@ -734,6 +819,9 @@ export class NoticeService {
       case 'trial_expired':
       case 'grace_ended':
         return { business, ended: instant(slot.about) };
+      default:
+        // Not a timeline kind (a branch's notice returns above): the business alone.
+        return { business };
     }
   }
 

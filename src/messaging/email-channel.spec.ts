@@ -88,6 +88,7 @@ describe('the portal instructions and the subscription messages (0099; docs/101 
     ended: '21 October 2026, 14:00 (Greenwich Mean Time)',
     graceEnds: '24 October 2026, 14:00 (Greenwich Mean Time)',
     usesLeft: '2',
+    branch: 'Ksar',
   };
   const keys = SUBSCRIPTION_TEMPLATES.map((t) => t.key as SubscriptionEmailKey);
   const compose = (template: SubscriptionEmailKey, language: (typeof LANGUAGES)[number]) => {
@@ -96,7 +97,7 @@ describe('the portal instructions and the subscription messages (0099; docs/101 
   };
 
   it('exists for every WhatsApp template, takes its variables and the portal’s address, and says who runs Dukan ERP', () => {
-    expect(keys).toHaveLength(8);
+    expect(keys).toHaveLength(9);
     for (const key of keys) {
       for (const language of LANGUAGES) {
         const { subject, text, html } = compose(key, language);

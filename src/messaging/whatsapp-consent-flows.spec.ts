@@ -190,7 +190,7 @@ describe('what never goes by email (the owner’s security correction of 2026-10
     const schema = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '..', 'prisma', 'schema.prisma'), 'utf8') as string;
     const block = schema.match(/enum SubscriptionNoticeKind \{([^}]*)\}/)![1];
     const kinds = block.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('///'));
-    expect(kinds).toEqual(['portal_instructions', 'trial_reminder', 'trial_expired', 'paid_reminder', 'paid_expired', 'grace_reminder', 'grace_ended']);
+    expect(kinds).toEqual(['portal_instructions', 'trial_reminder', 'trial_expired', 'paid_reminder', 'paid_expired', 'grace_reminder', 'grace_ended', 'branch_activation']);
   });
 
   it('a WhatsApp number’s verification code goes by WhatsApp or not at all — the contact delivery never swaps channels', () => {

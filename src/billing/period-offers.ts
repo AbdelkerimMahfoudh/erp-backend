@@ -31,6 +31,8 @@ export interface QuoteStore {
   activity: Activity;
   /** Seats bought for this store: the ones that cost 100 a month. Granted and included seats cost nothing. */
   paidSeats: number;
+  /** 0130: a branch added in the app, waiting for activation: priced like any store, activated by this payment. */
+  pending?: boolean;
 }
 
 export interface QuoteLine {
@@ -41,6 +43,7 @@ export interface QuoteLine {
   paidSeats: number;
   seatAmount: number;
   amount: number;
+  pending?: boolean;
 }
 
 export interface Quote {
@@ -58,7 +61,7 @@ export function quote(stores: readonly QuoteStore[], months: OfferMonths): Quote
     const storeAmount = storePrice(s.activity, months);
     const paidSeats = Math.max(0, Math.trunc(s.paidSeats));
     const seatAmount = paidSeats * SEAT_MONTHLY * months;
-    return { branchId: s.branchId, name: s.name, activity: s.activity, storeAmount, paidSeats, seatAmount, amount: storeAmount + seatAmount };
+    return { branchId: s.branchId, name: s.name, activity: s.activity, storeAmount, paidSeats, seatAmount, amount: storeAmount + seatAmount, ...(s.pending ? { pending: true } : {}) };
   });
   return { months, lines, total: lines.reduce((sum, l) => sum + l.amount, 0) };
 }

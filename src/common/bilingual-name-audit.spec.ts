@@ -207,6 +207,7 @@ function scan(): { uncovered: Finding[]; covered: number } {
 
 /** Classified occurrences that stay without their Arabic twin. Generated from the dump, then reviewed by hand. */
 const ALLOWED: Record<string, [Cls, string]> = {
+  'platform/branch-requests.service.ts :: create :: select branch.findMany.select': ['other', 'a branch added in the app (0130): existing names, compared normalized to refuse a duplicate; never returned'],
   'account/business-deletion.service.ts :: prepare :: select company.findUniqueOrThrow.select': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],
   'account/business-deletion.service.ts :: read :: select company.findUnique.select': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],
   'account/business-deletion.service.ts :: read :: select branch.findFirst.select': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],

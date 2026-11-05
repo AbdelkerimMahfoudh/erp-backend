@@ -39,7 +39,8 @@ export type SubscriptionEmailKey =
   | 'subscription.grace_started'
   | 'subscription.no_grace'
   | 'subscription.grace_reminder'
-  | 'subscription.grace_ended';
+  | 'subscription.grace_ended'
+  | 'branch.activation_ready';
 
 export interface EmailMessage {
   /** Normalised, lowercased address. */
@@ -185,6 +186,19 @@ const SUBSCRIPTION_EMAILS: Record<SubscriptionEmailKey, EmailTemplate> = {
       en: `The Dukan ERP subscription of {business} ends in {days} day(s).\n\n${RENEW.en}`,
       fr: `L’abonnement Dukan ERP de {business} se termine dans {days} jour(s).\n\n${RENEW.fr}`,
       ar: `ينتهي اشتراك {business} في Dukan ERP خلال {days} يوم.\n\n${RENEW.ar}`,
+    },
+  ),
+  'branch.activation_ready': subscriptionEmail(
+    ['business', 'branch'],
+    {
+      en: 'Your new Dukan ERP branch {branch} is ready for activation',
+      fr: 'Votre nouvelle succursale Dukan ERP {branch} est prête à être activée',
+      ar: 'فرعك الجديد {branch} في Dukan ERP جاهز للتفعيل',
+    },
+    {
+      en: 'Your new branch {branch} for {business} is ready for activation. Open your secure subscription page to review and activate it: {link}',
+      fr: 'Votre nouvelle succursale {branch} pour {business} est prête à être activée. Ouvrez votre page d’abonnement sécurisée pour la consulter et l’activer : {link}',
+      ar: 'فرعك الجديد {branch} الخاص بـ {business} جاهز للتفعيل. افتح صفحة اشتراكك الآمنة لمراجعته وتفعيله: {link}',
     },
   ),
   'subscription.grace_started': subscriptionEmail(

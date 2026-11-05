@@ -309,6 +309,7 @@ export async function activateDueAddOnsTx(
         name,
         nameAr: row.labelAr,
         activity,
+        address: row.location,
         actor,
         note: `Store "${name}" (${activity}) opened with its first paid period: paid for during the free trial, payment ${reference}.`,
       });

@@ -112,6 +112,8 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_TEMPLATE_TRIAL_REMINDER: Joi.string().allow('').default(''),
   /** The administrators' alert of a portal payment proof (owner, 2026-11-05). Empty: no alert is sent. */
   WHATSAPP_TEMPLATE_PAYMENT_SUBMITTED: Joi.string().allow('').default(''),
+  /** 0130: a branch added in the app is ready for activation (`dukan_branch_activation_ready`). Empty: held, not sent. */
+  WHATSAPP_TEMPLATE_BRANCH_ACTIVATION: Joi.string().allow('').default(''),
   /** The administrators' WhatsApp numbers for that alert, comma-separated E.164. Kept in the server's environment only. */
   PAYMENT_ALERT_NUMBERS: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_TRIAL_EXPIRED: Joi.string().allow('').default(''),

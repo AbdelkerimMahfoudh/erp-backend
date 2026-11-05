@@ -645,6 +645,8 @@ describe('route classification fails closed', () => {
       'POST auth/logout',
       'POST auth/logout-all',
       'POST auth/refresh',
+      // 0130: the Owner adds a branch from the app — a request, pending activation; nothing operational and nothing paid.
+      'POST branches/requests',
       'POST notifications/:id/read',
       // D154 (2026-10-08): asking for another activity for a branch is asking to pay (an
       // upgrade) or to pay less from the renewal (a downgrade); nothing changes by asking.

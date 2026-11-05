@@ -10,6 +10,7 @@ import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
 import { isOfferMonths, quote, type Quote } from '../billing/period-offers';
 import { PaymentAlertService } from './payment-alert.service';
+import { activatePendingBranchesTx } from './branch-activation';
 
 export const MAX_PROOF_BYTES = 5 * 1024 * 1024;
 /** How long a decided proof's file is kept. The decision and its figures stay; the image of somebody's receipt does not. */
@@ -105,8 +106,17 @@ export class PaymentProofsService {
    */
   async quoteFor(companyId: Buffer, months: Parameters<typeof quote>[1]): Promise<Quote> {
     const e = await this.entitlement.forCompany(companyId);
+    // 0130: the branches added in the app and waiting for activation are priced with the rest — this payment activates them.
+    const waiting = await this.prisma.seatAllocation.findMany({
+      where: { companyId, kind: 'store', status: 'pending_payment', replacesBranchId: null },
+      orderBy: [{ requestedAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, label: true, activityTo: true },
+    });
     return quote(
-      e.seatsByStore.map((b) => ({ branchId: b.branchId, name: b.name, activity: b.activity ?? 'electronics', paidSeats: b.paidSeats })),
+      [
+        ...e.seatsByStore.map((b) => ({ branchId: b.branchId, name: b.name, activity: b.activity ?? 'electronics', paidSeats: b.paidSeats })),
+        ...waiting.map((w) => ({ branchId: binToUuid(w.id), name: w.label ?? '', activity: w.activityTo ?? ('electronics' as const), paidSeats: 0, pending: true })),
+      ],
       months,
     );
   }
@@ -290,6 +300,13 @@ export class PaymentProofsService {
         const moved = await tx.paymentProof.updateMany({ where: { id: row.id, periodAppliedAt: null }, data: { periodAppliedAt: new Date() } });
         // Rolls the second period back: two recoveries at once apply one.
         if (!moved.count) throw new PeriodAlreadyApplied();
+        // 0130: the branches added in the app and waiting are activated in this same transaction — with the period, or not at all.
+        const sub = await tx.subscription.findFirst({ where: { companyId: row.companyId }, select: { id: true } });
+        const payment = await tx.subscriptionPayment.findFirst({ where: { companyId: row.companyId, reference: `proof:${id}` }, select: { id: true } });
+        if (sub) {
+          const activated = await activatePendingBranchesTx(tx, { companyId: row.companyId, subscriptionId: sub.id, paymentId: payment?.id ?? null, actor: ctx.admin.email, reference: `proof:${id}`, now: new Date() });
+          if (activated.length) await this.record('branch.activate', row.companyId, id, request.reason, { branches: activated }, ctx, tx);
+        }
       };
       const decision = { months: request.months, reason: request.reason };
       try {

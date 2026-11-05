@@ -369,6 +369,15 @@ const UNREAD_PINNED: { at: string; why: string }[] = [];
  */
 const PINNED: { at: string; count?: number; why: string }[] = [
   {
+    at: 'src/platform/branch-activation.ts activatePendingBranchesTx = pending_payment',
+    count: 2,
+    why: 'An approved payment activates the branches still waiting (0130); a scheduled one was already paid for.',
+  },
+  {
+    at: 'src/platform/payment-proofs.service.ts PaymentProofsService.quoteFor = pending_payment',
+    why: 'The portal prices the branches still waiting (0130); a scheduled one was already paid for.',
+  },
+  {
     at: 'src/account/business-deletion.service.ts BusinessDeletionService.read = pending_payment',
     why: 'A seat still awaiting its payment stops a deletion (post-Build-4). A scheduled seat was paid for: nothing is pending about it.',
   },
@@ -562,7 +571,7 @@ describe('every reader of a seat request’s status names `scheduled`, or says w
   });
 });
 
-describe('`scheduled` has one writer: the confirmation made while a trial runs', () => {
+describe('`scheduled` has two writers: the confirmations made while a trial runs', () => {
   const writes = uses.filter((u) => u.role === 'write');
 
   it('every status a seat request is written with is a literal, or a parameter typed as literals', () => {
@@ -571,10 +580,10 @@ describe('`scheduled` has one writer: the confirmation made while a trial runs',
     expect(unknown).toEqual([]);
   });
 
-  it('exactly one of them writes `scheduled`: SeatAllocationService.scheduleTx, behind its guard', () => {
-    expect(scheduledWriters(uses)).toEqual(['src/platform/seat-allocation.service.ts SeatAllocationService.scheduleTx']);
+  it('exactly two write `scheduled`: SeatAllocationService.scheduleTx and, for a branch added in the app (0130), activatePendingBranchesTx — both behind their guard', () => {
+    expect(scheduledWriters(uses)).toEqual(['src/platform/branch-activation.ts activatePendingBranchesTx', 'src/platform/seat-allocation.service.ts SeatAllocationService.scheduleTx']);
     // The same UPDATE guards on the request awaiting payment, at the version read, and sets the payment and the start.
-    const [only] = writes.filter((u) => u.values?.includes('scheduled'));
+    const only = writes.find((u) => u.values?.includes('scheduled') && u.file.endsWith('seat-allocation.service.ts'))!;
     const update = only.node.parent.parent.parent as ts.ObjectLiteralExpression;
     const text = update.getText(only.sourceFile).replace(/\s+/g, ' ');
     expect(text).toMatch(/where: \{ id: before\.id, status: 'pending_payment', version: before\.version \}/);
@@ -654,8 +663,8 @@ describe('a query built in a variable is read like one written in place (review 
       }`,
     );
     expect(scheduledWriters(found.uses)).toEqual(['fixture/writer.ts SecondWriter.schedule']);
-    // Beside the server's one writer, two: the check above would fail.
-    expect([...scheduledWriters(uses), ...scheduledWriters(found.uses)]).toHaveLength(2);
+    // Beside the server's two writers, a third: the check above would fail.
+    expect([...scheduledWriters(uses), ...scheduledWriters(found.uses)]).toHaveLength(3);
   });
 
   it('every other way of building one — untyped, the argument itself, a spread, a `let` changed later, a list in a constant, `satisfies`, a function’s return', () => {

@@ -467,7 +467,21 @@ export class SeatAllocationService {
    */
   async requestStore(
     companyId: Buffer,
-    input: { name: string; nameAr?: string | null; activity?: Activity | null; requestedBy: string },
+    input: {
+      name: string;
+      nameAr?: string | null;
+      activity?: Activity | null;
+      requestedBy: string;
+      /** 0130: the optional city or location label, opened with the branch as its address. */
+      location?: string | null;
+      /** 0130: the app's idempotency key; unique per business. */
+      requestKey?: string | null;
+      /**
+       * 0130: a branch added in the app always waits for activation — never opened at once on an archived store's paid
+       * slot (that rule stays the portal's and the console's): creating it unlocks nothing.
+       */
+      pendingOnly?: boolean;
+    },
   ): Promise<{ allocation: SeatAllocationView; created: boolean }> {
     const sub = await this.subscriptionOf(companyId);
     const name = (input.name ?? '').trim();
@@ -511,8 +525,10 @@ export class SeatAllocationService {
       const { pricing } = await this.billing.chargeablePricing(companyId, tx);
       const fee = activityFee(activity, pricing);
       const found = await this.billing.replacementSlots(companyId, tx);
-      const slot = found ? chooseReplacementSlot(found.slots, fee) : null;
+      const slot = found && !input.pendingOnly ? chooseReplacementSlot(found.slots, fee) : null;
       const id = newUuidV7Bin();
+      // 0130: what an app request carries, written with the request itself.
+      const fromApp = { location: input.location?.trim().slice(0, 160) || null, requestKey: input.requestKey ?? null };
 
       if (!found || !slot) {
         await tx.seatAllocation.create({
@@ -527,6 +543,7 @@ export class SeatAllocationService {
             activityTo: activity,
             monthlyAmount: fee,
             requestedBy: actor,
+            ...fromApp,
           },
         });
         await tx.subscriptionEvent.create({
@@ -1413,6 +1430,7 @@ export class SeatAllocationService {
         name: storeName,
         nameAr: before.labelAr,
         activity,
+        address: before.location,
         actor: p.by,
         note: `Store "${storeName}" (${activity}) opened after payment ${p.reference}.`,
       });

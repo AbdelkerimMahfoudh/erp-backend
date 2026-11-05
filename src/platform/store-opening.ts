@@ -12,6 +12,8 @@ export interface StoreOpening {
   /** D225: the Arabic name; null when none was given (a request from before 0111). */
   nameAr?: string | null;
   activity: Activity;
+  /** 0130: the city or location label the Owner gave when adding the branch in the app; none otherwise. */
+  address?: string | null;
   actor: string;
   note: string;
 }
@@ -51,6 +53,7 @@ export async function openStoreTx(tx: BillingDb, input: StoreOpening): Promise<B
         nameAr: input.nameAr ?? null,
         type: 'store',
         activity: input.activity,
+        address: input.address ?? null,
       },
       select: { id: true },
     });

@@ -240,6 +240,13 @@ export const GRACE_REMINDER_TEMPLATE = subscriptionTemplate('subscription.grace_
 /** The grace ended: read-only. */
 export const GRACE_ENDED_TEMPLATE = subscriptionTemplate('subscription.grace_ended', ['business', 'ended'], 'WHATSAPP_TEMPLATE_GRACE_ENDED');
 
+/**
+ * A branch the Owner added in the app is ready for activation (0130; the owner's brief of 2026-11-05): the branch's name
+ * and the business's, and a static button to the portal's subscription page — `dukan_branch_activation_ready`. Sent once
+ * per request, after it commits; held while the template or the portal is unavailable.
+ */
+export const BRANCH_ACTIVATION_TEMPLATE = subscriptionTemplate('branch.activation_ready', ['branch', 'business'], 'WHATSAPP_TEMPLATE_BRANCH_ACTIVATION');
+
 /** Every subscription message's template, in one list (the notices, the configuration, the documentation). */
 export const SUBSCRIPTION_TEMPLATES: readonly TemplateDefinition[] = [
   PORTAL_INSTRUCTIONS_TEMPLATE,
@@ -250,6 +257,7 @@ export const SUBSCRIPTION_TEMPLATES: readonly TemplateDefinition[] = [
   NO_GRACE_TEMPLATE,
   GRACE_REMINDER_TEMPLATE,
   GRACE_ENDED_TEMPLATE,
+  BRANCH_ACTIVATION_TEMPLATE,
 ];
 
 const REGISTRY: Record<string, TemplateDefinition> = {

@@ -66,6 +66,8 @@ export const ALWAYS_ALLOWED: readonly RouteRule[] = [
    */
   allow('POST', 'platform/my-subscription/seat-requests', 'Asking for a seat is asking to pay; nothing is granted until the platform confirms the payment'),
   allow('POST', 'platform/my-subscription/store-requests', 'Asking for a store is asking to pay; the store exists only once the payment is confirmed'),
+  // 0130: adding a branch in the app — a store request pending activation, nothing opened or priced here.
+  allow('POST', 'branches/requests', 'Adding a branch records a request pending activation: no branch exists and nothing is unlocked until the platform approves its payment'),
   allow('POST', 'platform/my-subscription/seat-requests/:rid/withdraw', 'Withdrawing an unpaid request writes no business truth'),
   allow(
     'POST',

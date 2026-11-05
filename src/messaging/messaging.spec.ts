@@ -212,6 +212,8 @@ describe('the portal instructions and the subscription messages (0099)', () => {
       ['subscription.no_grace', 'WHATSAPP_TEMPLATE_NO_GRACE', ['business', 'ended']],
       ['subscription.grace_reminder', 'WHATSAPP_TEMPLATE_GRACE_REMINDER', ['business', 'remaining', 'graceEnds']],
       ['subscription.grace_ended', 'WHATSAPP_TEMPLATE_GRACE_ENDED', ['business', 'ended']],
+      // 0130: a branch added in the app, ready for activation.
+      ['branch.activation_ready', 'WHATSAPP_TEMPLATE_BRANCH_ACTIVATION', ['branch', 'business']],
     ]);
     for (const t of SUBSCRIPTION_TEMPLATES) {
       expect(t).toMatchObject({ category: 'account', providerKind: 'utility', use: 'optional' });

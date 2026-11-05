@@ -4780,6 +4780,10 @@ model SeatAllocation {
   label String? @db.VarChar(160)
   /// D225 (0111): the requested store's Arabic name, opened with it. NULL on every request before 0111.
   labelAr String? @map("label_ar") @db.VarChar(160)
+  /// 0130: the optional city or location label of a branch requested in the app, copied to the branch when it opens.
+  location String? @db.VarChar(160)
+  /// 0130: the app's idempotency key for a branch request: a retry returns the one request made. Unique per business.
+  requestKey String? @map("request_key") @db.VarChar(80)
 
   /// D154: kind `activity` — the branch's activity change; a store request records the new
   /// store's activity in `activityTo`.
@@ -4840,6 +4844,8 @@ model SeatAllocation {
   @@index([status, requestedAt], map: "ix_seat_alloc_status_requested")
   @@index([replacesBranchId, status], map: "ix_seat_alloc_replaces_branch")
   @@map("seat_allocations")
+
+  @@unique([companyId, requestKey], map: "ux_seat_allocations_request_key")
 }
 
 /// One registration attempt, so a retry cannot create a second business.
@@ -6257,6 +6263,8 @@ enum SubscriptionNoticeKind {
   grace_reminder
   /// The grace ended.
   grace_ended
+  /// 0130: a branch the Owner added in the app is ready for activation (one per request, after it commits).
+  branch_activation
 }
 
 /// 0099: where one notice stands. `accepted` by WhatsApp is still watched for a terminal failure (one email
