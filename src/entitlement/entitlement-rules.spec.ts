@@ -756,7 +756,11 @@ describe('what a pending or suspended shop may still read', () => {
       'auth/refresh',
       'entitlement',
       'health',
+      // The Owner's 3/2/1-day renewal reminder (owner, 2026-11-05): days left and a link, no business data.
+      'me/renewal-reminder',
       'platform/my-subscription',
+      // The portal's prices (owner, 2026-11-05): what a closed business needs to pay.
+      'platform/my-subscription/plans',
       // 0099: the portal's server-calculated status.
       'platform/my-subscription/status',
       // 0095: the Owner's free trial card, read by a business that has not started yet.
@@ -810,7 +814,7 @@ describe('what a pending or suspended shop may still read', () => {
   it('names only account routes, and the one money-record lookup — never another business read', () => {
     // The lookup is the single argued exception (D161, 2026-10-10): one record, under the phone's own key, masked.
     // D181: the person's own WhatsApp consent is an account route too.
-    const accountish = /^(entitlement|health|auth\/|account(\/deletion|\/trial-setup|\/whatsapp\/consent)?$|platform\/(my-subscription|payment-instructions|portal\/session$))/;
+    const accountish = /^(entitlement|health|me\/renewal-reminder$|auth\/|account(\/deletion|\/trial-setup|\/whatsapp\/consent)?$|platform\/(my-subscription(\/plans)?|payment-instructions|portal\/session$))/;
     for (const { path } of ALWAYS_READABLE.filter((r) => r.path !== 'agent/transactions/client/:clientUuid')) {
       expect([path, accountish.test(path)]).toEqual([path, true]);
     }

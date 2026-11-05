@@ -149,16 +149,16 @@ const SUBSCRIPTION_EMAILS: Record<SubscriptionEmailKey, EmailTemplate> = {
     },
   ),
   'subscription.trial_reminder': subscriptionEmail(
-    ['business', 'remaining', 'ends'],
+    ['business', 'days'],
     {
-      en: 'Your Dukan ERP free trial ends in {remaining}',
-      fr: 'Votre essai gratuit Dukan ERP se termine dans {remaining}',
-      ar: 'تنتهي فترتك التجريبية المجانية في Dukan ERP خلال {remaining}',
+      en: 'Your Dukan ERP free trial ends in {days} day(s)',
+      fr: 'Votre essai gratuit Dukan ERP se termine dans {days} jour(s)',
+      ar: 'تنتهي فترتك التجريبية المجانية في Dukan ERP خلال {days} يوم',
     },
     {
-      en: 'The free trial of {business} on Dukan ERP ends in {remaining}, on {ends}.\n\nFree trials have no grace period: when the trial ends, the app becomes read-only. Your records stay readable, but new sales and changes stop until a subscription starts.\n\nTo choose a subscription, sign in at {link}.',
-      fr: 'L’essai gratuit de {business} sur Dukan ERP se termine dans {remaining}, le {ends}.\n\nLes essais gratuits n’ont pas de période de grâce : à la fin de l’essai, l’application passe en lecture seule. Vos données restent consultables, mais les nouvelles ventes et modifications s’arrêtent jusqu’au début d’un abonnement.\n\nPour choisir un abonnement, connectez-vous sur {link}.',
-      ar: 'تنتهي الفترة التجريبية المجانية لـ{business} في Dukan ERP خلال {remaining}، في {ends}.\n\nلا توجد فترة سماح للفترات التجريبية المجانية: عند انتهاء الفترة التجريبية يصبح التطبيق للقراءة فقط. تبقى سجلاتك متاحة للاطلاع، لكن المبيعات الجديدة والتعديلات تتوقف إلى أن يبدأ اشتراك.\n\nلاختيار اشتراك، سجّل الدخول على {link}.',
+      en: 'The free trial of {business} on Dukan ERP ends in {days} day(s).\n\nFree trials have no grace period: when the trial ends, the app becomes read-only. Your records stay readable, but new sales and changes stop until a subscription starts.\n\nTo choose a subscription, sign in at {link}.',
+      fr: 'L’essai gratuit de {business} sur Dukan ERP se termine dans {days} jour(s).\n\nLes essais gratuits n’ont pas de période de grâce : à la fin de l’essai, l’application passe en lecture seule. Vos données restent consultables, mais les nouvelles ventes et modifications s’arrêtent jusqu’au début d’un abonnement.\n\nPour choisir un abonnement, connectez-vous sur {link}.',
+      ar: 'تنتهي الفترة التجريبية المجانية لـ{business} في Dukan ERP خلال {days} يوم.\n\nلا توجد فترة سماح للفترات التجريبية المجانية: عند انتهاء الفترة التجريبية يصبح التطبيق للقراءة فقط. تبقى سجلاتك متاحة للاطلاع، لكن المبيعات الجديدة والتعديلات تتوقف إلى أن يبدأ اشتراك.\n\nلاختيار اشتراك، سجّل الدخول على {link}.',
     },
   ),
   'subscription.trial_expired': subscriptionEmail(
@@ -175,16 +175,16 @@ const SUBSCRIPTION_EMAILS: Record<SubscriptionEmailKey, EmailTemplate> = {
     },
   ),
   'subscription.paid_reminder': subscriptionEmail(
-    ['business', 'remaining', 'ends'],
+    ['business', 'days'],
     {
-      en: 'Your Dukan ERP subscription ends in {remaining}',
-      fr: 'Votre abonnement Dukan ERP se termine dans {remaining}',
-      ar: 'ينتهي اشتراكك في Dukan ERP خلال {remaining}',
+      en: 'Your Dukan ERP subscription ends in {days} day(s)',
+      fr: 'Votre abonnement Dukan ERP se termine dans {days} jour(s)',
+      ar: 'ينتهي اشتراكك في Dukan ERP خلال {days} يوم',
     },
     {
-      en: `The Dukan ERP subscription of {business} ends in {remaining}, on {ends}.\n\n${RENEW.en}`,
-      fr: `L’abonnement Dukan ERP de {business} se termine dans {remaining}, le {ends}.\n\n${RENEW.fr}`,
-      ar: `ينتهي اشتراك {business} في Dukan ERP خلال {remaining}، في {ends}.\n\n${RENEW.ar}`,
+      en: `The Dukan ERP subscription of {business} ends in {days} day(s).\n\n${RENEW.en}`,
+      fr: `L’abonnement Dukan ERP de {business} se termine dans {days} jour(s).\n\n${RENEW.fr}`,
+      ar: `ينتهي اشتراك {business} في Dukan ERP خلال {days} يوم.\n\n${RENEW.ar}`,
     },
   ),
   'subscription.grace_started': subscriptionEmail(

@@ -83,6 +83,7 @@ describe('the portal instructions and the subscription messages (0099; docs/101 
   const sample: Record<string, string> = {
     business: 'Boutique Aicha',
     remaining: '3 days',
+    days: '3',
     ends: '21 October 2026, 14:00 (Greenwich Mean Time)',
     ended: '21 October 2026, 14:00 (Greenwich Mean Time)',
     graceEnds: '24 October 2026, 14:00 (Greenwich Mean Time)',

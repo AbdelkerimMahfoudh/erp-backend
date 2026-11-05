@@ -45,7 +45,7 @@ describe('an account with no trading name (D227)', () => {
 });
 
 describe('a paid period’s reminders', () => {
-  it('72 hours before the end: one WhatsApp message saying 3 days and the exact end in the business’s zone', async () => {
+  it('72 hours before the end: one WhatsApp message with the business and 3 days left — never the exact end (owner, 2026-11-05)', async () => {
     const w = makeTrialWorld();
     const end = new Date(NOW.getTime() + 71 * HOUR);
     const shop = paidBusiness(w, end, { name: 'Boutique Aicha', timezone: 'Asia/Dubai' });
@@ -56,7 +56,7 @@ describe('a paid period’s reminders', () => {
       expect.objectContaining({
         to: shop.phone,
         template: 'subscription.paid_reminder',
-        variables: { business: 'Boutique Aicha', remaining: '3 days', ends: '16 October 2026, 13:00 (Gulf Standard Time)' },
+        variables: { business: 'Boutique Aicha', days: '3' },
       }),
     ]);
     expect(states(w, shop)).toEqual(['paid_reminder:h72:accepted']);
@@ -76,7 +76,7 @@ describe('a paid period’s reminders', () => {
     w.clock.advance(24 * HOUR);
     await tick(w, shop);
     expect(states(w, shop)).toEqual(['paid_reminder:h72:superseded', 'paid_reminder:h48:accepted']);
-    expect(sent(w).filter((m) => m.variables.remaining === '2 days')).toHaveLength(1);
+    expect(sent(w).filter((m) => m.variables.days === '2')).toHaveLength(1);
   });
 
   it('a renewal retires what it made obsolete — the waiting reminder is cancelled; a reminder already going out is re-checked first', async () => {
@@ -91,7 +91,7 @@ describe('a paid period’s reminders', () => {
     w.clock.advance(HOUR);
     await w.notices.deliverNow();
     expect(w.noticesOf(shop)[0]).toMatchObject({ state: 'cancelled', cancelReason: 'period_changed' });
-    expect(sent(w).filter((m) => m.variables.remaining)).toHaveLength(1);
+    expect(sent(w).filter((m) => m.variables.days)).toHaveLength(1);
   });
 
   it('a suspension cancels; the reinstatement revives the same message while its slot lasts', async () => {
@@ -198,7 +198,7 @@ describe('a free trial’s messages', () => {
     w.clock.advance(72 * HOUR);
     await tick(w, shop);
     expect(sent(w).map((m) => m.template)).toEqual(['subscription.trial_reminder', 'subscription.trial_expired']);
-    expect(sent(w)[0].variables).toEqual({ business: 'Shop 1', remaining: '3 days', ends: '20 October 2026, 10:00 (Coordinated Universal Time)' });
+    expect(sent(w)[0].variables).toEqual({ business: 'Shop 1', days: '3' });
     expect(w.noticesOf(shop).every((n) => n.periodKey.startsWith('trial:'))).toBe(true);
   });
 
@@ -223,7 +223,7 @@ describe('email, when WhatsApp cannot carry a lifecycle message', () => {
     expect((w.email as TestEmailChannel).sent).toEqual([
       expect.objectContaining({
         template: 'subscription.paid_reminder',
-        variables: { business: 'Shop 1', remaining: '1 day', ends: '14 October 2026, 09:00 (Coordinated Universal Time)', link: PORTAL_URL },
+        variables: { business: 'Shop 1', days: '1', link: PORTAL_URL },
       }),
     ]);
     expect(w.noticesOf(shop)[0]).toMatchObject({ state: 'accepted', channel: 'email', fallbackReason: 'template_unavailable' });

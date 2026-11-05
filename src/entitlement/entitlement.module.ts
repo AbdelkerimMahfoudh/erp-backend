@@ -5,6 +5,7 @@ import { EntitlementController } from './entitlement.controller';
 import { EntitlementInterceptor } from './entitlement.interceptor';
 import { EntitlementService } from './entitlement.service';
 import { ProvisioningController } from './provisioning.controller';
+import { RenewalReminderService } from './renewal-reminder.service';
 
 /**
  * Subscription entitlement (Milestone K).
@@ -18,6 +19,7 @@ import { ProvisioningController } from './provisioning.controller';
   controllers: [EntitlementController, ProvisioningController],
   providers: [
     EntitlementService,
+    RenewalReminderService,
     EntitlementInterceptor,
     ActivityGateInterceptor,
     { provide: CLOCK, useValue: systemClock },

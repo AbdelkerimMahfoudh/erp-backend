@@ -186,6 +186,7 @@ const readable = (path: string, why: string): ReadRule => ({ path, why });
  */
 export const ALWAYS_READABLE: readonly ReadRule[] = [
   readable('entitlement', 'How the app learns it is pending or suspended; refusing it would leave the app unable to explain the refusal'),
+  readable('me/renewal-reminder', 'The Owner’s 3/2/1-day reminder before access ends: its days left and a link, no business data'),
   readable('auth/me', 'Who is signed in: the app needs it to show any screen at all, including the one that explains a closed business'),
   readable('auth/logout', 'Signing out must never be blocked; it is a security action'),
   readable('auth/refresh', 'Keeping an existing session alive returns no business data'),
@@ -216,6 +217,7 @@ export const ALWAYS_READABLE: readonly ReadRule[] = [
    * exactly the states that close everything else, holding no operational data.
    */
   readable('platform/portal/session', 'Who is signed in to the portal: needed to show any portal page, including the one that explains a closed business'),
+  readable('platform/my-subscription/plans', 'The portal’s prices for this business — 1, 3 or 12 months per store (owner, 2026-11-05): what a closed business needs to pay, no operational data'),
   readable('platform/my-subscription/status', 'The portal’s server-calculated status — access, period, grace, messages, permitted actions — read by a closed business above all'),
   /*
    * The same business in the app (0095): whether it may claim its trial on the website and whether the setup

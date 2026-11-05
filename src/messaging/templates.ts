@@ -176,6 +176,22 @@ export const DELIVERY_CHECK_TEMPLATE: TemplateDefinition = {
   configKey: 'WHATSAPP_TEMPLATE_DELIVERY_CHECK',
 };
 
+/**
+ * The operator's alert that an Owner sent a payment proof from the portal (owner, 2026-11-05), to the administrators'
+ * own numbers (`PAYMENT_ALERT_NUMBERS`, the server's environment only): the business, the Owner's verified number, the
+ * amount and the duration with its stores. Nothing is decided by it — the console's Verified / Not verified is.
+ * Disabled until `WHATSAPP_TEMPLATE_PAYMENT_SUBMITTED` names the approved template.
+ */
+export const PAYMENT_SUBMITTED_TEMPLATE: TemplateDefinition = {
+  key: 'payment.submitted',
+  category: 'operational',
+  variables: ['business', 'phone', 'amount', 'duration'],
+  languages: ['en'],
+  providerKind: 'utility',
+  use: 'operator',
+  configKey: 'WHATSAPP_TEMPLATE_PAYMENT_SUBMITTED',
+};
+
 /*
  * The portal instructions and the subscription lifecycle messages (0099; the owner's brief of 2026-10-18; docs/101 §7).
  *
@@ -205,12 +221,16 @@ const subscriptionTemplate = (key: string, variables: readonly string[], configK
  * portal's `/claim/` address with the single-use link as its suffix (`claim`, `notices/claim-links.service.ts`).
  */
 export const PORTAL_INSTRUCTIONS_TEMPLATE: TemplateDefinition = { ...subscriptionTemplate('portal.instructions', ['business'], 'WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS'), linkVariable: 'claim' };
-/** 72, 48 and 24 hours before a free trial ends — which has no grace. */
-export const TRIAL_REMINDER_TEMPLATE = subscriptionTemplate('subscription.trial_reminder', ['business', 'remaining', 'ends'], 'WHATSAPP_TEMPLATE_TRIAL_REMINDER');
+/**
+ * 3, 2 and 1 days (72, 48 and 24 hours) before a free trial ends — which has no grace. Two variables, as the approved
+ * `dukan_subscription_expiry` template has them (owner, 2026-11-05): the business's name and the days left, a number.
+ * Never the exact end: the app and the portal show it.
+ */
+export const TRIAL_REMINDER_TEMPLATE = subscriptionTemplate('subscription.trial_reminder', ['business', 'days'], 'WHATSAPP_TEMPLATE_TRIAL_REMINDER');
 /** The free trial ended: read-only, no grace. */
 export const TRIAL_EXPIRED_TEMPLATE = subscriptionTemplate('subscription.trial_expired', ['business', 'ended'], 'WHATSAPP_TEMPLATE_TRIAL_EXPIRED');
-/** 72, 48 and 24 hours before a paid period ends. */
-export const PAID_REMINDER_TEMPLATE = subscriptionTemplate('subscription.paid_reminder', ['business', 'remaining', 'ends'], 'WHATSAPP_TEMPLATE_PAID_REMINDER');
+/** 3, 2 and 1 days before a paid period ends: the same two variables and template as the trial's. */
+export const PAID_REMINDER_TEMPLATE = subscriptionTemplate('subscription.paid_reminder', ['business', 'days'], 'WHATSAPP_TEMPLATE_PAID_REMINDER');
 /** A paid period ended and one of the three grace periods in 12 months started: its exact end, the uses left. */
 export const GRACE_STARTED_TEMPLATE = subscriptionTemplate('subscription.grace_started', ['business', 'ended', 'graceEnds', 'usesLeft'], 'WHATSAPP_TEMPLATE_GRACE_STARTED');
 /** A paid period ended with the three grace periods of 12 months already used: no grace. */
@@ -240,6 +260,7 @@ const REGISTRY: Record<string, TemplateDefinition> = {
   [CLOSING_SALE_TEMPLATE.key]: CLOSING_SALE_TEMPLATE,
   [CLOSING_RECLOSED_TEMPLATE.key]: CLOSING_RECLOSED_TEMPLATE,
   [DELIVERY_CHECK_TEMPLATE.key]: DELIVERY_CHECK_TEMPLATE,
+  [PAYMENT_SUBMITTED_TEMPLATE.key]: PAYMENT_SUBMITTED_TEMPLATE,
   ...Object.fromEntries(SUBSCRIPTION_TEMPLATES.map((t) => [t.key, t])),
 };
 

@@ -28,7 +28,9 @@ import type { SubscriptionEmailKey } from '../messaging/email-channel';
 import { isRealChannel, outboxAllowed } from '../platform/contact-delivery';
 import { mayClaimNow, readFacts } from '../platform/trial/trial-facts';
 import { maskForOwner } from '../platform/trial/trial-rules';
-import { daysLeftText, formatNoticeInstant, graceHoursLeftText, type ReminderThreshold } from './notice-copy';
+import { formatNoticeInstant, graceHoursLeftText, type ReminderThreshold } from './notice-copy';
+
+const REMINDER_DAYS: Record<ReminderThreshold, number> = { h72: 3, h48: 2, h24: 1 };
 import {
   ASYNC_FAILURE_WATCH_MS,
   AUTOMATIC_INSTRUCTIONS,
@@ -716,7 +718,8 @@ export class NoticeService {
     switch (slot.kind) {
       case 'trial_reminder':
       case 'paid_reminder':
-        return { business, remaining: daysLeftText(slot.threshold as ReminderThreshold, language), ends: instant(slot.about) };
+        // The days left as a number (3, 2, 1), the approved template's second variable; never the exact end (owner, 2026-11-05).
+        return { business, days: String(REMINDER_DAYS[slot.threshold as ReminderThreshold]) };
       case 'grace_reminder':
         return { business, remaining: graceHoursLeftText(slot.threshold as 'h48' | 'h24', language), graceEnds: instant(slot.about) };
       case 'paid_expired':

@@ -205,9 +205,9 @@ describe('the portal instructions and the subscription messages (0099)', () => {
   it('are optional utility messages in every product language, each named by its own configuration key', () => {
     expect(SUBSCRIPTION_TEMPLATES.map((t) => [t.key, t.configKey, t.variables])).toEqual([
       ['portal.instructions', 'WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS', ['business']],
-      ['subscription.trial_reminder', 'WHATSAPP_TEMPLATE_TRIAL_REMINDER', ['business', 'remaining', 'ends']],
+      ['subscription.trial_reminder', 'WHATSAPP_TEMPLATE_TRIAL_REMINDER', ['business', 'days']],
       ['subscription.trial_expired', 'WHATSAPP_TEMPLATE_TRIAL_EXPIRED', ['business', 'ended']],
-      ['subscription.paid_reminder', 'WHATSAPP_TEMPLATE_PAID_REMINDER', ['business', 'remaining', 'ends']],
+      ['subscription.paid_reminder', 'WHATSAPP_TEMPLATE_PAID_REMINDER', ['business', 'days']],
       ['subscription.grace_started', 'WHATSAPP_TEMPLATE_GRACE_STARTED', ['business', 'ended', 'graceEnds', 'usesLeft']],
       ['subscription.no_grace', 'WHATSAPP_TEMPLATE_NO_GRACE', ['business', 'ended']],
       ['subscription.grace_reminder', 'WHATSAPP_TEMPLATE_GRACE_REMINDER', ['business', 'remaining', 'graceEnds']],
