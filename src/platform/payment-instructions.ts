@@ -57,14 +57,18 @@ export interface PaymentProvider {
  */
 export const PLACEHOLDER_CODE = '00000';
 
+/** Where an Owner pays by Bankily or Sedad (owner, 2026-11-05). A merchant number for customers to see, not a secret. */
+export const PAYMENT_NUMBER = '36963839';
+
 /**
  * The catalogue, in the order a shop would see it. None is offered: each still
  * carries the stand-in, and a stand-in is never served.
  */
 export const PAYMENT_PROVIDER_CATALOGUE: readonly PaymentProvider[] = [
-  { key: 'bankily', label: 'Bankily', order: 1, enabled: false, code: PLACEHOLDER_CODE, placeholder: true },
+  // The owner's real merchant number (2026-11-05), the same for both; shown without the country code, as the apps take it.
+  { key: 'bankily', label: 'Bankily', order: 1, enabled: true, code: PAYMENT_NUMBER, placeholder: false },
   { key: 'masrivi', label: 'Masrivi', order: 2, enabled: false, code: PLACEHOLDER_CODE, placeholder: true },
-  { key: 'sedad', label: 'Sedad', order: 3, enabled: false, code: PLACEHOLDER_CODE, placeholder: true },
+  { key: 'sedad', label: 'Sedad', order: 3, enabled: true, code: PAYMENT_NUMBER, placeholder: false },
   { key: 'bimbank', label: 'Bimbank', order: 4, enabled: false, code: PLACEHOLDER_CODE, placeholder: true },
   { key: 'click', label: 'Click', order: 5, enabled: false, code: PLACEHOLDER_CODE, placeholder: true },
 ];

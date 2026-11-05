@@ -39,7 +39,7 @@ suite('committed decisions and stopped approvals', () => {
   const audit = url ? new Audit(db) : (null as never);
   const lifecycle = url ? new SubscriptionLifecycleService(db, audit, new BillingService(db, clock as never), clock as never) : (null as never);
   const registration = url ? new RegistrationService(db, new HashingService(), clock as never) : (null as never);
-  const proofs = url ? new PaymentProofsService(db, lifecycle, audit) : (null as never);
+  const proofs = url ? new PaymentProofsService(db, lifecycle, audit, { forCompany: async () => ({ seatsByStore: [] }) } as never, { proofSubmitted: async () => ({ sent: 0 }) } as never) : (null as never);
 
   beforeAll(() => root.$executeRaw`INSERT INTO platform_admins (id, email, name, password_hash, updated_at) VALUES (${admin.id}, ${admin.email}, ${admin.name}, 'x', NOW(6))`);
   afterAll(() => root.$disconnect());

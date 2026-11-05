@@ -7,6 +7,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PlatformAuditService } from './platform-audit.service';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
+import { EntitlementService } from '../entitlement/entitlement.service';
+import { isOfferMonths, quote, type Quote } from '../billing/period-offers';
+import { PaymentAlertService } from './payment-alert.service';
 
 export const MAX_PROOF_BYTES = 5 * 1024 * 1024;
 /** How long a decided proof's file is kept. The decision and its figures stay; the image of somebody's receipt does not. */
@@ -92,12 +95,26 @@ export class PaymentProofsService {
     private readonly prisma: PrismaService,
     private readonly lifecycle: SubscriptionLifecycleService,
     private readonly audit: PlatformAuditService,
+    private readonly entitlement: EntitlementService,
+    private readonly alerts: PaymentAlertService,
   ) {}
+
+  /**
+   * The portal's offers for this business (owner, 2026-11-05): 1, 3 or 12 months, priced per active store and its paid
+   * seats (`billing/period-offers.ts`). The same figures the submission records.
+   */
+  async quoteFor(companyId: Buffer, months: Parameters<typeof quote>[1]): Promise<Quote> {
+    const e = await this.entitlement.forCompany(companyId);
+    return quote(
+      e.seatsByStore.map((b) => ({ branchId: b.branchId, name: b.name, activity: b.activity ?? 'electronics', paidSeats: b.paidSeats })),
+      months,
+    );
+  }
 
   async submit(
     companyId: Buffer,
     file: { buffer: Buffer } | undefined,
-    input: { idempotencyKey: string; amount: string; paidAt: string; reference?: string; note?: string; userId: Buffer },
+    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; reference?: string; note?: string; userId: Buffer },
   ) {
     const key = input.idempotencyKey?.trim();
     if (!key || key.length > 80) throw new BadRequestException({ code: 'proof_key_missing', message: 'Missing request key.' });
@@ -108,15 +125,25 @@ export class PaymentProofsService {
     if (file.buffer.length > MAX_PROOF_BYTES) throw new BadRequestException({ code: 'proof_too_large', message: 'The file is too large.' });
     const contentType = sniffProof(file.buffer);
     if (!contentType) throw new BadRequestException({ code: 'proof_type', message: 'Send a PDF, PNG or JPEG file.' });
+    // A plan chosen on the portal (owner, 2026-11-05): the amount is the server's quote for it, paid now — never a figure
+    // the page sends. Without a plan, the Owner states the amount and the date, as before.
+    let chosen: Quote | null = null;
+    if (input.months !== undefined) {
+      if (!isOfferMonths(input.months)) throw new BadRequestException({ code: 'plan_invalid', message: 'Choose 1, 3 or 12 months.' });
+      chosen = await this.quoteFor(companyId, input.months);
+      if (chosen.total <= 0) throw new BadRequestException({ code: 'plan_no_store', message: 'There is no active store to pay for.' });
+      input = { ...input, amount: String(chosen.total), paidAt: input.paidAt ?? new Date().toISOString() };
+    }
+    if (!input.amount || !input.paidAt) throw new BadRequestException({ code: 'proof_fields', message: 'Enter the amount and the date paid.' });
     const amount = Number(input.amount);
     if (!Number.isFinite(amount) || amount <= 0 || amount > 100_000_000) throw new BadRequestException({ code: 'amount_invalid', message: 'Enter the amount paid.' });
-    const paidAt = new Date(input.paidAt);
+    const paidAt = new Date(input.paidAt!);
     if (Number.isNaN(paidAt.getTime()) || paidAt.getTime() > Date.now() + 5 * 60_000) {
       throw new BadRequestException({ code: 'paid_at_invalid', message: 'The payment date cannot be in the future.' });
     }
     const sha256 = createHash('sha256').update(file.buffer).digest('hex');
 
-    return this.prisma.$transaction(async (tx) => {
+    const saved = await this.prisma.$transaction(async (tx) => {
       // The company row serialises two submissions: one open proof at a time.
       await tx.$queryRaw(Prisma.sql`SELECT id FROM companies WHERE id = ${companyId} FOR UPDATE`);
       const open = await tx.paymentProof.findFirst({ where: { companyId, status: { in: ['submitted', 'under_review'] } }, select: { id: true } });
@@ -130,7 +157,8 @@ export class PaymentProofsService {
           companyId,
           idempotencyKey: key,
           status: 'submitted',
-          amount: new Prisma.Decimal(input.amount),
+          amount: new Prisma.Decimal(input.amount!),
+          months: chosen?.months ?? null,
           paidAt,
           reference: input.reference?.trim().slice(0, 120) || null,
           note: input.note?.trim().slice(0, 500) || null,
@@ -144,6 +172,12 @@ export class PaymentProofsService {
       });
       return view(row);
     });
+    // After the commit, never inside it: the administrators' WhatsApp alert (owner, 2026-11-05). A failure is logged and
+    // the proof waits in the console all the same.
+    await this.alerts
+      .proofSubmitted({ id: saved.id, companyId, submittedBy: input.userId, amount: saved.amount, months: saved.months, stores: chosen?.lines.map((l) => l.name) ?? [] })
+      .catch(() => undefined);
+    return saved;
   }
 
   async listForCompany(companyId: Buffer) {

@@ -110,6 +110,10 @@ export const envValidationSchema = Joi.object({
   // does not require it; while it is empty WhatsApp simply cannot carry these instructions, and says so.
   WHATSAPP_TEMPLATE_PORTAL_INSTRUCTIONS: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_TRIAL_REMINDER: Joi.string().allow('').default(''),
+  /** The administrators' alert of a portal payment proof (owner, 2026-11-05). Empty: no alert is sent. */
+  WHATSAPP_TEMPLATE_PAYMENT_SUBMITTED: Joi.string().allow('').default(''),
+  /** The administrators' WhatsApp numbers for that alert, comma-separated E.164. Kept in the server's environment only. */
+  PAYMENT_ALERT_NUMBERS: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_TRIAL_EXPIRED: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_PAID_REMINDER: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_GRACE_STARTED: Joi.string().allow('').default(''),

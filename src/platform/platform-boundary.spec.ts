@@ -347,9 +347,10 @@ describe('the controller, from the platform’s side', () => {
 });
 
 describe('payment instructions serve no stand-in (2026-10-05)', () => {
-  it('nothing is offered until a real code exists: unavailable, no provider, no code', () => {
+  it('only providers with a real code are offered: Bankily and Sedad on the owner’s number (2026-11-05), never a stand-in', () => {
     const answer = paymentInstructions();
-    expect(answer).toEqual({ available: false, providers: [], defaultProvider: null, placeholder: false });
+    expect(answer).toMatchObject({ available: true, defaultProvider: 'bankily', placeholder: false });
+    expect(answer.providers.map((p) => [p.key, p.code])).toEqual([['bankily', '36963839'], ['sedad', '36963839']]);
     expect(JSON.stringify(answer)).not.toContain(PLACEHOLDER_CODE);
     for (const p of PAYMENT_PROVIDER_CATALOGUE) {
       expect({ key: p.key, offeredStandIn: p.enabled && p.placeholder }).toEqual({ key: p.key, offeredStandIn: false });
@@ -468,6 +469,8 @@ describe('a closed business stays closed on the server', () => {
       'platform/payment-instructions',
       'platform/my-subscription/trial',
       'platform/portal/session',
+      // The portal's prices (owner, 2026-11-05): what a closed business needs to pay.
+      'platform/my-subscription/plans',
       'platform/my-subscription/status',
     ]);
   });

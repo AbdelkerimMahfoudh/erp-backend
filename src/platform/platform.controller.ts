@@ -625,7 +625,8 @@ export class PlatformController {
             where: { deletedAt: null, userBranches: { some: { role: { key: 'owner' } } } },
             orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
             take: 1,
-            select: { name: true },
+            // The Owner's number only once verified (owner, 2026-11-05): the list shows it, and the search above finds it.
+            select: { name: true, phone: true, phoneVerifiedAt: true },
           },
         },
       }),
@@ -645,6 +646,8 @@ export class PlatformController {
         nameAr: c.nameAr,
         // D227: for this list only, and never stored. The console words it in the operator's language.
         accountLabel: adminAccountLabel(c.users[0]?.name ?? null, c.branches),
+        /** The Owner's WhatsApp number when verified, else null — never an unverified one (owner, 2026-11-05). */
+        ownerPhone: c.users[0]?.phoneVerifiedAt ? c.users[0].phone ?? null : null,
         publicStoreId: c.publicStoreId,
         city: c.city,
         createdAt: c.createdAt.toISOString(),

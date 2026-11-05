@@ -83,6 +83,13 @@ export class AppConfigService {
   get whatsappTestRecipients(): string {
     return (this.config.get<string>('WHATSAPP_TEST_RECIPIENTS') ?? '').trim();
   }
+  /** The administrators' numbers for the payment-proof alert (owner, 2026-11-05): E.164 only; anything else is dropped. */
+  get paymentAlertNumbers(): string[] {
+    return (this.config.get<string>('PAYMENT_ALERT_NUMBERS') ?? '')
+      .split(',')
+      .map((n) => n.replace(/[\s-]/g, ''))
+      .filter((n) => /^\+[1-9]\d{7,14}$/.test(n));
+  }
   get whatsappLiveSends(): boolean {
     return (this.config.get<string>('WHATSAPP_LIVE_SENDS') ?? 'disabled').trim().toLowerCase() === 'enabled';
   }

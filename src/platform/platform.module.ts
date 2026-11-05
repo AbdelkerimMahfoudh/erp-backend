@@ -1,5 +1,6 @@
 import { PaymentProofsController } from './payment-proofs.controller';
 import { PaymentProofsService } from './payment-proofs.service';
+import { PaymentAlertService } from './payment-alert.service';
 import { Module, OnModuleInit } from '@nestjs/common';
 import { PlatformNamesController } from './platform-names.controller';
 import { PlatformNamesService } from './platform-names.service';
@@ -140,6 +141,7 @@ export function selectContactDelivery(
   ],
   providers: [
     PaymentProofsService,
+    PaymentAlertService,
     HashingService,
     AccountSetupCodeService,
     AccountProvisioningService,

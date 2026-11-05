@@ -94,6 +94,27 @@ describe('the console sees each business’s trial by the shop’s own rules', (
     expect(active.rows.map((r) => r.name)).toEqual(['Shop 1']);
   });
 
+  it('each row names the Owner’s number once verified, and never one that is not (owner, 2026-11-05)', async () => {
+    const owners = [
+      { name: 'A', phone: '+22236000001', phoneVerifiedAt: new Date(now) },
+      { name: 'B', phone: '+22236000002', phoneVerifiedAt: null },
+    ];
+    const rows = owners.map((o, i) => ({
+      id: newUuidV7Bin(),
+      name: `Shop ${i}`,
+      publicStoreId: `P${i}`,
+      city: null,
+      createdAt: new Date(now - i * HOUR),
+      timezone: 'Africa/Nouakchott',
+      subscription: { ...SUBS[4], company: undefined, version: 1 },
+      ...SUBS[4].company,
+      _count: { branches: 1, users: 1 }, users: [o], branches: [],
+    }));
+    const prisma = { graceEpisode, company: { findMany: async () => rows, count: async () => rows.length } };
+    const list = await platformWith({ prisma, entitlement: zones }).businesses();
+    expect(list.rows.map((r) => r.ownerPhone)).toEqual(['+22236000001', null]);
+  });
+
   it('each row with a trial carries it as the pending queue does — its end and the business’s zone (C18)', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const zonesOf = ['Asia/Dubai', 'Africa/Casablanca', 'Europe/Paris', 'Africa/Nouakchott', 'Mars/Olympus'];

@@ -44,6 +44,14 @@ export class PaymentProofsController {
     private readonly admins: PlatformAdminService,
   ) {}
 
+  /** The portal's plans for this business (owner, 2026-11-05): 1, 3 and 12 months, per store, computed here. */
+  @Get('my-subscription/plans')
+  @RequirePermissions('settings.manage')
+  async plans() {
+    const companyId = this.tenant.companyId();
+    return { plans: await Promise.all(([1, 3, 12] as const).map((m) => this.proofs.quoteFor(companyId, m))) };
+  }
+
   @Get('my-subscription/payment-proofs')
   @RequirePermissions('settings.manage')
   mine() {
@@ -56,14 +64,17 @@ export class PaymentProofsController {
   @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_PROOF_BYTES) }))
   submit(
     @UploadedFile() file: { buffer: Buffer } | undefined,
-    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; reference?: string; note?: string },
+    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; reference?: string; note?: string },
     @CurrentUser() user: AuthUser,
   ) {
-    if (!body?.amount || !body.paidAt) throw new BadRequestException({ code: 'proof_fields', message: 'Enter the amount and the date paid.' });
+    // A plan (1, 3 or 12 months, owner 2026-11-05) prices itself on the server; otherwise the amount and date are stated.
+    const months = body?.months !== undefined && body.months !== '' ? Number(body.months) : undefined;
+    if (months === undefined && (!body?.amount || !body.paidAt)) throw new BadRequestException({ code: 'proof_fields', message: 'Enter the amount and the date paid.' });
     return this.proofs.submit(this.tenant.companyId(), file, {
       idempotencyKey: body.idempotencyKey ?? '',
       amount: body.amount,
       paidAt: body.paidAt,
+      months,
       reference: body.reference,
       note: body.note,
       userId: uuidToBin(user.userId),
