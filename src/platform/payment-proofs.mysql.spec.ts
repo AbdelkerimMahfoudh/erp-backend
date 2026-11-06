@@ -54,8 +54,11 @@ suite('payment proofs', () => {
   it('a retry is the same proof; a second open one is refused, also when two race', async () => {
     const a = await company();
     const key = randomUUID();
-    const first = await send(a, key);
-    expect((await send(a, key)).id).toBe(first.id);
+    const file = Buffer.concat([PNG, Buffer.from(randomUUID())]);
+    const first = await send(a, key, file);
+    expect((await send(a, key, file)).id).toBe(first.id);
+    // 0132: the same key with another file is not a retry — refused, never answered with the first proof.
+    await expect(send(a, key)).rejects.toMatchObject({ response: { code: 'proof_key_reused' } });
     await expect(send(a)).rejects.toMatchObject({ response: { code: 'proof_open' } });
     const b = await company();
     const raced = await Promise.allSettled([send(b), send(b)]);
