@@ -110,8 +110,8 @@ suite('a branch added in the app', () => {
   it('the Owner adds one pending branch: no branch, no seat, no trial, nothing else changed — and one notice', async () => {
     const { id, owner } = await shop();
     const before = await facts(id);
-    const made = await requests.create(id, owner, { name: '  Ksar   Centre ', location: ' Nouakchott ', requestKey: key() }, 'spec');
-    expect(made).toMatchObject({ created: true, request: { name: 'Ksar Centre', location: 'Nouakchott', state: 'pending_activation', branchId: null } });
+    const made = await requests.create(id, owner, { name: '  Ksar   Centre ', address: ' Nouakchott ', requestKey: key() }, 'spec');
+    expect(made).toMatchObject({ created: true, request: { name: 'Ksar Centre', address: 'Nouakchott', state: 'pending_activation', branchId: null } });
     expect(await facts(id)).toEqual(before);
     expect(await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, kind: 'store' } })).toMatchObject({ status: 'pending_payment', location: 'Nouakchott' });
     expect(await root.subscriptionNotice.count({ where: { companyId: id, kind: 'branch_activation' } })).toBe(1);
@@ -130,7 +130,7 @@ suite('a branch added in the app', () => {
     const { id, owner } = await shop();
     await expect(requests.create(id, owner, { name: '   ', requestKey: key() }, 'spec')).rejects.toMatchObject({ response: { code: 'branch_name_required' } });
     await expect(requests.create(id, owner, { name: 'x'.repeat(161), requestKey: key() }, 'spec')).rejects.toMatchObject({ response: { code: 'branch_name_too_long' } });
-    await expect(requests.create(id, owner, { name: 'Ok', location: 'y'.repeat(161), requestKey: key() }, 'spec')).rejects.toMatchObject({ response: { code: 'branch_location_too_long' } });
+    await expect(requests.create(id, owner, { name: 'Ok', address: 'y'.repeat(161), requestKey: key() }, 'spec')).rejects.toMatchObject({ response: { code: 'branch_address_too_long' } });
     await expect(requests.create(id, owner, { name: 'Ok' }, 'spec')).rejects.toMatchObject({ response: { code: 'request_key_missing' } });
   });
 
@@ -175,7 +175,7 @@ suite('a branch added in the app', () => {
 
   it('an approved proof opens the branch with its period, atomically, once — staff and seats untouched', async () => {
     const { uuid, id, owner } = await shop();
-    await requests.create(id, owner, { name: 'Ksar', location: 'Nouakchott', requestKey: key() }, 'spec');
+    await requests.create(id, owner, { name: 'Ksar', address: 'Nouakchott', requestKey: key() }, 'spec');
     const proof = await proofFor(uuid, id, owner);
     const before = await facts(id);
     await proofs.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'paid by Bankily' }, ctx);

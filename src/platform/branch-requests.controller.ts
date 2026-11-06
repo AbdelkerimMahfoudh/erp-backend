@@ -9,7 +9,7 @@ import { BranchRequestsService } from './branch-requests.service';
 
 export class CreateBranchRequestDto {
   @IsString() @MaxLength(400) name!: string;
-  @IsOptional() @IsString() @MaxLength(400) location?: string;
+  @IsOptional() @IsString() @MaxLength(400) address?: string;
   @IsString() @MaxLength(80) requestKey!: string;
 }
 

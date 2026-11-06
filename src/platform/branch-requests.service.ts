@@ -23,7 +23,7 @@ export type BranchRequestState = 'pending_activation' | 'proof_under_review' | '
 export interface BranchRequestView {
   id: string;
   name: string;
-  location: string | null;
+  address: string | null;
   state: BranchRequestState;
   requestedAt: string;
   /** Once active: the branch it became. */
@@ -63,15 +63,15 @@ export class BranchRequestsService {
   async create(
     companyId: Buffer,
     userId: Buffer,
-    input: { name?: unknown; location?: unknown; requestKey?: unknown },
+    input: { name?: unknown; address?: unknown; requestKey?: unknown },
     actor: string,
   ): Promise<{ request: BranchRequestView; created: boolean }> {
     await this.assertOwner(companyId, userId);
     const name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';
     if (!name) throw new BadRequestException({ code: 'branch_name_required', message: 'Name the branch.' });
     if (name.length > BRANCH_NAME_MAX) throw new BadRequestException({ code: 'branch_name_too_long', message: `A branch name is at most ${BRANCH_NAME_MAX} characters.` });
-    const location = typeof input.location === 'string' ? input.location.trim().replace(/\s+/g, ' ') : '';
-    if (location.length > BRANCH_LOCATION_MAX) throw new BadRequestException({ code: 'branch_location_too_long', message: `A location is at most ${BRANCH_LOCATION_MAX} characters.` });
+    const location = typeof input.address === 'string' ? input.address.trim().replace(/\s+/g, ' ') : '';
+    if (location.length > BRANCH_LOCATION_MAX) throw new BadRequestException({ code: 'branch_address_too_long', message: `An address is at most ${BRANCH_LOCATION_MAX} characters.` });
     const requestKey = typeof input.requestKey === 'string' ? input.requestKey : '';
     if (!REQUEST_KEY.test(requestKey)) throw new BadRequestException({ code: 'request_key_missing', message: 'Missing request key.' });
 
@@ -160,7 +160,7 @@ export class BranchRequestsService {
     return {
       id: binToUuid(row.id),
       name: row.label ?? '',
-      location: row.location,
+      address: row.location,
       state,
       requestedAt: row.requestedAt.toISOString(),
       branchId: row.branchId ? binToUuid(row.branchId) : null,
