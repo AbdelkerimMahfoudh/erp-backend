@@ -53,6 +53,9 @@ interface Tables {
   whatsappMessages: Row[];
   /** `grace_episodes`: the decision recorded at a paid period end (0099). */
   graces: Row[];
+  /** 0132: the stores' own entitlements and history the trial writes. */
+  branchEntitlements: Row[];
+  branchPeriods: Row[];
   /** `registration_attempts`: only the language the business registered in. */
   registrations: Row[];
   events: Row[];
@@ -256,6 +259,8 @@ export function makeTrialWorld(options: WorldOptions = {}) {
     notices: [],
     whatsappMessages: [],
     graces: [],
+    branchEntitlements: [],
+    branchPeriods: [],
     registrations: [],
     events: [],
     audits: [],
@@ -327,6 +332,28 @@ export function makeTrialWorld(options: WorldOptions = {}) {
       findMany: async () => [],
       findFirst: async ({ where, select }: Row) => pick(t.graces.find((x) => matches(x, where)), select),
       count: async () => 0,
+    },
+    // 0132: each business's one store (its id the company's, reversed), and the trial written onto it.
+    branch: {
+      findFirst: async ({ where }: Row) =>
+        t.companies.some((x) => same(x.id, where.companyId)) ? { id: Buffer.from(where.companyId).reverse() } : null,
+    },
+    branchEntitlement: {
+      upsert: async ({ where, create, update }: Row) => {
+        const e = t.branchEntitlements.find((x) => same(x.branchId, where.branchId));
+        if (e) {
+          apply(e, update);
+          return e;
+        }
+        t.branchEntitlements.push({ ...create });
+        return create;
+      },
+    },
+    branchPeriod: {
+      create: async ({ data }: Row) => {
+        t.branchPeriods.push({ ...data });
+        return data;
+      },
     },
     trialClaim: {
       create: async ({ data }: Row) => {

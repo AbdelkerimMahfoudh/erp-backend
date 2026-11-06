@@ -1,13 +1,17 @@
 import type { BillingDb } from '../billing/billing.service';
 import { binToUuid, newUuidV7Bin } from '../common/utils/uuid.util';
 import { openStoreTx } from './store-opening';
+import type { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
 
 export interface ActivatedBranch {
   requestId: string;
   name: string;
-  /** `opened`: the branch exists now. `scheduled`: paid during the free trial, it opens when the trial ends (D176). */
-  outcome: 'opened' | 'scheduled';
-  branchId: string | null;
+  /** 0132: always `opened` — a paid branch opens at approval, never at the first branch's trial end (docs/122). */
+  outcome: 'opened';
+  branchId: string;
+  /** Its own paid period. */
+  startsAt: string;
+  endsAt: string;
 }
 
 /**
@@ -16,16 +20,28 @@ export interface ActivatedBranch {
  * their records commit together or not at all.
  *
  * - Each pending store request of its own (not one taking an archived store's place) is marked paid by the payment.
- * - It opens now — the branch created, every Owner assigned, the subscribed store count raised (`openStoreTx`) — or,
- *   while the business's free trial runs, it is scheduled to open when the trial ends: a new branch never receives
- *   trial time.
- * - The Owners are told in the app that the branch is active (or will be when the trial ends).
+ * - It opens now — the branch created, every Owner assigned, the subscribed store count raised (`openStoreTx`) — with
+ *   its own paid entitlement for the months paid, from this approval (0132; docs/122). The business's free trial, if
+ *   one runs, is the first branch's alone: the new branch neither receives it nor waits for its end.
+ * - The Owners are told in the app that the branch is active.
  *
  * Idempotent: only requests still `pending_payment` move, guarded by their version; a repeated approval finds none.
  */
 export async function activatePendingBranchesTx(
   tx: BillingDb,
-  input: { companyId: Buffer; subscriptionId: Buffer; paymentId: Buffer | null; actor: string; reference: string; now: Date },
+  input: {
+    companyId: Buffer;
+    subscriptionId: Buffer;
+    paymentId: Buffer | null;
+    proofId: Buffer | null;
+    months: number;
+    /** Each waiting request's priced line, by request id (the proof's lines); absent: priced by the catalogue. */
+    amounts?: Map<string, number>;
+    actor: string;
+    reference: string;
+    now: Date;
+    branches: Pick<BranchEntitlementService, 'applyPaidTx'>;
+  },
 ): Promise<ActivatedBranch[]> {
   const { companyId, now } = input;
   const pending = await tx.seatAllocation.findMany({
@@ -33,38 +49,42 @@ export async function activatePendingBranchesTx(
     orderBy: [{ requestedAt: 'asc' }, { id: 'asc' }],
   });
   if (pending.length === 0) return [];
-  const claim = await tx.trialClaim.findUnique({ where: { companyId }, select: { endsAt: true } });
-  const trialEndsAt = claim && claim.endsAt.getTime() > now.getTime() ? claim.endsAt : null;
   const done: ActivatedBranch[] = [];
 
   for (const row of pending) {
     const name = row.label ?? 'New branch';
     const moved = await tx.seatAllocation.updateMany({
       where: { id: row.id, companyId, status: 'pending_payment', version: row.version },
-      data: trialEndsAt
-        ? { status: 'scheduled', paymentId: input.paymentId, confirmedBy: input.actor, confirmedAt: now, effectiveAt: trialEndsAt, version: { increment: 1 } }
-        : { status: 'paid', paymentId: input.paymentId, confirmedBy: input.actor, confirmedAt: now, effectiveAt: now, version: { increment: 1 } },
+      data: { status: 'paid', paymentId: input.paymentId, confirmedBy: input.actor, confirmedAt: now, effectiveAt: now, version: { increment: 1 } },
     });
     if (moved.count !== 1) continue;
-    let branchId: Buffer | null = null;
-    if (!trialEndsAt) {
-      const activity = row.activityTo ?? 'electronics';
-      branchId = await openStoreTx(tx, {
-        companyId,
-        subscriptionId: input.subscriptionId,
-        name,
-        nameAr: row.labelAr,
-        activity,
-        address: row.location,
-        actor: input.actor,
-        note: `Branch "${name}" (${activity}), added in the app, opened with payment ${input.reference}.`,
-      });
-      await tx.seatAllocation.updateMany({ where: { id: row.id, branchId: null }, data: { branchId } });
-    }
-    done.push({ requestId: binToUuid(row.id), name, outcome: trialEndsAt ? 'scheduled' : 'opened', branchId: branchId ? binToUuid(branchId) : null });
+    const activity = row.activityTo ?? 'electronics';
+    const branchId = await openStoreTx(tx, {
+      companyId,
+      subscriptionId: input.subscriptionId,
+      name,
+      nameAr: row.labelAr,
+      activity,
+      address: row.location,
+      actor: input.actor,
+      note: `Branch "${name}" (${activity}), added in the app, opened with payment ${input.reference}.`,
+      entitlement: 'own',
+    });
+    await tx.seatAllocation.updateMany({ where: { id: row.id, branchId: null }, data: { branchId } });
+    const period = await input.branches.applyPaidTx(tx as never, {
+      companyId,
+      branchId,
+      months: input.months,
+      amount: input.amounts?.get(binToUuid(row.id)) ?? null,
+      paymentId: input.paymentId,
+      proofId: input.proofId,
+      actor: input.actor,
+      now,
+    });
+    done.push({ requestId: binToUuid(row.id), name, outcome: 'opened', branchId: binToUuid(branchId), startsAt: period.startsAt.toISOString(), endsAt: period.endsAt.toISOString() });
   }
 
-  // The Owners, in the app: the branch is active — or opens when the trial ends.
+  // The Owners, in the app: the branch is active.
   if (done.length) {
     const owners = await tx.user.findMany({
       where: { companyId, deletedAt: null, isActive: true, userBranches: { some: { role: { key: 'owner' } } } },
@@ -77,11 +97,11 @@ export async function activatePendingBranchesTx(
             id: newUuidV7Bin(),
             companyId,
             targetUserId: o.id,
-            type: b.outcome === 'opened' ? 'branch.activated' : 'branch.scheduled',
-            title: b.outcome === 'opened' ? `Branch ${b.name} is active` : `Branch ${b.name} opens when the free trial ends`,
-            body: b.outcome === 'opened' ? 'Open it from your branch list.' : null,
+            type: 'branch.activated',
+            title: `Branch ${b.name} is active`,
+            body: 'Open it from your branch list.',
             dedupeKey: `branch:${b.requestId}:${b.outcome}`.slice(0, 120),
-            payload: { requestId: b.requestId, branchId: b.branchId, name: b.name, outcome: b.outcome },
+            payload: { requestId: b.requestId, branchId: b.branchId, name: b.name, outcome: b.outcome, endsAt: b.endsAt },
             createdAt: now,
           },
         });

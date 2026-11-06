@@ -11,6 +11,7 @@ import { EntitlementService } from '../entitlement/entitlement.service';
 import { isOfferMonths, quote, type Quote } from '../billing/period-offers';
 import { PaymentAlertService } from './payment-alert.service';
 import { activatePendingBranchesTx } from './branch-activation';
+import { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
 
 export const MAX_PROOF_BYTES = 5 * 1024 * 1024;
 /** How long a decided proof's file is kept. The decision and its figures stay; the image of somebody's receipt does not. */
@@ -98,13 +99,14 @@ export class PaymentProofsService {
     private readonly audit: PlatformAuditService,
     private readonly entitlement: EntitlementService,
     private readonly alerts: PaymentAlertService,
+    private readonly branches: BranchEntitlementService,
   ) {}
 
   /**
    * The portal's offers for this business (owner, 2026-11-05): 1, 3 or 12 months, priced per active store and its paid
    * seats (`billing/period-offers.ts`). The same figures the submission records.
    */
-  async quoteFor(companyId: Buffer, months: Parameters<typeof quote>[1]): Promise<Quote> {
+  async quoteFor(companyId: Buffer, months: Parameters<typeof quote>[1], only?: readonly string[]): Promise<Quote> {
     const e = await this.entitlement.forCompany(companyId);
     // 0130: the branches added in the app and waiting for activation are priced with the rest — this payment activates them.
     const waiting = await this.prisma.seatAllocation.findMany({
@@ -112,11 +114,13 @@ export class PaymentProofsService {
       orderBy: [{ requestedAt: 'asc' }, { id: 'asc' }],
       select: { id: true, label: true, activityTo: true },
     });
+    // 0132: each store is its own subscription — the Owner may pay for some branches only (none named: all of them).
+    const pick = only?.length ? new Set(only.map((x) => x.toLowerCase())) : null;
     return quote(
       [
         ...e.seatsByStore.map((b) => ({ branchId: b.branchId, name: b.name, activity: b.activity ?? 'electronics', paidSeats: b.paidSeats })),
         ...waiting.map((w) => ({ branchId: binToUuid(w.id), name: w.label ?? '', activity: w.activityTo ?? ('electronics' as const), paidSeats: 0, pending: true })),
-      ],
+      ].filter((l) => !pick || pick.has(l.branchId.toLowerCase())),
       months,
     );
   }
@@ -124,7 +128,7 @@ export class PaymentProofsService {
   async submit(
     companyId: Buffer,
     file: { buffer: Buffer } | undefined,
-    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; reference?: string; note?: string; userId: Buffer },
+    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; branches?: string[]; reference?: string; note?: string; userId: Buffer },
   ) {
     const key = input.idempotencyKey?.trim();
     if (!key || key.length > 80) throw new BadRequestException({ code: 'proof_key_missing', message: 'Missing request key.' });
@@ -140,7 +144,7 @@ export class PaymentProofsService {
     let chosen: Quote | null = null;
     if (input.months !== undefined) {
       if (!isOfferMonths(input.months)) throw new BadRequestException({ code: 'plan_invalid', message: 'Choose 1, 3 or 12 months.' });
-      chosen = await this.quoteFor(companyId, input.months);
+      chosen = await this.quoteFor(companyId, input.months, input.branches);
       if (chosen.total <= 0) throw new BadRequestException({ code: 'plan_no_store', message: 'There is no active store to pay for.' });
       input = { ...input, amount: String(chosen.total), paidAt: input.paidAt ?? new Date().toISOString() };
     }
@@ -169,6 +173,8 @@ export class PaymentProofsService {
           status: 'submitted',
           amount: new Prisma.Decimal(input.amount!),
           months: chosen?.months ?? null,
+          // 0132: the lines as quoted — each branch (or waiting request) and its amount — applied exactly at approval.
+          lines: chosen ? (chosen.lines.map((l) => ({ branchId: l.branchId, name: l.name, amount: l.amount, pending: !!l.pending })) as never) : Prisma.DbNull,
           paidAt,
           reference: input.reference?.trim().slice(0, 120) || null,
           note: input.note?.trim().slice(0, 500) || null,
@@ -304,8 +310,30 @@ export class PaymentProofsService {
         const sub = await tx.subscription.findFirst({ where: { companyId: row.companyId }, select: { id: true } });
         const payment = await tx.subscriptionPayment.findFirst({ where: { companyId: row.companyId, reference: `proof:${id}` }, select: { id: true } });
         if (sub) {
-          const activated = await activatePendingBranchesTx(tx, { companyId: row.companyId, subscriptionId: sub.id, paymentId: payment?.id ?? null, actor: ctx.admin.email, reference: `proof:${id}`, now: new Date() });
+          // 0132 (docs/122 §5): each line applied to its own branch — a waiting request opens now with its own period, an
+          // existing store goes on from its own end (active or in grace) or from now. Retries find each line done.
+          const proof = await tx.paymentProof.findUnique({ where: { id: row.id }, select: { lines: true } });
+          const lines = Array.isArray(proof?.lines) ? (proof!.lines as Array<{ branchId: string; amount: number; pending?: boolean }>) : null;
+          const amounts = new Map((lines ?? []).filter((l) => l.pending).map((l) => [l.branchId, l.amount] as const));
+          const now = new Date();
+          const activated = await activatePendingBranchesTx(tx, {
+            companyId: row.companyId, subscriptionId: sub.id, paymentId: payment?.id ?? null, proofId: row.id, months: request.months, amounts,
+            actor: ctx.admin.email, reference: `proof:${id}`, now, branches: this.branches,
+          });
           if (activated.length) await this.record('branch.activate', row.companyId, id, request.reason, { branches: activated }, ctx, tx);
+          const opened = new Set(activated.map((a) => a.branchId));
+          const existing = lines
+            ? lines.filter((l) => !l.pending && isUuid(l.branchId)).map((l) => ({ id: uuidToBin(l.branchId), amount: l.amount }))
+            : (await tx.branch.findMany({ where: { companyId: row.companyId, type: 'store', deletedAt: null }, select: { id: true } })).map((b) => ({ id: b.id, amount: null as number | null }));
+          const applied = [];
+          for (const b of existing) {
+            if (opened.has(binToUuid(b.id))) continue;
+            const owns = await tx.branch.findFirst({ where: { id: b.id, companyId: row.companyId, type: 'store', deletedAt: null }, select: { id: true } });
+            if (!owns) continue;
+            const period = await this.branches.applyPaidTx(tx, { companyId: row.companyId, branchId: b.id, months: request.months, amount: b.amount, paymentId: payment?.id ?? null, proofId: row.id, actor: ctx.admin.email, now });
+            applied.push({ branchId: binToUuid(b.id), applied: period.applied, startsAt: period.startsAt.toISOString(), endsAt: period.endsAt.toISOString() });
+          }
+          if (applied.length) await this.record('branch.period.apply', row.companyId, id, request.reason, { branches: applied }, ctx, tx);
         }
       };
       const decision = { months: request.months, reason: request.reason };

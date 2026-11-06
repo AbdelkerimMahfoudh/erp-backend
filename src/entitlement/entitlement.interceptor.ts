@@ -10,6 +10,8 @@ import { ClsService } from 'nestjs-cls';
 import { Observable } from 'rxjs';
 import { IS_PUBLIC_KEY } from '../common/decorators/public.decorator';
 import { EntitlementService } from './entitlement.service';
+import { BranchEntitlementService } from './branch-entitlement.service';
+import { isUuid, uuidToBin } from '../common/utils/uuid.util';
 import { ENTITLEMENT_WRITE_BLOCKED } from './entitlement-rules';
 import { isAllowedWhenExpired, isAlwaysReadable, isMutation } from './route-classification';
 
@@ -42,6 +44,7 @@ export class EntitlementInterceptor implements NestInterceptor {
     private readonly reflector: Reflector,
     private readonly entitlement: EntitlementService,
     private readonly cls: ClsService,
+    private readonly branches: BranchEntitlementService,
   ) {}
 
   async intercept(context: ExecutionContext, next: CallHandler): Promise<Observable<unknown>> {
@@ -51,7 +54,7 @@ export class EntitlementInterceptor implements NestInterceptor {
     ]);
     if (isPublic) return next.handle();
 
-    const req = context.switchToHttp().getRequest<{ method: string; route?: { path?: string } }>();
+    const req = context.switchToHttp().getRequest<{ method: string; route?: { path?: string }; params?: Record<string, unknown>; body?: unknown }>();
     const method = (req.method ?? 'GET').toUpperCase();
 
     /*
@@ -83,6 +86,13 @@ export class EntitlementInterceptor implements NestInterceptor {
       const companyId = this.cls.get<Buffer | undefined>('companyId');
       if (!companyId) return next.handle();
 
+      // 0132 (docs/122): each store is its own subscription — a read of a branch asks that branch.
+      if (this.branches.mode === 'enforce') {
+        const refused = await this.branchRead(companyId);
+        if (!refused) return next.handle();
+        throw new ForbiddenException(refused);
+      }
+
       const blocked = await this.entitlement.operationalAccessBlocked(companyId);
       if (!blocked) return next.handle();
 
@@ -104,12 +114,64 @@ export class EntitlementInterceptor implements NestInterceptor {
       });
     }
 
+    // 0132 (docs/122): the branch the request works in, and every other branch it names, must each be able to write.
+    if (this.branches.mode !== 'off') {
+      const branchRefused = await this.branchWrite(companyId, req);
+      if (this.branches.mode === 'enforce') {
+        if (!branchRefused) return next.handle();
+        throw new ForbiddenException(branchRefused);
+      }
+      const business = await this.entitlement.writeRefusal(companyId);
+      this.branches.shadow(companyId, this.cls.get<Buffer | undefined>('branchId') ?? null, !business, !branchRefused, `${method} ${path}`);
+    }
+
     const refused = await this.entitlement.writeRefusal(companyId);
     if (!refused) return next.handle();
 
     // The state travels with the code, so a suspended business is never told its subscription ended.
     throw new ForbiddenException({ code: refused.code, message: refused.message, state: refused.state });
   }
+
+  /** A read: of a branch, that branch's; without one, any store that is not locked will do. */
+  private async branchRead(companyId: Buffer) {
+    const branchId = this.cls.get<Buffer | undefined>('branchId');
+    if (branchId) return this.branches.readRefusal(companyId, branchId);
+    const list = await this.branches.listForCompany(companyId);
+    if (list.some((b) => b.state !== 'locked' && b.state !== 'suspended')) return null;
+    const stopped = list.some((b) => b.state === 'suspended');
+    return stopped
+      ? { code: 'BRANCH_ENTITLEMENT_WRITE_BLOCKED', message: 'This business is suspended.', state: 'suspended' }
+      : { code: 'BRANCH_LOCKED', message: 'No branch is active yet. A branch opens when its payment is approved.', state: 'locked' };
+  }
+
+  /** A write: the active branch, then every branch named in the path or the body — so editing an id reaches nothing locked. */
+  private async branchWrite(companyId: Buffer, req: { params?: Record<string, unknown>; body?: unknown }) {
+    const named = namedBranches(req);
+    const active = this.cls.get<Buffer | undefined>('branchId');
+    if (!active && named.length === 0) {
+      if (await this.branches.anyWritable(companyId)) return null;
+      return { code: 'BRANCH_ENTITLEMENT_WRITE_BLOCKED', message: 'No branch of this business can record changes now.', state: 'expired' };
+    }
+    for (const id of [...(active ? [active] : []), ...named]) {
+      const refused = await this.branches.writeRefusal(companyId, id);
+      if (refused) return refused;
+    }
+    return null;
+  }
+}
+
+/** The fields that name a branch, in the URL or the JSON body. */
+const BRANCH_FIELDS = ['branchId', 'toBranchId', 'fromBranchId', 'destinationBranchId', 'sourceBranchId', 'targetBranchId'] as const;
+
+export function namedBranches(req: { params?: Record<string, unknown>; body?: unknown }): Buffer[] {
+  const out = new Map<string, Buffer>();
+  const take = (v: unknown) => {
+    if (typeof v === 'string' && isUuid(v)) out.set(v.toLowerCase(), uuidToBin(v));
+  };
+  for (const f of BRANCH_FIELDS) take(req.params?.[f]);
+  const body = req.body && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : null;
+  if (body) for (const f of BRANCH_FIELDS) take(body[f]);
+  return [...out.values()];
 }
 
 /**

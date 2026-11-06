@@ -2,6 +2,10 @@ import { Controller, Get } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { EntitlementService } from './entitlement.service';
 import { RenewalReminderService } from './renewal-reminder.service';
+import { ClsService } from 'nestjs-cls';
+import { PrismaService } from '../prisma/prisma.service';
+import { uuidToBin } from '../common/utils/uuid.util';
+import { BranchEntitlementService } from './branch-entitlement.service';
 
 @ApiTags('entitlement')
 @ApiBearerAuth()
@@ -10,6 +14,9 @@ export class EntitlementController {
   constructor(
     private readonly entitlement: EntitlementService,
     private readonly reminders: RenewalReminderService,
+    private readonly branches: BranchEntitlementService,
+    private readonly cls: ClsService,
+    private readonly prisma: PrismaService,
   ) {}
 
   /**
@@ -24,8 +31,20 @@ export class EntitlementController {
    */
   @Get('entitlement')
   @ApiOperation({ summary: 'Subscription state, seats and whether writes are accepted' })
-  current() {
-    return this.entitlement.current();
+  async current() {
+    const e = await this.entitlement.current();
+    // 0132 (docs/122): each store's own state and dates. An Owner sees every store; anyone else only the stores they
+    // work in — a locked store is never theirs, since it has no assignment until it opens.
+    const companyId = this.cls.get<Buffer>('companyId');
+    const userId = this.cls.get<string | undefined>('userId');
+    const all = await this.branches.listForCompany(companyId);
+    const mine = userId
+      ? await this.prisma.userBranch.findMany({ where: { companyId, userId: uuidToBin(userId) }, select: { branchId: true, role: { select: { key: true } } } })
+      : [];
+    const owner = mine.some((m) => m.role.key === 'owner');
+    const assigned = new Set(mine.map((m) => m.branchId.toString('hex')));
+    const visible = owner ? all : all.filter((b) => assigned.has(b.branchId.replace(/-/g, '')));
+    return { ...e, branches: visible };
   }
 
   /**

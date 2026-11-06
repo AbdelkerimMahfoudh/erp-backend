@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import type { BillingDb } from '../billing/billing.service';
 import type { Activity } from '../entitlement/activity';
 import { newUuidV7Bin } from '../common/utils/uuid.util';
+import { inheritCompanyTimelineTx } from '../entitlement/branch-entitlement.service';
 
 /** What opening a store needs to know: whose it is, what it is called and does, and what the timeline says. */
 export interface StoreOpening {
@@ -16,6 +17,11 @@ export interface StoreOpening {
   address?: string | null;
   actor: string;
   note: string;
+  /**
+   * 0132 (docs/122): `inherit` — a store the Super Admin opens takes the business's timeline, as every store did before;
+   * `own` — the caller gives it its own entitlement in the same transaction (a branch paid in the app).
+   */
+  entitlement?: 'inherit' | 'own';
 }
 
 /**
@@ -97,5 +103,8 @@ export async function openStoreTx(tx: BillingDb, input: StoreOpening): Promise<B
       actor: input.actor.slice(0, 120),
     },
   });
+  if ((input.entitlement ?? 'inherit') === 'inherit') {
+    await inheritCompanyTimelineTx(tx as never, { companyId: input.companyId, branchId: branch.id, actor: input.actor, now: new Date() });
+  }
   return branch.id;
 }

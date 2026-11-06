@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
 import { randomUUID } from 'node:crypto';
 import { BillingService } from '../billing/billing.service';
 import { binToUuid, newUuidV7Bin, uuidToBin } from '../common/utils/uuid.util';
@@ -57,7 +58,7 @@ suite('a branch added in the app', () => {
   };
   const requests = url ? new BranchRequestsService(db, allocations, notices as never) : (null as never);
   const entitlement = { forCompany: async () => ({ seatsByStore: [] }) };
-  const proofs = url ? new PaymentProofsService(db, lifecycle, audit, entitlement as never, { proofSubmitted: async () => ({ sent: 0 }) } as never) : (null as never);
+  const proofs = url ? new PaymentProofsService(db, lifecycle, audit, entitlement as never, { proofSubmitted: async () => ({ sent: 0 }) } as never, new BranchEntitlementService(db as never, { now: () => new Date() })) : (null as never);
 
   beforeAll(() => root.$executeRaw`INSERT INTO platform_admins (id, email, name, password_hash, updated_at) VALUES (${admin.id}, ${admin.email}, ${admin.name}, 'x', NOW(6))`);
   afterAll(() => root.$disconnect());
@@ -202,17 +203,23 @@ suite('a branch added in the app', () => {
     expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'branch.activate' } })).toBe(1);
   });
 
-  it('during the free trial: the new branch receives no trial — paid, it waits for the trial to end', async () => {
+  it('during the free trial: the new branch receives no trial — paid, it opens at once with its own period (0132)', async () => {
     const { uuid, id, owner } = await shop({ trial: true });
     const trial = (await facts(id)).claim;
     await requests.create(id, owner, { name: 'Port', requestKey: key() }, 'spec');
     expect(await facts(id)).toMatchObject({ branches: 1, claim: trial });
     const proof = await proofFor(uuid, id, owner);
+    const before = Date.now();
     await proofs.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'paid' }, ctx);
     const request = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, kind: 'store' } });
-    expect(request.status).toBe('scheduled');
-    expect(request.effectiveAt?.getTime()).toBe(trial!.endsAt.getTime());
-    expect(request.branchId).toBeNull();
-    expect(await facts(id)).toMatchObject({ branches: 1, claim: trial });
+    expect(request.status).toBe('paid');
+    expect(request.branchId).not.toBeNull();
+    const own = await root.branchEntitlement.findUniqueOrThrow({ where: { branchId: request.branchId! } });
+    expect(own.trialEndsAt).toBeNull();
+    // Its own month, from the approval — never from the trial's end.
+    expect(own.paidUntil!.getTime()).toBeGreaterThan(before + 27 * 86_400_000);
+    expect(own.paidUntil!.getTime()).toBeLessThan(trial!.endsAt.getTime() + 27 * 86_400_000);
+    expect(await facts(id)).toMatchObject({ branches: 2, claim: trial });
   });
+
 });

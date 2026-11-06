@@ -6,7 +6,8 @@ import { Type } from 'class-transformer';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { AuthUser } from '../common/types/auth-user';
-import { uuidToBin } from '../common/utils/uuid.util';
+import { isUuid, uuidToBin } from '../common/utils/uuid.util';
+import { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
 import { uploadLimits } from '../common/upload/upload-limits';
 import { TenantContext } from '../common/tenant/tenant-context.service';
 import { RequirePermissions } from '../rbac/require-permissions.decorator';
@@ -42,14 +43,20 @@ export class PaymentProofsController {
     private readonly proofs: PaymentProofsService,
     private readonly tenant: TenantContext,
     private readonly admins: PlatformAdminService,
+    private readonly branchStatus: BranchEntitlementService,
   ) {}
 
   /** The portal's plans for this business (owner, 2026-11-05): 1, 3 and 12 months, per store, computed here. */
   @Get('my-subscription/plans')
   @RequirePermissions('settings.manage')
-  async plans() {
+  async plans(@Query('branches') branches?: string) {
     const companyId = this.tenant.companyId();
-    return { plans: await Promise.all(([1, 3, 12] as const).map((m) => this.proofs.quoteFor(companyId, m))) };
+    // 0132: each branch is its own subscription — its state and end beside its price; `branches` narrows the quote.
+    const only = branchList(branches);
+    return {
+      plans: await Promise.all(([1, 3, 12] as const).map((m) => this.proofs.quoteFor(companyId, m, only))),
+      branches: await this.branchStatus.listForCompany(companyId),
+    };
   }
 
   @Get('my-subscription/payment-proofs')
@@ -64,7 +71,7 @@ export class PaymentProofsController {
   @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_PROOF_BYTES) }))
   submit(
     @UploadedFile() file: { buffer: Buffer } | undefined,
-    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; reference?: string; note?: string },
+    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; branches?: string; reference?: string; note?: string },
     @CurrentUser() user: AuthUser,
   ) {
     // A plan (1, 3 or 12 months, owner 2026-11-05) prices itself on the server; otherwise the amount and date are stated.
@@ -75,6 +82,7 @@ export class PaymentProofsController {
       amount: body.amount,
       paidAt: body.paidAt,
       months,
+      branches: branchList(body.branches),
       reference: body.reference,
       note: body.note,
       userId: uuidToBin(user.userId),
@@ -155,4 +163,10 @@ export class PaymentProofsController {
     await this.admins.requireStepUp(req.platformAdmin!);
     return this.proofs.releaseRecovery(id, dto.reason, { admin: req.platformAdmin!, ip: req.ip });
   }
+}
+
+/** `a,b,c` — the branch (or waiting request) ids a quote covers; none: every one. */
+function branchList(raw: string | undefined): string[] | undefined {
+  const ids = (raw ?? '').split(',').map((x) => x.trim()).filter((x) => isUuid(x));
+  return ids.length ? ids : undefined;
 }

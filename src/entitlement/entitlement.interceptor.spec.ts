@@ -43,7 +43,8 @@ function interceptorFor(subscription: { status: string; currentPeriodEnd: Date |
   const entitlement = new EntitlementService(prisma as never, {} as never, { now: () => NOW });
   const reflector = { getAllAndOverride: () => false };
   const cls = { get: (key: string) => (key === 'companyId' ? COMPANY : undefined) };
-  return new EntitlementInterceptor(reflector as never, entitlement, cls as never);
+  // 0132: the business-wide gate, as before (BRANCH_ENTITLEMENTS=off); the branch gate has its own real-MySQL suite.
+  return new EntitlementInterceptor(reflector as never, entitlement, cls as never, { mode: 'off' } as never);
 }
 
 function request(method: string, path: string) {

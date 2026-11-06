@@ -584,8 +584,8 @@ describe('`scheduled` has two writers: the confirmations made while a trial runs
     expect(unknown).toEqual([]);
   });
 
-  it('exactly two write `scheduled`: SeatAllocationService.scheduleTx and, for a branch added in the app (0130), activatePendingBranchesTx — both behind their guard', () => {
-    expect(scheduledWriters(uses)).toEqual(['src/platform/branch-activation.ts activatePendingBranchesTx', 'src/platform/seat-allocation.service.ts SeatAllocationService.scheduleTx']);
+  it('exactly one writes `scheduled`: SeatAllocationService.scheduleTx — a branch added in the app opens at its approval (0132), never scheduled', () => {
+    expect(scheduledWriters(uses)).toEqual(['src/platform/seat-allocation.service.ts SeatAllocationService.scheduleTx']);
     // The same UPDATE guards on the request awaiting payment, at the version read, and sets the payment and the start.
     const only = writes.find((u) => u.values?.includes('scheduled') && u.file.endsWith('seat-allocation.service.ts'))!;
     const update = only.node.parent.parent.parent as ts.ObjectLiteralExpression;
@@ -667,8 +667,8 @@ describe('a query built in a variable is read like one written in place (review 
       }`,
     );
     expect(scheduledWriters(found.uses)).toEqual(['fixture/writer.ts SecondWriter.schedule']);
-    // Beside the server's two writers, a third: the check above would fail.
-    expect([...scheduledWriters(uses), ...scheduledWriters(found.uses)]).toHaveLength(3);
+    // Beside the server's one writer, a second: the check above would fail.
+    expect([...scheduledWriters(uses), ...scheduledWriters(found.uses)]).toHaveLength(2);
   });
 
   it('every other way of building one — untyped, the argument itself, a spread, a `let` changed later, a list in a constant, `satisfies`, a function’s return', () => {

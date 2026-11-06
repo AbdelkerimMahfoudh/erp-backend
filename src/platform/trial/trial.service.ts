@@ -26,6 +26,7 @@ import { isClosed, mayClaimNow, readFacts, readOwner, subscriptionRecordOf, type
 import { TrialRefusal } from './trial-refusal';
 import { isAutomaticTrialKey } from './automatic-trial';
 import { TrialSetupService } from './trial-setup.service';
+import { startBranchTrialTx } from '../../entitlement/branch-entitlement.service';
 import type { WebsiteSetup } from './trial-setup-rules';
 
 /**
@@ -279,6 +280,8 @@ export class TrialService {
         createdAt: now,
       },
     });
+    // 0132: the trial belongs to the business's first store alone (docs/122 §1).
+    await startBranchTrialTx(tx, { companyId: who.companyId, startedAt, endsAt, actor });
 
     await tx.subscriptionEvent.create({
       data: {

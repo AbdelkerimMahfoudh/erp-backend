@@ -10,6 +10,7 @@ import { recordDueGraceTx } from '../billing/grace-roll';
 import { NoticeService } from '../notices/notice.service';
 import { runningTrialEnd } from './trial/trial-rules';
 import { TrialEndRoll } from './trial/trial-end-roll';
+import { followCompanyTimelineTx } from '../entitlement/branch-entitlement.service';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 
 /**
@@ -237,6 +238,8 @@ export class SubscriptionLifecycleService {
     companyId: Buffer,
     reason: TrialEligibilityClosedReason,
     decide: (tx: Prisma.TransactionClient, fence: TrialFence) => Promise<R>,
+    /** 0132: the business's stores follow this decision — not when a payment proof applies its own lines per branch. */
+    follow = true,
   ): Promise<R> {
     return this.prisma.$transaction(async (tx) => {
       await lockSubscription(tx, companyId);
@@ -247,7 +250,9 @@ export class SubscriptionLifecycleService {
       });
       const claim = await tx.trialClaim.findUnique({ where: { companyId }, select: { endsAt: true } });
       await recordDueGraceTx(tx, companyId, now, 'lifecycle');
-      return decide(tx, { now, trialEndsAt: runningTrialEnd(claim, now) });
+      const result = await decide(tx, { now, trialEndsAt: runningTrialEnd(claim, now) });
+      if (follow) await followCompanyTimelineTx(tx, { companyId, actor: 'lifecycle', now });
+      return result;
     });
   }
 
@@ -493,7 +498,7 @@ export class SubscriptionLifecycleService {
         tx,
       );
       return { after };
-    });
+    }, !alongside);
     if (!approved) return { subscription: before, applied: false };
     const { after } = approved;
 
@@ -758,7 +763,7 @@ export class SubscriptionLifecycleService {
         tx,
       );
       return { after };
-    });
+    }, !alongside);
     // A new period may now be in force for what was paid for during an ended trial (D176).
     await this.trialEnd.applyIfDue(id);
 

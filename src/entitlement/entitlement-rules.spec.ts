@@ -753,9 +753,15 @@ describe('what a pending or suspended shop may still read', () => {
       'account/whatsapp/consent',
       // D161 (2026-10-10): what became of the phone's own money record, under its own key.
       'agent/transactions/client/:clientUuid',
+      // 0132 (docs/122): the branch list and permissions, so an Owner whose stores are all locked still sees them.
+      'auth/branches',
       'auth/logout',
       'auth/me',
+      'auth/permissions',
       'auth/refresh',
+      // 0132: the Owner's branch requests and how to activate them — no operational data.
+      'branches/requests',
+      'branches/requests/:id',
       'entitlement',
       'health',
       // The Owner's 3/2/1-day renewal reminder (owner, 2026-11-05): days left and a link, no business data.
@@ -816,7 +822,7 @@ describe('what a pending or suspended shop may still read', () => {
   it('names only account routes, and the one money-record lookup — never another business read', () => {
     // The lookup is the single argued exception (D161, 2026-10-10): one record, under the phone's own key, masked.
     // D181: the person's own WhatsApp consent is an account route too.
-    const accountish = /^(entitlement|health|me\/renewal-reminder$|auth\/|account(\/deletion|\/trial-setup|\/whatsapp\/consent)?$|platform\/(my-subscription(\/plans)?|payment-instructions|portal\/session$))/;
+    const accountish = /^(entitlement|health|branches\/requests(\/:id)?$|me\/renewal-reminder$|auth\/|account(\/deletion|\/trial-setup|\/whatsapp\/consent)?$|platform\/(my-subscription(\/plans)?|payment-instructions|portal\/session$))/;
     for (const { path } of ALWAYS_READABLE.filter((r) => r.path !== 'agent/transactions/client/:clientUuid')) {
       expect([path, accountish.test(path)]).toEqual([path, true]);
     }

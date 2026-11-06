@@ -232,6 +232,10 @@ export const ALWAYS_READABLE: readonly ReadRule[] = [
    * their number and see whether a deletion is pending — none of it business
    * data, and all of it needed in exactly the states that close everything else.
    */
+  readable('auth/branches', 'The branch list (0132): an Owner must see every branch, locked ones included, to choose one or to activate it'),
+  readable('auth/permissions', 'What the signed-in person may do: needed to draw any screen, including the locked-branch one'),
+  readable('branches/requests', 'The Owner’s branch requests and how to activate them (0132): no operational data'),
+  readable('branches/requests/:id', 'One branch request’s status (0132): no operational data'),
   readable('account', 'The person’s own account page: their sign-in identifier and their number, needed to leave in any state'),
   readable('account/whatsapp/consent', 'The person own operational WhatsApp consent, its history and what a withdrawal means (D213); display only'),
   readable('account/deletion', 'Whether the person’s own deletion request is pending; a right the subscription cannot withhold'),

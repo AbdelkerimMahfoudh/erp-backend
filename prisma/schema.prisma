@@ -316,57 +316,57 @@ enum SyncStatus {
 // ------------------------- Tenancy & Access --------------------------------
 
 model Company {
-  paymentProofs PaymentProof[]
-  ownerIdentities OwnerIdentity[]
+  paymentProofs           PaymentProof[]
+  ownerIdentities         OwnerIdentity[]
   notificationPreferences NotificationPreference[]
   notificationReads       NotificationRead[]
   pushDevices             PushDevice[]
   pushDeliveries          PushDelivery[]
-  actingOwnerDelegations ActingOwnerDelegation[]
-  branchReturnPolicies BranchReturnPolicy[]
-  discountApprovals    DiscountApproval[]
-  id                   Bytes                @id @db.Binary(16)
-  name                 String?               @db.VarChar(160)
+  actingOwnerDelegations  ActingOwnerDelegation[]
+  branchReturnPolicies    BranchReturnPolicy[]
+  discountApprovals       DiscountApproval[]
+  id                      Bytes                    @id @db.Binary(16)
+  name                    String?                  @db.VarChar(160)
   /// D225 (0111): the Arabic name, read by the Arabic interface. NULL until given: `name` is shown meanwhile.
-  nameAr               String?              @map("name_ar") @db.VarChar(160)
+  nameAr                  String?                  @map("name_ar") @db.VarChar(160)
   /// Public Store Account ID (F1 Stage 3.2): the human-typable, NON-secret code
   /// that selects this company before login. Canonical = 10 uppercase hex chars.
   /// Not the binary `id`, a branch id, a device id or a subscription id.
   /// Generated on create, unique, immutable through store-facing APIs.
-  publicStoreId        String               @unique @map("public_store_id") @db.VarChar(16)
+  publicStoreId           String                   @unique @map("public_store_id") @db.VarChar(16)
   /// Discovery (0049). Off until the Owner turns it on: a shop that never
   /// heard of consignment must not be searchable by every other shop by
   /// default. Publication is a decision, not a default.
-  isDiscoverable       Boolean              @default(false) @map("is_discoverable")
+  isDiscoverable          Boolean                  @default(false) @map("is_discoverable")
   /// Coarse location only. Never an address — a city narrows a search, an
   /// address identifies a building full of stock.
-  city                 String?              @db.VarChar(120)
-  logoRef              String?              @map("logo_ref") @db.VarChar(512)
+  city                    String?                  @db.VarChar(120)
+  logoRef                 String?                  @map("logo_ref") @db.VarChar(512)
   /// Shown only AFTER a connection is accepted, so a connection request cannot
   /// be used to harvest phone numbers.
-  publicPhone          String?              @map("public_phone") @db.VarChar(40)
+  publicPhone             String?                  @map("public_phone") @db.VarChar(40)
 
-  currency     String    @default("USD") @db.Char(3)
-  timezone     String    @default("UTC") @db.VarChar(64)
-  settingsJson Json      @map("settings") @db.Json
-  isActive     Boolean   @default(true) @map("is_active")
+  currency          String    @default("USD") @db.Char(3)
+  timezone          String    @default("UTC") @db.VarChar(64)
+  settingsJson      Json      @map("settings") @db.Json
+  isActive          Boolean   @default(true) @map("is_active")
   /// When the Owner closed the business through the account-deletion flow
   /// (0084, docs/64). Set exactly once; a closed company never reopens.
-  closedAt     DateTime? @map("closed_at") @db.DateTime(6)
+  closedAt          DateTime? @map("closed_at") @db.DateTime(6)
   /// Post-Build-4 (0128): when an administrator's final deletion completed. Every record kept after it is de-identified
   /// and belongs to a deleted business; `business_deletions` holds who, when and the retention policy.
-  deletedAt    DateTime? @map("deleted_at") @db.DateTime(6)
+  deletedAt         DateTime? @map("deleted_at") @db.DateTime(6)
   /// A persistent test business (0102, D217): set and cleared only by a platform administrator. Kept out of the
   /// platform's customer counts, connected only to other test businesses, never paid for.
-  isTest       Boolean   @default(false) @map("is_test")
+  isTest            Boolean   @default(false) @map("is_test")
   /// D227: `draft` until an administrator's account has its access basis applied; NULL is an ordinary account.
-  provisioningState String? @map("provisioning_state") @db.VarChar(16)
-  provisioningBasis Json?   @map("provisioning_basis")
+  provisioningState String?   @map("provisioning_state") @db.VarChar(16)
+  provisioningBasis Json?     @map("provisioning_basis")
   /// When, and by which administrator, the test status was last set or cleared. Null for a business never marked.
-  testMarkedAt DateTime? @map("test_marked_at") @db.DateTime(6)
-  testMarkedBy String?   @map("test_marked_by") @db.VarChar(160)
-  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt    DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  testMarkedAt      DateTime? @map("test_marked_at") @db.DateTime(6)
+  testMarkedBy      String?   @map("test_marked_by") @db.VarChar(160)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
 
   accountDeletionRequests        AccountDeletionRequest[]
   branches                       Branch[]
@@ -476,6 +476,9 @@ model Company {
   agentRequestKeys               AgentRequestKey[]
   trialEligibility               TrialEligibility?
   trialClaim                     TrialClaim?
+  branchEntitlements             BranchEntitlement[]
+  branchPeriods                  BranchPeriod[]
+  branchGraceEpisodes            BranchGraceEpisode[]
   businessDeletion               BusinessDeletion?
   trialSetupLinks                TrialSetupLink[]
   trialSetupMessages             TrialSetupMessage[]
@@ -508,6 +511,9 @@ model Branch {
 
   company Company @relation(fields: [companyId], references: [id])
 
+  entitlement          BranchEntitlement?
+  entitlementPeriods   BranchPeriod[]
+  graceEpisodes        BranchGraceEpisode[]
   refundPayouts        RefundPayout[]
   financialCorrections FinancialCorrection[]
   returnRequests       ReturnRequest[]
@@ -558,16 +564,16 @@ model Branch {
 }
 
 model User {
-  notificationPreference  NotificationPreference?
-  notificationReads       NotificationRead[]
-  pushDevices             PushDevice[]
-  actingOwnerDelegations  ActingOwnerDelegation[] @relation("ActingOwnerDelegate")
-  actingOwnerGranted      ActingOwnerDelegation[] @relation("ActingOwnerGrantedBy")
-  actingOwnerRevoked      ActingOwnerDelegation[] @relation("ActingOwnerRevokedBy")
-  discountApprovalsRequested DiscountApproval[] @relation("DiscountApprovalRequester")
-  discountApprovalsApproved  DiscountApproval[] @relation("DiscountApprovalApprover")
-  expensesReported           Expense[]          @relation("ExpenseReportedBy")
-  expensesConfirmed          Expense[]          @relation("ExpenseConfirmedBy")
+  notificationPreference     NotificationPreference?
+  notificationReads          NotificationRead[]
+  pushDevices                PushDevice[]
+  actingOwnerDelegations     ActingOwnerDelegation[] @relation("ActingOwnerDelegate")
+  actingOwnerGranted         ActingOwnerDelegation[] @relation("ActingOwnerGrantedBy")
+  actingOwnerRevoked         ActingOwnerDelegation[] @relation("ActingOwnerRevokedBy")
+  discountApprovalsRequested DiscountApproval[]      @relation("DiscountApprovalRequester")
+  discountApprovalsApproved  DiscountApproval[]      @relation("DiscountApprovalApprover")
+  expensesReported           Expense[]               @relation("ExpenseReportedBy")
+  expensesConfirmed          Expense[]               @relation("ExpenseConfirmedBy")
 
   /// TAC mappings this user proposed, and those they confirmed. Two relations,
   /// because who suggested and who decided must stay distinguishable.
@@ -607,20 +613,20 @@ model User {
 
   /// Consignment and connection roles. Named because several of them touch the
   /// same model and Prisma cannot tell them apart otherwise.
-  connectionsRequestedBy   StoreConnection[]        @relation("ConnectionRequestedBy")
-  connectionsDecidedBy     StoreConnection[]        @relation("ConnectionDecidedBy")
-  counterpartyRecords      Counterparty[]           @relation("CounterpartyUser")
-  counterpartiesCreated    Counterparty[]           @relation("CounterpartyCreatedBy")
-  paymentsRecorded         Payment[]                @relation("PaymentRecordedBy")
-  consignmentLedgerEntries ConsignmentLedgerEntry[]
-  ownerInvitations         OwnerInvitation[]
-  staffInvitations         StaffInvitation[]
+  connectionsRequestedBy     StoreConnection[]           @relation("ConnectionRequestedBy")
+  connectionsDecidedBy       StoreConnection[]           @relation("ConnectionDecidedBy")
+  counterpartyRecords        Counterparty[]              @relation("CounterpartyUser")
+  counterpartiesCreated      Counterparty[]              @relation("CounterpartyCreatedBy")
+  paymentsRecorded           Payment[]                   @relation("PaymentRecordedBy")
+  consignmentLedgerEntries   ConsignmentLedgerEntry[]
+  ownerInvitations           OwnerInvitation[]
+  staffInvitations           StaffInvitation[]
   phoneVerificationDeferrals PhoneVerificationDeferral[]
-  accountSetupCodes        AccountSetupCode[]
-  referralInvitations      ReferralInvitation[]     @relation("ReferralInvitationCreator")
-  revokedReferrals         ReferralInvitation[]     @relation("ReferralInvitationRevoker")
-  invitedAcquisitions      BusinessAcquisition[]
-  accountDeletionRequests  AccountDeletionRequest[]
+  accountSetupCodes          AccountSetupCode[]
+  referralInvitations        ReferralInvitation[]        @relation("ReferralInvitationCreator")
+  revokedReferrals           ReferralInvitation[]        @relation("ReferralInvitationRevoker")
+  invitedAcquisitions        BusinessAcquisition[]
+  accountDeletionRequests    AccountDeletionRequest[]
 
   /// Loan roles. Named, because who proposed and who decided must stay
   /// distinguishable even when an owner does both.
@@ -628,51 +634,51 @@ model User {
   loansDecidedBy    Loan[]            @relation("LoanDecidedBy")
   loanLedgerEntries LoanLedgerEntry[] @relation("LoanLedgerUser")
 
-  id              Bytes     @id @db.Binary(16)
-  companyId       Bytes     @map("company_id") @db.Binary(16)
-  name            String    @db.VarChar(160)
+  id                Bytes     @id @db.Binary(16)
+  companyId         Bytes     @map("company_id") @db.Binary(16)
+  name              String    @db.VarChar(160)
   /// D225 (0111): the Arabic name, read by the Arabic interface. NULL until given: `name` is shown meanwhile.
-  nameAr          String?   @map("name_ar") @db.VarChar(160)
-  login           String    @db.VarChar(120)
+  nameAr            String?   @map("name_ar") @db.VarChar(160)
+  login             String    @db.VarChar(120)
   /// The identifier somebody signs in with when they have no phone, or
   /// prefer not to type one. Generated, globally unique, and NOT the binary id:
   /// `U-` plus 8 characters with the ambiguous glyphs removed. See docs/35.
-  personalId      String    @unique(map: "ux_users_personal_id") @map("personal_id") @db.Char(10)
+  personalId        String    @unique(map: "ux_users_personal_id") @map("personal_id") @db.Char(10)
   /// Contact phone in E.164 (e.g. +2223xxxxxxx). The future WhatsApp OTP and
   /// recovery channel, so uniqueness is enforced in the database — see
   /// @@unique([companyId, phone]) — not in application code, where two devices
   /// could race onto one number. Null until captured; existing users stay null.
-  phone           String?   @db.VarChar(24)
+  phone             String?   @db.VarChar(24)
   /// Set only by a real verification event, and cleared whenever `phone`
   /// changes. Never set it to fake "verified" — there is no verification
   /// mechanism in Stage 1, so this stays null until Stage 4 delivers OTP.
-  phoneVerifiedAt DateTime? @map("phone_verified_at") @db.DateTime(6)
+  phoneVerifiedAt   DateTime? @map("phone_verified_at") @db.DateTime(6)
   /// 0109 (D224): required | deferred_by_platform | verified. `verified` exactly when `phoneVerifiedAt` is set — the
   /// database derives it (triggers) and enforces it (CHECK). `deferred_by_platform` is never verification.
-  phoneVerification String @default("required") @map("phone_verification") @db.VarChar(24)
+  phoneVerification String    @default("required") @map("phone_verification") @db.VarChar(24)
   /// A sign-in identifier, not just recovery, as of `0055`. Unique per company
   /// — the same rule `phone` already had — so one address used at two shops
   /// still reaches the password-first account chooser rather than colliding.
   /// Stored lowercased; the column is `ai_ci`, so comparison is already case-
   /// and accent-insensitive and matches the index exactly. NULLs coexist.
-  email           String?   @db.VarChar(160)
+  email             String?   @db.VarChar(160)
   /// Set only by a real verification event, and cleared whenever `email` changes.
-  emailVerifiedAt DateTime? @map("email_verified_at") @db.DateTime(6)
-  passwordHash    String    @map("password_hash") @db.VarChar(255)
-  pinHash         String?   @map("pin_hash") @db.VarChar(255)
-  isActive        Boolean   @default(true) @map("is_active")
+  emailVerifiedAt   DateTime? @map("email_verified_at") @db.DateTime(6)
+  passwordHash      String    @map("password_hash") @db.VarChar(255)
+  pinHash           String?   @map("pin_hash") @db.VarChar(255)
+  isActive          Boolean   @default(true) @map("is_active")
   /// 0086: set when an Owner created this account from Team. Such an account is
   /// unusable until `activatedAt` is set; null for every account that predates
   /// the staff flow.
-  invitedAt       DateTime? @map("invited_at") @db.DateTime(6)
+  invitedAt         DateTime? @map("invited_at") @db.DateTime(6)
   /// 0086: when the account became usable — every selected contact verified
   /// and a seat held at each of its stores. Backfilled to `createdAt` for every
   /// existing account, so nobody who already worked here reads as pending.
-  activatedAt     DateTime? @map("activated_at") @db.DateTime(6)
-  lastLoginAt     DateTime? @map("last_login_at") @db.DateTime(6)
-  createdAt       DateTime  @default(now()) @map("created_at") @db.DateTime(6)
-  updatedAt       DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
-  deletedAt       DateTime? @map("deleted_at") @db.DateTime(6)
+  activatedAt       DateTime? @map("activated_at") @db.DateTime(6)
+  lastLoginAt       DateTime? @map("last_login_at") @db.DateTime(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.DateTime(6)
+  deletedAt         DateTime? @map("deleted_at") @db.DateTime(6)
 
   company Company @relation(fields: [companyId], references: [id])
 
@@ -737,7 +743,7 @@ model User {
   trialSetupMessages           TrialSetupMessage[]
   requestedNotices             SubscriptionNotice[]
 
-  ownerIdentities              OwnerIdentity[]
+  ownerIdentities OwnerIdentity[]
 
   @@unique([companyId, login]) // company_id leftmost → covers company scans
   @@unique([companyId, phone]) // one phone per company; NULLs coexist (recovery/OTP channel)
@@ -2352,9 +2358,9 @@ model Notification {
   actorUserId  Bytes?   @map("actor_user_id") @db.Binary(16)
   createdAt    DateTime @default(now()) @map("created_at") @db.DateTime(6)
 
-  company    Company @relation(fields: [companyId], references: [id])
-  branch     Branch? @relation(fields: [branchId], references: [id])
-  targetUser User?   @relation(fields: [targetUserId], references: [id])
+  company    Company            @relation(fields: [companyId], references: [id])
+  branch     Branch?            @relation(fields: [branchId], references: [id])
+  targetUser User?              @relation(fields: [targetUserId], references: [id])
   reads      NotificationRead[]
   deliveries PushDelivery[]
 
@@ -3269,17 +3275,17 @@ enum ReturnAdjustmentKind {
 
 /// A reviewed return request against exactly ONE serialized sale line.
 model ReturnRequest {
-  id         Bytes @id @db.Binary(16)
-  companyId  Bytes @map("company_id") @db.Binary(16)
-  branchId   Bytes @map("branch_id") @db.Binary(16)
-  saleId     Bytes @map("sale_id") @db.Binary(16)
-  saleItemId Bytes @map("sale_item_id") @db.Binary(16)
+  id               Bytes   @id @db.Binary(16)
+  companyId        Bytes   @map("company_id") @db.Binary(16)
+  branchId         Bytes   @map("branch_id") @db.Binary(16)
+  saleId           Bytes   @map("sale_id") @db.Binary(16)
+  saleItemId       Bytes   @map("sale_item_id") @db.Binary(16)
   /// Null for a counted line (0123), which has no one physical thing.
-  unitId     Bytes? @map("unit_id") @db.Binary(16)
+  unitId           Bytes?  @map("unit_id") @db.Binary(16)
   /// How many of a counted line come back. Null for a device, which is always the one.
-  returnedQuantity Int? @map("returned_quantity")
+  returnedQuantity Int?    @map("returned_quantity")
   /// Decided at approval for a counted return: `sellable` went back on the shelf, `damaged` did not.
-  disposition String? @db.VarChar(16)
+  disposition      String? @db.VarChar(16)
 
   status ReturnStatus @default(pending_investigation)
 
@@ -3328,7 +3334,7 @@ model ReturnRequest {
   branch      Branch   @relation(fields: [branchId], references: [id])
   sale        Sale     @relation(fields: [saleId], references: [id])
   saleItem    SaleItem @relation(fields: [saleItemId], references: [id])
-  unit        Unit?     @relation(fields: [unitId], references: [id])
+  unit        Unit?    @relation(fields: [unitId], references: [id])
   requestedBy User?    @relation("ReturnRequestedBy", fields: [requestedById], references: [id])
   reviewedBy  User?    @relation("ReturnReviewedBy", fields: [reviewedById], references: [id])
   decidedBy   User?    @relation("ReturnDecidedBy", fields: [decidedById], references: [id])
@@ -3378,15 +3384,15 @@ model ReturnAdjustment {
 /// original sale line, so the reversal stays true when catalogue prices and
 /// costs move afterwards.
 model ReturnReversal {
-  id              Bytes @id @db.Binary(16)
-  companyId       Bytes @map("company_id") @db.Binary(16)
-  branchId        Bytes @map("branch_id") @db.Binary(16)
-  saleId          Bytes @map("sale_id") @db.Binary(16)
-  saleItemId      Bytes @map("sale_item_id") @db.Binary(16)
-  unitId          Bytes? @map("unit_id") @db.Binary(16)
-  returnedQuantity Int?  @map("returned_quantity")
+  id               Bytes   @id @db.Binary(16)
+  companyId        Bytes   @map("company_id") @db.Binary(16)
+  branchId         Bytes   @map("branch_id") @db.Binary(16)
+  saleId           Bytes   @map("sale_id") @db.Binary(16)
+  saleItemId       Bytes   @map("sale_item_id") @db.Binary(16)
+  unitId           Bytes?  @map("unit_id") @db.Binary(16)
+  returnedQuantity Int?    @map("returned_quantity")
   disposition      String? @db.VarChar(16)
-  returnRequestId Bytes @map("return_request_id") @db.Binary(16)
+  returnRequestId  Bytes   @map("return_request_id") @db.Binary(16)
 
   lineRevenue Decimal  @map("line_revenue") @db.Decimal(14, 2)
   lineCost    Decimal? @map("line_cost") @db.Decimal(14, 2) // NULL when the sold line's cost was unknown (0107)
@@ -4777,11 +4783,11 @@ model SeatAllocation {
   status SeatAllocationStatus @default(pending_payment)
 
   /// The requested store's name, for a store request. Null for a seat.
-  label String? @db.VarChar(160)
+  label      String? @db.VarChar(160)
   /// D225 (0111): the requested store's Arabic name, opened with it. NULL on every request before 0111.
-  labelAr String? @map("label_ar") @db.VarChar(160)
+  labelAr    String? @map("label_ar") @db.VarChar(160)
   /// 0130: the optional city or location label of a branch requested in the app, copied to the branch when it opens.
-  location String? @db.VarChar(160)
+  location   String? @db.VarChar(160)
   /// 0130: the app's idempotency key for a branch request: a retry returns the one request made. Unique per business.
   requestKey String? @map("request_key") @db.VarChar(80)
 
@@ -4795,13 +4801,13 @@ model SeatAllocation {
   /// the archived branch whose slot it reserved, what that period already paid for it, and the period. An activity
   /// upgrade priced against such a credit carries the credit and the period too (no branch): its difference is that
   /// period's figure alone, refused at confirmation once the period has ended.
-  replacesBranchId    Bytes? @map("replaces_branch_id") @db.Binary(16)
-  replacementCredit   Int?   @map("replacement_credit") @db.UnsignedInt
-  replacementPeriodId Bytes? @map("replacement_period_id") @db.Binary(16)
+  replacesBranchId    Bytes?    @map("replaces_branch_id") @db.Binary(16)
+  replacementCredit   Int?      @map("replacement_credit") @db.UnsignedInt
+  replacementPeriodId Bytes?    @map("replacement_period_id") @db.Binary(16)
   /// A store granted free until renewal (D227, 0117): the one billing period it is not assessed in.
-  freeUntilPeriodId Bytes? @map("free_until_period_id") @db.Binary(16)
+  freeUntilPeriodId   Bytes?    @map("free_until_period_id") @db.Binary(16)
   /// When that exemption ends, as recorded at the grant. Only an audited extension moves it.
-  freeUntilAt DateTime? @map("free_until_at") @db.DateTime(6)
+  freeUntilAt         DateTime? @map("free_until_at") @db.DateTime(6)
 
   /// Integer MRU per month, copied from the plan when requested. Zero for a grant.
   monthlyAmount Int    @map("monthly_amount") @db.UnsignedInt
@@ -4838,14 +4844,13 @@ model SeatAllocation {
   payment      SubscriptionPayment? @relation(fields: [paymentId], references: [id])
   replacements BranchReplacement[]
 
+  @@unique([companyId, requestKey], map: "ux_seat_allocations_request_key")
   @@index([companyId, status], map: "ix_seat_alloc_company_status")
   @@index([branchId, status], map: "ix_seat_alloc_branch_status")
   @@index([userId], map: "ix_seat_alloc_user")
   @@index([status, requestedAt], map: "ix_seat_alloc_status_requested")
   @@index([replacesBranchId, status], map: "ix_seat_alloc_replaces_branch")
   @@map("seat_allocations")
-
-  @@unique([companyId, requestKey], map: "ux_seat_allocations_request_key")
 }
 
 /// One registration attempt, so a retry cannot create a second business.
@@ -6529,28 +6534,30 @@ enum PaymentProofStatus {
 
 /// D227: an Owner's payment proof from the web portal. Asking changes nothing; only an administrator's approval records a payment.
 model PaymentProof {
-  id             Bytes              @id @db.Binary(16)
-  companyId      Bytes              @map("company_id") @db.Binary(16)
-  idempotencyKey String             @map("idempotency_key") @db.VarChar(80)
-  status         PaymentProofStatus @default(submitted)
-  amount         Decimal            @db.Decimal(14, 2)
-  paidAt         DateTime           @map("paid_at") @db.DateTime(6)
-  reference      String?            @db.VarChar(120)
-  note           String?            @db.VarChar(500)
-  contentType    String             @map("content_type") @db.VarChar(40)
-  byteSize       Int                @map("byte_size")
-  sha256         String             @db.Char(64)
-  file           Bytes?             @db.MediumBlob
-  submittedBy    Bytes              @map("submitted_by") @db.Binary(16)
-  submittedAt    DateTime           @default(now()) @map("submitted_at") @db.DateTime(6)
-  refusalReason  String?            @map("refusal_reason") @db.VarChar(500)
-  months         Int?
-  appliedAt      DateTime?          @map("applied_at") @db.DateTime(6)
-  applyRequest   Json?              @map("apply_request")
-  periodAppliedAt DateTime?         @map("period_applied_at") @db.DateTime(6)
-  decidedAt      DateTime?          @map("decided_at") @db.DateTime(6)
-  purgedAt       DateTime?          @map("purged_at") @db.DateTime(6)
-  company        Company            @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_proofs_company")
+  id              Bytes              @id @db.Binary(16)
+  companyId       Bytes              @map("company_id") @db.Binary(16)
+  idempotencyKey  String             @map("idempotency_key") @db.VarChar(80)
+  status          PaymentProofStatus @default(submitted)
+  amount          Decimal            @db.Decimal(14, 2)
+  paidAt          DateTime           @map("paid_at") @db.DateTime(6)
+  reference       String?            @db.VarChar(120)
+  note            String?            @db.VarChar(500)
+  contentType     String             @map("content_type") @db.VarChar(40)
+  byteSize        Int                @map("byte_size")
+  sha256          String             @db.Char(64)
+  file            Bytes?             @db.MediumBlob
+  submittedBy     Bytes              @map("submitted_by") @db.Binary(16)
+  submittedAt     DateTime           @default(now()) @map("submitted_at") @db.DateTime(6)
+  refusalReason   String?            @map("refusal_reason") @db.VarChar(500)
+  months          Int?
+  appliedAt       DateTime?          @map("applied_at") @db.DateTime(6)
+  applyRequest    Json?              @map("apply_request")
+  periodAppliedAt DateTime?          @map("period_applied_at") @db.DateTime(6)
+  /// 0132: the quote's lines at submission (branch or waiting request, months, amount) — applied exactly at approval.
+  lines           Json?
+  decidedAt       DateTime?          @map("decided_at") @db.DateTime(6)
+  purgedAt        DateTime?          @map("purged_at") @db.DateTime(6)
+  company         Company            @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_proofs_company")
 
   @@unique([companyId, idempotencyKey], map: "ux_payment_proofs_key")
   @@index([status, submittedAt], map: "ix_payment_proofs_status")
@@ -6660,4 +6667,80 @@ model PortalClaimLink {
 
   @@index([companyId, usedAt, revokedAt], map: "ix_portal_claim_links_company")
   @@map("portal_claim_links")
+}
+
+/// 0132 (docs/122): a store branch's own entitlement — its trial end (first branch only), paid end and grant.
+model BranchEntitlement {
+  id                 Bytes     @id @db.Binary(16)
+  companyId          Bytes     @map("company_id") @db.Binary(16)
+  branchId           Bytes     @unique(map: "ux_branch_entitlement_branch") @map("branch_id") @db.Binary(16)
+  trialEndsAt        DateTime? @map("trial_ends_at") @db.DateTime(6)
+  paidUntil          DateTime? @map("paid_until") @db.DateTime(6)
+  complimentary      Boolean   @default(false)
+  complimentaryUntil DateTime? @map("complimentary_until") @db.DateTime(6)
+  version            Int       @default(0) @db.UnsignedInt
+  createdAt          DateTime  @default(now()) @map("created_at") @db.DateTime(6)
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id], map: "fk_branch_entitlement_company")
+  branch  Branch  @relation(fields: [branchId], references: [id], map: "fk_branch_entitlement_branch")
+
+  @@index([companyId], map: "ix_branch_entitlement_company")
+  @@index([paidUntil], map: "ix_branch_entitlement_paid_until")
+  @@map("branch_entitlements")
+}
+
+enum BranchPeriodSource {
+  trial
+  payment
+  grant
+  grandfathered
+  admin
+}
+
+/// 0132: one entry of a branch's history. A payment or proof extends a branch once (unique keys).
+model BranchPeriod {
+  id             Bytes              @id @db.Binary(16)
+  companyId      Bytes              @map("company_id") @db.Binary(16)
+  branchId       Bytes              @map("branch_id") @db.Binary(16)
+  source         BranchPeriodSource
+  months         Int?               @db.UnsignedTinyInt
+  startsAt       DateTime           @map("starts_at") @db.DateTime(6)
+  endsAt         DateTime?          @map("ends_at") @db.DateTime(6)
+  amount         Int?               @db.UnsignedInt
+  paymentId      Bytes?             @map("payment_id") @db.Binary(16)
+  paymentProofId Bytes?             @map("payment_proof_id") @db.Binary(16)
+  recordedBy     String             @map("recorded_by") @db.VarChar(160)
+  note           String?            @db.VarChar(255)
+  createdAt      DateTime           @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id], map: "fk_branch_period_company")
+  branch  Branch  @relation(fields: [branchId], references: [id], map: "fk_branch_period_branch")
+
+  @@unique([paymentProofId, branchId], map: "ux_branch_period_proof")
+  @@unique([paymentId, branchId], map: "ux_branch_period_payment")
+  @@index([branchId, startsAt], map: "ix_branch_period_branch")
+  @@index([companyId, createdAt], map: "ix_branch_period_company")
+  @@map("branch_periods")
+}
+
+/// 0132: the grace decision for one branch period end (72 h; three granted in any rolling 12 months, per branch).
+model BranchGraceEpisode {
+  id         Bytes         @id @db.Binary(16)
+  companyId  Bytes         @map("company_id") @db.Binary(16)
+  branchId   Bytes         @map("branch_id") @db.Binary(16)
+  periodEnd  DateTime      @map("period_end") @db.DateTime(6)
+  decision   GraceDecision
+  startedAt  DateTime      @map("started_at") @db.DateTime(6)
+  endsAt     DateTime      @map("ends_at") @db.DateTime(6)
+  usesBefore Int           @map("uses_before") @db.UnsignedTinyInt
+  recordedAt DateTime      @map("recorded_at") @db.DateTime(6)
+  createdAt  DateTime      @default(now()) @map("created_at") @db.DateTime(6)
+
+  company Company @relation(fields: [companyId], references: [id], map: "fk_branch_grace_company")
+  branch  Branch  @relation(fields: [branchId], references: [id], map: "fk_branch_grace_branch")
+
+  @@unique([branchId, periodEnd], map: "ux_branch_grace_period")
+  @@index([branchId, decision, startedAt], map: "ix_branch_grace_window")
+  @@map("branch_grace_episodes")
 }

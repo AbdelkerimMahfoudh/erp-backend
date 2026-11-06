@@ -4,6 +4,7 @@ import { ActivityGateInterceptor } from './activity-gate.interceptor';
 import { EntitlementController } from './entitlement.controller';
 import { EntitlementInterceptor } from './entitlement.interceptor';
 import { EntitlementService } from './entitlement.service';
+import { BranchEntitlementService } from './branch-entitlement.service';
 import { ProvisioningController } from './provisioning.controller';
 import { RenewalReminderService } from './renewal-reminder.service';
 
@@ -19,11 +20,12 @@ import { RenewalReminderService } from './renewal-reminder.service';
   controllers: [EntitlementController, ProvisioningController],
   providers: [
     EntitlementService,
+    BranchEntitlementService,
     RenewalReminderService,
     EntitlementInterceptor,
     ActivityGateInterceptor,
     { provide: CLOCK, useValue: systemClock },
   ],
-  exports: [EntitlementService, EntitlementInterceptor, ActivityGateInterceptor, CLOCK],
+  exports: [EntitlementService, BranchEntitlementService, EntitlementInterceptor, ActivityGateInterceptor, CLOCK],
 })
 export class EntitlementModule {}

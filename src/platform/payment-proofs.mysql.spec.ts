@@ -26,7 +26,7 @@ suite('payment proofs', () => {
   const root = url ? new PrismaClient({ datasources: { db: { url } } }) : (null as unknown as PrismaClient);
   const lifecycle = { recordPayment: jest.fn(), approve: jest.fn(), extend: jest.fn() };
   const audit = { record: jest.fn() };
-  const service = new PaymentProofsService(root as never, lifecycle as never, audit as never, { forCompany: async () => ({ seatsByStore: [] }) } as never, { proofSubmitted: async () => ({ sent: 0 }) } as never);
+  const service = new PaymentProofsService(root as never, lifecycle as never, audit as never, { forCompany: async () => ({ seatsByStore: [] }) } as never, { proofSubmitted: async () => ({ sent: 0 }) } as never, { applyPaidTx: jest.fn(), listForCompany: async () => [] } as never);
   const user = Buffer.alloc(16, 7);
   afterAll(() => root?.$disconnect());
   beforeEach(() => {

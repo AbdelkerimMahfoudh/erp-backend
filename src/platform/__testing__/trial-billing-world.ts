@@ -65,6 +65,8 @@ const REL: Record<string, Record<string, Rel>> = {
     users: { model: 'user', one: false, local: 'id', foreign: 'companyId' },
   },
   subscription: { company: { model: 'company', one: true, local: 'companyId', foreign: 'id' } },
+  branch: { entitlement: { model: 'branchEntitlement', one: true, local: 'id', foreign: 'branchId' } },
+  branchEntitlement: { branch: { model: 'branch', one: true, local: 'branchId', foreign: 'id' } },
   seatAllocation: {
     branch: { model: 'branch', one: true, local: 'branchId', foreign: 'id' },
     replaces: { model: 'branch', one: true, local: 'replacesBranchId', foreign: 'id' },
@@ -102,6 +104,10 @@ const MODELS = [
   'platformAuditEvent',
   'graceEpisode',
   'staffInvitation',
+  // 0132: each store's own entitlement and history (docs/122).
+  'branchEntitlement',
+  'branchPeriod',
+  'branchGraceEpisode',
 ] as const;
 type Model = (typeof MODELS)[number];
 type Tables = Record<Model, Row[]>;
@@ -158,6 +164,10 @@ function defaultsOf(model: Model, now: Date): Row {
       return { expiryRecordedAt: null, setupLinkId: null, createdAt: now };
     case 'trialEligibility':
       return { closedAt: null, closedReason: null, basis: 'self_registration', createdAt: now };
+    case 'branchEntitlement':
+      return { trialEndsAt: null, paidUntil: null, complimentary: false, complimentaryUntil: null, version: 0, createdAt: now, updatedAt: now };
+    case 'branchPeriod':
+      return { months: null, endsAt: null, amount: null, paymentId: null, paymentProofId: null, note: null, createdAt: now };
     default:
       return { createdAt: now };
   }
@@ -249,6 +259,8 @@ const UNIQUE: Partial<Record<Model, string[][]>> = {
   trialClaim: [['companyId']],
   trialEligibility: [['companyId']],
   branchReplacement: [['billingPeriodId', 'archivedBranchId'], ['replacementBranchId']],
+  branchEntitlement: [['branchId']],
+  branchGraceEpisode: [['branchId', 'periodEnd']],
 };
 
 /** 0097's CHECK: a scheduled request has its start, and is a seat or a store. */
@@ -509,6 +521,31 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
         undo?.push({ model, before: t[model][index], after: next });
         t[model][index] = next;
         return project(model, next, args);
+      },
+      upsert: async (args: Row) => {
+        const index = t[model].findIndex((x) => matches(model, x, args.where));
+        if (index < 0) {
+          const row = { ...defaultsOf(model, now), ...defined(args.create) };
+          checkRow(model, row);
+          assertUnique(model, row, null);
+          t[model].push(row);
+          undo?.push({ model, before: null, after: row });
+          return project(model, row, args);
+        }
+        const next = applyData(t[model][index], defined(args.update));
+        if ('updatedAt' in next) next.updatedAt = now;
+        undo?.push({ model, before: t[model][index], after: next });
+        t[model][index] = next;
+        return project(model, next, args);
+      },
+      aggregate: async (args: Row) => {
+        const rows = query(model, t[model], { where: args.where });
+        const max: Row = {};
+        for (const k of Object.keys(args._max ?? {})) {
+          const vals = rows.map((r) => r[k]).filter((v) => v !== null && v !== undefined) as Date[];
+          max[k] = vals.length ? vals.reduce((a, b) => (a.getTime() >= b.getTime() ? a : b)) : null;
+        }
+        return { _max: max };
       },
       updateMany: async (args: Row) => {
         const hits = t[model].map((r, i) => ({ r, i })).filter(({ r }) => matches(model, r, args.where));

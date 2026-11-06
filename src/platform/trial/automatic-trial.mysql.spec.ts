@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { BranchEntitlementService } from '../../entitlement/branch-entitlement.service';
 import { randomUUID } from 'node:crypto';
 import { BillingService } from '../../billing/billing.service';
 import { HashingService } from '../../common/security/hashing.service';
@@ -323,7 +324,7 @@ suite('the automatic free trial', () => {
     });
   });
 
-  it('an additional branch never receives the trial: paid during it, it opens at the trial’s end; the trial is unchanged', async () => {
+  it('an additional branch never receives the trial: paid during it, it opens at once with its own period; the trial is unchanged', async () => {
     const { id, owner } = await business();
     await start(id, owner);
     const before = (await facts(id)).claims[0];
@@ -333,13 +334,20 @@ suite('the automatic free trial', () => {
     await requests.create(id, owner, { name: 'Ksar', requestKey: randomUUID() }, 'spec');
     const sub = await root.subscription.findFirstOrThrow({ where: { companyId: id } });
     const done = await root.$transaction((tx) =>
-      activatePendingBranchesTx(tx as never, { companyId: id, subscriptionId: sub.id, paymentId: null, actor: 'spec', reference: 'proof:spec', now: new Date() }),
+      activatePendingBranchesTx(tx as never, { companyId: id, subscriptionId: sub.id, paymentId: null, proofId: null, months: 3, actor: 'spec', reference: 'proof:spec', now: new Date(), branches: new BranchEntitlementService(db as never, { now: () => new Date() }) }),
     );
-    expect(done).toMatchObject([{ outcome: 'scheduled', branchId: null }]);
+    expect(done).toMatchObject([{ outcome: 'opened', branchId: expect.any(String) }]);
+    const own = await root.branchEntitlement.findUniqueOrThrow({ where: { branchId: uuidToBin(done[0].branchId) } });
+    expect(own.trialEndsAt).toBeNull();
+    expect(own.paidUntil).not.toBeNull();
+    // The trial is the first store's alone.
+    const first = await root.branchEntitlement.findMany({ where: { companyId: id, trialEndsAt: { not: null } } });
+    expect(first).toHaveLength(1);
+    expect(first[0].trialEndsAt!.getTime()).toBe(before.endsAt.getTime());
     const after = (await facts(id)).claims;
     expect(after).toHaveLength(1);
     expect(after[0].startedAt.getTime()).toBe(before.startedAt.getTime());
     expect(after[0].endsAt.getTime()).toBe(before.endsAt.getTime());
-    expect(await root.branch.count({ where: { companyId: id } })).toBe(1);
+    expect(await root.branch.count({ where: { companyId: id } })).toBe(2);
   });
 });

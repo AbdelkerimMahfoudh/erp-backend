@@ -251,6 +251,11 @@ export class EntitlementService {
    * a renewal that will not help; and a phone replaying a queued write needs
    * the state to know whether sending again later can ever succeed.
    */
+  /** The business-wide state now (0132: what a store without its own entitlement row follows). */
+  async businessState(companyId: Buffer): Promise<EntitlementState> {
+    return stateOf(await this.recordFor(companyId), this.clock.now());
+  }
+
   async writeRefusal(companyId: Buffer): Promise<{ code: string; message: string; state: EntitlementState } | null> {
     const record = await this.recordFor(companyId);
     const state = stateOf(record, this.clock.now());

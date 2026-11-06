@@ -5,6 +5,7 @@ import { lockSubscription } from '../../billing/renewal';
 import type { PlatformAuditService } from '../platform-audit.service';
 import { TRIAL_DURATION_DAYS, TRIAL_TERMS_VERSION, claimRequestHash, missingContacts, trialEndFor } from './trial-rules';
 import { mayClaimNow, readFacts, readOwner } from './trial-facts';
+import { startBranchTrialTx } from '../../entitlement/branch-entitlement.service';
 
 /** How an automatic trial began: at the registration's completion, or at a legacy Owner's next sign-in. */
 export type AutomaticTrialSource = 'registration' | 'sign_in';
@@ -84,6 +85,8 @@ export async function startAutomaticTrialTx(
       createdAt: now,
     },
   });
+  // 0132: the trial belongs to the business's first store alone (docs/122 §1).
+  await startBranchTrialTx(tx, { companyId, startedAt, endsAt, actor });
   await tx.subscriptionEvent.create({
     data: {
       id: newUuidV7Bin(),

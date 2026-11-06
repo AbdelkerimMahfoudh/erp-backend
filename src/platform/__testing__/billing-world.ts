@@ -261,6 +261,13 @@ export async function makeBillingWorld(opts: WorldOptions) {
     subscriptionEvent: {
       create: async ({ data }: AnyRow) => (t.events.push({ ...data, at: now }), data),
     },
+    // 0132: a store the console opens takes the business's timeline — recorded, not read back here.
+    branchEntitlement: {
+      upsert: async ({ create }: AnyRow) => create,
+    },
+    branchPeriod: {
+      create: async ({ data }: AnyRow) => data,
+    },
     planVersion: {
       findMany: async () => [...t.planVersions],
     },
