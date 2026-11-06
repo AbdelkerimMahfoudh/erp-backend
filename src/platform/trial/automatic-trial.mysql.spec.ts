@@ -270,16 +270,43 @@ suite('the automatic free trial', () => {
     it('with its template: sent once, the business and the end in Nouakchott time, in the Owner’s language', async () => {
       const { id, owner } = await business();
       await start(id, owner);
+      await root.company.update({ where: { id }, data: { name: 'Les   Oasis Shop' } });
       template = 'dukan_trial_started';
       const [notice] = (await facts(id)).notices;
       await notices.deliverOne(notice.id);
       expect(await notices.deliverOne(notice.id)).toBe(false);
       expect(sent).toHaveLength(1);
       expect(sent[0]).toMatchObject({ template: 'trial.started', language: 'fr' });
-      expect(sent[0].variables.business).toMatch(/^Shop /);
+      expect(sent[0].variables.business).toBe('Les Oasis Shop');
       const ends = (await facts(id)).claims[0].endsAt;
       const day = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Nouakchott', day: 'numeric', month: 'long', year: 'numeric' }).format(ends);
       expect(sent[0].variables.ends).toContain(day);
+    });
+
+    it('a held notice released after its 24 hours is superseded, never sent late', async () => {
+      const { id, owner } = await business();
+      await start(id, owner);
+      const [notice] = (await facts(id)).notices;
+      await notices.deliverOne(notice.id); // held: template not set
+      const claim = (await facts(id)).claims[0];
+      await root.trialClaim.update({ where: { id: claim.id }, data: { claimedAt: new Date(claim.claimedAt.getTime() - 25 * 3_600_000), startedAt: new Date(claim.startedAt.getTime() - 25 * 3_600_000), endsAt: new Date(claim.endsAt.getTime() - 25 * 3_600_000) } });
+      await root.subscriptionNotice.update({ where: { id: notice.id }, data: { nextAttemptAt: new Date(0) } });
+      template = 'dukan_trial_started';
+      await notices.deliverOne(notice.id);
+      expect(await root.subscriptionNotice.findUniqueOrThrow({ where: { id: notice.id } })).toMatchObject({ state: 'superseded', cancelReason: 'trial_notice_late' });
+      expect(sent).toHaveLength(0);
+    });
+
+    it('a notice whose trial has ended is superseded, never sent', async () => {
+      const { id, owner } = await business();
+      await start(id, owner);
+      const claim = (await facts(id)).claims[0];
+      await root.trialClaim.update({ where: { id: claim.id }, data: { claimedAt: new Date(claim.claimedAt.getTime() - 169 * 3_600_000), startedAt: new Date(claim.startedAt.getTime() - 169 * 3_600_000), endsAt: new Date(claim.endsAt.getTime() - 169 * 3_600_000) } });
+      template = 'dukan_trial_started';
+      const [notice] = (await facts(id)).notices;
+      await notices.deliverOne(notice.id);
+      expect(await root.subscriptionNotice.findUniqueOrThrow({ where: { id: notice.id } })).toMatchObject({ state: 'superseded', cancelReason: 'trial_not_running' });
+      expect(sent).toHaveLength(0);
     });
 
     it('a failure changes nothing about the trial: retried, then failed with its reason — access and dates unchanged', async () => {

@@ -32,6 +32,9 @@ import { mayClaimNow, readFacts } from '../platform/trial/trial-facts';
 import { maskForOwner } from '../platform/trial/trial-rules';
 import { formatNoticeInstant, graceHoursLeftText, type ReminderThreshold } from './notice-copy';
 
+/** 0131: a trial-started message later than this after the trial's start is superseded, not sent (owner, 2026-11-06). */
+export const TRIAL_STARTED_MAX_DELAY_MS = 24 * 3_600_000;
+
 const REMINDER_DAYS: Record<ReminderThreshold, number> = { h72: 3, h48: 2, h24: 1 };
 import {
   ASYNC_FAILURE_WATCH_MS,
@@ -459,9 +462,11 @@ export class NoticeService {
       if (!request || request.status !== 'pending_payment') return { state: 'cancelled', cancelReason: 'branch_not_pending', completedAt: now };
       branchLabel = (request.label ?? '').trim().replace(/\s+/g, ' ').slice(0, 100);
     } else if (n.kind === 'trial_started') {
-      // Re-read now (0131): the trial it announces must still be running — never a message about a trial that ended.
-      const claim = await this.prisma.trialClaim.findUnique({ where: { companyId: n.companyId }, select: { endsAt: true } });
-      if (!claim || claim.endsAt.getTime() <= now.getTime()) return { state: 'cancelled', cancelReason: 'trial_not_running', completedAt: now };
+      // Re-read now (0131): the trial it announces must still be running, and the news still timely — a notice held
+      // (template not yet approved, sender off) or retried past TRIAL_STARTED_MAX_DELAY_MS is superseded, never sent late.
+      const claim = await this.prisma.trialClaim.findUnique({ where: { companyId: n.companyId }, select: { startedAt: true, endsAt: true } });
+      if (!claim || claim.endsAt.getTime() <= now.getTime()) return { state: 'superseded', cancelReason: 'trial_not_running', completedAt: now };
+      if (now.getTime() - claim.startedAt.getTime() > TRIAL_STARTED_MAX_DELAY_MS) return { state: 'superseded', cancelReason: 'trial_notice_late', completedAt: now };
       trialEnds = claim.endsAt;
     } else if (n.kind === 'portal_instructions') {
       // 0131: retired by automatic trials — never sent, so no new link is issued.
@@ -818,7 +823,7 @@ export class NoticeService {
     if (n.kind === 'trial_started') {
       const zone = this.entitlement.trialZone(n.companyId, row.timezone);
       return {
-        business: row.name?.trim().replace(/s+/g, ' ').slice(0, 100) || neutralAccount(language, true),
+        business: row.name?.trim().replace(/\s+/g, ' ').slice(0, 100) || neutralAccount(language, true),
         ends: trialEnds ? formatNoticeInstant(trialEnds, zone, language) : '',
       };
     }
