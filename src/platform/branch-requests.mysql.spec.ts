@@ -162,6 +162,36 @@ suite('a branch added in the app', () => {
     return proofs.submit(id, { buffer: PNG() }, { idempotencyKey: key(), months: 1, userId: owner });
   }
 
+  it('0132: stores and prices cannot be manipulated — another business’s store, a duplicate, a withdrawn request are refused; the price is the server’s; a reused key with other contents is refused', async () => {
+    const mine = await shop();
+    const theirs = await shop();
+    await requests.create(mine.id, mine.owner, { name: 'Ksar', requestKey: key() }, 'spec');
+    await requests.create(mine.id, mine.owner, { name: 'Port', requestKey: key() }, 'spec');
+    await requests.create(theirs.id, theirs.owner, { name: 'Atar', requestKey: key() }, 'spec');
+    const [ksar, port] = await root.seatAllocation.findMany({ where: { companyId: mine.id, kind: 'store' }, orderBy: { requestedAt: 'asc' } });
+    const foreign = await root.seatAllocation.findFirstOrThrow({ where: { companyId: theirs.id, kind: 'store' } });
+    const send = (branches: string[], over: Record<string, unknown> = {}) =>
+      proofs.submit(mine.id, { buffer: PNG() }, { idempotencyKey: key(), months: 3, branches, userId: mine.owner, ...over } as never);
+    await expect(send([binToUuid(foreign.id)])).rejects.toMatchObject({ response: { code: 'branch_not_quotable' } });
+    await expect(send([binToUuid(ksar.id), binToUuid(ksar.id)])).rejects.toMatchObject({ response: { code: 'branches_duplicate' } });
+    await root.seatAllocation.update({ where: { id: port.id }, data: { status: 'released' } });
+    await expect(send([binToUuid(port.id)])).rejects.toMatchObject({ response: { code: 'branch_not_quotable' } });
+    expect(await root.paymentProof.count({ where: { companyId: mine.id } })).toBe(0);
+    // The page's figure is never used: the amount is the server's quote for exactly the store chosen.
+    const k = key();
+    const file = PNG();
+    const saved = await proofs.submit(mine.id, { buffer: file }, { idempotencyKey: k, months: 3, branches: [binToUuid(ksar.id)], amount: '1', userId: mine.owner } as never);
+    const quoted = await proofs.quoteFor(mine.id, 3, [binToUuid(ksar.id)]);
+    expect(Number(saved.amount)).toBe(quoted.total);
+    expect(quoted.total).toBeGreaterThan(1);
+    expect(saved.lines).toEqual([{ branchId: binToUuid(ksar.id), name: 'Ksar', amount: quoted.total, pending: true }]);
+    // The same retry is the same proof; the same key with other contents is refused.
+    expect((await proofs.submit(mine.id, { buffer: file }, { idempotencyKey: k, months: 3, branches: [binToUuid(ksar.id)], userId: mine.owner } as never)).id).toBe(saved.id);
+    await expect(proofs.submit(mine.id, { buffer: file }, { idempotencyKey: k, months: 12, branches: [binToUuid(ksar.id)], userId: mine.owner } as never)).rejects.toMatchObject({ response: { code: 'proof_key_reused' } });
+    await expect(proofs.submit(mine.id, { buffer: PNG() }, { idempotencyKey: k, months: 3, branches: [binToUuid(ksar.id)], userId: mine.owner } as never)).rejects.toMatchObject({ response: { code: 'proof_key_reused' } });
+    expect(await root.paymentProof.count({ where: { companyId: mine.id } })).toBe(1);
+  });
+
   it('a payment proof alone activates nothing; a refused proof leaves the branch pending', async () => {
     const { uuid, id, owner } = await shop();
     await requests.create(id, owner, { name: 'Ksar', requestKey: key() }, 'spec');

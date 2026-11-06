@@ -135,8 +135,21 @@ export class PaymentProofsService {
   ) {
     const key = input.idempotencyKey?.trim();
     if (!key || key.length > 80) throw new BadRequestException({ code: 'proof_key_missing', message: 'Missing request key.' });
-    const replay = await this.prisma.paymentProof.findFirst({ where: { companyId, idempotencyKey: key }, select: VIEW });
-    if (replay) return view(replay);
+    // 0132: a retry is the same proof — the same file, plan and stores. A key reused with other contents is refused,
+    // never answered with the first proof as though it were this one.
+    const replay = await this.prisma.paymentProof.findFirst({ where: { companyId, idempotencyKey: key }, select: { ...VIEW, sha256: true } });
+    if (replay) {
+      const { sha256: storedSha, ...shown } = replay;
+      const sameFile = !file?.buffer?.length || createHash('sha256').update(file.buffer).digest('hex') === storedSha;
+      const sameMonths = input.months === undefined || input.months === replay.months;
+      const storedIds = Array.isArray(replay.lines) ? (replay.lines as Array<{ branchId: string }>).map((l) => l.branchId.toLowerCase()).sort() : null;
+      const askedIds = input.branches?.length ? [...input.branches].map((x) => x.toLowerCase()).sort() : null;
+      const sameStores = !askedIds || (storedIds !== null && askedIds.join(',') === storedIds.join(','));
+      if (!sameFile || !sameMonths || !sameStores) {
+        throw new ConflictException({ code: 'proof_key_reused', message: 'This request was already sent with other details. Start a new payment.' });
+      }
+      return view(shown as Row);
+    }
 
     if (!file?.buffer?.length) throw new BadRequestException({ code: 'proof_file_missing', message: 'Choose a file.' });
     if (file.buffer.length > MAX_PROOF_BYTES) throw new BadRequestException({ code: 'proof_too_large', message: 'The file is too large.' });
@@ -147,6 +160,16 @@ export class PaymentProofsService {
     let chosen: Quote | null = null;
     if (input.months !== undefined) {
       if (!isOfferMonths(input.months)) throw new BadRequestException({ code: 'plan_invalid', message: 'Choose 1, 3 or 12 months.' });
+      // 0132: the stores named must each be this business's own — a store or a request still waiting — named once.
+      // The price is always the server's quote for exactly those stores; a figure from the page is never used.
+      if (input.branches?.length) {
+        const asked = input.branches.map((x) => x.toLowerCase());
+        if (new Set(asked).size !== asked.length) throw new BadRequestException({ code: 'branches_duplicate', message: 'A store is named twice.' });
+        const quotable = new Set((await this.quoteFor(companyId, input.months)).lines.map((l) => l.branchId.toLowerCase()));
+        if (asked.some((x) => !quotable.has(x))) {
+          throw new BadRequestException({ code: 'branch_not_quotable', message: 'One of these stores cannot be paid for here.' });
+        }
+      }
       chosen = await this.quoteFor(companyId, input.months, input.branches);
       if (chosen.total <= 0) throw new BadRequestException({ code: 'plan_no_store', message: 'There is no active store to pay for.' });
       input = { ...input, amount: String(chosen.total), paidAt: input.paidAt ?? new Date().toISOString() };

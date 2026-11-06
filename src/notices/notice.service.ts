@@ -919,7 +919,9 @@ export class NoticeService {
     const opensWithName = n.kind === 'portal_instructions' || !slot;
     const named = row.name?.trim().replace(/\s+/g, ' ') || neutralAccount(language, opensWithName);
     // 0132: a store's own timeline names the store ("Business · Store") when the business has more than one.
-    const business = (row.store?.many ? `${named} · ${((language === 'ar' && row.store.nameAr?.trim()) || row.store.name).trim().replace(/\s+/g, ' ')}` : named).slice(0, 100);
+    // The store is never the part cut: a long business name is shortened first, so each message still says which store.
+    const storeName = row.store?.many ? ((language === 'ar' && row.store.nameAr?.trim()) || row.store.name).trim().replace(/\s+/g, ' ').slice(0, 60) : null;
+    const business = storeName ? `${named.slice(0, 100 - storeName.length - 3).trimEnd()} · ${storeName}` : named.slice(0, 100);
     if (opensWithName) return { business };
     const zone = this.entitlement.trialZone(n.companyId, row.timezone);
     const instant = (d: Date) => formatNoticeInstant(d, zone, language);

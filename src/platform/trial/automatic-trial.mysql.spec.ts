@@ -231,6 +231,7 @@ suite('the automatic free trial', () => {
 
   describe('the trial-started message', () => {
     let template = '';
+    let paidTemplate = '';
     const sent: WhatsAppMessage[] = [];
     let script: DeliveryResult[] = [];
     const whatsapp = {
@@ -245,7 +246,7 @@ suite('the automatic free trial', () => {
       portalLive: true,
       automaticTrial: true,
       portalSubscriptionUrl: 'https://dukan.tsxmr.com/subscription',
-      whatsappTemplateName: (k: string) => (k === 'WHATSAPP_TEMPLATE_TRIAL_STARTED' ? template : ''),
+      whatsappTemplateName: (k: string) => (k === 'WHATSAPP_TEMPLATE_TRIAL_STARTED' ? template : k === 'WHATSAPP_TEMPLATE_PAID_REMINDER' ? paidTemplate : ''),
     };
     const email = { name: 'disabled', isEnabled: false, send: async () => ({ status: 'failed', reason: 'unavailable', detail: 'off', provider: 'disabled' }) };
     const records = { contactState: async () => ({ consented: true, consent: 'active', optOutScope: 'none', undeliverableAt: null, pendingLive: false }) };
@@ -256,6 +257,54 @@ suite('the automatic free trial', () => {
       sent.length = 0;
       script = [];
       template = '';
+      paidTemplate = '';
+    });
+
+    // The approved dukan_subscription_expiry bodies (WhatsApp Manager, read 2026-11-06): two variables, {{1}} business, {{2}} days.
+    const EXPIRY_BODY: Record<string, string> = {
+      en: 'Your Dukan ERP subscription for {{1}} expires in {{2}} day(s). Open your subscription page to review or renew it.',
+      fr: 'Votre abonnement Dukan ERP pour {{1}} expire dans {{2}} jour(s). Ouvrez la page de votre abonnement pour le consulter ou le renouveler.',
+      ar: 'ينتهي اشتراك Dukan ERP الخاص بـ {{1}} خلال {{2}} يوم. افتح صفحة الاشتراك لمراجعته أو تجديده.',
+    };
+    it('0132: per store and per remaining day, one message whatever the retries; two stores ending together get one each, each naming its store — EN/FR/AR, within WhatsApp limits', async () => {
+      for (const lang of ['en', 'fr', 'ar'] as const) {
+        sent.length = 0;
+        paidTemplate = 'dukan_subscription_expiry';
+        const { id } = await business();
+        await root.company.update({ where: { id }, data: { name: 'Boutique Aicha' + ' Électronique'.repeat(lang === 'fr' ? 8 : 0) } });
+        await root.registrationAttempt.updateMany({ where: { companyId: id }, data: { language: lang } });
+        const ends = new Date(Date.now() + 47 * 3_600_000);
+        const a = (await root.branch.findFirstOrThrow({ where: { companyId: id, type: 'store' } })).id;
+        await root.branch.update({ where: { id: a }, data: { nameAr: 'الفرع الرئيسي' } });
+        const b = newUuidV7Bin();
+        await root.branch.create({ data: { id: b, companyId: id, name: 'Ksar', nameAr: 'لكصر', type: 'store' } });
+        for (const branchId of [a, b]) await root.branchEntitlement.create({ data: { id: newUuidV7Bin(), companyId: id, branchId, paidUntil: ends } });
+        // Retries and concurrent passes: one row per store and threshold.
+        await Promise.all([notices.refresh(id), notices.refresh(id), notices.refresh(id)]);
+        await notices.refresh(id);
+        const rows = await root.subscriptionNotice.findMany({ where: { companyId: id, kind: 'paid_reminder' }, orderBy: { periodKey: 'asc' } });
+        expect(rows).toHaveLength(2);
+        expect(new Set(rows.map((x) => x.periodKey)).size).toBe(2);
+        expect(rows.every((x) => x.threshold === 'h48')).toBe(true);
+        for (const n of rows) {
+          await notices.deliverOne(n.id);
+          expect(await notices.deliverOne(n.id)).toBe(false);
+        }
+        await notices.refresh(id);
+        expect(await root.subscriptionNotice.count({ where: { companyId: id, kind: 'paid_reminder' } })).toBe(2);
+        expect(sent).toHaveLength(2);
+        const names = sent.map((m) => m.variables.business).sort();
+        const want = lang === 'ar' ? ['لكصر', 'الفرع الرئيسي'] : ['Ksar', 'Main'];
+        for (const w of want) expect(names.some((x) => x.endsWith(` · ${w}`))).toBe(true);
+        for (const m of sent) {
+          expect(Object.keys(m.variables).sort()).toEqual(['business', 'days']);
+          expect(m.variables.business.length).toBeLessThanOrEqual(100);
+          expect(m.variables.business).not.toMatch(/[\n\t]| {4}/);
+          const body = EXPIRY_BODY[lang].replace('{{1}}', m.variables.business).replace('{{2}}', m.variables.days);
+          expect(body.length).toBeLessThanOrEqual(1024);
+          expect(m.language).toBe(lang);
+        }
+      }
     });
 
     it('0132: each store has its own 3/2/1-day timeline, keyed by the store; a renewal supersedes what waited', async () => {
