@@ -97,7 +97,7 @@ describe('the portal instructions and the subscription messages (0099; docs/101 
   };
 
   it('exists for every WhatsApp template, takes its variables and the portal’s address, and says who runs Dukan ERP', () => {
-    expect(keys).toHaveLength(9);
+    expect(keys).toHaveLength(10);
     for (const key of keys) {
       for (const language of LANGUAGES) {
         const { subject, text, html } = compose(key, language);

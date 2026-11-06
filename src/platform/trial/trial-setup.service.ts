@@ -133,6 +133,8 @@ export class TrialSetupService {
   async resend(who: TrialPrincipal, by?: { admin: PlatformAdminIdentity; ip: string | null }): Promise<WebsiteSetup> {
     const now = this.clock.now();
     const owner = await readOwner(this.prisma, who);
+    // 0131: the trial starts by itself — there is no setup message to send again, and no link is issued.
+    if (owner && this.notices.automaticTrial) throw new TrialRefusal('trial_not_available');
     // Read before the lock — the providers' state and the person's own WhatsApp records — so the lock holds no lookup.
     const carriable = owner ? await this.notices.canCarryInstructions(owner) : false;
     await this.prisma.$transaction(async (tx) => {

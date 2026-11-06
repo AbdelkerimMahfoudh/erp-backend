@@ -40,7 +40,8 @@ export type SubscriptionEmailKey =
   | 'subscription.no_grace'
   | 'subscription.grace_reminder'
   | 'subscription.grace_ended'
-  | 'branch.activation_ready';
+  | 'branch.activation_ready'
+  | 'trial.started';
 
 export interface EmailMessage {
   /** Normalised, lowercased address. */
@@ -199,6 +200,19 @@ const SUBSCRIPTION_EMAILS: Record<SubscriptionEmailKey, EmailTemplate> = {
       en: 'Your new branch {branch} for {business} is ready for activation. Open your secure subscription page to review and activate it: {link}',
       fr: 'Votre nouvelle succursale {branch} pour {business} est prête à être activée. Ouvrez votre page d’abonnement sécurisée pour la consulter et l’activer : {link}',
       ar: 'فرعك الجديد {branch} الخاص بـ {business} جاهز للتفعيل. افتح صفحة اشتراكك الآمنة لمراجعته وتفعيله: {link}',
+    },
+  ),
+  'trial.started': subscriptionEmail(
+    ['business', 'ends'],
+    {
+      en: 'Your Dukan ERP 7-day trial is active',
+      fr: 'Votre période d’essai Dukan ERP de 7 jours est active',
+      ar: 'بدأت فترة التجربة لمدة 7 أيام في Dukan ERP',
+    },
+    {
+      en: 'Welcome to Dukan ERP. Your 7-day trial for {business} is now active and ends on {ends}. View its status and manage your subscription on your secure subscription page: {link}',
+      fr: 'Bienvenue sur Dukan ERP. Votre période d’essai de 7 jours pour {business} est maintenant active et se termine le {ends}. Consultez son statut et gérez votre abonnement depuis votre page d’abonnement sécurisée : {link}',
+      ar: 'مرحبًا بك في Dukan ERP. بدأت الآن فترة التجربة لمدة 7 أيام الخاصة بـ {business} وتنتهي في {ends}. يمكنك عرض حالتها وإدارة اشتراكك من صفحة الاشتراك الآمنة: {link}',
     },
   ),
   'subscription.grace_started': subscriptionEmail(

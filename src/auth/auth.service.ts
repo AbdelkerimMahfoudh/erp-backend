@@ -1,5 +1,6 @@
 import { storesOfUser, storesText, storesTextAr, type NamedStore } from '../common/account-label';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, Optional, UnauthorizedException } from '@nestjs/common';
+import { AppConfigService } from '../common/config/app-config.service';
 import { User } from '@prisma/client';
 import { UsersService } from '../users/users.service';
 import { HashingService } from '../common/security/hashing.service';
@@ -11,6 +12,8 @@ import { TokensService } from './tokens.service';
 import { SessionsService } from './sessions.service';
 import { DevicesService, type DeviceEnrollment } from './devices.service';
 import { LoginDto } from './dto/login.dto';
+import { PlatformAuditService } from '../platform/platform-audit.service';
+import { startAutomaticTrialTx } from '../platform/trial/automatic-trial';
 
 export interface AuthTokenResponse {
   tokenType: 'Bearer';
@@ -64,6 +67,8 @@ export const ACCOUNT_CHOICE_TTL_SECONDS = 120;
 
 @Injectable()
 export class AuthService {
+  private readonly log = new Logger('AuthService');
+
   constructor(
     private readonly users: UsersService,
     private readonly hashing: HashingService,
@@ -71,6 +76,7 @@ export class AuthService {
     private readonly sessions: SessionsService,
     private readonly devices: DevicesService,
     private readonly prisma: PrismaService,
+    @Optional() private readonly config?: AppConfigService,
   ) {}
 
   async login(dto: LoginDto, meta: { ip?: string; userAgent?: string }): Promise<LoginResult> {
@@ -217,6 +223,7 @@ export class AuthService {
       userAgent: meta.userAgent,
     });
     await this.users.setLastLogin(user.id);
+    await this.startLegacyTrial(user.companyId, user.id);
 
     let enrollment: DeviceEnrollment | undefined;
     if (recognisedDeviceId) {
@@ -234,6 +241,26 @@ export class AuthService {
     // `company` is guaranteed here: `user` is set only when the company resolved
     // and was active, and we would have thrown otherwise.
     return { ...this.buildResponse(user, sessionId, secret, company!), device: enrollment };
+  }
+
+  /**
+   * A self-registered business that became eligible before automatic trials (0131) and never claimed its trial: the
+   * trial starts at its Owner's next successful sign-in — 168 hours from this instant, never from the account's creation —
+   * once, atomically, with its notice. Anyone else, or a business not eligible, changes nothing. Never fails the sign-in.
+   */
+  private async startLegacyTrial(companyId: Buffer, userId: Buffer): Promise<void> {
+    if (!this.config?.automaticTrial) return;
+    try {
+      const waiting = await this.prisma.trialEligibility.findFirst({
+        where: { companyId, ownerUserId: userId, closedAt: null, company: { trialClaim: null } },
+        select: { id: true },
+      });
+      if (!waiting) return;
+      const audit = new PlatformAuditService(this.prisma);
+      await this.prisma.$transaction((tx) => startAutomaticTrialTx(tx, { companyId, ownerUserId: userId, now: () => new Date(), source: 'sign_in', audit }));
+    } catch (e) {
+      this.log.warn(`Automatic trial not started at sign-in for company ${binToUuid(companyId)}: ${(e as Error).message}`);
+    }
   }
 
   async refresh(refreshToken: string): Promise<AuthTokenResponse> {

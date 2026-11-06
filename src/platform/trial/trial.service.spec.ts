@@ -542,13 +542,14 @@ describe('tenant isolation and the trial’s source', () => {
     expect(code).not.toMatch(/origin|referer|referrer|headers|req\./i);
   });
 
-  it('only a claim writes a trial claim, and only registration writes an eligibility — no other path grants one', () => {
+  it('only a claim or the automatic start writes a trial claim, and only registration writes an eligibility — no other path grants one', () => {
     // Staff, invitations, store openings, replacements, the console: none of them may make a business eligible.
     const sources = (readdirSync('src', { recursive: true }) as string[])
       .filter((f) => f.endsWith('.ts') && !f.endsWith('.spec.ts') && !f.includes('__testing__'))
-      .map((f) => join('src', f));
+      .map((f) => join('src', f).split(String.fromCharCode(92)).join('/'));
     const writers = (pattern: string) => sources.filter((f) => readFileSync(f, 'utf8').includes(pattern)).sort();
-    expect(writers('trialClaim.create(')).toEqual(['src/platform/trial/trial.service.ts']);
+    // 0131: the automatic start, at a completed registration or a legacy Owner's sign-in, under the same eligibility rules.
+    expect(writers('trialClaim.create(')).toEqual(['src/platform/trial/automatic-trial.ts', 'src/platform/trial/trial.service.ts']);
     expect(writers('trialEligibility.create(')).toEqual(['src/platform/registration.service.ts']);
   });
 });

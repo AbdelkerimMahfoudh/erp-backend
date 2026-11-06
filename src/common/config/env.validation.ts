@@ -114,6 +114,8 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_TEMPLATE_PAYMENT_SUBMITTED: Joi.string().allow('').default(''),
   /** 0130: a branch added in the app is ready for activation (`dukan_branch_activation_ready`). Empty: held, not sent. */
   WHATSAPP_TEMPLATE_BRANCH_ACTIVATION: Joi.string().allow('').default(''),
+  /** 0131: the free trial started at registration (`dukan_trial_started`). Empty: held, not sent; the trial runs either way. */
+  WHATSAPP_TEMPLATE_TRIAL_STARTED: Joi.string().allow('').default(''),
   /** The administrators' WhatsApp numbers for that alert, comma-separated E.164. Kept in the server's environment only. */
   PAYMENT_ALERT_NUMBERS: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_TRIAL_EXPIRED: Joi.string().allow('').default(''),
@@ -167,6 +169,9 @@ export const envValidationSchema = Joi.object({
   PORTAL_ORIGIN: Joi.string().allow('').default(''),
   // Post-Build-4: set only once the portal is published and verified on its real hostname; holds the account-ready message until then.
   PORTAL_LIVE: Joi.string().valid('enabled', 'disabled', '').default(''),
+  // 0131: the free trial starts automatically when a self-registration completes (and at a legacy Owner's next sign-in);
+  // no setup link and no account-ready message are issued. `disabled` restores the claim flow without a code change.
+  AUTOMATIC_TRIAL: Joi.string().valid('enabled', 'disabled').default('enabled'),
 
   // ── Customer activation (0102; D217) ──────────────────────────────────────
   // "closed": the console's owner setup invitation, and the actions that give a business access, are allowed for test

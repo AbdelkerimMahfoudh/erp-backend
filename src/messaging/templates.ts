@@ -247,6 +247,13 @@ export const GRACE_ENDED_TEMPLATE = subscriptionTemplate('subscription.grace_end
  */
 export const BRANCH_ACTIVATION_TEMPLATE = subscriptionTemplate('branch.activation_ready', ['branch', 'business'], 'WHATSAPP_TEMPLATE_BRANCH_ACTIVATION');
 
+/**
+ * The free trial started automatically at registration (0131; the owner's brief of 2026-11-06): the business's name and
+ * the trial's end in Nouakchott time, and a static button to the portal's subscription page — `dukan_trial_started`.
+ * Created with the trial, once per business; held while the template is not configured. The trial never waits for it.
+ */
+export const TRIAL_STARTED_TEMPLATE = subscriptionTemplate('trial.started', ['business', 'ends'], 'WHATSAPP_TEMPLATE_TRIAL_STARTED');
+
 /** Every subscription message's template, in one list (the notices, the configuration, the documentation). */
 export const SUBSCRIPTION_TEMPLATES: readonly TemplateDefinition[] = [
   PORTAL_INSTRUCTIONS_TEMPLATE,
@@ -258,6 +265,7 @@ export const SUBSCRIPTION_TEMPLATES: readonly TemplateDefinition[] = [
   GRACE_REMINDER_TEMPLATE,
   GRACE_ENDED_TEMPLATE,
   BRANCH_ACTIVATION_TEMPLATE,
+  TRIAL_STARTED_TEMPLATE,
 ];
 
 const REGISTRY: Record<string, TemplateDefinition> = {

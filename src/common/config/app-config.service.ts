@@ -206,6 +206,11 @@ export class AppConfigService {
    * after the HTTPS checks on the real hostname. Until then the account-ready message is held, never sent: its button
    * would open nothing.
    */
+  /** 0131: automatic trials (default). `AUTOMATIC_TRIAL=disabled` restores the claim flow and its setup messages. */
+  get automaticTrial(): boolean {
+    return (this.config.get<string>('AUTOMATIC_TRIAL') ?? 'enabled').trim() !== 'disabled';
+  }
+
   get portalLive(): boolean {
     return (this.config.get<string>('PORTAL_LIVE') ?? '').trim() === 'enabled' && this.portalOrigin !== '';
   }

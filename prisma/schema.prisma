@@ -6265,6 +6265,8 @@ enum SubscriptionNoticeKind {
   grace_ended
   /// 0130: a branch the Owner added in the app is ready for activation (one per request, after it commits).
   branch_activation
+  /// 0131: the free trial started automatically at registration (one per business, created with the trial).
+  trial_started
 }
 
 /// 0099: where one notice stands. `accepted` by WhatsApp is still watched for a terminal failure (one email

@@ -8,6 +8,10 @@ import { ContactVerificationService } from './contact-verification.service';
 import { TrialSetupService } from './trial/trial-setup.service';
 import { WhatsAppRecords } from '../messaging/whatsapp-records';
 import { binToUuid } from '../common/utils/uuid.util';
+import { NoticeService } from '../notices/notice.service';
+import { AppConfigService } from '../common/config/app-config.service';
+import { PlatformAuditService } from './platform-audit.service';
+import { startAutomaticTrialTx } from './trial/automatic-trial';
 
 /**
  * Finishing a registration, and only that.
@@ -86,6 +90,9 @@ export class RegistrationContinuationService {
     private readonly tokens: TokensService,
     private readonly trialSetup: TrialSetupService,
     @Optional() private readonly whatsappRecords?: WhatsAppRecords,
+    @Optional() private readonly audit?: PlatformAuditService,
+    @Optional() private readonly notices?: NoticeService,
+    @Optional() private readonly config?: AppConfigService,
   ) {}
 
   /**
@@ -168,6 +175,11 @@ export class RegistrationContinuationService {
    * because "earlier" can be fifteen minutes ago and an account can be disabled
    * in between.
    */
+  /** 0131: automatic trials are on (the default), and what starting one needs is here. */
+  private automatic(): boolean {
+    return !!this.audit && !!this.config?.automaticTrial;
+  }
+
   async complete(
     token: string,
     code: string,
@@ -234,6 +246,16 @@ export class RegistrationContinuationService {
       }
 
       /*
+       * The registration is complete and the business usable: its free trial starts now, in this same transaction (0131;
+       * the owner's brief of 2026-11-06) — 168 hours from this commit, with its record, audit and WhatsApp notice — or
+       * not at all if anything here rolls back. A business that is not eligible (console-created, already started) is
+       * left as it is; the notice is only queued, so the trial never waits for a message.
+       */
+      if (this.automatic()) {
+        await startAutomaticTrialTx(tx, { companyId: user.companyId, ownerUserId: user.id, now: () => new Date(), source: 'registration', audit: this.audit! });
+      }
+
+      /*
        * On the SAME transaction. `auth_sessions` has a foreign key to `users`,
        * and the update above holds an exclusive lock on that row — an insert
        * from a second connection would wait for a lock this very transaction is
@@ -263,7 +285,13 @@ export class RegistrationContinuationService {
      * in the background (C14): the continuation is already spent, so the Owner's session below must reach the client
      * before any client gives up on the request.
      */
-    await this.trialSetup.onContactsVerified(user.companyId, user.id);
+    // 0131: no setup link and no account-ready message any more — the trial already runs. Its notice and the reminders
+    // are delivered in the background; the Owner's session never waits for them.
+    if (this.automatic()) {
+      void this.notices?.refresh(user.companyId).then(() => this.notices?.deliverNow());
+    } else {
+      await this.trialSetup.onContactsVerified(user.companyId, user.id);
+    }
 
     const access = this.tokens.signAccessToken(
       binToUuid(user.id),

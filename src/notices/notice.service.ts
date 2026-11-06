@@ -14,6 +14,7 @@ import { RecipientHasher } from '../messaging/recipient-hash';
 import { WhatsAppRecords } from '../messaging/whatsapp-records';
 import {
   BRANCH_ACTIVATION_TEMPLATE,
+  TRIAL_STARTED_TEMPLATE,
   GRACE_ENDED_TEMPLATE,
   GRACE_REMINDER_TEMPLATE,
   GRACE_STARTED_TEMPLATE,
@@ -157,6 +158,7 @@ const TEMPLATES: Record<Exclude<SubscriptionNoticeKind, 'paid_expired'>, Templat
   grace_reminder: GRACE_REMINDER_TEMPLATE,
   grace_ended: GRACE_ENDED_TEMPLATE,
   branch_activation: BRANCH_ACTIVATION_TEMPLATE,
+  trial_started: TRIAL_STARTED_TEMPLATE,
 };
 
 /** A branch request's notice identity (0130): `branch:<request id hex>`. */
@@ -272,10 +274,17 @@ export class NoticeService {
    * once per eligibility — null when they were already asked for — or as the Owner's resend from the portal. The
    * worker sends them; `deliverNow` is the caller's to start once the transaction committed.
    */
+  /** 0131: automatic trials are on — the account-ready message and its setup link are retired. */
+  get automaticTrial(): boolean {
+    return !!this.config.automaticTrial;
+  }
+
   async requestInstructions(
     tx: Prisma.TransactionClient,
     p: { companyId: Buffer; subscriptionId: Buffer; eligibilityId: Buffer; requestedBy: Buffer | null; now: Date },
   ): Promise<Buffer | null> {
+    // 0131: with automatic trials, no account-ready message and no setup link are issued any more.
+    if (this.config.automaticTrial) return null;
     const periodKey = eligibilityPeriodKey(binToUuid(p.eligibilityId));
     const threshold = p.requestedBy ? `resend:${binToUuid(newUuidV7Bin())}` : AUTOMATIC_INSTRUCTIONS;
     if (!p.requestedBy) {
@@ -440,6 +449,7 @@ export class NoticeService {
     const row = await this.readSubject(n.companyId);
     let slot: NoticeSlot | null = null;
     let branchLabel: string | null = null;
+    let trialEnds: Date | null = null;
     if (n.kind === 'branch_activation') {
       // Re-read now (0130): a request activated, withdrawn or refused meanwhile has nothing to announce.
       const requestId = branchRequestIdOf(n.periodKey);
@@ -448,7 +458,14 @@ export class NoticeService {
         : null;
       if (!request || request.status !== 'pending_payment') return { state: 'cancelled', cancelReason: 'branch_not_pending', completedAt: now };
       branchLabel = (request.label ?? '').trim().replace(/\s+/g, ' ').slice(0, 100);
+    } else if (n.kind === 'trial_started') {
+      // Re-read now (0131): the trial it announces must still be running — never a message about a trial that ended.
+      const claim = await this.prisma.trialClaim.findUnique({ where: { companyId: n.companyId }, select: { endsAt: true } });
+      if (!claim || claim.endsAt.getTime() <= now.getTime()) return { state: 'cancelled', cancelReason: 'trial_not_running', completedAt: now };
+      trialEnds = claim.endsAt;
     } else if (n.kind === 'portal_instructions') {
+      // 0131: retired by automatic trials — never sent, so no new link is issued.
+      if (this.config.automaticTrial) return { state: 'cancelled', cancelReason: 'automatic_trial', completedAt: now };
       const facts = await readFacts(this.prisma, n.companyId);
       if (!facts || !mayClaimNow(facts, now)) return { state: 'cancelled', cancelReason: 'trial_not_available', completedAt: now };
     } else {
@@ -463,12 +480,12 @@ export class NoticeService {
     if (!recipient) return { state: 'failed', failureReason: 'no_recipient', completedAt: now };
     const template = templateOf(n.kind, n.variant);
     const language = (LANGUAGES as readonly string[]).includes(n.language) ? (n.language as MessageLanguage) : 'en';
-    const variables = this.variablesOf(n, row, slot, language, branchLabel);
+    const variables = this.variablesOf(n, row, slot, language, branchLabel, trialEnds);
 
     // The account-ready message waits for the portal and its template (post-Build-4): held, not spent, while either is
     // missing — its button would open nothing, or nothing could carry it. Only when WhatsApp could reach the Owner at all;
     // with no verified number the attempt below records why nothing was sent.
-    if ((template.linkVariable || n.kind === 'branch_activation') && n.fallbackReason === null && recipient.phone && recipient.phoneVerifiedAt) {
+    if ((template.linkVariable || n.kind === 'branch_activation' || n.kind === 'trial_started') && n.fallbackReason === null && recipient.phone && recipient.phoneVerifiedAt) {
       const held = !this.config.portalLive ? 'held_portal' : isRealChannel(this.whatsapp) && this.config.whatsappTemplateName(template.configKey) === '' ? 'held_template' : null;
       if (held) return { state: 'pending', whatsappOutcome: held, nextAttemptAt: new Date(now.getTime() + HOLD_MS), attempts: Math.max(0, n.attempts - 1) };
     }
@@ -789,7 +806,22 @@ export class NoticeService {
   }
 
   /** The template's variables, composed here in the message's language from the facts re-read for this attempt. */
-  private variablesOf(n: SubscriptionNotice, row: SubjectRow, slot: NoticeSlot | null, language: MessageLanguage, branchLabel: string | null = null): Record<string, string> {
+  private variablesOf(
+    n: SubscriptionNotice,
+    row: SubjectRow,
+    slot: NoticeSlot | null,
+    language: MessageLanguage,
+    branchLabel: string | null = null,
+    trialEnds: Date | null = null,
+  ): Record<string, string> {
+    // The trial started (0131): the business's name, and the trial's end as a date in the business's zone (Nouakchott).
+    if (n.kind === 'trial_started') {
+      const zone = this.entitlement.trialZone(n.companyId, row.timezone);
+      return {
+        business: row.name?.trim().replace(/s+/g, ' ').slice(0, 100) || neutralAccount(language, true),
+        ends: trialEnds ? formatNoticeInstant(trialEnds, zone, language) : '',
+      };
+    }
     // A branch ready for activation (0130): its name, then the business's — opening with names, as the account-ready message does.
     if (n.kind === 'branch_activation') {
       return { branch: branchLabel ?? '', business: row.name?.trim().replace(/\s+/g, ' ').slice(0, 100) || neutralAccount(language, true) };

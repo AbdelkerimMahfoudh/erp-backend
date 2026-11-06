@@ -24,6 +24,7 @@ import {
 } from './trial-rules';
 import { isClosed, mayClaimNow, readFacts, readOwner, subscriptionRecordOf, type TrialFactsRow, type TrialPrincipal } from './trial-facts';
 import { TrialRefusal } from './trial-refusal';
+import { isAutomaticTrialKey } from './automatic-trial';
 import { TrialSetupService } from './trial-setup.service';
 import type { WebsiteSetup } from './trial-setup-rules';
 
@@ -74,6 +75,8 @@ export interface ClaimAnswer {
   state: EntitlementState;
   trial: TrialView;
   subscriptionVersion: number;
+  /** 0131: the trial had already started automatically — an old link's claim is answered with it, dates unchanged. */
+  alreadyActive?: true;
 }
 
 @Injectable()
@@ -205,6 +208,10 @@ export class TrialService {
   ): ClaimAnswer {
     const claim = row.trialClaim!;
     const card = this.statusOf(companyId, row, owner, now);
+    // 0131: started automatically — a claim from an old link or Build 5 is told it is already active; nothing changes.
+    if (isAutomaticTrialKey(claim.idempotencyKey)) {
+      return { claimed: true, replayed: true, alreadyActive: true, state: card.state, trial: card.trial!, subscriptionVersion: claim.subscriptionVersionAfter };
+    }
     if (claim.idempotencyKey !== input.idempotencyKey) throw new TrialRefusal('trial_already_claimed', { trial: card.trial });
     if (claim.requestHash !== requestHash) throw new TrialRefusal('idempotency_conflict');
     return { claimed: true, replayed: true, state: card.state, trial: card.trial!, subscriptionVersion: claim.subscriptionVersionAfter };

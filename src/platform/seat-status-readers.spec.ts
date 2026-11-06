@@ -369,6 +369,10 @@ const UNREAD_PINNED: { at: string; why: string }[] = [];
  */
 const PINNED: { at: string; count?: number; why: string }[] = [
   {
+    at: 'src/platform/branch-requests.service.ts BranchRequestsService.list = paid',
+    why: 'Stores activated from an app request in the last 30 days, for the setup checklist (0130); a scheduled one is listed as waiting by the clause beside it.',
+  },
+  {
     at: 'src/platform/branch-activation.ts activatePendingBranchesTx = pending_payment',
     count: 2,
     why: 'An approved payment activates the branches still waiting (0130); a scheduled one was already paid for.',

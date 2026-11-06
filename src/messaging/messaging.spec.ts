@@ -214,6 +214,8 @@ describe('the portal instructions and the subscription messages (0099)', () => {
       ['subscription.grace_ended', 'WHATSAPP_TEMPLATE_GRACE_ENDED', ['business', 'ended']],
       // 0130: a branch added in the app, ready for activation.
       ['branch.activation_ready', 'WHATSAPP_TEMPLATE_BRANCH_ACTIVATION', ['branch', 'business']],
+      // 0131: the free trial started automatically at registration.
+      ['trial.started', 'WHATSAPP_TEMPLATE_TRIAL_STARTED', ['business', 'ends']],
     ]);
     for (const t of SUBSCRIPTION_TEMPLATES) {
       expect(t).toMatchObject({ category: 'account', providerKind: 'utility', use: 'optional' });
