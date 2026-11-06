@@ -96,7 +96,7 @@ interface SubjectRow {
   /** Granted activations counted against the current period end, when its decision is recorded. */
   usesBefore: number | null;
   /** 0132: the store this timeline is about, when each store has its own (docs/122); null for the business-wide one. */
-  store?: { id: Buffer; name: string; many: boolean } | null;
+  store?: { id: Buffer; name: string; nameAr: string | null; many: boolean } | null;
 }
 
 /** 0132: a store's timeline keys carry the store — `s:<hex>:` before the period key (fits the 80 characters). */
@@ -814,7 +814,7 @@ export class NoticeService {
     const stores = await this.prisma.branch.findMany({
       where: { companyId, type: 'store', deletedAt: null, entitlement: { isNot: null } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      select: { id: true, name: true, entitlement: true },
+      select: { id: true, name: true, nameAr: true, entitlement: true },
     });
     const out: SubjectRow[] = [];
     const companyStatus = base.subject.status;
@@ -829,7 +829,7 @@ export class NoticeService {
         timezone: base.timezone,
         subscriptionId: base.subscriptionId,
         usesBefore: episode?.usesBefore ?? null,
-        store: { id: b.id, name: b.name, many: stores.length > 1 },
+        store: { id: b.id, name: b.name, nameAr: b.nameAr, many: stores.length > 1 },
         subject: {
           status: stopped ? companyStatus : e.paidUntil ? 'activated' : 'pending_activation',
           currentPeriodEnd: e.paidUntil,
@@ -919,7 +919,7 @@ export class NoticeService {
     const opensWithName = n.kind === 'portal_instructions' || !slot;
     const named = row.name?.trim().replace(/\s+/g, ' ') || neutralAccount(language, opensWithName);
     // 0132: a store's own timeline names the store ("Business · Store") when the business has more than one.
-    const business = (row.store?.many ? `${named} · ${row.store.name.trim().replace(/\s+/g, ' ')}` : named).slice(0, 100);
+    const business = (row.store?.many ? `${named} · ${((language === 'ar' && row.store.nameAr?.trim()) || row.store.name).trim().replace(/\s+/g, ' ')}` : named).slice(0, 100);
     if (opensWithName) return { business };
     const zone = this.entitlement.trialZone(n.companyId, row.timezone);
     const instant = (d: Date) => formatNoticeInstant(d, zone, language);
