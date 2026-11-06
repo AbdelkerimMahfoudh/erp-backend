@@ -193,7 +193,8 @@ suite('a branch added in the app', () => {
     expect((await root.subscription.findFirstOrThrow({ where: { companyId: id } })).status).toBe('activated');
     expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'branch.activate' } })).toBe(1);
     expect(await root.notification.count({ where: { companyId: id, type: 'branch.activated' } })).toBeGreaterThanOrEqual(1);
-    expect(await requests.list(id, owner)).toEqual([]);
+    // Recently activated: listed as active with the branch it became, for the app's setup checklist.
+    expect(await requests.list(id, owner)).toMatchObject([{ state: 'active', branchId: expect.any(String) }]);
     // The notice has nothing left to announce once the branch is active: the worker cancels it as not pending.
     // A repeated approval is the decision already made.
     await proofs.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'again' }, ctx);

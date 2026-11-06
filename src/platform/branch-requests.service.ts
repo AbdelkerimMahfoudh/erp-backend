@@ -109,7 +109,16 @@ export class BranchRequestsService {
     const owner = await this.prisma.userBranch.count({ where: { companyId, userId, role: { key: 'owner' } } });
     if (owner === 0) return [];
     const rows = await this.prisma.seatAllocation.findMany({
-      where: { companyId, kind: 'store', status: { in: ['pending_payment', 'scheduled'] } },
+      where: {
+        companyId,
+        kind: 'store',
+        requestKey: { not: null },
+        OR: [
+          { status: { in: ['pending_payment', 'scheduled'] } },
+          // Activated in the last 30 days: the app offers its setup checklist on the first opening.
+          { status: 'paid', branchId: { not: null }, confirmedAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60_000) } },
+        ],
+      },
       orderBy: [{ requestedAt: 'asc' }, { id: 'asc' }],
       select: { id: true },
     });
