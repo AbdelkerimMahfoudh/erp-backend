@@ -95,6 +95,18 @@ interface SubjectRow {
   subject: NoticeSubject;
   /** Granted activations counted against the current period end, when its decision is recorded. */
   usesBefore: number | null;
+  /** 0132: the store this timeline is about, when each store has its own (docs/122); null for the business-wide one. */
+  store?: { id: Buffer; name: string; many: boolean } | null;
+}
+
+/** 0132: a store's timeline keys carry the store — `s:<hex>:` before the period key (fits the 80 characters). */
+export const storeKeyPrefix = (branchId: Buffer): string => `s:${branchId.toString('hex')}:`;
+export function storeOfKey(periodKey: string): Buffer | null {
+  const m = /^s:([0-9a-f]{32}):/.exec(periodKey);
+  return m ? Buffer.from(m[1], 'hex') : null;
+}
+function prefixed(slot: NoticeSlot | null, prefix: string): NoticeSlot | null {
+  return slot ? { ...slot, periodKey: prefix + slot.periodKey } : null;
 }
 
 /** The person a message goes to: an active Owner of the business. */
@@ -220,6 +232,28 @@ export class NoticeService {
   async refresh(companyId: Buffer): Promise<void> {
     try {
       const now = this.clock.now();
+      // 0132 (docs/122): each store with its own entitlement has its own 3/2/1-day timeline, named after the store.
+      const stores = await this.storeSubjects(companyId);
+      if (stores.length) {
+        const current: NoticeSlot[] = [];
+        for (const row of stores) {
+          const slot = prefixed(currentSlot(row.subject, now), storeKeyPrefix(row.store!.id));
+          if (slot) {
+            await this.ensure(companyId, row, slot, now);
+            current.push(slot);
+          }
+        }
+        await this.prisma.subscriptionNotice.updateMany({
+          where: {
+            companyId,
+            kind: { in: ['trial_reminder', 'trial_expired', 'paid_reminder', 'paid_expired', 'grace_reminder', 'grace_ended'] },
+            state: 'pending',
+            NOT: current.length ? { OR: current.map((c) => ({ kind: c.kind, periodKey: c.periodKey, threshold: c.threshold })) } : { id: Buffer.alloc(16) },
+          },
+          data: { state: 'superseded', completedAt: now },
+        });
+        return;
+      }
       const row = await this.readSubject(companyId);
       const slot = row ? currentSlot(row.subject, now) : null;
       if (row && slot) await this.ensure(companyId, row, slot, now);
@@ -453,6 +487,7 @@ export class NoticeService {
     let slot: NoticeSlot | null = null;
     let branchLabel: string | null = null;
     let trialEnds: Date | null = null;
+    let storeRow: SubjectRow | null = null;
     if (n.kind === 'branch_activation') {
       // Re-read now (0130): a request activated, withdrawn or refused meanwhile has nothing to announce.
       const requestId = branchRequestIdOf(n.periodKey);
@@ -473,6 +508,14 @@ export class NoticeService {
       if (this.config.automaticTrial) return { state: 'cancelled', cancelReason: 'automatic_trial', completedAt: now };
       const facts = await readFacts(this.prisma, n.companyId);
       if (!facts || !mayClaimNow(facts, now)) return { state: 'cancelled', cancelReason: 'trial_not_available', completedAt: now };
+    } else if (storeOfKey(n.periodKey)) {
+      const store = storeOfKey(n.periodKey)!;
+      const own = (await this.storeSubjects(n.companyId)).find((x) => x.store!.id.equals(store)) ?? null;
+      slot = own ? prefixed(currentSlot(own.subject, now), storeKeyPrefix(store)) : null;
+      if (!isCurrent(n, slot)) {
+        return slot ? { state: 'superseded', completedAt: now } : { state: 'cancelled', cancelReason: quietReason(own?.subject ?? null), completedAt: now };
+      }
+      storeRow = own;
     } else {
       slot = row ? currentSlot(row.subject, now) : null;
       if (!isCurrent(n, slot)) {
@@ -485,7 +528,7 @@ export class NoticeService {
     if (!recipient) return { state: 'failed', failureReason: 'no_recipient', completedAt: now };
     const template = templateOf(n.kind, n.variant);
     const language = (LANGUAGES as readonly string[]).includes(n.language) ? (n.language as MessageLanguage) : 'en';
-    const variables = this.variablesOf(n, row, slot, language, branchLabel, trialEnds);
+    const variables = this.variablesOf(n, storeRow ?? row, slot, language, branchLabel, trialEnds);
 
     // The account-ready message waits for the portal and its template (post-Build-4): held, not spent, while either is
     // missing — its button would open nothing, or nothing could carry it. Only when WhatsApp could reach the Owner at all;
@@ -760,6 +803,47 @@ export class NoticeService {
     }
   }
 
+  /**
+   * 0132 (docs/122): each store with its own entitlement as a timeline subject — its trial end (first store only), its
+   * paid end, its grant and its own grace decision; the business's suspension or closure stops them all. Empty when
+   * no store has a row yet: the business-wide timeline applies, as before.
+   */
+  private async storeSubjects(companyId: Buffer): Promise<SubjectRow[]> {
+    const base = await this.readSubject(companyId);
+    if (!base) return [];
+    const stores = await this.prisma.branch.findMany({
+      where: { companyId, type: 'store', deletedAt: null, entitlement: { isNot: null } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, name: true, entitlement: true },
+    });
+    const out: SubjectRow[] = [];
+    const companyStatus = base.subject.status;
+    const stopped = companyStatus === 'suspended' || companyStatus === 'rejected' || companyStatus === 'cancelled';
+    for (const b of stores) {
+      const e = b.entitlement!;
+      const episode = e.paidUntil
+        ? await this.prisma.branchGraceEpisode.findUnique({ where: { branchId_periodEnd: { branchId: b.id, periodEnd: e.paidUntil } }, select: { decision: true, usesBefore: true } })
+        : null;
+      out.push({
+        name: base.name,
+        timezone: base.timezone,
+        subscriptionId: base.subscriptionId,
+        usesBefore: episode?.usesBefore ?? null,
+        store: { id: b.id, name: b.name, many: stores.length > 1 },
+        subject: {
+          status: stopped ? companyStatus : e.paidUntil ? 'activated' : 'pending_activation',
+          currentPeriodEnd: e.paidUntil,
+          isComplimentary: e.complimentary,
+          complimentaryUntil: e.complimentaryUntil,
+          open: base.subject.open,
+          trial: e.trialEndsAt && base.subject.trial ? { claimId: base.subject.trial.claimId, endsAt: e.trialEndsAt } : null,
+          grace: episode ? { decision: episode.decision } : null,
+        },
+      });
+    }
+    return out;
+  }
+
   /** The business, its timeline's facts and the decision recorded at its current period end. */
   private async readSubject(companyId: Buffer): Promise<SubjectRow | null> {
     const company = await this.prisma.company.findUnique({
@@ -833,7 +917,9 @@ export class NoticeService {
     }
     // Only this message opens with the name. A subscription concerns the whole account, so no store stands in for it.
     const opensWithName = n.kind === 'portal_instructions' || !slot;
-    const business = (row.name?.trim().replace(/\s+/g, ' ').slice(0, 100) || neutralAccount(language, opensWithName));
+    const named = row.name?.trim().replace(/\s+/g, ' ') || neutralAccount(language, opensWithName);
+    // 0132: a store's own timeline names the store ("Business · Store") when the business has more than one.
+    const business = (row.store?.many ? `${named} · ${row.store.name.trim().replace(/\s+/g, ' ')}` : named).slice(0, 100);
     if (opensWithName) return { business };
     const zone = this.entitlement.trialZone(n.companyId, row.timezone);
     const instant = (d: Date) => formatNoticeInstant(d, zone, language);

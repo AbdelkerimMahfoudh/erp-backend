@@ -55,6 +55,7 @@ const VIEW = {
   byteSize: true,
   refusalReason: true,
   months: true,
+  lines: true,
   submittedAt: true,
   decidedAt: true,
   purgedAt: true,
@@ -75,6 +76,8 @@ function view(r: Row) {
     byteSize: r.byteSize,
     refusalReason: r.refusalReason,
     months: r.months,
+    // 0132: the stores this proof pays for, each with its amount — what the approval applies, store by store.
+    lines: Array.isArray(r.lines) ? (r.lines as Array<{ branchId: string; name: string; amount: number; pending?: boolean }>) : null,
     submittedAt: r.submittedAt.toISOString(),
     decidedAt: r.decidedAt?.toISOString() ?? null,
     fileAvailable: r.purgedAt === null,

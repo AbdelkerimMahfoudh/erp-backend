@@ -337,6 +337,8 @@ export function makeTrialWorld(options: WorldOptions = {}) {
     branch: {
       findFirst: async ({ where }: Row) =>
         t.companies.some((x) => same(x.id, where.companyId)) ? { id: Buffer.from(where.companyId).reverse() } : null,
+      // The stores with their own timeline (0132): none here — the business-wide timeline these tests describe.
+      findMany: async () => [],
     },
     branchEntitlement: {
       upsert: async ({ where, create, update }: Row) => {

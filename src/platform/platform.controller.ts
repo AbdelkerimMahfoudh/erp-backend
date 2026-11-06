@@ -72,6 +72,7 @@ import { trialFactsOf, trialSummaryOf, type TrialClaimFacts } from './trial/tria
 import { ProvisioningService } from './provisioning.service';
 import { AccountProvisioningService } from './account-provisioning.service';
 import { DeferralDto } from './account-provisioning.controller';
+import { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
 import { Type } from 'class-transformer';
 
 /**
@@ -344,6 +345,8 @@ export class PlatformController {
     private readonly provisioning: ProvisioningService,
     private readonly testProvisioning: AccountProvisioningService,
     @Optional() private readonly trialSetup?: TrialSetupService,
+    /** 0132: each store's own state; absent where a test builds the controller by hand. */
+    @Optional() private readonly branchStatus?: BranchEntitlementService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -752,7 +755,10 @@ export class PlatformController {
     // Provisioning and activation, separately (D217): the Owner's setup and invitation, the contacts' state.
     const setup = await this.provisioning.status(companyId);
 
+    // 0132 (docs/122): each store's own state and dates — the console's and the portal's per-store status.
+    const storeStatus = this.branchStatus ? await this.branchStatus.listForCompany(companyId) : [];
     return {
+      storeStatus,
       id: binToUuid(company.id),
       name: company.name,
       nameAr: company.nameAr,
@@ -1367,7 +1373,10 @@ export class PlatformController {
       select: { name: true, email: true, phone: true, emailVerifiedAt: true, phoneVerifiedAt: true },
     });
 
+    // 0132 (docs/122): each store's own state and dates — the console's and the portal's per-store status.
+    const storeStatus = this.branchStatus ? await this.branchStatus.listForCompany(companyId) : [];
     return {
+      storeStatus,
       /*
        * The business's configured zone, normalised as the trial's view normalises it — an unknown one reads UTC (C18):
        * the zone the account page shows this business's dates in when no trial view carries one.

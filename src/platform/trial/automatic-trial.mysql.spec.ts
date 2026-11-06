@@ -258,6 +258,23 @@ suite('the automatic free trial', () => {
       template = '';
     });
 
+    it('0132: each store has its own 3/2/1-day timeline, keyed by the store; a renewal supersedes what waited', async () => {
+      const { id, owner } = await business();
+      await start(id, owner);
+      const second = newUuidV7Bin();
+      await root.branch.create({ data: { id: second, companyId: id, name: 'Ksar', type: 'store' } });
+      const ends = new Date(Date.now() + 47 * 3_600_000);
+      await root.branchEntitlement.create({ data: { id: newUuidV7Bin(), companyId: id, branchId: second, paidUntil: ends } });
+      await notices.refresh(id);
+      const rows = await root.subscriptionNotice.findMany({ where: { companyId: id, kind: { in: ['paid_reminder', 'trial_reminder'] } } });
+      // The first store's trial is 168 hours away: nothing yet. The second store's paid end is 47 hours away: its 48-hour reminder.
+      expect(rows.map((r) => [r.kind, r.threshold, r.periodKey])).toEqual([['paid_reminder', 'h48', `s:${second.toString('hex')}:paid:${ends.getTime()}`]]);
+      // Renewed: its end moves, and the reminder that waited is superseded, never sent.
+      await root.branchEntitlement.update({ where: { branchId: second }, data: { paidUntil: new Date(ends.getTime() + 90 * 86_400_000) } });
+      await notices.refresh(id);
+      expect((await root.subscriptionNotice.findUniqueOrThrow({ where: { id: rows[0].id } })).state).toBe('superseded');
+    });
+
     it('held without its template — no attempt spent — and the trial runs regardless', async () => {
       const { id, owner } = await business();
       await start(id, owner);
