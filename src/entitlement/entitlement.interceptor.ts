@@ -92,6 +92,11 @@ export class EntitlementInterceptor implements NestInterceptor {
         if (!refused) return next.handle();
         throw new ForbiddenException(refused);
       }
+      // Shadow keeps every legacy store's access, but never opens a store that was never opened (owner, 2026-11-07).
+      if (this.branches.mode === 'shadow') {
+        const neverOpened = await this.lockedBranchNamed(companyId, [this.cls.get<Buffer | undefined>('branchId')]);
+        if (neverOpened) throw new ForbiddenException(neverOpened);
+      }
 
       const blocked = await this.entitlement.operationalAccessBlocked(companyId);
       if (!blocked) return next.handle();
@@ -121,6 +126,8 @@ export class EntitlementInterceptor implements NestInterceptor {
         if (!branchRefused) return next.handle();
         throw new ForbiddenException(branchRefused);
       }
+      // Shadow logs every other difference, but a store never opened (no trial, payment or grant) stays locked.
+      if (branchRefused?.state === 'locked') throw new ForbiddenException(branchRefused);
       const business = await this.entitlement.writeRefusal(companyId);
       this.branches.shadow(companyId, this.cls.get<Buffer | undefined>('branchId') ?? null, !business, !branchRefused, `${method} ${path}`);
     }
@@ -130,6 +137,16 @@ export class EntitlementInterceptor implements NestInterceptor {
 
     // The state travels with the code, so a suspended business is never told its subscription ended.
     throw new ForbiddenException({ code: refused.code, message: refused.message, state: refused.state });
+  }
+
+  /** Shadow mode's one hard rule: the first of these branches whose own state is `locked` (never opened), refused. */
+  private async lockedBranchNamed(companyId: Buffer, ids: Array<Buffer | undefined>) {
+    for (const id of ids) {
+      if (!id) continue;
+      const refused = await this.branches.readRefusal(companyId, id);
+      if (refused?.state === 'locked') return refused;
+    }
+    return null;
   }
 
   /** A read: of a branch, that branch's; without one, any store that is not locked will do. */

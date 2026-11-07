@@ -6,7 +6,7 @@ import { RegistrationService } from '../platform/registration.service';
 import { BranchEntitlementService, startBranchTrialTx } from './branch-entitlement.service';
 import { addMonths } from './branch-rules';
 import { GRACE_MS } from './grace-rules';
-import { namedBranches } from './entitlement.interceptor';
+import { EntitlementInterceptor, namedBranches } from './entitlement.interceptor';
 
 /**
  * Per-branch entitlements (0132; docs/122) on real MySQL: several stores of one business in mixed states — the first on
@@ -186,5 +186,34 @@ suite('per-branch entitlements', () => {
     expect(await state(id, first)).toBe('suspended');
     expect(await branches.readRefusal(id, first)).toMatchObject({ state: 'suspended' });
     expect(await branches.anyWritable(id)).toBe(false);
+  });
+
+  it('shadow mode keeps the business-wide access, but a store never opened stays locked (owner, 2026-11-07)', async () => {
+    const { id, first } = await business();
+    await trial(id);
+    const second = await store(id, 'Never paid');
+    const before = process.env.BRANCH_ENTITLEMENTS;
+    process.env.BRANCH_ENTITLEMENTS = 'shadow';
+    try {
+      // The business-wide gate allows everything (a business on its trial); only the store decides.
+      const businessWide = { writeRefusal: async () => null, operationalAccessBlocked: async () => null };
+      const run = async (branchId: Buffer, method: string, body: unknown = {}) => {
+        const cls = { get: (k: string) => (k === 'companyId' ? id : k === 'branchId' ? branchId : undefined) };
+        const interceptor = new EntitlementInterceptor({ getAllAndOverride: () => false } as never, businessWide as never, cls as never, branches);
+        const req = { method, route: { path: '/api/v1/sales' }, params: {}, body };
+        const ctx = { getHandler: () => null, getClass: () => null, switchToHttp: () => ({ getRequest: () => req }) };
+        return interceptor.intercept(ctx as never, { handle: () => 'passed' } as never);
+      };
+      expect(branches.mode).toBe('shadow');
+      await expect(run(first, 'POST')).resolves.toBe('passed');
+      await expect(run(first, 'GET')).resolves.toBe('passed');
+      await expect(run(second, 'POST')).rejects.toMatchObject({ response: { code: 'BRANCH_LOCKED', state: 'locked' } });
+      await expect(run(second, 'GET')).rejects.toMatchObject({ response: { state: 'locked' } });
+      // Naming the locked store from the open one reaches nothing either.
+      await expect(run(first, 'POST', { toBranchId: binToUuid(second) })).rejects.toMatchObject({ response: { state: 'locked' } });
+    } finally {
+      if (before === undefined) delete process.env.BRANCH_ENTITLEMENTS;
+      else process.env.BRANCH_ENTITLEMENTS = before;
+    }
   });
 });
