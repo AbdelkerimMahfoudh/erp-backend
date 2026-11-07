@@ -161,6 +161,31 @@ export const CLOSING_RECLOSED_TEMPLATE: TemplateDefinition = {
 };
 
 /**
+ * The Owner's WhatsApp summaries (owner, 2026-11-07): the day's, sent at its first close, and the month's, sent at the
+ * close of its last day — each only while its switch in the business's settings is on (`whatsappDailyEnabled`,
+ * `whatsappMonthlyEnabled`), amounts only with `whatsappIncludeAmounts`. Composed by `closing/closing-notices.ts`.
+ */
+export const CLOSING_SUMMARY_TEMPLATE: TemplateDefinition = {
+  key: 'closing.summary',
+  category: 'business_summary',
+  variables: ['branch', 'date', 'sales', 'money'],
+  languages: ['en', 'ar', 'fr'],
+  providerKind: 'utility',
+  use: 'optional',
+  configKey: 'WHATSAPP_TEMPLATE_CLOSING_SUMMARY',
+};
+
+export const CLOSING_MONTHLY_TEMPLATE: TemplateDefinition = {
+  key: 'closing.monthly',
+  category: 'business_summary',
+  variables: ['branch', 'month', 'sales', 'days'],
+  languages: ['en', 'ar', 'fr'],
+  providerKind: 'utility',
+  use: 'optional',
+  configKey: 'WHATSAPP_TEMPLATE_CLOSING_MONTHLY',
+};
+
+/**
  * The operator's delivery check (correction phase, 2026-10-12): one message per language, sent by
  * `npm run whatsapp:prove` to the operator's own number, so that a delivered status — reaching us through the
  * signed webhook — proves the account, the number, the template approval and the webhook together. It goes through
@@ -275,6 +300,8 @@ const REGISTRY: Record<string, TemplateDefinition> = {
   [CLOSING_REOPENED_TEMPLATE.key]: CLOSING_REOPENED_TEMPLATE,
   [CLOSING_SALE_TEMPLATE.key]: CLOSING_SALE_TEMPLATE,
   [CLOSING_RECLOSED_TEMPLATE.key]: CLOSING_RECLOSED_TEMPLATE,
+  [CLOSING_SUMMARY_TEMPLATE.key]: CLOSING_SUMMARY_TEMPLATE,
+  [CLOSING_MONTHLY_TEMPLATE.key]: CLOSING_MONTHLY_TEMPLATE,
   [DELIVERY_CHECK_TEMPLATE.key]: DELIVERY_CHECK_TEMPLATE,
   [PAYMENT_SUBMITTED_TEMPLATE.key]: PAYMENT_SUBMITTED_TEMPLATE,
   ...Object.fromEntries(SUBSCRIPTION_TEMPLATES.map((t) => [t.key, t])),
@@ -344,8 +371,6 @@ export function assertLanguageSupported(
  *
  * | Future template | Category | Blocked on |
  * |---|---|---|
- * | Daily Owner summary | `business_summary` | Approved copy. Content must never enter OTP tables |
- * | Monthly Owner summary | `business_summary` | Same |
  * | Inter-store consignment notice | `operational` | Approved copy |
  * | Loan / debt reminder | `operational` | Approved copy |
  *
@@ -356,8 +381,6 @@ export function assertLanguageSupported(
  * accidentally disable everyone's ability to sign in or to delete an account.
  */
 export const PLANNED_TEMPLATES = Object.freeze([
-  'summary.daily',
-  'summary.monthly',
   'consignment.notice',
   'debt.reminder',
 ] as const);

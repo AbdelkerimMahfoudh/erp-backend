@@ -23,7 +23,7 @@ export interface NoticeContext {
 
 export interface Notice {
   /** `closing.reopened` | `closing.sale` | `closing.reclosed` */
-  template: 'closing.reopened' | 'closing.sale' | 'closing.reclosed';
+  template: 'closing.reopened' | 'closing.sale' | 'closing.reclosed' | 'closing.summary' | 'closing.monthly';
   /** The in-app notification's `dedupeKey` and the WhatsApp `idempotencyKey`. */
   dedupeKey: string;
   variables: Record<string, string>;
@@ -63,6 +63,13 @@ const WORDS: Record<NoticeLanguage, Record<string, string>> = {
     since: 'since the first count',
     whole: 'whole day',
     at: 'at',
+    daily: 'Day closed',
+    monthly: 'Month closed',
+    sales: '{n} sales',
+    salesValue: '{n} sales · {value}',
+    collectedOwed: 'collected {collected} · still owed {owed}',
+    cashDiff: 'cash difference {diff}',
+    days: '{n} days closed',
   },
   fr: {
     reopened: 'Journée rouverte',
@@ -77,6 +84,13 @@ const WORDS: Record<NoticeLanguage, Record<string, string>> = {
     since: 'depuis le premier comptage',
     whole: 'journée entière',
     at: 'à',
+    daily: 'Journée clôturée',
+    monthly: 'Mois clôturé',
+    sales: '{n} ventes',
+    salesValue: '{n} ventes · {value}',
+    collectedOwed: 'encaissé {collected} · reste dû {owed}',
+    cashDiff: 'écart de caisse {diff}',
+    days: '{n} jours clôturés',
   },
   ar: {
     reopened: 'أُعيد فتح اليوم',
@@ -91,6 +105,13 @@ const WORDS: Record<NoticeLanguage, Record<string, string>> = {
     since: 'منذ العدّ الأول',
     whole: 'اليوم كاملًا',
     at: 'في',
+    daily: 'أُقفل اليوم',
+    monthly: 'أُقفل الشهر',
+    sales: '{n} عملية بيع',
+    salesValue: '{n} عملية بيع · {value}',
+    collectedOwed: 'المحصّل {collected} · المتبقي {owed}',
+    cashDiff: 'فرق النقد {diff}',
+    days: '{n} يوم مُقفل',
   },
 };
 
@@ -203,6 +224,80 @@ export function reclosedNotice(ctx: NoticeContext, ev: ReclosedEvent): Notice {
       businessDate: ctx.businessDate,
       sinceFirstCount: ctx.includeAmounts ? ev.sinceFirstCount : { salesCount: ev.sinceFirstCount.salesCount },
       ...(ctx.includeAmounts ? { wholeDay: ev.wholeDay } : {}),
+    },
+  };
+}
+
+export interface DaySummaryEvent {
+  closingIdHex: string;
+  salesCount: number;
+  salesValue: number;
+  collected: number;
+  owed: number;
+  /** Null when the drawer was not counted at this close (0078). */
+  difference: number | null;
+}
+
+/** The day's summary (owner, 2026-11-07): sent once, at the day's first close — a reclose has its own notice. */
+export function daySummaryNotice(ctx: NoticeContext, ev: DaySummaryEvent): Notice {
+  const lang = ctx.language;
+  const sales = ctx.includeAmounts
+    ? word(lang, 'salesValue', { n: String(ev.salesCount), value: formatAmount(ev.salesValue, ctx.currency) })
+    : word(lang, 'sales', { n: String(ev.salesCount) });
+  const money = ctx.includeAmounts
+    ? `${word(lang, 'collectedOwed', { collected: formatAmount(ev.collected, ctx.currency), owed: formatAmount(ev.owed, ctx.currency) })} · ${
+        ev.difference === null ? word(lang, 'notVerified') : word(lang, 'cashDiff', { diff: formatAmount(ev.difference, ctx.currency) })
+      }`
+    : word(lang, 'hidden');
+  const variables = { branch: ctx.branchName, date: ctx.businessDate, sales, money };
+  assertNoticeSafe(variables);
+  return {
+    template: 'closing.summary',
+    dedupeKey: `closing:${ev.closingIdHex}:summary`,
+    variables,
+    title: `${word(lang, 'daily')} · ${ctx.branchName}`,
+    body: `${ctx.businessDate} · ${sales} · ${money}`,
+    payload: {
+      event: 'summary',
+      branch: ctx.branchName,
+      businessDate: ctx.businessDate,
+      salesCount: ev.salesCount,
+      ...(ctx.includeAmounts ? { salesValue: ev.salesValue, collected: ev.collected, owed: ev.owed, difference: ev.difference } : {}),
+    },
+  };
+}
+
+export interface MonthSummaryEvent {
+  /** `YYYY-MM`. */
+  month: string;
+  branchIdHex: string;
+  salesCount: number;
+  salesValue: number;
+  daysClosed: number;
+}
+
+/** The month's summary: sent at the close of the month's last day, once per store and month. */
+export function monthSummaryNotice(ctx: NoticeContext, ev: MonthSummaryEvent): Notice {
+  const lang = ctx.language;
+  const sales = ctx.includeAmounts
+    ? word(lang, 'salesValue', { n: String(ev.salesCount), value: formatAmount(ev.salesValue, ctx.currency) })
+    : word(lang, 'sales', { n: String(ev.salesCount) });
+  const days = word(lang, 'days', { n: String(ev.daysClosed) });
+  const variables = { branch: ctx.branchName, month: ev.month, sales, days };
+  assertNoticeSafe(variables);
+  return {
+    template: 'closing.monthly',
+    dedupeKey: `closing:${ev.branchIdHex}:monthly:${ev.month}`,
+    variables,
+    title: `${word(lang, 'monthly')} · ${ctx.branchName}`,
+    body: `${ev.month} · ${sales} · ${days}`,
+    payload: {
+      event: 'monthly',
+      branch: ctx.branchName,
+      month: ev.month,
+      salesCount: ev.salesCount,
+      daysClosed: ev.daysClosed,
+      ...(ctx.includeAmounts ? { salesValue: ev.salesValue } : {}),
     },
   };
 }

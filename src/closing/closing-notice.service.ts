@@ -39,6 +39,16 @@ export class ClosingNoticeService {
     @Inject(WHATSAPP_CHANNEL) private readonly channel: WhatsAppChannel,
   ) {}
 
+  /** The Owner's switch for this summary: daily or monthly (business settings; on by default since 0133). */
+  private async summaryWanted(companyId: Buffer, template: string): Promise<boolean> {
+    const s = await this.prisma.companySettings.findUnique({
+      where: { companyId },
+      select: { whatsappDailyEnabled: true, whatsappMonthlyEnabled: true },
+    });
+    if (!s) return true;
+    return template === 'closing.monthly' ? s.whatsappMonthlyEnabled : s.whatsappDailyEnabled;
+  }
+
   /** Branch name, zone, currency and the Owner's WhatsApp preferences. */
   async context(companyId: Buffer, branchId: Buffer): Promise<NoticeContext & { businessDate: string }> {
     const [branch, company, settings] = await Promise.all([
@@ -81,6 +91,8 @@ export class ClosingNoticeService {
       const variables = validateTemplateVariables(template, notice.variables);
       const owners = await this.owners(companyId);
       const language = (notice.payload.language as 'en' | 'ar' | 'fr' | undefined) ?? 'en';
+      // A summary goes to WhatsApp only while the Owner's switch for it is on; the in-app notice is always written.
+      const whatsapp = template.category !== 'business_summary' || (await this.summaryWanted(companyId, notice.template));
 
       for (const owner of owners) {
         let fresh = false;
@@ -109,6 +121,10 @@ export class ClosingNoticeService {
           throw e;
         }
         if (!fresh) continue;
+        if (!whatsapp) {
+          outcome.failures.push('summary_switched_off');
+          continue;
+        }
         if (!owner.phone) {
           outcome.failures.push('owner_has_no_phone');
           continue;

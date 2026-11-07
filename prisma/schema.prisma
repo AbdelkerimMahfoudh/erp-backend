@@ -2574,8 +2574,8 @@ model CompanySettings {
   /// Owner WhatsApp summaries (docs/21 §10). Nothing is sent in this phase.
   whatsappLanguage       SummaryLanguage @default(en) @map("whatsapp_language")
   whatsappIncludeAmounts Boolean         @default(false) @map("whatsapp_include_amounts")
-  whatsappDailyEnabled   Boolean         @default(false) @map("whatsapp_daily_enabled")
-  whatsappMonthlyEnabled Boolean         @default(false) @map("whatsapp_monthly_enabled")
+  whatsappDailyEnabled   Boolean         @default(true)  @map("whatsapp_daily_enabled")
+  whatsappMonthlyEnabled Boolean         @default(true)  @map("whatsapp_monthly_enabled")
 
   /// The longest auto-lock interval any user may choose, in seconds.
   /// `0` locks immediately. There is deliberately no value meaning "never" —

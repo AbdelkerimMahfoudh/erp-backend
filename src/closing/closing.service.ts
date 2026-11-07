@@ -93,7 +93,7 @@ import {
   type CounterRefusal,
   type DayStanding,
 } from './closing-lifecycle';
-import { reclosedNotice, reopenedNotice, saleNotice, type Notice } from './closing-notices';
+import { daySummaryNotice, monthSummaryNotice, reclosedNotice, reopenedNotice, saleNotice, type Notice } from './closing-notices';
 import { ClosingNoticeService, type NoticeOutcome } from './closing-notice.service';
 import { MoneyAnchorsService } from './money-anchors.service';
 import type { OpenedAnchor, TrackedMethod } from './money-positions';
@@ -1080,6 +1080,19 @@ export class ClosingService {
         actionLink: links.closingDay(day),
         payload: { event: 'completed', date: day, check: unverified.length > 0 ? 'unverified' : attested.length > 0 ? 'attested' : 'counted' },
       });
+      // The Owner's summaries (owner, 2026-11-07), after commit: the day's, and the month's at its last day.
+      const s = built.report.sales;
+      void this.tellOwner(companyId, branchId, day, null, (ctx) =>
+        daySummaryNotice(ctx, {
+          closingIdHex: closingId.toString('hex'),
+          salesCount: s.salesCount,
+          salesValue: s.netSalesValue,
+          collected: s.collected.total,
+          owed: s.owed,
+          difference,
+        }),
+      ).catch(() => undefined);
+      if (isLastDayOfMonth(day)) void this.tellMonth(companyId, branchId, day).catch(() => undefined);
     } else {
       // After commit, never before: a delivery problem is not the close's problem.
       void this.tellOwner(companyId, branchId, day, result.eventId, (ctx) =>
@@ -2440,6 +2453,40 @@ export class ClosingService {
       );
     } catch (e) {
       this.logger.warn(`Post-sale closing notices skipped for ${binToUuid(saleId)}: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * The month's summary, at the close of its last day: each closed day of the month counted once, from its latest
+   * close's frozen report — the same figures the day's own summary gave. Never throws.
+   */
+  private async tellMonth(companyId: Buffer, branchId: Buffer, day: string): Promise<void> {
+    try {
+      const month = day.slice(0, 7);
+      const events = await this.db.closingEvent.findMany({
+        where: {
+          companyId,
+          branchId,
+          kind: { in: ['closed', 'reclosed'] },
+          businessDate: { gte: new Date(`${month}-01T00:00:00.000Z`), lte: new Date(`${day}T00:00:00.000Z`) },
+        },
+        orderBy: { at: 'asc' },
+        select: { closingId: true, payload: true },
+      });
+      const latest = new Map<string, unknown>();
+      for (const e of events) if (e.closingId) latest.set(e.closingId.toString('hex'), e.payload);
+      let salesCount = 0;
+      let salesValue = 0;
+      for (const p of latest.values()) {
+        const sales = (p as { report?: { sales?: { salesCount?: number; netSalesValue?: number } } } | null)?.report?.sales;
+        salesCount += sales?.salesCount ?? 0;
+        salesValue += sales?.netSalesValue ?? 0;
+      }
+      await this.tellOwner(companyId, branchId, day, null, (ctx) =>
+        monthSummaryNotice(ctx, { month, branchIdHex: branchId.toString('hex'), salesCount, salesValue: round2(salesValue), daysClosed: latest.size }),
+      );
+    } catch (e) {
+      this.logger.warn(`Monthly summary for ${day} not delivered: ${(e as Error).message}`);
     }
   }
 
@@ -3972,4 +4019,11 @@ function snapshotReport(payload: unknown): {
 function dayWindowOf(day: string, timezone: string): { startsAt: string; endsAt: string } {
   const w = dayWindow(day, timezone);
   return { startsAt: w.start.toISOString(), endsAt: w.end.toISOString() };
+}
+
+/** `YYYY-MM-DD` is the last day of its month (the month's summary is sent at its close). */
+export function isLastDayOfMonth(day: string): boolean {
+  const d = new Date(`${day}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.getUTCDate() === 1;
 }
