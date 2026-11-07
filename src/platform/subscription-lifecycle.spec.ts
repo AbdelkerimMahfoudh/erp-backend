@@ -96,9 +96,28 @@ function makeWorld(status: Status, over: Record<string, unknown> = {}, branches:
   let latest: { periodEnd: Date | null } | null =
     status === 'activated' && !trial.unbilled ? { periodEnd: (sub.currentPeriodEnd as Date | null) ?? null } : null;
 
+  // 0132: each store's own entitlement and period, written beside the business's decision (`followCompanyTimelineTx`).
+  const storeEntitlements: any[] = [];
+  const storePeriods: any[] = [];
   const prisma: Record<string, any> = {
+    branchEntitlement: {
+      upsert: async ({ create }: any) => {
+        storeEntitlements.push(create);
+        return create;
+      },
+    },
+    branchPeriod: {
+      create: async ({ data }: any) => {
+        storePeriods.push(data);
+        return data;
+      },
+    },
     branch: {
-      findMany: async () => branches.filter((b) => b.activityNext !== null).map((b) => ({ ...b })),
+      // The per-store timeline names the stores; the activity roll asks for the branches with a change pending.
+      findMany: async ({ where }: any = {}) =>
+        where?.type === 'store'
+          ? branches.map((b) => ({ id: b.id, entitlement: null }))
+          : branches.filter((b) => b.activityNext !== null).map((b) => ({ ...b })),
       update: async ({ where, data }: any) => {
         const b = branches.find((x) => x.id.equals(where.id))!;
         Object.assign(b, data);
@@ -798,7 +817,7 @@ describe('what the lifecycle never does', () => {
 
   it('never writes grace onto the subscription: a passed end’s decision is recorded once, under the fence’s lock (0099)', () => {
     expect(SERVICE).not.toMatch(/(graceEnd|graceUntil|graceHours|graceEndsAt)\s*:/i);
-    expect(SERVICE).toMatch(/await recordDueGraceTx\(tx, companyId, now, 'lifecycle'\);\n\s*return decide\(/);
+    expect(SERVICE).toMatch(/await recordDueGraceTx\(tx, companyId, now, 'lifecycle'\);\r?\n\s*const result = await decide\(/);
   });
 });
 
