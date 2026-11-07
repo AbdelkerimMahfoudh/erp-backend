@@ -52,6 +52,26 @@ if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migration
   [ "$deletions" = 0 ] || die "$target predates 0128 and does not know a business prepared for deletion or deleted; the database holds $deletions such row(s). Roll a fix forward instead."
   echo "0128 floor: no business deletion started: rollback allowed by this floor."
 fi
+# The 0130–0132 floors (docs/122 §10). Code built before 0130/0131 cannot read a notice kind it does not know
+# (`branch_activation`, `trial_started`); code built before 0132 ignores each store's own entitlement, so once any store
+# has a decision of its own (a payment, trial, grant or admin period, or a proof naming stores) it would grant or refuse
+# by the business alone. Grandfathered rows only copy the business's timeline: they never block a rollback.
+if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migrations/0130_branch_requests'; then
+  n=$(db_root -e "SELECT COUNT(*) FROM phonestore.subscription_notices WHERE kind = 'branch_activation'" | tr -d '[:space:]')
+  [ "$n" = 0 ] || die "$target predates 0130 and cannot read a branch-activation notice; the database holds $n. Roll a fix forward instead."
+  echo "0130 floor: no branch-activation notice: rollback allowed by this floor."
+fi
+if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migrations/0131_automatic_trial'; then
+  n=$(db_root -e "SELECT COUNT(*) FROM phonestore.subscription_notices WHERE kind = 'trial_started'" | tr -d '[:space:]')
+  [ "$n" = 0 ] || die "$target predates 0131 and cannot read a trial-started notice; the database holds $n. Roll a fix forward instead."
+  echo "0131 floor: no trial-started notice: rollback allowed by this floor."
+fi
+if ! docker run --rm --entrypoint sh "$target" -c 'test -d /app/prisma/migrations/0132_branch_entitlements'; then
+  n=$(db_root -e "SELECT (SELECT COUNT(*) FROM phonestore.branch_periods WHERE source <> 'grandfathered')
+    + (SELECT COUNT(*) FROM phonestore.payment_proofs WHERE \`lines\` IS NOT NULL)" | tr -d '[:space:]')
+  [ "$n" = 0 ] || die "$target predates 0132 and would decide every store by the business alone; $n store decision(s) of their own exist. Roll a fix forward instead (docs/122 §10)."
+  echo "0132 floor: no store decision of its own: rollback allowed by this floor."
+fi
 export API_IMAGE=$target
 # The tools image of the same commit when the host still has it (deploy.sh tags both alike), else the current one.
 tools=${target/erp-api:/erp-api-tools:}
