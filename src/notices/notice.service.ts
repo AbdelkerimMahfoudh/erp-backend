@@ -237,8 +237,19 @@ export class NoticeService {
       if (stores.length) {
         const current: NoticeSlot[] = [];
         for (const row of stores) {
-          const slot = prefixed(currentSlot(row.subject, now), storeKeyPrefix(row.store!.id));
-          if (slot) {
+          const own = currentSlot(row.subject, now);
+          const slot = prefixed(own, storeKeyPrefix(row.store!.id));
+          if (own && slot) {
+            // Made before per-store keys (the deploy of 0132), under the business's key: that notice IS this moment's
+            // message — never a second one, and never superseded while it still waits to go.
+            const legacy = await this.prisma.subscriptionNotice.findFirst({
+              where: { companyId, kind: own.kind, periodKey: own.periodKey, threshold: own.threshold },
+              select: { id: true },
+            });
+            if (legacy) {
+              current.push(own);
+              continue;
+            }
             await this.ensure(companyId, row, slot, now);
             current.push(slot);
           }

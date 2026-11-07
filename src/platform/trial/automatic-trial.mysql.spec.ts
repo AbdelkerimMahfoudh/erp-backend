@@ -324,6 +324,26 @@ suite('the automatic free trial', () => {
       expect((await root.subscriptionNotice.findUniqueOrThrow({ where: { id: rows[0].id } })).state).toBe('superseded');
     });
 
+    it('0132 deploy day: a reminder already made under the business’s key is that moment’s message — no second one, still sendable', async () => {
+      const { id, owner } = await business();
+      await start(id, owner);
+      const second = newUuidV7Bin();
+      await root.branch.create({ data: { id: second, companyId: id, name: 'Ksar', type: 'store' } });
+      const ends = new Date(Date.now() + 47 * 3_600_000);
+      await root.branchEntitlement.create({ data: { id: newUuidV7Bin(), companyId: id, branchId: second, paidUntil: ends } });
+      // Made by the code before 0132: the same reminder, keyed by the business only, still waiting to go.
+      const sub = await root.subscription.findFirstOrThrow({ where: { companyId: id }, select: { id: true } });
+      const legacy = await root.subscriptionNotice.create({
+        data: { id: newUuidV7Bin(), companyId: id, subscriptionId: sub.id, kind: 'paid_reminder', periodKey: `paid:${ends.getTime()}`, threshold: 'h48', dueAt: new Date(), language: 'en', nextAttemptAt: new Date() },
+      });
+      await notices.refresh(id);
+      await notices.refresh(id);
+      const rows = await root.subscriptionNotice.findMany({ where: { companyId: id, kind: 'paid_reminder' } });
+      expect(rows.map((r) => r.periodKey)).toEqual([`paid:${ends.getTime()}`]);
+      // Not superseded: it is still the message to send.
+      expect((await root.subscriptionNotice.findUniqueOrThrow({ where: { id: legacy.id } })).state).not.toBe('superseded');
+    });
+
     it('held without its template — no attempt spent — and the trial runs regardless', async () => {
       const { id, owner } = await business();
       await start(id, owner);
