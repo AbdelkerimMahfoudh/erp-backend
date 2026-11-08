@@ -6,6 +6,7 @@ import type { PlatformAdminIdentity } from './platform-admin.service';
 import { AccessBasisDto, parseBasis } from './access-basis';
 import { finishDraft } from './provisioning-draft';
 import { PaymentProofsService } from './payment-proofs.service';
+import { priceList } from '../billing/period-offers';
 import { normaliseEmail, normalisePhone } from '../auth/identifier';
 import {
   BadRequestException,
@@ -1301,6 +1302,28 @@ export class PlatformController {
       { admin, ip: req.ip },
     );
     return { applied: r.applied, version: r.subscription.version, status: r.subscription.status };
+  }
+
+  /** 0134: the server's price for a categorised payment, while the administrator fills Record payment. Reads only. */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Get('businesses/:id/payment-price')
+  async paymentPrice(
+    @Param('id') id: string,
+    @Query('category') category: string,
+    @Query('months') months?: string,
+    @Query('branches') branches?: string,
+    @Query('seats') seats?: string,
+  ) {
+    if (!isUuid(id) || !this.proofs) throw new BadRequestException({ code: 'category_unavailable', message: 'This payment cannot be priced here.' });
+    if (!['subscription', 'store_activation', 'extra_seats', 'other'].includes(category)) throw new BadRequestException({ code: 'category_invalid', message: 'Choose what this payment is for.' });
+    const priced = await this.proofs.priceFor(uuidToBin(id), {
+      category: category as 'subscription',
+      months: months ? Number(months) : undefined,
+      branches: branches ? branches.split(',').map((x) => x.trim()).filter(Boolean) : undefined,
+      seats: seats ? Number(seats) : undefined,
+    });
+    return { category, price: priced, prices: priceList() };
   }
 
   @Public()
