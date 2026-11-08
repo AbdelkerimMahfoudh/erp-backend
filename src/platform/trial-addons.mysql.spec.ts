@@ -318,7 +318,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
         const l = await ledger(w.b);
         expect(l.requests).toEqual([expect.objectContaining({ status: 'paid', effectiveAt: T.toISOString() })]);
         expect(l.branches).toEqual(['Main', 'B']);
-        expect(l.periods).toEqual([expect.objectContaining({ start: T.toISOString(), total: 1000 })]);
+        expect(l.periods).toEqual([expect.objectContaining({ start: T.toISOString(), total: 1200 })]);
         expect(l.expiries).toBe(1);
       }
       expect((await root.subscription.findUniqueOrThrow({ where: { companyId: suspended.b.companyId } })).status).toBe('suspended');
@@ -409,7 +409,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
 
       // 1. Requested during the trial: waiting for payment, nothing opened, nothing billed.
       const store = (await s.seats.requestStore(b.companyId, { name: 'B', activity: 'electronics', requestedBy: 'owner' })).allocation;
-      expect(store).toMatchObject({ status: 'pending_payment', monthlyAmount: 500, label: 'B', activityTo: 'electronics', effectiveAt: null });
+      expect(store).toMatchObject({ status: 'pending_payment', monthlyAmount: 600, label: 'B', activityTo: 'electronics', effectiveAt: null });
       const seat = (await s.seats.requestSeat(b.companyId, { branchId: b.stores.Main, userId: sara, requestedBy: 'owner' })).allocation;
       expect(seat).toMatchObject({ status: 'pending_payment', monthlyAmount: 100 });
       expect(await ledger(b)).toMatchObject({ branches: ['Main'], periods: [], payments: [] });
@@ -419,7 +419,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
       await confirm(s, store.id, 500, 'BK-1');
       await confirm(s, seat.id, 100, 'BK-2');
       expect(await ledger(b)).toMatchObject({
-        periods: [{ start: T.toISOString(), total: 500, branchFee: 500, staffFee: 0, active: 1 }],
+        periods: [{ start: T.toISOString(), total: 600, branchFee: 600, staffFee: 0, active: 1 }],
         payments: ['500', '100'],
         branches: ['Main'],
       });
@@ -445,7 +445,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
       expect(done).toMatchObject({
         branches: ['Main', 'B'],
         requests: [expect.objectContaining({ kind: 'store', status: 'paid', effectiveAt: T.toISOString() }), expect.objectContaining({ kind: 'seat', status: 'paid', effectiveAt: T.toISOString() })],
-        periods: [{ start: T.toISOString(), total: 1100, branchFee: 1000, staffFee: 100, active: 2 }],
+        periods: [{ start: T.toISOString(), total: 1300, branchFee: 1200, staffFee: 100, active: 2 }],
         activations: 2,
         expiries: 1,
       });
@@ -471,15 +471,15 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
   });
 
   describe('7. one charge only — the R1 reproduction on real MySQL', () => {
-    it('a store paid for before the approval: the first period opens at 500, not 1000, and is 1000 after the end — never 1500', async () => {
+    it('a store paid for before the approval: the first period opens at 600, not 1200, and is 1200 after the end — never 1800', async () => {
       const { s, b, T, clock } = await inTrial();
       const store = (await s.seats.requestStore(b.companyId, { name: 'Second', activity: 'electronics', requestedBy: 'owner' })).allocation.id;
       await confirm(s, store, 500, 'BK-TRIAL-1');
       await approve(s, b);
-      expect((await ledger(b)).periods.map((p) => p.total)).toEqual([500]);
+      expect((await ledger(b)).periods.map((p) => p.total)).toEqual([600]);
       clock.set(T);
       await s.entitlement.forCompany(b.companyId);
-      expect(await ledger(b)).toMatchObject({ periods: [{ total: 1000 }], payments: ['500'] });
+      expect(await ledger(b)).toMatchObject({ periods: [{ total: 1200 }], payments: ['500'] });
     });
 
     it('a seat paid for before the approval: the staff fee is 0 during the trial and 100 from its end', async () => {
@@ -488,10 +488,10 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
       const seat = (await s.seats.requestSeat(b.companyId, { branchId: b.stores.Main, requestedBy: 'owner' })).allocation.id;
       await confirm(s, seat, 100, 'BK-TRIAL-2');
       await approve(s, b);
-      expect((await ledger(b)).periods.map((p) => [p.staffFee, p.total])).toEqual([[0, 500]]);
+      expect((await ledger(b)).periods.map((p) => [p.staffFee, p.total])).toEqual([[0, 600]]);
       clock.set(T);
       await s.entitlement.forCompany(b.companyId);
-      expect((await ledger(b)).periods.map((p) => [p.staffFee, p.total])).toEqual([[100, 600]]);
+      expect((await ledger(b)).periods.map((p) => [p.staffFee, p.total])).toEqual([[100, 700]]);
     });
   });
 
@@ -561,7 +561,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
         const l = await ledger(w.b);
         expect(l).toMatchObject({ expiries: 1, activations: 2, branches: ['Main', 'C', 'B'] });
         expect(l.requests.filter((r) => r.label === 'B' || r.kind === 'seat').every((r) => r.status === 'paid' && r.effectiveAt === w.T.toISOString())).toBe(true);
-        expect(l.periods).toEqual([expect.objectContaining({ total: 1600, staffFee: 100, active: 3 })]);
+        expect(l.periods).toEqual([expect.objectContaining({ total: 1900, staffFee: 100, active: 3 })]);
         expect(l.payments).toHaveLength(3);
       }
       note(`(i) slowest of twelve evaluations per run (ms): ${worst.map((x) => x.toFixed(1)).join(', ')}`);
@@ -590,7 +590,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
         expect(l.branches.filter((x) => x === 'B')).toHaveLength(1);
         expect(l.payments).toEqual(['500']);
         expect(l.expiries).toBe(1);
-        expect(l.periods.map((p) => p.total)).toEqual([1000]);
+        expect(l.periods.map((p) => p.total)).toEqual([1200]);
         if (request.effectiveAt === null) outcomes.push('at-once');
         else {
           expect(request.effectiveAt).toBe(w.T.toISOString());
@@ -610,7 +610,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
         expect(confirmed).toMatchObject({ status: 'fulfilled', value: { allocation: { status: 'paid', effectiveAt: null } } });
         w.clock.set(new Date(w.T.getTime() + 10_000));
         await w.s.entitlement.forCompany(w.b.companyId);
-        expect(await ledger(w.b)).toMatchObject({ branches: ['Main', 'B'], payments: ['500'], expiries: 1, activations: 0, periods: [{ total: 1000 }] });
+        expect(await ledger(w.b)).toMatchObject({ branches: ['Main', 'B'], payments: ['500'], expiries: 1, activations: 0, periods: [{ total: 1200 }] });
       }
     });
 
@@ -706,7 +706,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
       const paid = l.requests.filter((r) => r.status === 'paid').length;
       expect([0, 3]).toContain(paid);
       expect(l.branches).toEqual(paid === 3 ? ['Main', 'B'] : ['Main']);
-      expect(l.periods.map((p) => p.total)).toEqual([paid === 3 ? 1200 : 500]);
+      expect(l.periods.map((p) => p.total)).toEqual([paid === 3 ? 1400 : 600]);
       expect(l.activations).toBe(paid);
       expect(l.payments).toEqual(['500', '100', '100']);
       return paid === 3 ? 'all' : 'none';
@@ -824,7 +824,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
         expect(await ledger(w.b)).toMatchObject({
           requests: [expect.objectContaining({ status: 'paid', effectiveAt: w.T.toISOString() })],
           branches: ['Main', 'B'],
-          periods: [expect.objectContaining({ total: 1000 })],
+          periods: [expect.objectContaining({ total: 1200 })],
           activations: 1,
           expiries: 1,
         });
@@ -861,8 +861,8 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
       await s.sweeper.sweep();
       const after = await root.billingPeriod.findMany({ where: { companyId: b.companyId } });
       expect(after).toHaveLength(2);
-      expect(after.find((p) => p.id.equals(granted.id))).toMatchObject({ assessedTotal: 1000 });
-      expect(after.find((p) => p.id.equals(ahead))).toMatchObject({ assessedTotal: 500 });
+      expect(after.find((p) => p.id.equals(granted.id))).toMatchObject({ assessedTotal: 1200 });
+      expect(after.find((p) => p.id.equals(ahead))).toMatchObject({ assessedTotal: 600 });
       expect(await ledger(b)).toMatchObject({ requests: [expect.objectContaining({ status: 'paid', effectiveAt: T.toISOString() })], activations: 1, payments: ['500'] });
     });
   });
@@ -906,7 +906,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
         expect(l).toMatchObject({
           requests: [expect.objectContaining({ status: 'scheduled', effectiveAt: T.toISOString() })],
           payments: ['500'],
-          periods: [expect.objectContaining({ total: 500 })],
+          periods: [expect.objectContaining({ total: 600 })],
           activations: 0,
           expiries: 1,
         });
@@ -1011,14 +1011,14 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
       await holder.done;
       note(`14. Alpha's evaluation ${lazy.ms.toFixed(1)} ms, trigger ${trigger.ms.toFixed(1)} ms, with Beta's row held`);
       expect(lazy.ms).toBeLessThan(1_000);
-      expect(await ledger(a.b)).toMatchObject({ branches: ['Main', 'B'], activations: 1, expiries: 1, periods: [{ total: 1000 }] });
+      expect(await ledger(a.b)).toMatchObject({ branches: ['Main', 'B'], activations: 1, expiries: 1, periods: [{ total: 1200 }] });
       expect(await ledger(b.b)).toEqual(betaBefore);
 
       // Beta's own end, later: its own rows.
       const alphaAfter = await ledger(a.b);
       b.clock.set(new Date(b.T.getTime() + 1_000));
       await b.s.entitlement.forCompany(b.b.companyId);
-      expect(await ledger(b.b)).toMatchObject({ branches: ['Main', 'B'], activations: 1, periods: [{ total: 1000 }] });
+      expect(await ledger(b.b)).toMatchObject({ branches: ['Main', 'B'], activations: 1, periods: [{ total: 1200 }] });
       expect(await ledger(a.b)).toEqual(alphaAfter);
     });
 
