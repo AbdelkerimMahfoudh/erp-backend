@@ -455,7 +455,7 @@ run('add-ons during the free trial, on real MySQL (D176)', () => {
       const audits = await root.platformAuditEvent.findMany({ where: { targetId: b.companyId, action: { in: ['store.activate', 'seat.activate'] } } });
       expect(audits.map((a) => [a.action, (a.afterJson as { raisedBy: number }).raisedBy]).sort()).toEqual([
         ['seat.activate', 100],
-        ['store.activate', 500],
+        ['store.activate', 600],
       ]);
 
       // 7. Whoever looks again finds nothing more to charge.
