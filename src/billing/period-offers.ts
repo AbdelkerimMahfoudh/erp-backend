@@ -101,6 +101,7 @@ export function seatsPrice(seats: number, months: OfferMonths): number {
 
 /** The price list the portal and the console show (one source for every screen). */
 export function priceList() {
+  const per = (f: (m: OfferMonths) => number) => Object.fromEntries(OFFER_MONTHS.map((m) => [String(m), f(m)])) as Record<string, number>;
   return {
     currency: 'MRU',
     months: [...OFFER_MONTHS],
@@ -108,6 +109,13 @@ export function priceList() {
     moneyAgentMonthly: MONTHLY_PRICE.money_agent,
     bothMonthly: MONTHLY_PRICE.both,
     seatMonthly: SEAT_MONTHLY,
+    /** Every figure the pages show, by period — computed here, so no page multiplies a price. */
+    table: {
+      electronics: per((m) => storePrice('electronics', m)),
+      money_agent: per((m) => storePrice('money_agent', m)),
+      both: per((m) => storePrice('both', m)),
+      seat: per((m) => seatsPrice(1, m)),
+    },
     categories: [...PAYMENT_CATEGORIES],
   };
 }

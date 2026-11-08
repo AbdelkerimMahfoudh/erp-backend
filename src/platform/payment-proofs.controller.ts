@@ -14,7 +14,7 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { PlatformAdminGuard, type AdminRequest } from './platform-admin.guard';
 import { PlatformAdminService } from './platform-admin.service';
 import { MAX_PROOF_BYTES, PaymentProofsService } from './payment-proofs.service';
-import { priceList } from '../billing/period-offers';
+import { isPaymentCategory, priceList } from '../billing/period-offers';
 
 export class RefuseProofDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
@@ -50,15 +50,39 @@ export class PaymentProofsController {
   /** The portal's plans for this business (owner, 2026-11-05): 1, 3 and 12 months, per store, computed here. */
   @Get('my-subscription/plans')
   @RequirePermissions('settings.manage')
-  async plans(@Query('branches') branches?: string) {
+  async plans(@Query('branches') branches?: string, @Query('category') category?: string) {
     const companyId = this.tenant.companyId();
     // 0132: each branch is its own subscription — its state and end beside its price; `branches` narrows the quote.
     const only = branchList(branches);
     return {
       // 0134: the one price list every screen shows, and the categories a payment can be for.
       prices: priceList(),
-      plans: await Promise.all(([1, 3, 12] as const).map((m) => this.proofs.quoteFor(companyId, m, only))),
+      plans: await Promise.all(
+        ([1, 3, 12] as const).map(async (m) => {
+          const q = await this.proofs.quoteFor(companyId, m, only);
+          // 0134: a subscription quotes the open stores, an activation the waiting ones — totals from the server.
+          if (category !== 'subscription' && category !== 'store_activation') return q;
+          const lines = q.lines.filter((l) => !!l.pending === (category === 'store_activation'));
+          return { ...q, lines, total: lines.reduce((t, l) => t + l.amount, 0) };
+        }),
+      ),
       branches: await this.branchStatus.listForCompany(companyId),
+    };
+  }
+
+  /** 0134: the server's price for a categorised payment the Owner is about to make (extra seats, mostly). */
+  @Get('my-subscription/payment-price')
+  @RequirePermissions('settings.manage')
+  async price(@Query('category') category: string, @Query('months') months?: string, @Query('branches') branches?: string, @Query('seats') seats?: string) {
+    if (!isPaymentCategory(category)) throw new BadRequestException({ code: 'category_invalid', message: 'Choose what this payment is for.' });
+    return {
+      category,
+      price: await this.proofs.priceFor(this.tenant.companyId(), {
+        category,
+        months: months ? Number(months) : undefined,
+        branches: branchList(branches),
+        seats: seats ? Number(seats) : undefined,
+      }),
     };
   }
 
