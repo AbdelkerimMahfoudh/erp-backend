@@ -15,7 +15,7 @@ import type { Activity } from '../entitlement/activity';
  * ## The formula (docs/21, 2026-10-05; activities D154, 2026-10-08)
  *
  *     for each active branch:
- *       activityFee   = { electronics: 500, money_agent: 300, both: 700 }[activity]
+ *       activityFee   = { electronics: 600, money_agent: 300, both: 800 }[activity]   (0134; was 500/300/700)
  *     branchFee     = Σ activityFee                       (was activeBranchCount × 500)
  *     for each store:
  *       includedSeats = 1                       the Owner never counts
@@ -95,7 +95,20 @@ export const STANDARD_PLAN_V3: PlanPricing = {
   extraStaffMonthly: 100,
 };
 
-export const CURRENT_PLAN: PlanPricing = STANDARD_PLAN_V3;
+/**
+ * The owner's prices of 2026-11-05/2026-11-08 (migration 0134): electronics 600, money services agent 300, both 800
+ * MRU per store per month; the seat terms unchanged. The same figures the portal sells by the period
+ * (`period-offers.ts`), so every screen shows one price list.
+ */
+export const STANDARD_PLAN_V4: PlanPricing = {
+  branchMonthly: 600,
+  agentMonthly: 300,
+  bothMonthly: 800,
+  includedStaffPerBranch: 1,
+  extraStaffMonthly: 100,
+};
+
+export const CURRENT_PLAN: PlanPricing = STANDARD_PLAN_V4;
 
 /** The prices an activity needs — a plan, a plan version, or a period's copied figures. */
 export type ActivityPrices = Pick<PlanPricing, 'branchMonthly' | 'agentMonthly' | 'bothMonthly'>;

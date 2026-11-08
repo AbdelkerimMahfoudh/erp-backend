@@ -1,23 +1,37 @@
 import {
-  activityChange,
-  activityFee,
-  assessPeriod,
+  activityChange as activityChangeAt,
+  activityFee as activityFeeAt,
+  assessPeriod as assessPeriodAt,
   chooseReplacementSlot,
-  CURRENT_PLAN,
-  estimateFor,
-  nextRenewalEstimate,
-  quoteFor,
+  CURRENT_PLAN as PLAN_IN_FORCE,
+  estimateFor as estimateForAt,
+  nextRenewalEstimate as nextRenewalEstimateAt,
+  quoteFor as quoteForAt,
   replacementDue,
   replacementSlotValue,
   STANDARD_PLAN_V1,
   STANDARD_PLAN_V2,
   STANDARD_PLAN_V3,
+  STANDARD_PLAN_V4,
   upgradeDue,
   type AssessedPeriod,
   type BranchSize,
   type CompanySize,
 } from './pricing-rules';
 import type { Activity } from '../entitlement/activity';
+
+/*
+ * The rules below were written and worked with version 3's figures (500 / 300 / 700, D154). The rules did not change in
+ * 0134 — only the figures (version 4: 600 / 300 / 800) — so every worked example keeps pricing at version 3, named,
+ * and version 4 is checked on its own at the end.
+ */
+const CURRENT_PLAN = STANDARD_PLAN_V3;
+const activityFee = (a: Activity, plan: Parameters<typeof activityFeeAt>[1] = CURRENT_PLAN) => activityFeeAt(a, plan);
+const activityChange = (from: Activity, to: Activity, plan: Parameters<typeof activityChangeAt>[2] = CURRENT_PLAN, credit = 0) => activityChangeAt(from, to, plan, credit);
+const quoteFor = (size: CompanySize, plan: Parameters<typeof quoteForAt>[1] = CURRENT_PLAN) => quoteForAt(size, plan);
+const nextRenewalEstimate = (size: CompanySize, plan: Parameters<typeof nextRenewalEstimateAt>[1] = CURRENT_PLAN) => nextRenewalEstimateAt(size, plan);
+const estimateFor = (staff: readonly number[], plan: Parameters<typeof estimateForAt>[1] = CURRENT_PLAN, activities: readonly Activity[] = []) => estimateForAt(staff, plan, activities);
+const assessPeriod = (...a: Parameters<typeof assessPeriodAt>) => assessPeriodAt(a[0], a[1], a[2] ?? CURRENT_PLAN, ...(a.slice(3) as []));
 
 /**
  * The approved rule of 2026-10-05 (docs/21): 500 MRU per store per month, one
@@ -255,7 +269,8 @@ describe('a branch is priced by its activity (D154, docs/73 §3)', () => {
       includedStaffPerBranch: 1,
       extraStaffMonthly: 100,
     });
-    expect(CURRENT_PLAN).toBe(STANDARD_PLAN_V3);
+    // 0134: version 4 is the plan in force now; version 3 keeps its figures for the periods it opened.
+    expect(PLAN_IN_FORCE).toBe(STANDARD_PLAN_V4);
     // Migration 0088 backfilled the agent and both prices onto the older rows
     // so a period opened under them still re-prices with its own figures.
     expect(STANDARD_PLAN_V1).toMatchObject({ includedStaffPerBranch: 2, agentMonthly: 300, bothMonthly: 700 });
@@ -663,5 +678,19 @@ describe('replacing an archived store in the same paid period (D158)', () => {
     // 700 (A) + 500 (Shop) + max(0, 300 − 700): the cheaper replacement is free, and the others are not discounted.
     expect(replaced.assessedBranchFee).toBe(1200);
     expect(replaced.addedThisPeriod).toBe(0);
+  });
+});
+
+describe('0134: version 4 — the owner’s prices of 2026-11-05/08, one list everywhere', () => {
+  it('electronics 600, money services agent 300, both 800 (never the sum), one included seat, 100 per extra seat', () => {
+    expect(STANDARD_PLAN_V4).toEqual({ branchMonthly: 600, agentMonthly: 300, bothMonthly: 800, includedStaffPerBranch: 1, extraStaffMonthly: 100 });
+    expect(PLAN_IN_FORCE).toBe(STANDARD_PLAN_V4);
+    expect(activityFeeAt('electronics')).toBe(600);
+    expect(activityFeeAt('money_agent')).toBe(300);
+    expect(activityFeeAt('both')).toBe(800);
+  });
+  it('the monthly engine and the portal’s one-month offer agree for every activity', async () => {
+    const { storePrice } = await import('./period-offers');
+    for (const a of ['electronics', 'money_agent', 'both'] as const) expect(activityFeeAt(a)).toBe(storePrice(a, 1));
   });
 });

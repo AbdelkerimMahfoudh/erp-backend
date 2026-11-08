@@ -953,6 +953,9 @@ export class SubscriptionLifecycleService {
       reference?: string;
       note?: string;
       confirm?: boolean;
+      /** 0134: what the payment is for, and the stores, months and seats it covers. */
+      category?: 'subscription' | 'store_activation' | 'extra_seats' | 'other';
+      details?: Record<string, unknown>;
     },
     ctx: ActorContext,
   ) {
@@ -992,6 +995,8 @@ export class SubscriptionLifecycleService {
           currency: 'MRU',
           paidAt: input.paidAt,
           channel,
+          category: input.category ?? null,
+          details: input.details ? (input.details as Prisma.InputJsonValue) : Prisma.DbNull,
           reference,
           note: input.note?.slice(0, 500) ?? null,
           recordedBy: ctx.admin.email,
@@ -1061,6 +1066,9 @@ export class SubscriptionLifecycleService {
         amount: p.amount.toString(),
         currency: p.currency,
         channel: p.channel,
+        // 0134: what the payment was for (null before 0134), and the stores, months and seats it covered.
+        category: p.category,
+        details: p.details ?? null,
         reference: p.reference,
         note: p.note,
         paidAt: p.paidAt.toISOString(),

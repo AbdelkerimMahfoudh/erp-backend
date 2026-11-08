@@ -5,8 +5,10 @@ import { claimedBy } from './owner-identity/owner-identity';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 import { AccessBasisDto, parseBasis } from './access-basis';
 import { finishDraft } from './provisioning-draft';
+import { PaymentProofsService } from './payment-proofs.service';
 import { normaliseEmail, normalisePhone } from '../auth/identifier';
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -23,6 +25,8 @@ import { ApiExcludeController } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsEmail,
   IsIn,
@@ -30,6 +34,7 @@ import {
   IsNumberString,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -311,6 +316,11 @@ class PaymentDto {
   @IsOptional() @IsString() @MaxLength(500) note?: string;
   @IsOptional() confirm?: boolean;
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
+  /** 0134: what the payment is for. With it, the server prices it (all but other) — the amount sent must match. */
+  @IsOptional() @IsIn(['subscription', 'store_activation', 'extra_seats', 'other']) category?: 'subscription' | 'store_activation' | 'extra_seats' | 'other';
+  @IsOptional() @IsIn([1, 3, 12]) months?: number;
+  @IsOptional() @IsArray() @ArrayMaxSize(50) @IsString({ each: true }) branches?: string[];
+  @IsOptional() @IsInt() @Min(1) @Max(50) seats?: number;
 }
 
 export class PlanVersionDto {
@@ -347,6 +357,8 @@ export class PlatformController {
     @Optional() private readonly trialSetup?: TrialSetupService,
     /** 0132: each store's own state; absent where a test builds the controller by hand. */
     @Optional() private readonly branchStatus?: BranchEntitlementService,
+    /** 0134: the one price list, for a categorised payment; absent where a test builds the controller by hand. */
+    @Optional() private readonly proofs?: PaymentProofsService,
   ) {}
 
   // ── Public: a shop signs itself up ───────────────────────────────────────
@@ -1299,10 +1311,27 @@ export class PlatformController {
     const admin = req.platformAdmin!;
     await this.admins.requireStepUp(admin);
     if (isUuid(id)) await this.provisioning.assertMayTakePayment(uuidToBin(id), 'subscription.payment', { admin, ip: req.ip });
+    // 0134: a categorised payment is priced by the server; its amount must be that price (an adjustment states its own).
+    let details: Record<string, unknown> | undefined;
+    if (dto.category) {
+      if (dto.category === 'other') {
+        if (!dto.note?.trim()) throw new BadRequestException({ code: 'note_required', message: 'Say what this payment is for.' });
+        details = { note: dto.note.trim() };
+      } else {
+        if (!this.proofs || !isUuid(id)) throw new BadRequestException({ code: 'category_unavailable', message: 'This payment cannot be priced here.' });
+        const priced = await this.proofs.priceFor(uuidToBin(id), { category: dto.category, months: dto.months, branches: dto.branches, seats: dto.seats });
+        if (priced && Number(dto.amount) !== priced.total) {
+          throw new BadRequestException({ code: 'amount_not_price', message: 'The amount must be ' + priced.total + ' MRU for this choice.', price: priced.total });
+        }
+        details = priced ?? undefined;
+      }
+    }
     const { payment: p, applied } = await this.lifecycle.recordPayment(
       id,
       {
         amount: dto.amount,
+        category: dto.category,
+        details,
         paidAt: new Date(dto.paidAt),
         channel: dto.channel,
         reference: dto.reference,

@@ -1,5 +1,5 @@
 import { decideActivityChange, type ActivityDecisionInput } from './activity-decision';
-import { CURRENT_PLAN } from '../billing/pricing-rules';
+import { STANDARD_PLAN_V3 as CURRENT_PLAN } from '../billing/pricing-rules'; // the worked examples use version 3's figures (0134 changed figures, not rules)
 
 /**
  * An upgrade at a branch that replaced a store archived this period (D158, docs/73 §11.1): priced against the credit

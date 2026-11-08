@@ -70,3 +70,44 @@ export function quote(stores: readonly QuoteStore[], months: OfferMonths): Quote
 export function offers(stores: readonly QuoteStore[]): Quote[] {
   return OFFER_MONTHS.map((m) => quote(stores, m));
 }
+
+/**
+ * What a payment is for (owner, 2026-11-08; migration 0134). The Owner picks one on the portal, the administrator on
+ * the console; the server prices the first three from this file and never trusts a figure from a page.
+ *
+ * - `subscription`: stores for 1, 3 or 12 months (a renewal is the same thing);
+ * - `store_activation`: a store added in the app and waiting, for 1, 3 or 12 months;
+ * - `extra_seats`: additional seats at one store, 100 MRU each a month;
+ * - `other`: an adjustment — its amount stated, its note required.
+ */
+export const PAYMENT_CATEGORIES = ['subscription', 'store_activation', 'extra_seats', 'other'] as const;
+export type PaymentCategoryKey = (typeof PAYMENT_CATEGORIES)[number];
+
+export function isPaymentCategory(v: unknown): v is PaymentCategoryKey {
+  return (PAYMENT_CATEGORIES as readonly unknown[]).includes(v);
+}
+
+/** Categories whose approval extends store access by their months; the others record money only. */
+export function extendsAccess(category: PaymentCategoryKey | null | undefined): boolean {
+  return category == null || category === 'subscription' || category === 'store_activation';
+}
+
+export const MAX_EXTRA_SEATS = 50;
+
+/** Extra seats at one store: 100 MRU each a month, times the months. */
+export function seatsPrice(seats: number, months: OfferMonths): number {
+  return Math.max(0, Math.trunc(seats)) * SEAT_MONTHLY * months;
+}
+
+/** The price list the portal and the console show (one source for every screen). */
+export function priceList() {
+  return {
+    currency: 'MRU',
+    months: [...OFFER_MONTHS],
+    electronics: { ...ELECTRONICS_PRICE },
+    moneyAgentMonthly: MONTHLY_PRICE.money_agent,
+    bothMonthly: MONTHLY_PRICE.both,
+    seatMonthly: SEAT_MONTHLY,
+    categories: [...PAYMENT_CATEGORIES],
+  };
+}

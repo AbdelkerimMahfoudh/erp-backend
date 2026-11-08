@@ -14,6 +14,7 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { PlatformAdminGuard, type AdminRequest } from './platform-admin.guard';
 import { PlatformAdminService } from './platform-admin.service';
 import { MAX_PROOF_BYTES, PaymentProofsService } from './payment-proofs.service';
+import { priceList } from '../billing/period-offers';
 
 export class RefuseProofDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
@@ -54,6 +55,8 @@ export class PaymentProofsController {
     // 0132: each branch is its own subscription — its state and end beside its price; `branches` narrows the quote.
     const only = branchList(branches);
     return {
+      // 0134: the one price list every screen shows, and the categories a payment can be for.
+      prices: priceList(),
       plans: await Promise.all(([1, 3, 12] as const).map((m) => this.proofs.quoteFor(companyId, m, only))),
       branches: await this.branchStatus.listForCompany(companyId),
     };
@@ -71,12 +74,13 @@ export class PaymentProofsController {
   @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_PROOF_BYTES) }))
   submit(
     @UploadedFile() file: { buffer: Buffer } | undefined,
-    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; branches?: string; reference?: string; note?: string },
+    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; branches?: string; reference?: string; note?: string; category?: string; seats?: string },
     @CurrentUser() user: AuthUser,
   ) {
     // A plan (1, 3 or 12 months, owner 2026-11-05) prices itself on the server; otherwise the amount and date are stated.
     const months = body?.months !== undefined && body.months !== '' ? Number(body.months) : undefined;
-    if (months === undefined && (!body?.amount || !body.paidAt)) throw new BadRequestException({ code: 'proof_fields', message: 'Enter the amount and the date paid.' });
+    // 0134: a category prices itself too (an adjustment states its amount and date).
+    if (months === undefined && body?.category !== 'other' && (!body?.amount || !body.paidAt)) throw new BadRequestException({ code: 'proof_fields', message: 'Enter the amount and the date paid.' });
     return this.proofs.submit(this.tenant.companyId(), file, {
       idempotencyKey: body.idempotencyKey ?? '',
       amount: body.amount,
@@ -85,6 +89,8 @@ export class PaymentProofsController {
       branches: branchList(body.branches),
       reference: body.reference,
       note: body.note,
+      category: body.category,
+      seats: body.seats !== undefined && body.seats !== '' ? Number(body.seats) : undefined,
       userId: uuidToBin(user.userId),
     });
   }

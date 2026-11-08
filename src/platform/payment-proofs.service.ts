@@ -8,7 +8,7 @@ import { PlatformAuditService } from './platform-audit.service';
 import type { PlatformAdminIdentity } from './platform-admin.service';
 import { SubscriptionLifecycleService } from './subscription-lifecycle.service';
 import { EntitlementService } from '../entitlement/entitlement.service';
-import { isOfferMonths, quote, type Quote } from '../billing/period-offers';
+import { isOfferMonths, isPaymentCategory, MAX_EXTRA_SEATS, quote, seatsPrice, extendsAccess, type PaymentCategoryKey, type Quote } from '../billing/period-offers';
 import { PaymentAlertService } from './payment-alert.service';
 import { activatePendingBranchesTx } from './branch-activation';
 import { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
@@ -55,6 +55,8 @@ const VIEW = {
   byteSize: true,
   refusalReason: true,
   months: true,
+  category: true,
+  seats: true,
   lines: true,
   submittedAt: true,
   decidedAt: true,
@@ -76,6 +78,9 @@ function view(r: Row) {
     byteSize: r.byteSize,
     refusalReason: r.refusalReason,
     months: r.months,
+    // 0134: what the Owner says this pays for, and the seats of an extra-seats payment.
+    category: r.category,
+    seats: r.seats,
     // 0132: the stores this proof pays for, each with its amount — what the approval applies, store by store.
     lines: Array.isArray(r.lines) ? (r.lines as Array<{ branchId: string; name: string; amount: number; pending?: boolean }>) : null,
     submittedAt: r.submittedAt.toISOString(),
@@ -128,10 +133,34 @@ export class PaymentProofsService {
     );
   }
 
+  /**
+   * 0134: the server's price for a categorised payment — the portal's proof and the console's Record payment alike.
+   * `other` has no price here (its amount is stated, with a note). Throws the same refusals the portal shows.
+   */
+  async priceFor(companyId: Buffer, input: { category: PaymentCategoryKey; months?: number; branches?: string[]; seats?: number }) {
+    if (input.category === 'other') return null;
+    if (input.months === undefined || !isOfferMonths(input.months)) throw new BadRequestException({ code: 'plan_invalid', message: 'Choose 1, 3 or 12 months.' });
+    const all = (await this.quoteFor(companyId, input.months)).lines;
+    if (input.category === 'extra_seats') {
+      const seats = Number(input.seats);
+      if (!Number.isInteger(seats) || seats < 1 || seats > MAX_EXTRA_SEATS) throw new BadRequestException({ code: 'seats_invalid', message: 'Choose how many seats (1 to ' + MAX_EXTRA_SEATS + ').' });
+      const store = all.find((l) => !l.pending && input.branches?.length === 1 && l.branchId.toLowerCase() === input.branches[0].toLowerCase());
+      if (!store) throw new BadRequestException({ code: 'branch_not_quotable', message: 'Choose one of the active stores.' });
+      const amount = seatsPrice(seats, input.months);
+      return { months: input.months, seats, total: amount, stores: [{ branchId: store.branchId, amount }] };
+    }
+    const wantPending = input.category === 'store_activation';
+    const pick = input.branches?.length ? new Set(input.branches.map((x) => x.toLowerCase())) : null;
+    const lines = all.filter((l) => !!l.pending === wantPending && (!pick || pick.has(l.branchId.toLowerCase())));
+    if (pick && lines.length !== pick.size) throw new BadRequestException({ code: 'branch_not_quotable', message: 'One of these stores cannot be paid for under this category.' });
+    if (!lines.length) throw new BadRequestException({ code: 'plan_no_store', message: wantPending ? 'No store is waiting for activation.' : 'There is no active store to pay for.' });
+    return { months: input.months, seats: null, total: lines.reduce((t, l) => t + l.amount, 0), stores: lines.map((l) => ({ branchId: l.branchId, amount: l.amount })) };
+  }
+
   async submit(
     companyId: Buffer,
     file: { buffer: Buffer } | undefined,
-    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; branches?: string[]; reference?: string; note?: string; userId: Buffer },
+    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; branches?: string[]; reference?: string; note?: string; category?: string; seats?: number; userId: Buffer },
   ) {
     const key = input.idempotencyKey?.trim();
     if (!key || key.length > 80) throw new BadRequestException({ code: 'proof_key_missing', message: 'Missing request key.' });
@@ -145,7 +174,8 @@ export class PaymentProofsService {
       const storedIds = Array.isArray(replay.lines) ? (replay.lines as Array<{ branchId: string }>).map((l) => l.branchId.toLowerCase()).sort() : null;
       const askedIds = input.branches?.length ? [...input.branches].map((x) => x.toLowerCase()).sort() : null;
       const sameStores = !askedIds || (storedIds !== null && askedIds.join(',') === storedIds.join(','));
-      if (!sameFile || !sameMonths || !sameStores) {
+      const sameCategory = input.category === undefined || input.category === replay.category;
+      if (!sameFile || !sameMonths || !sameStores || !sameCategory) {
         throw new ConflictException({ code: 'proof_key_reused', message: 'This request was already sent with other details. Start a new payment.' });
       }
       return view(shown as Row);
@@ -158,7 +188,31 @@ export class PaymentProofsService {
     // A plan chosen on the portal (owner, 2026-11-05): the amount is the server's quote for it, paid now — never a figure
     // the page sends. Without a plan, the Owner states the amount and the date, as before.
     let chosen: Quote | null = null;
-    if (input.months !== undefined) {
+    // 0134 (owner, 2026-11-08): what the payment is for. Absent = as before 0134 (a plan, or a stated amount).
+    const category: PaymentCategoryKey | null = input.category === undefined || input.category === '' ? null : isPaymentCategory(input.category) ? input.category : (() => { throw new BadRequestException({ code: 'category_invalid', message: 'Choose what this payment is for.' }); })();
+    let seats: number | null = null;
+    if (category === 'other') {
+      if (!input.note?.trim()) throw new BadRequestException({ code: 'note_required', message: 'Say what this payment is for.' });
+      input = { ...input, months: undefined, branches: undefined };
+    } else if (category === 'extra_seats') {
+      if (input.months === undefined || !isOfferMonths(input.months)) throw new BadRequestException({ code: 'plan_invalid', message: 'Choose 1, 3 or 12 months.' });
+      seats = Number(input.seats);
+      if (!Number.isInteger(seats) || seats < 1 || seats > MAX_EXTRA_SEATS) throw new BadRequestException({ code: 'seats_invalid', message: 'Choose how many seats (1 to ' + MAX_EXTRA_SEATS + ').' });
+      const store = (await this.quoteFor(companyId, input.months)).lines.filter((l) => !l.pending).find((l) => input.branches?.length === 1 && l.branchId.toLowerCase() === input.branches[0].toLowerCase());
+      if (!store) throw new BadRequestException({ code: 'branch_not_quotable', message: 'Choose one of your active stores.' });
+      const amount = seatsPrice(seats, input.months);
+      chosen = { months: input.months, lines: [{ ...store, storeAmount: 0, paidSeats: seats, seatAmount: amount, amount }], total: amount };
+      input = { ...input, amount: String(amount), paidAt: input.paidAt ?? new Date().toISOString() };
+    } else if (category === 'subscription' || category === 'store_activation') {
+      if (input.months === undefined) throw new BadRequestException({ code: 'plan_invalid', message: 'Choose 1, 3 or 12 months.' });
+      // A subscription pays for stores already open; an activation for stores added in the app and still waiting.
+      if (!input.branches?.length && isOfferMonths(input.months)) {
+        const lines = (await this.quoteFor(companyId, input.months)).lines.filter((l) => !!l.pending === (category === 'store_activation'));
+        if (!lines.length) throw new BadRequestException({ code: 'plan_no_store', message: category === 'store_activation' ? 'No store is waiting for activation.' : 'There is no active store to pay for.' });
+        input = { ...input, branches: lines.map((l) => l.branchId) };
+      }
+    }
+    if (input.months !== undefined && category !== 'extra_seats') {
       if (!isOfferMonths(input.months)) throw new BadRequestException({ code: 'plan_invalid', message: 'Choose 1, 3 or 12 months.' });
       // 0132: the stores named must each be this business's own — a store or a request still waiting — named once.
       // The price is always the server's quote for exactly those stores; a figure from the page is never used.
@@ -171,6 +225,8 @@ export class PaymentProofsService {
         }
       }
       chosen = await this.quoteFor(companyId, input.months, input.branches);
+      if (category === 'subscription' && chosen.lines.some((l) => l.pending)) throw new BadRequestException({ code: 'category_mismatch', message: 'A store waiting for activation is paid as an activation.' });
+      if (category === 'store_activation' && chosen.lines.some((l) => !l.pending)) throw new BadRequestException({ code: 'category_mismatch', message: 'Only stores waiting for activation are paid as an activation.' });
       if (chosen.total <= 0) throw new BadRequestException({ code: 'plan_no_store', message: 'There is no active store to pay for.' });
       input = { ...input, amount: String(chosen.total), paidAt: input.paidAt ?? new Date().toISOString() };
     }
@@ -199,6 +255,9 @@ export class PaymentProofsService {
           status: 'submitted',
           amount: new Prisma.Decimal(input.amount!),
           months: chosen?.months ?? null,
+          // 0134: unnamed before 0134 but priced by a plan: a waiting store's payment is its activation, otherwise a subscription.
+          category: category ?? (chosen ? (chosen.lines.every((l) => l.pending) ? 'store_activation' : 'subscription') : null),
+          seats,
           // 0132: the lines as quoted — each branch (or waiting request) and its amount — applied exactly at approval.
           lines: chosen ? (chosen.lines.map((l) => ({ branchId: l.branchId, name: l.name, amount: l.amount, pending: !!l.pending })) as never) : Prisma.DbNull,
           paidAt,
@@ -294,7 +353,10 @@ export class PaymentProofsService {
     const row = await this.rowOf(id);
     if (row.status === 'approved') return view(row);
     if (row.status !== 'submitted' && row.status !== 'under_review') throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
-    if (!Number.isInteger(input.months) || input.months < 1 || input.months > 60) throw new BadRequestException({ code: 'months_invalid', message: 'Choose the period paid for.' });
+    // 0134: extra seats and adjustments record money only; their months extend nothing.
+    const extend = extendsAccess(row.category);
+    if (extend && (!Number.isInteger(input.months) || input.months < 1 || input.months > 60)) throw new BadRequestException({ code: 'months_invalid', message: 'Choose the period paid for.' });
+    if (!extend) input = { ...input, months: Number.isInteger(input.months) && input.months > 0 ? input.months : (row.months ?? 1) };
     const paidAt = new Date(input.paidAt);
     if (Number.isNaN(paidAt.getTime())) throw new BadRequestException({ code: 'paid_at_invalid', message: 'Enter the payment date.' });
     if (!input.reason?.trim()) throw new BadRequestException({ code: 'reason_required', message: 'Say why.' });
@@ -307,7 +369,7 @@ export class PaymentProofsService {
     if (!claimed.count) throw new ConflictException({ code: 'proof_applying', message: 'This proof is being applied, or stopped part-way. Open its recovery to see what happened.' });
 
     try {
-      return await this.applySteps(row, id, request, ctx);
+      return await this.applySteps(row, id, request, ctx, extend);
     } catch (e) {
       const { payment, periodApplied } = await this.progress(row.companyId, row.id, id);
       if (!payment && !periodApplied) {
@@ -323,7 +385,12 @@ export class PaymentProofsService {
     const actor = { admin: ctx.admin, ip: ctx.ip ?? undefined } as never;
     await this.lifecycle.recordPayment(
       company,
-      { amount: request.amount, paidAt: new Date(request.paidAt), channel: request.channel, reference: `proof:${id}`, note: request.reason, confirm: true },
+      {
+        amount: request.amount, paidAt: new Date(request.paidAt), channel: request.channel, reference: `proof:${id}`, note: request.reason, confirm: true,
+        // 0134: the payment says what it was for — the proof's category, stores, months and seats.
+        category: row.category ?? undefined,
+        details: { proofId: id, months: row.months, seats: row.seats, stores: Array.isArray(row.lines) ? (row.lines as Array<{ branchId: string; name: string; amount: number }>).map((l) => ({ branchId: l.branchId, name: l.name, amount: l.amount })) : null },
+      },
       actor,
     );
 

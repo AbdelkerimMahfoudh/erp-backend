@@ -117,6 +117,14 @@ enum SubscriptionStatus {
 
 /// How money actually arrived. No provider is integrated in this checkpoint,
 /// so nothing here may claim one confirmed anything.
+/// 0134: what a subscription payment or proof pays for (owner, 2026-11-08).
+enum PaymentCategory {
+  subscription
+  store_activation
+  extra_seats
+  other
+}
+
 enum SubscriptionPaymentChannel {
   /// Cash or a transfer somebody recorded by hand.
   manual
@@ -2574,8 +2582,8 @@ model CompanySettings {
   /// Owner WhatsApp summaries (docs/21 §10). Nothing is sent in this phase.
   whatsappLanguage       SummaryLanguage @default(en) @map("whatsapp_language")
   whatsappIncludeAmounts Boolean         @default(false) @map("whatsapp_include_amounts")
-  whatsappDailyEnabled   Boolean         @default(true)  @map("whatsapp_daily_enabled")
-  whatsappMonthlyEnabled Boolean         @default(true)  @map("whatsapp_monthly_enabled")
+  whatsappDailyEnabled   Boolean         @default(true) @map("whatsapp_daily_enabled")
+  whatsappMonthlyEnabled Boolean         @default(true) @map("whatsapp_monthly_enabled")
 
   /// The longest auto-lock interval any user may choose, in seconds.
   /// `0` locks immediately. There is deliberately no value meaning "never" —
@@ -4707,8 +4715,12 @@ model SubscriptionPayment {
   amount   Decimal @db.Decimal(14, 2)
   currency String  @default("MRU") @db.Char(3)
 
-  paidAt  DateTime                   @map("paid_at") @db.DateTime(6)
-  channel SubscriptionPaymentChannel @default(manual)
+  paidAt   DateTime                   @map("paid_at") @db.DateTime(6)
+  channel  SubscriptionPaymentChannel @default(manual)
+  /// 0134: what this payment is for; null before 0134.
+  category PaymentCategory?
+  /// 0134: the stores, months and seats it covers, or an adjustment's note, as recorded.
+  details  Json?
 
   /// The shop's own reference — a transfer id, a receipt number.
   reference String? @db.VarChar(120)
@@ -6550,6 +6562,10 @@ model PaymentProof {
   submittedAt     DateTime           @default(now()) @map("submitted_at") @db.DateTime(6)
   refusalReason   String?            @map("refusal_reason") @db.VarChar(500)
   months          Int?
+  /// 0134: what the Owner says this proof pays for; null before 0134.
+  category        PaymentCategory?
+  /// 0134: extra seats bought at one store (category extra_seats).
+  seats           Int?               @db.UnsignedInt
   appliedAt       DateTime?          @map("applied_at") @db.DateTime(6)
   applyRequest    Json?              @map("apply_request")
   periodAppliedAt DateTime?          @map("period_applied_at") @db.DateTime(6)

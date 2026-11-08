@@ -252,4 +252,58 @@ suite('a branch added in the app', () => {
     expect(await facts(id)).toMatchObject({ branches: 2, claim: trial });
   });
 
+
+  // 0134 (owner, 2026-11-08): what a payment is for, priced from the one price list; only subscriptions and activations
+  // extend access. A proof service whose entitlement knows the business's real Main store.
+  async function mainStore(companyId: Buffer) {
+    const b = await root.branch.findFirstOrThrow({ where: { companyId, type: 'store' } });
+    const svc = new PaymentProofsService(db, lifecycle, audit, { forCompany: async () => ({ seatsByStore: [{ branchId: binToUuid(b.id), name: b.name, activity: 'electronics', paidSeats: 0 }] }) } as never, { proofSubmitted: async () => ({ sent: 0 }) } as never, new BranchEntitlementService(db as never, { now: () => new Date() }));
+    return { branch: b, svc };
+  }
+
+  it('0134: each category is priced by the server — subscription 600/1 500/5 000, activation, 100 a seat a month, other with its note', async () => {
+    const { id, owner } = await shop();
+    const { branch, svc } = await mainStore(id);
+    const main = binToUuid(branch.id);
+    await requests.create(id, owner, { name: 'Ksar', requestKey: key() }, 'spec');
+    expect((await svc.priceFor(id, { category: 'subscription', months: 1 }))!.total).toBe(600);
+    expect((await svc.priceFor(id, { category: 'subscription', months: 3 }))!.total).toBe(1500);
+    expect((await svc.priceFor(id, { category: 'subscription', months: 12 }))!.total).toBe(5000);
+    expect((await svc.priceFor(id, { category: 'store_activation', months: 1 }))!.stores).toHaveLength(1);
+    expect((await svc.priceFor(id, { category: 'extra_seats', months: 3, branches: [main], seats: 2 }))!.total).toBe(600);
+    expect(await svc.priceFor(id, { category: 'other' })).toBeNull();
+    await expect(svc.priceFor(id, { category: 'extra_seats', months: 1, branches: [main], seats: 0 })).rejects.toMatchObject({ response: { code: 'seats_invalid' } });
+    await expect(svc.priceFor(id, { category: 'subscription', months: 2 as never })).rejects.toMatchObject({ response: { code: 'plan_invalid' } });
+    // A subscription never names a waiting store, an activation never an open one.
+    const ksar = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, kind: 'store' } });
+    await expect(svc.priceFor(id, { category: 'subscription', months: 1, branches: [binToUuid(ksar.id)] })).rejects.toMatchObject({ response: { code: 'branch_not_quotable' } });
+    await expect(svc.priceFor(id, { category: 'store_activation', months: 1, branches: [main] })).rejects.toMatchObject({ response: { code: 'branch_not_quotable' } });
+    // Submitted: the server's amount and the category are stored, whatever the page sent.
+    const seatsProof = await svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'extra_seats', months: 3, branches: [main], seats: 2, amount: '1', userId: owner } as never);
+    expect(seatsProof).toMatchObject({ category: 'extra_seats', seats: 2, amount: '600' });
+    await expect(svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'other', amount: '250', paidAt: new Date().toISOString(), userId: owner } as never)).rejects.toMatchObject({ response: { code: 'note_required' } });
+  });
+
+  it('0134: approving extra seats or an adjustment records the payment with its category — and extends no store', async () => {
+    const { id, owner } = await shop();
+    const { branch, svc } = await mainStore(id);
+    const proof = await svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'extra_seats', months: 1, branches: [binToUuid(branch.id)], seats: 1, userId: owner } as never);
+    const before = await root.branchEntitlement.findUnique({ where: { branchId: branch.id } });
+    await svc.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'seat paid' }, ctx);
+    const payment = await root.subscriptionPayment.findFirstOrThrow({ where: { companyId: id, reference: 'proof:' + proof.id } });
+    expect(payment.category).toBe('extra_seats');
+    expect(payment.details).toMatchObject({ seats: 1, months: 1 });
+    expect(await root.branchEntitlement.findUnique({ where: { branchId: branch.id } })).toEqual(before);
+    expect(await root.branchPeriod.count({ where: { branchId: branch.id, paymentProofId: uuidToBin(proof.id) } })).toBe(0);
+  });
+
+  it('0134: an older proof without a category still extends access as before (subscription by its plan)', async () => {
+    const { uuid, id, owner } = await shop();
+    await requests.create(id, owner, { name: 'Ksar', requestKey: key() }, 'spec');
+    const proof = await proofFor(uuid, id, owner);
+    expect(proof.category).toBe('store_activation');
+    await proofs.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'paid' }, ctx);
+    expect((await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, kind: 'store' } })).status).toBe('paid');
+  });
+
 });
