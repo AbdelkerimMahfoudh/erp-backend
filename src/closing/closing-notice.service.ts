@@ -8,6 +8,20 @@ import type { Notice, NoticeContext } from './closing-notices';
 import { links } from '../notifications/notification-target';
 import { localizedName } from '../common/bilingual-name';
 
+/** Makes the app's report PDF for one Owner (ReportPdfService, registered by the reports module when Chromium is set). */
+export interface ReportPdfMaker {
+  make(o: { companyId: Buffer; branchId: Buffer; ownerId: Buffer; language: 'en' | 'fr' | 'ar'; kind: 'daily' | 'monthly'; period: string }): Promise<{
+    content: Buffer;
+    filename: string;
+  }>;
+}
+
+/** A text summary and its PDF twin (owner, 2026-11-09). */
+const PDF_TWIN: Record<string, { template: string; kind: 'daily' | 'monthly'; period: string }> = {
+  'closing.summary': { template: 'closing.summary_pdf', kind: 'daily', period: 'businessDate' },
+  'closing.monthly': { template: 'closing.monthly_pdf', kind: 'monthly', period: 'month' },
+};
+
 export interface NoticeOutcome {
   /** Owners who received a NEW in-app notification (a retry counts as 0). */
   notified: number;
@@ -33,6 +47,33 @@ export interface NoticeOutcome {
 @Injectable()
 export class ClosingNoticeService {
   private readonly logger = new Logger(ClosingNoticeService.name);
+  private pdfMaker: ReportPdfMaker | null = null;
+
+  usePdfMaker(maker: ReportPdfMaker): void {
+    this.pdfMaker = maker;
+  }
+
+  /**
+   * The PDF twin of a summary, when it can go: a maker, the twin's template configured, amounts allowed by the Owner
+   * (the PDF shows them) and the period known. Anything missing or failing: null, and the text summary goes instead.
+   */
+  private async pdfFor(companyId: Buffer, branchId: Buffer, ownerId: Buffer, notice: Notice, language: 'en' | 'fr' | 'ar') {
+    const twin = PDF_TWIN[notice.template];
+    if (!twin || !this.pdfMaker) return null;
+    const twinTemplate = getTemplate(twin.template);
+    if (!process.env[twinTemplate.configKey]) return null;
+    const period = notice.payload[twin.period];
+    if (typeof period !== 'string') return null;
+    const s = await this.prisma.companySettings.findUnique({ where: { companyId }, select: { whatsappIncludeAmounts: true } });
+    if (!s?.whatsappIncludeAmounts) return null;
+    try {
+      const document = await this.pdfMaker.make({ companyId, branchId, ownerId, language, kind: twin.kind, period });
+      return { template: twinTemplate, document };
+    } catch (e) {
+      this.logger.warn(`Report PDF for ${notice.dedupeKey} not made; the text summary goes instead: ${(e as Error).message}`);
+      return null;
+    }
+  }
 
   constructor(
     private readonly prisma: PrismaService,
@@ -131,13 +172,16 @@ export class ClosingNoticeService {
         }
         try {
           assertLanguageSupported(template, language);
-          const result = await this.channel.send({
-            to: owner.phone,
-            template: template.key,
-            language,
-            variables,
-            idempotencyKey: `${notice.dedupeKey}:${owner.id.toString('hex')}`,
-          });
+          const idempotencyKey = `${notice.dedupeKey}:${owner.id.toString('hex')}`;
+          const pdf = template.category === 'business_summary' ? await this.pdfFor(companyId, branchId, owner.id, notice, language) : null;
+          let result = pdf
+            ? await this.channel.send({ to: owner.phone, template: pdf.template.key, language, variables, idempotencyKey: `${idempotencyKey}:pdf`, document: pdf.document })
+            : null;
+          // The PDF refused or not made: the text summary, so the Owner still has the day.
+          if (!result || result.status !== 'accepted') {
+            if (result) this.logger.warn(`Report PDF for ${notice.dedupeKey} not sent (${result.reason}); the text summary goes instead`);
+            result = await this.channel.send({ to: owner.phone, template: template.key, language, variables, idempotencyKey });
+          }
           if (result.status === 'accepted') outcome.sent += 1;
           else outcome.failures.push(result.reason);
         } catch {

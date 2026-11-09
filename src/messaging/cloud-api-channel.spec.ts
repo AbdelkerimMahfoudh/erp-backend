@@ -370,3 +370,34 @@ describe('the provider codes D181 names', () => {
     }
   });
 });
+
+describe('a template with a document header — the report PDF (owner, 2026-11-09)', () => {
+  const vars = { branch: 'Ksar', date: '2026-11-30', sales: '3 ventes', money: '—' };
+  const doc = { content: Buffer.from('%PDF-1.7 report'), filename: 'DukanERP_Ksar_Daily_2026-11-30_FR.pdf' };
+  const cfg = (fetchImpl: typeof fetch) => config({ fetchImpl, templateNames: { 'closing.summary_pdf': 'dukan_daily_report_pdf' } });
+
+  it('uploads the PDF, then sends the template with it as the header document', async () => {
+    const { calls, fetchImpl } = fakeFetch((c) => (c.url.endsWith('/media') ? json(200, { id: 'media-1' }) : json(200, { messages: [{ id: 'wamid.1' }] })));
+    const r = await new CloudApiWhatsAppChannel(cfg(fetchImpl)).send({ to: '+22200000001', template: 'closing.summary_pdf', language: 'fr', variables: vars, idempotencyKey: 'k', document: doc });
+    expect(r.status).toBe('accepted');
+    expect(calls[0].url).toBe('https://graph.example.test/v21.0/1234567890/media');
+    const form = calls[0].init.body as FormData;
+    expect(form.get('messaging_product')).toBe('whatsapp');
+    expect((form.get('file') as File).name).toBe(doc.filename);
+    const sent = JSON.parse(String(calls[1].init.body));
+    expect(sent.template.name).toBe('dukan_daily_report_pdf');
+    expect(sent.template.components[0]).toEqual({ type: 'header', parameters: [{ type: 'document', document: { id: 'media-1', filename: doc.filename } }] });
+    expect(sent.template.components[1].type).toBe('body');
+  });
+
+  it('no document, or the upload refused: nothing sent, a provider-neutral failure', async () => {
+    const none = fakeFetch(() => json(200, {}));
+    expect((await new CloudApiWhatsAppChannel(cfg(none.fetchImpl)).send({ to: '+22200000001', template: 'closing.summary_pdf', language: 'fr', variables: vars, idempotencyKey: 'k' })).status).toBe('failed');
+    expect(none.calls).toHaveLength(0);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const refused = fakeFetch(() => json(400, { error: { code: 100 } }));
+    const r = await new CloudApiWhatsAppChannel(cfg(refused.fetchImpl)).send({ to: '+22200000001', template: 'closing.summary_pdf', language: 'fr', variables: vars, idempotencyKey: 'k', document: doc });
+    expect(r).toMatchObject({ status: 'failed', reason: 'rejected' });
+    expect(refused.calls).toHaveLength(1);
+  });
+});

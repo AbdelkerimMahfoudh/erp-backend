@@ -169,6 +169,15 @@ jobs:
           echo "$out" | tail -n 3
           test "$code" -ne 0
           echo "$out" | grep -q 'JWT_ACCESS_SECRET_FILE names a file that cannot be read'
+      - name: the image draws a report PDF — Chromium as the app user, Arabic shaped, nothing fetched (owner, 2026-11-09)
+        run: |
+          docker run --rm --user node erp-api:ci node -e '
+            const { PdfRenderer } = require("./dist/src/reports/pdf/pdf-renderer");
+            const r = new PdfRenderer();
+            r.render("<html dir=rtl><body><h1>التقرير اليومي</h1><p>45 500 MRU</p><img src=\"https://example.com/x.png\"></body></html>")
+              .then(async (pdf) => { if (pdf.subarray(0, 5).toString() !== "%PDF-" || pdf.length < 2000) throw new Error("not a PDF"); console.log("pdf bytes", pdf.length); await r.onModuleDestroy(); })
+              .catch((e) => { console.error(e.message); process.exit(1); });'
+          docker run --rm erp-api:ci sh -c 'fc-list :lang=ar family | head -n 3' | grep -q .
       - name: scripts — shellcheck, syntax
         run: |
           shellcheck --version | head -n 2

@@ -110,6 +110,34 @@ export class CloudApiWhatsAppChannel implements WhatsAppChannel {
 
   constructor(private readonly cfg: CloudApiConfig) {}
 
+  /** A PDF to the provider's media store (POST /{phone-number-id}/media): its id, or why it could not go. */
+  private async uploadDocument(doc: { content: Buffer; filename: string }): Promise<{ id: string } | { failed: DeliveryResult }> {
+    const url = `${this.cfg.baseUrl.replace(/\/+$/, '')}/${this.cfg.apiVersion}/${encodeURIComponent(this.cfg.phoneNumberId)}/media`;
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', 'application/pdf');
+    form.append('file', new Blob([new Uint8Array(doc.content)], { type: 'application/pdf' }), doc.filename);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.cfg.timeoutMs * 2);
+    try {
+      const response = await (this.cfg.fetchImpl ?? globalThis.fetch)(url, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${this.cfg.accessToken}` },
+        body: form,
+        signal: controller.signal,
+      });
+      const payload = (await response.json().catch(() => ({}))) as { id?: string } & GraphErrorBody;
+      if (response.ok && payload.id) return { id: payload.id };
+      const code = payload.error?.code;
+      this.logger.warn(`WhatsApp document upload refused (${response.status}, ${describeGraphCode(code, payload.error?.error_subcode)})`);
+      return { failed: this.failed(classifyGraphFailure(response.status, code), 'The provider refused the document') };
+    } catch {
+      return { failed: this.failed('temporary', 'The document could not be uploaded') };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async send(message: WhatsAppMessage): Promise<DeliveryResult> {
     const template = getTemplate(message.template);
     const providerName = this.cfg.templateNames[message.template];
@@ -124,7 +152,7 @@ export class CloudApiWhatsAppChannel implements WhatsAppChannel {
       return this.failed('rejected', `Template ${message.template} cannot be sent as requested`);
     }
 
-    const components =
+    const components: object[] =
       template.providerKind === 'authentication'
         ? [
             { type: 'body', parameters: [{ type: 'text', text: message.variables.code }] },
@@ -136,6 +164,13 @@ export class CloudApiWhatsAppChannel implements WhatsAppChannel {
             },
           ]
         : utilityComponents(template, message.variables);
+
+    if (template.documentHeader) {
+      if (!message.document) return this.failed('rejected', `Template ${message.template} needs its document`);
+      const media = await this.uploadDocument(message.document);
+      if ('failed' in media) return media.failed;
+      components.unshift({ type: 'header', parameters: [{ type: 'document', document: { id: media.id, filename: message.document.filename } }] });
+    }
 
     const body = {
       messaging_product: 'whatsapp',

@@ -73,6 +73,8 @@ export interface TemplateDefinition {
    * single-use portal link). Required like the others; never written into a row or a log line.
    */
   readonly linkVariable?: string;
+  /** The template's header is a document: the message carries a PDF (`WhatsAppMessage.document`) or is not sent. */
+  readonly documentHeader?: boolean;
 }
 
 /**
@@ -183,6 +185,25 @@ export const CLOSING_MONTHLY_TEMPLATE: TemplateDefinition = {
   providerKind: 'utility',
   use: 'optional',
   configKey: 'WHATSAPP_TEMPLATE_CLOSING_MONTHLY',
+};
+
+/**
+ * The day's and the month's reports as the app's own PDF (owner, 2026-11-09): the same variables as the text
+ * summaries, with the report PDF as the template's document header. Sent instead of the text summary when configured
+ * and the PDF was made; the text summary stays the fallback.
+ */
+export const CLOSING_SUMMARY_PDF_TEMPLATE: TemplateDefinition = {
+  ...CLOSING_SUMMARY_TEMPLATE,
+  key: 'closing.summary_pdf',
+  configKey: 'WHATSAPP_TEMPLATE_CLOSING_SUMMARY_PDF',
+  documentHeader: true,
+};
+
+export const CLOSING_MONTHLY_PDF_TEMPLATE: TemplateDefinition = {
+  ...CLOSING_MONTHLY_TEMPLATE,
+  key: 'closing.monthly_pdf',
+  configKey: 'WHATSAPP_TEMPLATE_CLOSING_MONTHLY_PDF',
+  documentHeader: true,
 };
 
 /**
@@ -302,6 +323,8 @@ const REGISTRY: Record<string, TemplateDefinition> = {
   [CLOSING_RECLOSED_TEMPLATE.key]: CLOSING_RECLOSED_TEMPLATE,
   [CLOSING_SUMMARY_TEMPLATE.key]: CLOSING_SUMMARY_TEMPLATE,
   [CLOSING_MONTHLY_TEMPLATE.key]: CLOSING_MONTHLY_TEMPLATE,
+  [CLOSING_SUMMARY_PDF_TEMPLATE.key]: CLOSING_SUMMARY_PDF_TEMPLATE,
+  [CLOSING_MONTHLY_PDF_TEMPLATE.key]: CLOSING_MONTHLY_PDF_TEMPLATE,
   [DELIVERY_CHECK_TEMPLATE.key]: DELIVERY_CHECK_TEMPLATE,
   [PAYMENT_SUBMITTED_TEMPLATE.key]: PAYMENT_SUBMITTED_TEMPLATE,
   ...Object.fromEntries(SUBSCRIPTION_TEMPLATES.map((t) => [t.key, t])),

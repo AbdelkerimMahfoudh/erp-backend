@@ -6,6 +6,8 @@ import { ReturnsModule } from '../returns/returns.module';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
 import { ReportDocumentsService } from './report-documents.service';
+import { PdfRenderer } from './pdf/pdf-renderer';
+import { ReportPdfService } from './pdf/report-pdf.service';
 
 /**
  * Reporting exports: the spreadsheets, and the daily and monthly report documents the
@@ -18,6 +20,6 @@ import { ReportDocumentsService } from './report-documents.service';
 @Module({
   imports: [AnalyticsModule, LoansModule, ClosingModule, ReturnsModule],
   controllers: [ReportsController],
-  providers: [ReportsService, ReportDocumentsService],
+  providers: [ReportsService, ReportDocumentsService, PdfRenderer, ReportPdfService],
 })
 export class ReportsModule {}

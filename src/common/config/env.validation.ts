@@ -105,6 +105,10 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_TEMPLATE_CLOSING_REOPENED: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_CLOSING_SALE: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_CLOSING_RECLOSED: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_CLOSING_SUMMARY_PDF: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_CLOSING_MONTHLY_PDF: Joi.string().allow('').default(''),
+  /** Headless Chromium for the report PDFs WhatsApp carries; unset = text summaries only. */
+  PDF_CHROMIUM_PATH: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_DELIVERY_CHECK: Joi.string().allow('').default(''),
   // The free trial's setup instructions (0095; docs/76): a utility template with a URL button. Optional — production
   // does not require it; while it is empty WhatsApp simply cannot carry these instructions, and says so.

@@ -46,6 +46,11 @@ export interface WhatsAppMessage {
    * never creates one — and it is still refused once the number's consent was withdrawn.
    */
   verifiesContact?: boolean;
+  /**
+   * A PDF for a template whose header is a document (`documentHeader`): uploaded to the provider, then sent as the
+   * header. Server-made only (the report PDFs); never logged, never stored.
+   */
+  document?: { content: Buffer; filename: string };
 }
 
 /**

@@ -53,10 +53,13 @@ FROM node:22-slim AS runtime
 WORKDIR /app
 
 # Prisma's query engine needs OpenSSL, which the slim image does not carry.
-RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+# Chromium and the Noto fonts draw the report PDFs WhatsApp carries (owner, 2026-11-09): the app's own page, Arabic
+# shaped and right-to-left; nothing is fetched while printing (src/reports/pdf/pdf-renderer.ts).
+RUN apt-get update && apt-get install -y --no-install-recommends openssl chromium fonts-noto-core fonts-noto-ui-core \
   && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
+ENV PDF_CHROMIUM_PATH=/usr/bin/chromium
 # The port the healthcheck below and the edge both use; the environment may not
 # silently move it (the schema's own default is the development 3000).
 ENV PORT=3010

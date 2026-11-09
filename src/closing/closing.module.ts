@@ -14,6 +14,6 @@ import { MoneyAnchorsService } from './money-anchors.service';
   controllers: [ClosingController, MoneyAnchorsController],
   providers: [MoneyTrackingStore, ClosingService, DiscrepanciesService, ClosingNoticeService, MoneyAnchorsService],
   // Sales, receipts and later payments are refused while the day is closed (store_closed); nothing reopens a day by itself (docs/61).
-  exports: [ClosingService],
+  exports: [ClosingService, ClosingNoticeService],
 })
 export class ClosingModule {}
