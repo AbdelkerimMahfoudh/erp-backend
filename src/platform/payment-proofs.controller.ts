@@ -19,6 +19,8 @@ import { isPaymentCategory, priceList } from '../billing/period-offers';
 export class RefuseProofDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
   @IsString() @MinLength(1) @MaxLength(500) reason!: string;
+  /** 0135: the revision the decision was made on; a later correction by the Owner refuses it (proof_revised). */
+  @Type(() => Number) @IsInt() @Min(1) revision!: number;
 }
 
 export class ProofRecoveryDto {
@@ -34,6 +36,8 @@ export class ApproveProofDto {
   @IsString() paidAt!: string;
   @IsOptional() @IsIn(['manual', 'bank_transfer', 'mobile_money']) channel?: 'manual' | 'bank_transfer' | 'mobile_money';
   @Type(() => Number) @IsInt() @Min(1) @Max(60) months!: number;
+  /** 0135: the revision the decision was made on; a later correction by the Owner refuses it (proof_revised). */
+  @Type(() => Number) @IsInt() @Min(1) revision!: number;
 }
 
 /** The Owner's proof on the web portal, and the administrator's decision on it (D227). */
@@ -98,7 +102,7 @@ export class PaymentProofsController {
   @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_PROOF_BYTES) }))
   submit(
     @UploadedFile() file: { buffer: Buffer } | undefined,
-    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; branches?: string; reference?: string; note?: string; category?: string; seats?: string },
+    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; branches?: string; reference?: string; note?: string; category?: string; seats?: string; payerPhone?: string },
     @CurrentUser() user: AuthUser,
   ) {
     // A plan (1, 3 or 12 months, owner 2026-11-05) prices itself on the server; otherwise the amount and date are stated.
@@ -115,8 +119,28 @@ export class PaymentProofsController {
       note: body.note,
       category: body.category,
       seats: body.seats !== undefined && body.seats !== '' ? Number(body.seats) : undefined,
+      payerPhone: body.payerPhone,
       userId: uuidToBin(user.userId),
     });
+  }
+
+  /**
+   * 0135 (owner, 2026-11-11): the Owner corrects a proof still waiting for the decision: the number paid from, the
+   * screenshot, the reference. Only their own business's proof (any other id is unknown here).
+   */
+  @Post('my-subscription/payment-proofs/:id/correct')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions('settings.manage')
+  @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_PROOF_BYTES) }))
+  correct(
+    @Param('id') id: string,
+    @UploadedFile() file: { buffer: Buffer } | undefined,
+    @Body() body: { payerPhone?: string; reference?: string; note?: string; revision?: string },
+    @CurrentUser() user: AuthUser,
+    @Req() req: { ip?: string },
+  ) {
+    const revision = body?.revision !== undefined && body.revision !== '' ? Number(body.revision) : undefined;
+    return this.proofs.correct(this.tenant.companyId(), id, file, { payerPhone: body?.payerPhone, reference: body?.reference, note: body?.note, revision, userId: uuidToBin(user.userId) }, { ip: req.ip });
   }
 
   @Public()
@@ -157,7 +181,7 @@ export class PaymentProofsController {
   @HttpCode(HttpStatus.OK)
   async refuse(@Param('id') id: string, @Body() dto: RefuseProofDto, @Req() req: AdminRequest) {
     await this.admins.requireStepUp(req.platformAdmin!);
-    return this.proofs.refuse(id, dto.reason, { admin: req.platformAdmin!, ip: req.ip });
+    return this.proofs.refuse(id, dto.reason, { admin: req.platformAdmin!, ip: req.ip }, dto.revision);
   }
 
   @Public()

@@ -50,6 +50,9 @@ const VIEW = {
   amount: true,
   paidAt: true,
   reference: true,
+  payerPhone: true,
+  revision: true,
+  revisedAt: true,
   note: true,
   contentType: true,
   byteSize: true,
@@ -73,6 +76,10 @@ function view(r: Row) {
     amount: r.amount.toString(),
     paidAt: r.paidAt.toISOString(),
     reference: r.reference,
+    // 0135: the number paid from, and which revision of the proof this is (raised by each correction).
+    payerPhone: r.payerPhone,
+    revision: r.revision,
+    revisedAt: r.revisedAt?.toISOString() ?? null,
     note: r.note,
     contentType: r.contentType,
     byteSize: r.byteSize,
@@ -160,9 +167,10 @@ export class PaymentProofsService {
   async submit(
     companyId: Buffer,
     file: { buffer: Buffer } | undefined,
-    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; branches?: string[]; reference?: string; note?: string; category?: string; seats?: number; userId: Buffer },
+    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; branches?: string[]; reference?: string; note?: string; category?: string; seats?: number; payerPhone?: string; userId: Buffer },
   ) {
     const key = input.idempotencyKey?.trim();
+    const payerPhone = payerPhoneOf(input.payerPhone);
     if (!key || key.length > 80) throw new BadRequestException({ code: 'proof_key_missing', message: 'Missing request key.' });
     // 0132: a retry is the same proof — the same file, plan and stores. A key reused with other contents is refused,
     // never answered with the first proof as though it were this one.
@@ -262,6 +270,7 @@ export class PaymentProofsService {
           lines: chosen ? (chosen.lines.map((l) => ({ branchId: l.branchId, name: l.name, amount: l.amount, pending: !!l.pending })) as never) : Prisma.DbNull,
           paidAt,
           reference: input.reference?.trim().slice(0, 120) || null,
+          payerPhone,
           note: input.note?.trim().slice(0, 500) || null,
           contentType,
           byteSize: file.buffer.length,
@@ -279,6 +288,59 @@ export class PaymentProofsService {
       .proofSubmitted({ id: saved.id, companyId, submittedBy: input.userId, amount: saved.amount, months: saved.months, stores: chosen?.lines.map((l) => l.name) ?? [] })
       .catch(() => undefined);
     return saved;
+  }
+
+  /**
+   * 0135 (owner, 2026-11-11): the Owner corrects their own proof (the number paid from, the screenshot, the reference)
+   * while it waits for the decision. Only this business's proof, only before a decision or an approval's claim; each
+   * correction raises the revision, so a decision made on what the administrator saw before is refused (proof_revised).
+   */
+  async correct(
+    companyId: Buffer,
+    id: string,
+    file: { buffer: Buffer } | undefined,
+    input: { payerPhone?: string; reference?: string; note?: string; revision?: number; userId: Buffer },
+    ctx?: { ip?: string },
+  ) {
+    if (!isUuid(id)) throw new NotFoundException('Unknown proof');
+    const row = await this.prisma.paymentProof.findFirst({ where: { id: uuidToBin(id), companyId }, select: { id: true, revision: true, status: true, appliedAt: true } });
+    if (!row) throw new NotFoundException('Unknown proof');
+    if (row.appliedAt || (row.status !== 'submitted' && row.status !== 'under_review')) {
+      throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
+    }
+    if (input.revision !== undefined && input.revision !== row.revision) {
+      throw new ConflictException({ code: 'proof_revised', message: 'This proof was changed meanwhile. Reload it.', revision: row.revision });
+    }
+    const data: Prisma.PaymentProofUpdateManyMutationInput = {};
+    if (input.payerPhone !== undefined) data.payerPhone = payerPhoneOf(input.payerPhone);
+    if (input.reference !== undefined) data.reference = input.reference.trim().slice(0, 120) || null;
+    if (input.note !== undefined) data.note = input.note.trim().slice(0, 500) || null;
+    if (file?.buffer?.length) {
+      if (file.buffer.length > MAX_PROOF_BYTES) throw new BadRequestException({ code: 'proof_too_large', message: 'The file is too large.' });
+      const contentType = sniffProof(file.buffer);
+      if (!contentType) throw new BadRequestException({ code: 'proof_type', message: 'Send a PDF, PNG or JPEG file.' });
+      Object.assign(data, { file: file.buffer, contentType, byteSize: file.buffer.length, sha256: createHash('sha256').update(file.buffer).digest('hex') });
+    }
+    const fields = Object.keys(data).map((k) => (k === 'contentType' || k === 'byteSize' || k === 'sha256' ? null : k)).filter(Boolean);
+    if (!fields.length) throw new BadRequestException({ code: 'proof_nothing', message: 'Change the number or the screenshot.' });
+    const moved = await this.prisma.paymentProof.updateMany({
+      where: { id: row.id, companyId, revision: row.revision, appliedAt: null, status: { in: ['submitted', 'under_review'] } },
+      data: { ...data, revision: { increment: 1 }, revisedAt: new Date() },
+    });
+    if (!moved.count) throw new ConflictException({ code: 'proof_revised', message: 'This proof was changed or decided meanwhile. Reload it.' });
+    await this.audit
+      .record({
+        admin: null,
+        actor: `owner:${binToUuid(input.userId)}`,
+        action: 'payment_proof.corrected',
+        targetType: 'payment_proof',
+        targetId: row.id,
+        targetLabel: binToUuid(companyId),
+        after: { revision: row.revision + 1, fields },
+        ip: ctx?.ip ?? null,
+      })
+      .catch(() => undefined);
+    return view((await this.prisma.paymentProof.findFirst({ where: { id: row.id, companyId }, select: VIEW }))!);
   }
 
   async listForCompany(companyId: Buffer) {
@@ -326,12 +388,13 @@ export class PaymentProofsService {
     return view(await this.rowOf(id));
   }
 
-  async refuse(id: string, reason: string, ctx: Actor) {
+  async refuse(id: string, reason: string, ctx: Actor, revision?: number) {
     const why = reason?.trim();
     if (!why) throw new BadRequestException({ code: 'reason_required', message: 'Say why: the Owner reads this.' });
     const row = await this.rowOf(id);
+    if (revision !== undefined && row.status !== 'refused' && revision !== row.revision) throw staleRevision(row.revision);
     const moved = await this.prisma.paymentProof.updateMany({
-      where: { id: row.id, status: { in: ['submitted', 'under_review'] }, appliedAt: null },
+      where: { id: row.id, status: { in: ['submitted', 'under_review'] }, appliedAt: null, ...(revision !== undefined ? { revision } : {}) },
       data: { status: 'refused', refusalReason: why.slice(0, 500), decidedAt: new Date() },
     });
     if (!moved.count) throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
@@ -347,11 +410,13 @@ export class PaymentProofsService {
    */
   async approve(
     id: string,
-    input: { amount: string; paidAt: string; channel?: Channel; months: number; reason: string },
+    input: { amount: string; paidAt: string; channel?: Channel; months: number; reason: string; revision?: number },
     ctx: Actor,
   ) {
     const row = await this.rowOf(id);
+    // A retry of the approval answers with it; an approval of a revision the Owner has since corrected is refused (0135).
     if (row.status === 'approved') return view(row);
+    if (input.revision !== undefined && input.revision !== row.revision) throw staleRevision(row.revision);
     if (row.status !== 'submitted' && row.status !== 'under_review') throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
     // 0134: extra seats and adjustments record money only; their months extend nothing.
     const extend = extendsAccess(row.category);
@@ -363,7 +428,7 @@ export class PaymentProofsService {
 
     const request: ApplyRequest = { amount: input.amount, paidAt: paidAt.toISOString(), channel: input.channel, months: input.months, reason: input.reason };
     const claimed = await this.prisma.paymentProof.updateMany({
-      where: { id: row.id, appliedAt: null, status: { in: ['submitted', 'under_review'] } },
+      where: { id: row.id, appliedAt: null, status: { in: ['submitted', 'under_review'] }, ...(input.revision !== undefined ? { revision: input.revision } : {}) },
       data: { appliedAt: new Date(), applyRequest: request as never },
     });
     if (!claimed.count) throw new ConflictException({ code: 'proof_applying', message: 'This proof is being applied, or stopped part-way. Open its recovery to see what happened.' });
@@ -553,4 +618,16 @@ export class PaymentProofsService {
       ip: ctx.ip ?? null,
     }, db);
   }
+}
+
+/** 0135: the number paid from: digits with an optional leading +, spaces, dots and dashes dropped; 6 to 20 digits, or none. */
+export function payerPhoneOf(raw: string | undefined): string | null {
+  if (raw === undefined || raw === null || !String(raw).trim()) return null;
+  const s = String(raw).trim().replace(/[\s.-]/g, '');
+  if (!/^\+?\d{6,20}$/.test(s)) throw new BadRequestException({ code: 'payer_phone_invalid', message: 'Enter the number you paid from.' });
+  return s;
+}
+
+function staleRevision(current: number) {
+  return new ConflictException({ code: 'proof_revised', message: 'The Owner corrected this proof after you opened it. Review the latest version.', revision: current });
 }

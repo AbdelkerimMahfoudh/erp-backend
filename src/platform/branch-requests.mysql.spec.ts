@@ -1,3 +1,5 @@
+import { CLAIM_LINK_TTL_MS, ClaimLinkService } from '../notices/claim-links.service';
+import { claimLanding } from './portal/portal-session.service';
 import { PrismaClient } from '@prisma/client';
 import { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
 import { randomUUID } from 'node:crypto';
@@ -304,6 +306,76 @@ suite('a branch added in the app', () => {
     expect(proof.category).toBe('store_activation');
     await proofs.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'paid' }, ctx);
     expect((await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, kind: 'store' } })).status).toBe('paid');
+  });
+
+  // 0135 (owner, 2026-11-11): a waiting store paid from the portal with the number paid from and the screenshot; the Owner
+  // corrects either until the decision; each correction raises the revision and a decision on an older one is refused.
+  it('0135: the activation proof carries the payer number; the Owner corrects it; the latest revision is the one decided', async () => {
+    const { id, owner } = await shop();
+    await requests.create(id, owner, { name: 'Ksar', requestKey: key() }, 'spec');
+    const ksar = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, kind: 'store' } });
+    const first = await proofs.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, branches: [binToUuid(ksar.id)], payerPhone: ' +222 36 00 00 01 ', userId: owner } as never);
+    expect(first).toMatchObject({ status: 'submitted', category: 'store_activation', amount: '600', payerPhone: '+22236000001', revision: 1, revisedAt: null });
+    await expect(proofs.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, payerPhone: 'abc', userId: owner } as never)).rejects.toMatchObject({ response: { code: 'payer_phone_invalid' } });
+
+    // The administrator opens revision 1; the Owner then corrects the number and the screenshot.
+    await proofs.review(first.id, ctx);
+    const fixed = await proofs.correct(id, first.id, { buffer: PNG() }, { payerPhone: '36000002', revision: 1, userId: owner });
+    expect(fixed).toMatchObject({ payerPhone: '36000002', revision: 2, status: 'under_review' });
+    expect(fixed.revisedAt).not.toBeNull();
+    // A correction based on what the Owner saw before is refused, as is one that changes nothing.
+    await expect(proofs.correct(id, first.id, undefined, { payerPhone: '36000003', revision: 1, userId: owner })).rejects.toMatchObject({ response: { code: 'proof_revised' } });
+    await expect(proofs.correct(id, first.id, undefined, { userId: owner })).rejects.toMatchObject({ response: { code: 'proof_nothing' } });
+
+    // An approval or a refusal made on revision 1 is refused; nothing is recorded.
+    await expect(proofs.approve(first.id, { amount: '600', paidAt: new Date().toISOString(), months: 1, reason: 'paid', revision: 1 }, ctx)).rejects.toMatchObject({ response: { code: 'proof_revised', revision: 2 } });
+    await expect(proofs.refuse(first.id, 'wrong file', ctx, 1)).rejects.toMatchObject({ response: { code: 'proof_revised' } });
+    expect(await root.subscriptionPayment.count({ where: { companyId: id, reference: 'proof:' + first.id } })).toBe(0);
+    expect((await root.seatAllocation.findUniqueOrThrow({ where: { id: ksar.id } })).status).toBe('pending_payment');
+
+    // On revision 2: approved once; a retry answers with the same approval, and no correction is accepted any more.
+    const approved = await proofs.approve(first.id, { amount: '600', paidAt: new Date().toISOString(), months: 1, reason: 'paid', revision: 2 }, ctx);
+    expect(approved).toMatchObject({ status: 'approved', revision: 2 });
+    expect(await proofs.approve(first.id, { amount: '600', paidAt: new Date().toISOString(), months: 1, reason: 'paid', revision: 2 }, ctx)).toMatchObject({ status: 'approved' });
+    expect(await root.subscriptionPayment.count({ where: { companyId: id, reference: 'proof:' + first.id } })).toBe(1);
+    expect((await root.seatAllocation.findUniqueOrThrow({ where: { id: ksar.id } })).status).toBe('paid');
+    await expect(proofs.correct(id, first.id, undefined, { payerPhone: '36000004', userId: owner })).rejects.toMatchObject({ response: { code: 'proof_decided' } });
+  });
+
+  it('0135: another business can neither read nor correct a proof; a refused proof stays refused on a retry', async () => {
+    const a = await shop();
+    const b = await shop();
+    await requests.create(a.id, a.owner, { name: 'Ksar', requestKey: key() }, 'spec');
+    const proof = await proofs.submit(a.id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, payerPhone: '36000005', userId: a.owner } as never);
+    await expect(proofs.correct(b.id, proof.id, undefined, { payerPhone: '36000006', userId: b.owner })).rejects.toMatchObject({ status: 404 });
+    expect((await proofs.listForCompany(b.id)).map((x: { id: string }) => x.id)).not.toContain(proof.id);
+    expect((await root.paymentProof.findUniqueOrThrow({ where: { id: uuidToBin(proof.id) } })).payerPhone).toBe('36000005');
+    await proofs.refuse(proof.id, 'unreadable', ctx, 1);
+    await expect(proofs.refuse(proof.id, 'unreadable', ctx, 1)).rejects.toMatchObject({ response: { code: 'proof_decided' } });
+    await expect(proofs.correct(a.id, proof.id, undefined, { payerPhone: '36000007', userId: a.owner })).rejects.toMatchObject({ response: { code: 'proof_decided' } });
+  });
+
+  it('0135: the activation message link signs in once, lands on that waiting store, expires after 72 hours', async () => {
+    const links = new ClaimLinkService(db);
+    const { id, owner } = await shop();
+    await requests.create(id, owner, { name: 'Ksar', requestKey: key() }, 'spec');
+    const ksar = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, kind: 'store' } });
+    const notice = await root.subscriptionNotice.findFirstOrThrow({ where: { companyId: id, kind: 'branch_activation' } });
+    const { token, expiresAt } = await links.issue({ companyId: id, userId: owner, noticeId: notice.id });
+    expect(expiresAt.getTime() - Date.now()).toBeGreaterThan(CLAIM_LINK_TTL_MS - 60_000);
+    expect(CLAIM_LINK_TTL_MS).toBe(72 * 3_600_000);
+    // Redeemed: the landing is that store; a second use is refused.
+    const first = await links.redeem(token, (tx, link) => claimLanding(tx, link));
+    expect(first).toEqual({ ok: true, result: binToUuid(ksar.id) });
+    await expect(links.redeem(token, (tx, link) => claimLanding(tx, link))).resolves.toEqual({ ok: false, reason: 'used' });
+    // Issued 72 hours ago and a second: expired, never opened.
+    const old = await links.issue({ companyId: id, userId: owner, noticeId: notice.id }, new Date(Date.now() - CLAIM_LINK_TTL_MS - 1000));
+    await expect(links.redeem(old.token, (tx, link) => claimLanding(tx, link))).resolves.toEqual({ ok: false, reason: 'expired' });
+    // Another business's notice named on a link lands nowhere (the subscription page).
+    const other = await shop();
+    await root.$transaction(async (tx) => expect(await claimLanding(tx, { companyId: other.id, noticeId: notice.id })).toBeNull());
+    // A link with no notice (the welcome message) lands on the subscription page.
+    await root.$transaction(async (tx) => expect(await claimLanding(tx, { companyId: id, noticeId: null })).toBeNull());
   });
 
 });

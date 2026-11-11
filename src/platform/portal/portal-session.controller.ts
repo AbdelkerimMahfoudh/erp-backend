@@ -97,7 +97,8 @@ export class PortalSessionController {
       throw new HttpException({ code: `claim_link_${opened.refused}`, message: CLAIM_REFUSALS[opened.refused] }, status);
     }
     setCookies(res, opened);
-    return { status: 'signed_in', session: opened.session };
+    // Where the link was for: a waiting store (its activation message), or nothing (the subscription page).
+    return { status: 'signed_in', session: opened.session, landing: opened.landing ?? null };
   }
 
   /**

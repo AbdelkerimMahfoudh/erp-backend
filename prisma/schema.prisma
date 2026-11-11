@@ -6553,6 +6553,11 @@ model PaymentProof {
   amount          Decimal            @db.Decimal(14, 2)
   paidAt          DateTime           @map("paid_at") @db.DateTime(6)
   reference       String?            @db.VarChar(120)
+  /// 0135: the number the Owner paid from, as they typed it on the portal.
+  payerPhone      String?            @map("payer_phone") @db.VarChar(32)
+  /// 0135: raised by each correction before the decision; a decision names the revision it was made on.
+  revision        Int                @default(1) @db.UnsignedInt
+  revisedAt       DateTime?          @map("revised_at") @db.DateTime(6)
   note            String?            @db.VarChar(500)
   contentType     String             @map("content_type") @db.VarChar(40)
   byteSize        Int                @map("byte_size")

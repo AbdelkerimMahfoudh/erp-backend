@@ -1,5 +1,6 @@
 import { storesOfUser, type NamedStore } from '../../common/account-label';
 import { ForbiddenException, Injectable, UnauthorizedException, Optional } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ClaimLinkService, type ClaimRefusal } from '../../notices/claim-links.service';
 import { AppConfigService } from '../../common/config/app-config.service';
@@ -44,6 +45,8 @@ export interface PortalOpened {
   accessTtlSeconds: number;
   refreshToken: string;
   session: PortalSessionView;
+  /** A claim link's destination: the waiting store its activation message was about (owner, 2026-11-11). */
+  landing?: { store: string } | null;
 }
 
 export type PortalSignInAnswer =
@@ -91,18 +94,19 @@ export class PortalSessionService {
       if (!owner) throw new ClaimLinkUnusable();
       const secret = this.tokens.generateRefreshSecret();
       const sessionId = await this.sessions.create({ companyId: owner.companyId, userId: owner.id, secret, userAgent: meta.userAgent, ip: meta.ip });
-      return { owner, sessionId, secret };
+      const store = await claimLanding(tx, link);
+      return { owner, sessionId, secret, store };
     }).catch((e) => {
       if (e instanceof ClaimLinkUnusable) return { ok: false as const, reason: 'invalid' as const };
       throw e;
     });
     if (!spent.ok) return { refused: spent.reason };
-    const { owner, sessionId, secret } = spent.result;
+    const { owner, sessionId, secret, store } = spent.result;
     const access = this.tokens.signAccessToken(binToUuid(owner.id), binToUuid(owner.companyId), binToUuid(sessionId));
     const refreshToken = this.tokens.buildRefreshToken(binToUuid(sessionId), secret);
     const named = await this.ownerOf(owner.id, owner.companyId);
     if (!named) throw new ForbiddenException(OWNER_ONLY);
-    return { accessToken: access.token, accessTtlSeconds: access.expiresIn, refreshToken, session: await this.viewOf(named, binToUuid(sessionId)) };
+    return { accessToken: access.token, accessTtlSeconds: access.expiresIn, refreshToken, session: await this.viewOf(named, binToUuid(sessionId)), landing: store ? { store } : null };
   }
 
   /** The refresh cookie, rotated: a new pair of cookies for the same session — and the Owner checked again. */
@@ -164,4 +168,17 @@ export class PortalSessionService {
       csrfToken: portalCsrfToken(this.config.jwtAccessSecret, sessionId),
     };
   }
+}
+
+/**
+ * Where a claim link lands (owner, 2026-11-11): a store activation message opens that waiting store, by its id; every other
+ * link, the subscription page (null). Only this business's own notice and store are read.
+ */
+export async function claimLanding(tx: Prisma.TransactionClient, link: { companyId: Buffer; noticeId: Buffer | null }): Promise<string | null> {
+  if (!link.noticeId) return null;
+  const notice = await tx.subscriptionNotice.findFirst({ where: { id: link.noticeId, companyId: link.companyId, kind: 'branch_activation' }, select: { periodKey: true } });
+  const allocation = notice?.periodKey.startsWith('branch:') ? Buffer.from(notice.periodKey.slice(7), 'hex') : null;
+  if (allocation?.length !== 16) return null;
+  const store = await tx.seatAllocation.findFirst({ where: { id: allocation, companyId: link.companyId, kind: 'store' }, select: { id: true } });
+  return store ? binToUuid(store.id) : null;
 }

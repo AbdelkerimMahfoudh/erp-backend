@@ -52,7 +52,7 @@ export class ClaimLinkService {
    */
   async redeem<T>(
     token: string,
-    open: (tx: Prisma.TransactionClient, link: { companyId: Buffer; userId: Buffer }) => Promise<T>,
+    open: (tx: Prisma.TransactionClient, link: { companyId: Buffer; userId: Buffer; noticeId: Buffer | null }) => Promise<T>,
     now = new Date(),
   ): Promise<{ ok: true; result: T } | { ok: false; reason: ClaimRefusal }> {
     if (typeof token !== 'string' || !CLAIM_TOKEN_PATTERN.test(token)) return { ok: false, reason: 'invalid' };
@@ -64,7 +64,7 @@ export class ClaimLinkService {
     return this.prisma.$transaction(async (tx) => {
       const spent = await tx.portalClaimLink.updateMany({ where: { id: link.id, usedAt: null, revokedAt: null, expiresAt: { gt: now } }, data: { usedAt: now } });
       if (spent.count !== 1) return { ok: false as const, reason: 'used' as const };
-      return { ok: true as const, result: await open(tx, { companyId: link.companyId, userId: link.userId }) };
+      return { ok: true as const, result: await open(tx, { companyId: link.companyId, userId: link.userId, noticeId: link.noticeId ?? null }) };
     });
   }
 

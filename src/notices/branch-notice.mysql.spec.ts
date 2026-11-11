@@ -9,6 +9,7 @@ import { PlatformAuditService } from '../platform/platform-audit.service';
 import { RegistrationService } from '../platform/registration.service';
 import { SeatAllocationService } from '../platform/seat-allocation.service';
 import { MAX_WHATSAPP_ATTEMPTS } from './notice-rules';
+import { ClaimLinkService, hashClaimToken } from './claim-links.service';
 import { branchNoticeKey, NoticeService } from './notice.service';
 
 /**
@@ -45,7 +46,8 @@ suite('the branch-activation notice', () => {
   const records = { contactState: async () => ({ consented: true, consent: 'active', optOutScope: 'none', undeliverableAt: null, pendingLive: false }) };
   const hasher = { hash: () => 'h'.repeat(64) };
   const entitlement = { trialZone: () => 'Africa/Nouakchott' };
-  const notices = url ? new NoticeService(db, config as never, entitlement as never, records as never, hasher as never, whatsapp as never, email as never, clock as never) : (null as never);
+  // Owner, 2026-11-11: the activation message carries the single-use portal link, so the service has its claim links.
+  const notices = url ? new NoticeService(db, config as never, entitlement as never, records as never, hasher as never, whatsapp as never, email as never, clock as never, new ClaimLinkService(db)) : (null as never);
   // The worker is the test's to drive: an enqueue does not start a delivery pass here.
   if (notices) (notices as unknown as { deliverNow: () => Promise<void> }).deliverNow = async () => undefined;
   const billing = url ? new BillingService(db, { now: () => new Date() } as never) : (null as never);
@@ -104,6 +106,9 @@ suite('the branch-activation notice', () => {
     await notices.deliverOne(notice.id);
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ template: 'branch.activation_ready', language: 'fr', variables: { branch: 'Ksar' } });
+    // The button's single-use link, stored only as its hash and tied to this notice.
+    expect(sent[0].variables.claim).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await root.portalClaimLink.findFirst({ where: { tokenHash: hashClaimToken(sent[0].variables.claim), noticeId: notice.id } })).toBeTruthy();
     expect(sent[0].variables.business).toMatch(/^Shop /);
     expect((await row(notice.id)).state).toBe('accepted');
     later(60 * 60_000);
@@ -156,5 +161,27 @@ suite('the branch-activation notice', () => {
     expect(await notices.enqueueBranchActivation(id, allocation)).toEqual({ created: false });
     expect(await root.subscriptionNotice.count({ where: { companyId: id, kind: 'branch_activation' } })).toBe(1);
     void newUuidV7Bin;
+  });
+  it('in the language the business set for WhatsApp in the app — EN, FR and AR — each with its own one-time link', async () => {
+    template = 'dukan_store_activation_ready';
+    for (const lang of ['en', 'fr', 'ar'] as const) {
+      const key = randomUUID().replace(/-/g, '').slice(0, 10);
+      const made = await registration.register({
+        idempotencyKey: `spec:${key}`, ownerName: 'Owner', businessName: `Shop ${key}`, branchName: 'Main',
+        phone: `+2223${(Date.now() + lang.length).toString().slice(-7)}`, password: 'unusable-password-for-the-spec', language: 'fr', actor: 'spec',
+      } as never);
+      const id = uuidToBin(made.companyId);
+      await root.user.update({ where: { id: uuidToBin(made.ownerUserId) }, data: { phoneVerifiedAt: new Date(), isActive: true } });
+      // Registered in French; the app's WhatsApp language decides.
+      await root.companySettings.upsert({ where: { companyId: id }, update: { whatsappLanguage: lang }, create: { companyId: id, whatsappLanguage: lang } as never });
+      const r = await requests.create(id, uuidToBin(made.ownerUserId), { name: 'Ksar', requestKey: randomUUID() }, 'spec');
+      const notice = await root.subscriptionNotice.findFirstOrThrow({ where: { companyId: id, periodKey: branchNoticeKey(uuidToBin(r.request.id)) } });
+      expect(notice.language).toBe(lang);
+      sent.length = 0;
+      await notices.deliverOne(notice.id);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ template: 'branch.activation_ready', language: lang, variables: { branch: 'Ksar' } });
+      expect(sent[0].variables.claim).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    }
   });
 });

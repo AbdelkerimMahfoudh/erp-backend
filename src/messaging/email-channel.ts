@@ -192,14 +192,14 @@ const SUBSCRIPTION_EMAILS: Record<SubscriptionEmailKey, EmailTemplate> = {
   'branch.activation_ready': subscriptionEmail(
     ['business', 'branch'],
     {
-      en: 'Your new Dukan ERP branch {branch} is ready for activation',
-      fr: 'Votre nouvelle succursale Dukan ERP {branch} est prête à être activée',
-      ar: 'فرعك الجديد {branch} في Dukan ERP جاهز للتفعيل',
+      en: 'Your new Dukan ERP store {branch} is ready for activation',
+      fr: 'Votre nouvelle boutique Dukan ERP {branch} est prête à être activée',
+      ar: 'متجرك الجديد {branch} في Dukan ERP جاهز للتفعيل',
     },
     {
-      en: 'Your new branch {branch} for {business} is ready for activation. Open your secure subscription page to review and activate it: {link}',
-      fr: 'Votre nouvelle succursale {branch} pour {business} est prête à être activée. Ouvrez votre page d’abonnement sécurisée pour la consulter et l’activer : {link}',
-      ar: 'فرعك الجديد {branch} الخاص بـ {business} جاهز للتفعيل. افتح صفحة اشتراكك الآمنة لمراجعته وتفعيله: {link}',
+      en: 'Your new store {branch} for {business} is ready for activation. Open your secure subscription page to review and activate it: {link}',
+      fr: 'Votre nouvelle boutique {branch} pour {business} est prête à être activée. Ouvrez votre page d’abonnement sécurisée pour la consulter et l’activer : {link}',
+      ar: 'متجرك الجديد {branch} الخاص بـ {business} جاهز للتفعيل. افتح صفحة اشتراكك الآمنة لمراجعته وتفعيله: {link}',
     },
   ),
   'trial.started': subscriptionEmail(
