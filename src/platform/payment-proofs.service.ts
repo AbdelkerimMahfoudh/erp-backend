@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { PROOF_TYPES, safeProofName, servedProofName, sniffProofType, type ProofType } from './proof-file';
 import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { binToUuid, isUuid, uuidToBin } from '../common/utils/uuid.util';
@@ -55,6 +56,7 @@ const VIEW = {
   revisedAt: true,
   note: true,
   contentType: true,
+  fileName: true,
   byteSize: true,
   refusalReason: true,
   months: true,
@@ -82,6 +84,8 @@ function view(r: Row) {
     revisedAt: r.revisedAt?.toISOString() ?? null,
     note: r.note,
     contentType: r.contentType,
+    // 0136: the name it downloads under: the one it was sent with (made safe), or one built from its date and type.
+    fileName: servedProofName({ id: binToUuid(r.id), fileName: r.fileName, submittedAt: r.submittedAt }, (r.contentType in PROOF_TYPES ? r.contentType : null) as ProofType | null),
     byteSize: r.byteSize,
     refusalReason: r.refusalReason,
     months: r.months,
@@ -166,7 +170,7 @@ export class PaymentProofsService {
 
   async submit(
     companyId: Buffer,
-    file: { buffer: Buffer } | undefined,
+    file: { buffer: Buffer; originalname?: string } | undefined,
     input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; branches?: string[]; reference?: string; note?: string; category?: string; seats?: number; payerPhone?: string; userId: Buffer },
   ) {
     const key = input.idempotencyKey?.trim();
@@ -273,6 +277,7 @@ export class PaymentProofsService {
           payerPhone,
           note: input.note?.trim().slice(0, 500) || null,
           contentType,
+          fileName: safeProofName(file.originalname, contentType),
           byteSize: file.buffer.length,
           sha256,
           file: file.buffer,
@@ -298,7 +303,7 @@ export class PaymentProofsService {
   async correct(
     companyId: Buffer,
     id: string,
-    file: { buffer: Buffer } | undefined,
+    file: { buffer: Buffer; originalname?: string } | undefined,
     input: { payerPhone?: string; reference?: string; note?: string; revision?: number; userId: Buffer },
     ctx?: { ip?: string },
   ) {
@@ -319,9 +324,9 @@ export class PaymentProofsService {
       if (file.buffer.length > MAX_PROOF_BYTES) throw new BadRequestException({ code: 'proof_too_large', message: 'The file is too large.' });
       const contentType = sniffProof(file.buffer);
       if (!contentType) throw new BadRequestException({ code: 'proof_type', message: 'Send a PDF, PNG or JPEG file.' });
-      Object.assign(data, { file: file.buffer, contentType, byteSize: file.buffer.length, sha256: createHash('sha256').update(file.buffer).digest('hex') });
+      Object.assign(data, { file: file.buffer, contentType, fileName: safeProofName(file.originalname, contentType), byteSize: file.buffer.length, sha256: createHash('sha256').update(file.buffer).digest('hex') });
     }
-    const fields = Object.keys(data).map((k) => (k === 'contentType' || k === 'byteSize' || k === 'sha256' ? null : k)).filter(Boolean);
+    const fields = Object.keys(data).map((k) => (k === 'contentType' || k === 'byteSize' || k === 'sha256' || k === 'fileName' ? null : k)).filter(Boolean);
     if (!fields.length) throw new BadRequestException({ code: 'proof_nothing', message: 'Change the number or the screenshot.' });
     const moved = await this.prisma.paymentProof.updateMany({
       where: { id: row.id, companyId, revision: row.revision, appliedAt: null, status: { in: ['submitted', 'under_review'] } },
@@ -374,11 +379,20 @@ export class PaymentProofsService {
 
   async file(id: string, ctx: Actor) {
     if (!isUuid(id)) throw new NotFoundException('Unknown proof');
-    const row = await this.prisma.paymentProof.findUnique({ where: { id: uuidToBin(id) }, select: { id: true, companyId: true, file: true, contentType: true } });
+    const row = await this.prisma.paymentProof.findUnique({ where: { id: uuidToBin(id) }, select: FILE_SELECT });
     if (!row) throw new NotFoundException('Unknown proof');
     if (!row.file) throw new ConflictException({ code: 'proof_purged', message: 'This file is no longer kept.' });
-    await this.record('payment_proof.view', row.companyId, id, null, {}, ctx);
-    return { file: Buffer.from(row.file), contentType: row.contentType };
+    await this.record('payment_proof.view', row.companyId, id, null, { revision: row.revision }, ctx);
+    return served(row, id);
+  }
+
+  /** 0136: the Owner's own proof file — only this business's (any other id is unknown here), as the admin would see it. */
+  async fileForOwner(companyId: Buffer, id: string) {
+    if (!isUuid(id)) throw new NotFoundException('Unknown proof');
+    const row = await this.prisma.paymentProof.findFirst({ where: { id: uuidToBin(id), companyId }, select: FILE_SELECT });
+    if (!row) throw new NotFoundException('Unknown proof');
+    if (!row.file) throw new ConflictException({ code: 'proof_purged', message: 'This file is no longer kept.' });
+    return served(row, id);
   }
 
   async review(id: string, ctx: Actor) {
@@ -630,4 +644,14 @@ export function payerPhoneOf(raw: string | undefined): string | null {
 
 function staleRevision(current: number) {
   return new ConflictException({ code: 'proof_revised', message: 'The Owner corrected this proof after you opened it. Review the latest version.', revision: current });
+}
+
+const FILE_SELECT = { id: true, companyId: true, file: true, contentType: true, fileName: true, submittedAt: true, revision: true } as const;
+
+/** 0136: what is served: the bytes, the type they say (the stored one only if they say nothing known), and a usable name. */
+function served(row: { file: Uint8Array | Buffer | null; contentType: string; fileName: string | null; submittedAt: Date; revision: number }, id: string) {
+  const file = Buffer.from(row.file!);
+  const type = sniffProofType(file);
+  const contentType = type ?? 'application/octet-stream';
+  return { file, contentType, fileName: servedProofName({ id, fileName: row.fileName, submittedAt: row.submittedAt }, type), revision: row.revision, known: type !== null };
 }

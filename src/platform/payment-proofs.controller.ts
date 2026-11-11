@@ -14,6 +14,7 @@ import { RequirePermissions } from '../rbac/require-permissions.decorator';
 import { PlatformAdminGuard, type AdminRequest } from './platform-admin.guard';
 import { PlatformAdminService } from './platform-admin.service';
 import { MAX_PROOF_BYTES, PaymentProofsService } from './payment-proofs.service';
+import { contentDisposition } from './proof-file';
 import { isPaymentCategory, priceList } from '../billing/period-offers';
 
 export class RefuseProofDto {
@@ -101,7 +102,7 @@ export class PaymentProofsController {
   @HttpCode(HttpStatus.CREATED)
   @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_PROOF_BYTES) }))
   submit(
-    @UploadedFile() file: { buffer: Buffer } | undefined,
+    @UploadedFile() file: { buffer: Buffer; originalname?: string } | undefined,
     @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; branches?: string; reference?: string; note?: string; category?: string; seats?: string; payerPhone?: string },
     @CurrentUser() user: AuthUser,
   ) {
@@ -134,7 +135,7 @@ export class PaymentProofsController {
   @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_PROOF_BYTES) }))
   correct(
     @Param('id') id: string,
-    @UploadedFile() file: { buffer: Buffer } | undefined,
+    @UploadedFile() file: { buffer: Buffer; originalname?: string } | undefined,
     @Body() body: { payerPhone?: string; reference?: string; note?: string; revision?: string },
     @CurrentUser() user: AuthUser,
     @Req() req: { ip?: string },
@@ -161,10 +162,17 @@ export class PaymentProofsController {
     @Req() req: AdminRequest,
     @Res() res: { setHeader(k: string, v: string): void; end(b: Buffer): void },
   ) {
-    const { file, contentType } = await this.proofs.file(id, { admin: req.platformAdmin!, ip: req.ip });
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', 'attachment; filename="payment-proof"');
-    res.end(file);
+    const served = await this.proofs.file(id, { admin: req.platformAdmin!, ip: req.ip });
+    sendProof(res, served);
+  }
+
+  /** 0136: the Owner's own proof — the file they sent, under its name and true type; only this business's. */
+  @Get('my-subscription/payment-proofs/:id/file')
+  @RequirePermissions('settings.manage')
+  @Header('X-Content-Type-Options', 'nosniff')
+  @Header('Cache-Control', 'no-store')
+  async ownFile(@Param('id') id: string, @Res() res: { setHeader(k: string, v: string): void; end(b: Buffer): void }) {
+    sendProof(res, await this.proofs.fileForOwner(this.tenant.companyId(), id));
   }
 
   @Public()
@@ -223,4 +231,15 @@ export class PaymentProofsController {
 function branchList(raw: string | undefined): string[] | undefined {
   const ids = (raw ?? '').split(',').map((x) => x.trim()).filter((x) => isUuid(x));
   return ids.length ? ids : undefined;
+}
+
+/**
+ * 0136: a proof as a download: its true type (from its bytes), a usable name with the right extension, and its revision.
+ * Always `attachment` with nosniff: the console and the portal show it from the bytes they fetched, never on the API's origin.
+ */
+function sendProof(res: { setHeader(k: string, v: string): void; end(b: Buffer): void }, served: { file: Buffer; contentType: string; fileName: string; revision: number }) {
+  res.setHeader('Content-Type', served.contentType);
+  res.setHeader('Content-Disposition', contentDisposition(served.fileName));
+  res.setHeader('X-Proof-Revision', String(served.revision));
+  res.end(served.file);
 }

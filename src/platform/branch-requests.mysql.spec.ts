@@ -378,4 +378,35 @@ suite('a branch added in the app', () => {
     await root.$transaction(async (tx) => expect(await claimLanding(tx, { companyId: id, noticeId: null })).toBeNull());
   });
 
+  // 0136 (owner, 2026-11-11): a proof downloads under a usable name and its true type, to its Owner or an administrator only.
+  it('0136: image, PDF, unknown bytes, a replacement, and another business — each proof served as what it is, to whom it belongs', async () => {
+    const a = await shop();
+    const b = await shop();
+    await requests.create(a.id, a.owner, { name: 'Ksar', requestKey: key() }, 'spec');
+    const png = PNG();
+    const sent = await proofs.submit(a.id, { buffer: png, originalname: 'C:\\phone\\Screenshot 06.43.PNG' }, { idempotencyKey: key(), category: 'store_activation', months: 1, payerPhone: '36000008', userId: a.owner } as never);
+    expect(sent).toMatchObject({ contentType: 'image/png', fileName: 'Screenshot 06.43.png' });
+    // The administrator and the Owner get the same bytes, type and name; another business gets nothing.
+    const asAdmin = await proofs.file(sent.id, ctx);
+    expect(asAdmin).toMatchObject({ contentType: 'image/png', fileName: 'Screenshot 06.43.png', revision: 1, known: true });
+    expect(asAdmin.file.equals(png)).toBe(true);
+    expect(await proofs.fileForOwner(a.id, sent.id)).toMatchObject({ contentType: 'image/png', fileName: 'Screenshot 06.43.png' });
+    await expect(proofs.fileForOwner(b.id, sent.id)).rejects.toMatchObject({ status: 404 });
+    await expect(proofs.fileForOwner(a.id, 'not-an-id')).rejects.toMatchObject({ status: 404 });
+
+    // Replaced by a PDF: the new bytes, type, name and revision are what is served — the administrator sees the latest.
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.from(randomUUID())]);
+    await proofs.correct(a.id, sent.id, { buffer: pdf, originalname: 'reçu final.pdf' }, { revision: 1, userId: a.owner });
+    const latest = await proofs.file(sent.id, ctx);
+    expect(latest).toMatchObject({ contentType: 'application/pdf', fileName: 'reçu final.pdf', revision: 2 });
+    expect(latest.file.equals(pdf)).toBe(true);
+
+    // A proof stored before 0136 (no name) is named from its date and type; bytes of no known type download as .bin.
+    await root.paymentProof.update({ where: { id: uuidToBin(sent.id) }, data: { fileName: null } });
+    expect((await proofs.file(sent.id, ctx)).fileName).toMatch(/^payment-proof-\d{4}-\d{2}-\d{2}-[0-9a-f]{8}\.pdf$/);
+    await root.paymentProof.update({ where: { id: uuidToBin(sent.id) }, data: { file: Buffer.from('GIF89a-not-a-proof') } });
+    expect(await proofs.file(sent.id, ctx)).toMatchObject({ contentType: 'application/octet-stream', known: false });
+    expect((await proofs.file(sent.id, ctx)).fileName).toMatch(/\.bin$/);
+  });
+
 });

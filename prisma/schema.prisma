@@ -6560,6 +6560,8 @@ model PaymentProof {
   revisedAt       DateTime?          @map("revised_at") @db.DateTime(6)
   note            String?            @db.VarChar(500)
   contentType     String             @map("content_type") @db.VarChar(40)
+  /// 0136: the name the file was sent with, made safe, its extension matching its sniffed type.
+  fileName        String?            @map("file_name") @db.VarChar(160)
   byteSize        Int                @map("byte_size")
   sha256          String             @db.Char(64)
   file            Bytes?             @db.MediumBlob
