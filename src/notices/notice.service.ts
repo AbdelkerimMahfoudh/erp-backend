@@ -971,8 +971,13 @@ export class NoticeService {
     return isRealChannel(this.email) || (this.email.isEnabled && this.email.name === 'development-log' && outboxAllowed());
   }
 
-  /** The language the business registered in — what its Owner chose to read — or English. */
+  /**
+   * The language the business set in the app for its WhatsApp messages (owner, 2026-11-11: every automatic message in
+   * the app's language, as the summaries already are); before any setting exists, the language it registered in.
+   */
   private async languageOf(db: Prisma.TransactionClient, companyId: Buffer): Promise<MessageLanguage> {
+    const settings = await db.companySettings?.findUnique({ where: { companyId }, select: { whatsappLanguage: true } });
+    if (settings && LANGUAGES.includes(settings.whatsappLanguage as MessageLanguage)) return settings.whatsappLanguage as MessageLanguage;
     const attempt = await db.registrationAttempt.findFirst({ where: { companyId }, select: { language: true } });
     const language = attempt?.language as MessageLanguage | undefined;
     return language && LANGUAGES.includes(language) ? language : 'en';

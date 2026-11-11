@@ -291,7 +291,15 @@ export const GRACE_ENDED_TEMPLATE = subscriptionTemplate('subscription.grace_end
  * and the business's, and a static button to the portal's subscription page — `dukan_branch_activation_ready`. Sent once
  * per request, after it commits; held while the template or the portal is unavailable.
  */
-export const BRANCH_ACTIVATION_TEMPLATE = subscriptionTemplate('branch.activation_ready', ['branch', 'business'], 'WHATSAPP_TEMPLATE_BRANCH_ACTIVATION');
+/**
+ * The store's activation notice. Owner, 2026-11-11: its button signs the Owner into the portal once, like the account-ready
+ * message (the single-use `claim` link), because WhatsApp's browser holds no portal session. The provider template behind
+ * this key must carry a dynamic URL button `https://dukan.tsxmr.com/claim/{{1}}` (`dukan_store_activation_ready`).
+ */
+export const BRANCH_ACTIVATION_TEMPLATE: TemplateDefinition = {
+  ...subscriptionTemplate('branch.activation_ready', ['branch', 'business'], 'WHATSAPP_TEMPLATE_BRANCH_ACTIVATION'),
+  linkVariable: 'claim',
+};
 
 /**
  * The free trial started automatically at registration (0131; the owner's brief of 2026-11-06): the business's name and
