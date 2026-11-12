@@ -147,7 +147,12 @@ export class PaymentProofsController {
   @Public()
   @UseGuards(PlatformAdminGuard)
   @Get('payment-proofs')
-  list(@Query('status') status?: string) {
+  list(@Query('status') status?: string, @Query('company') company?: string) {
+    // Owner, 2026-11-12: one business's proofs, whatever their decision — read in its payment history, without downloading.
+    if (company !== undefined) {
+      if (!isUuid(company)) throw new BadRequestException('Unknown business');
+      return this.proofs.listForCompany(uuidToBin(company));
+    }
     return this.proofs.listForAdmin(['submitted', 'under_review', 'approved', 'refused'].includes(status ?? '') ? status : undefined);
   }
 
