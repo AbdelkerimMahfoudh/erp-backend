@@ -343,8 +343,12 @@ suite('a branch added in the app', () => {
     const { id, owner } = await shop();
     await requests.create(id, owner, { name: 'Ksar', requestKey: key() }, 'spec');
     const ksar = await root.seatAllocation.findFirstOrThrow({ where: { companyId: id, kind: 'store' } });
-    const first = await proofs.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, branches: [binToUuid(ksar.id)], payerPhone: ' +222 36 00 00 01 ', userId: owner } as never);
-    expect(first).toMatchObject({ status: 'submitted', category: 'store_activation', amount: '600', payerPhone: '+22236000001', revision: 1, revisedAt: null });
+    const first = await proofs.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, branches: [binToUuid(ksar.id)], payerPhone: ' 36 00 00 01 ', userId: owner } as never);
+    expect(first).toMatchObject({ status: 'submitted', category: 'store_activation', amount: '600', payerPhone: '36000001', revision: 1, revisedAt: null });
+    // Owner, 2026-11-12: exactly eight digits, without +222 — anything else is refused.
+    for (const bad of ['+222 36 00 00 01', '22236000001', '3600000', '360000011', '3600-0001']) {
+      await expect(proofs.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, payerPhone: bad, userId: owner } as never)).rejects.toMatchObject({ response: { code: 'payer_phone_invalid' } });
+    }
     await expect(proofs.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, payerPhone: 'abc', userId: owner } as never)).rejects.toMatchObject({ response: { code: 'payer_phone_invalid' } });
 
     // The administrator opens revision 1; the Owner then corrects the number and the screenshot.

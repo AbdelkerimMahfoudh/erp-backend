@@ -784,8 +784,10 @@ export class PaymentProofsService {
 /** 0135: the number paid from: digits with an optional leading +, spaces, dots and dashes dropped; 6 to 20 digits, or none. */
 export function payerPhoneOf(raw: string | undefined): string | null {
   if (raw === undefined || raw === null || !String(raw).trim()) return null;
-  const s = String(raw).trim().replace(/[\s.-]/g, '');
-  if (!/^\+?\d{6,20}$/.test(s)) throw new BadRequestException({ code: 'payer_phone_invalid', message: 'Enter the number you paid from.' });
+  // Owner, 2026-11-12: the number paid from is a local mobile number — exactly eight digits, without +222. Spaces are
+  // dropped; anything shorter, longer or with another character is refused.
+  const s = String(raw).trim().replace(/\s/g, '');
+  if (!/^\d{8}$/.test(s)) throw new BadRequestException({ code: 'payer_phone_invalid', message: 'Enter the 8-digit number you paid from.' });
   return s;
 }
 
