@@ -222,7 +222,20 @@ export class PaymentProofsController {
     return this.proofs.approve(id, dto, { admin: req.platformAdmin!, ip: req.ip });
   }
 
-  /** 0138: the second administrator — never the first — confirms the deposit on the receiving account. */
+  /**
+   * 0138 (owner, 2026-11-12): open access while reviewing — the purchased access now, the proof still under review, no
+   * message to the Owner. Confirmed or refused later, by the same administrator or another.
+   */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('payment-proofs/:id/open')
+  @HttpCode(HttpStatus.OK)
+  async open(@Param('id') id: string, @Body() dto: ApproveProofDto, @Req() req: AdminRequest) {
+    await this.admins.requireStepUp(req.platformAdmin!);
+    return this.proofs.approve(id, dto, { admin: req.platformAdmin!, ip: req.ip }, { open: true });
+  }
+
+  /** 0138: a proof opened while reviewing, confirmed once the deposit is found. */
   @Public()
   @UseGuards(PlatformAdminGuard)
   @Post('payment-proofs/:id/confirm')

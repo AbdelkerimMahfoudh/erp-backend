@@ -138,10 +138,10 @@ suite('committed decisions and stopped approvals', () => {
 
     it('a failure before any money releases the claim, so the next decision is fresh', async () => {
       const { proof, id } = await paidShopWithProof();
-      failAudit = 'payment.record';
+      failAudit = 'payment.record_and_confirm';
       await expect(proofs.approve(proof.id, decision, ctx)).rejects.toThrow('audit down');
       expect(await proofs.recovery(proof.id)).toMatchObject({ stopped: false, paymentRecorded: false });
-      expect(await proofs.approve(proof.id, decision, ctx)).toMatchObject({ status: 'under_review' });
+      expect(await proofs.approve(proof.id, decision, ctx)).toMatchObject({ status: 'approved' });
       expect(await payments(id)).toBe(1);
     });
 
@@ -160,23 +160,23 @@ suite('committed decisions and stopped approvals', () => {
       expect((await proofs.recovery(proof.id)).actions).toEqual({ complete: true, closeWithoutPeriod: true, release: false });
       await expect(proofs.releaseRecovery(proof.id, 'x', ctx)).rejects.toMatchObject({ response: { code: 'proof_recovery_refused' } });
 
-      expect(await proofs.completeRecovery(proof.id, { reason: 'read the evidence' }, ctx)).toMatchObject({ status: 'under_review', months: 1, review: { openedBy: admin.email } });
+      expect(await proofs.completeRecovery(proof.id, { reason: 'read the evidence' }, ctx)).toMatchObject({ status: 'approved', months: 1 });
       expect(await payments(id)).toBe(1);
       expect((await sub(id)).currentPeriodEnd!.getTime()).toBeGreaterThan(end.getTime());
       expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'payment_proof.recovery_complete' } })).toBe(1);
-      expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'payment_proof.open' } })).toBe(1);
+      expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'payment_proof.approve' } })).toBe(1);
     });
 
     it('period applied and then a crash: completing adds no second period', async () => {
       const { proof, id } = await paidShopWithProof();
-      failAudit = 'payment_proof.open';
+      failAudit = 'payment_proof.approve';
       await expect(proofs.approve(proof.id, decision, ctx)).rejects.toThrow('audit down');
       const extended = (await sub(id)).currentPeriodEnd;
       expect(await proofs.recovery(proof.id)).toMatchObject({ stopped: true, paymentRecorded: true, periodApplied: true });
 
       await age(proof.id);
       expect((await proofs.recovery(proof.id)).actions).toEqual({ complete: true, closeWithoutPeriod: false, release: false });
-      expect(await proofs.completeRecovery(proof.id, { reason: 'finish' }, ctx)).toMatchObject({ status: 'under_review' });
+      expect(await proofs.completeRecovery(proof.id, { reason: 'finish' }, ctx)).toMatchObject({ status: 'approved' });
       expect((await sub(id)).currentPeriodEnd).toEqual(extended);
       expect(await payments(id)).toBe(1);
     });
@@ -190,7 +190,7 @@ suite('committed decisions and stopped approvals', () => {
       expect(await payments(id)).toBe(1);
       expect(await root.subscriptionEvent.count({ where: { companyId: id, kind: 'extended' } })).toBe(1);
       expect((await sub(id)).currentPeriodEnd!.getTime()).toBeGreaterThan(end.getTime());
-      expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'payment_proof.open' } })).toBe(1);
+      expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'payment_proof.approve' } })).toBe(1);
     });
 
     it('a period given some other way: closed with the money recorded and no period added', async () => {
@@ -198,7 +198,7 @@ suite('committed decisions and stopped approvals', () => {
       failAudit = 'subscription.extend';
       await expect(proofs.approve(proof.id, decision, ctx)).rejects.toThrow('audit down');
       await age(proof.id);
-      expect(await proofs.completeRecovery(proof.id, { reason: 'extended by hand', closeWithoutPeriod: true }, ctx)).toMatchObject({ status: 'under_review', months: null });
+      expect(await proofs.completeRecovery(proof.id, { reason: 'extended by hand', closeWithoutPeriod: true }, ctx)).toMatchObject({ status: 'approved', months: null });
       expect((await sub(id)).currentPeriodEnd).toEqual(end);
       expect(await payments(id)).toBe(1);
     });
@@ -209,7 +209,7 @@ suite('committed decisions and stopped approvals', () => {
       expect((await proofs.recovery(proof.id)).actions).toEqual({ complete: true, closeWithoutPeriod: false, release: true });
       await proofs.releaseRecovery(proof.id, 'nothing was applied', ctx);
       expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'payment_proof.recovery_release' } })).toBe(1);
-      expect(await proofs.approve(proof.id, { ...decision, amount: '250' }, ctx)).toMatchObject({ status: 'under_review' });
+      expect(await proofs.approve(proof.id, { ...decision, amount: '250' }, ctx)).toMatchObject({ status: 'approved' });
       expect(await payments(id)).toBe(1);
     });
 

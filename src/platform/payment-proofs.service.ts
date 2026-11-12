@@ -42,9 +42,6 @@ interface OpenChanges {
   statusBefore: string | null;
 }
 
-/** 0138: the second step is a different person's. */
-const secondAdminRequired = () =>
-  new ConflictException({ code: 'second_admin_required', message: 'Another administrator must confirm or refuse this payment.' });
 class PeriodAlreadyApplied extends Error {}
 const refused = (state: { stopped: boolean; mayStillBeRunning: boolean }) =>
   new ConflictException(
@@ -456,12 +453,11 @@ export class PaymentProofsService {
     const row = await this.rowOf(id);
     if (revision !== undefined && row.status !== 'refused' && revision !== row.revision) throw staleRevision(row.revision);
     if (row.openedAt && row.status === 'under_review') {
-      if (row.openedBy === ctx.admin.email) throw secondAdminRequired();
-      const full = await this.prisma.paymentProof.findUniqueOrThrow({ where: { id: row.id }, select: { openChanges: true, submittedBy: true } });
+        const full = await this.prisma.paymentProof.findUniqueOrThrow({ where: { id: row.id }, select: { openChanges: true, submittedBy: true } });
       const now = new Date();
       const taken = await this.prisma.$transaction(async (tx) => {
         const moved = await tx.paymentProof.updateMany({
-          where: { id: row.id, status: 'under_review', openedAt: { not: null }, openedBy: { not: ctx.admin.email } },
+          where: { id: row.id, status: 'under_review', openedAt: { not: null } },
           data: { status: 'refused', refusalReason: why.slice(0, 500), decidedAt: now, confirmedBy: ctx.admin.email },
         });
         if (!moved.count) throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
@@ -492,14 +488,26 @@ export class PaymentProofsService {
    * was recorded releases the claim. After that the claim stays, whatever the failure: a second decision could name another
    * amount and so record a second payment. `recovery` reads such a proof; `completeRecovery` and `releaseRecovery` settle it.
    */
+  /**
+   * Confirm payment (the deposit is verified): the payment is recorded confirmed and the purchased access granted, in one
+   * step. On a proof whose access was already opened while reviewing, it finalizes the payment — the period is never
+   * granted a second time. With `opts.open` (0138, owner 2026-11-12): open access while reviewing — the access is granted
+   * now, the payment recorded unconfirmed, the proof stays "under review", and the Owner is sent nothing; the same
+   * administrator later confirms or refuses it.
+   */
   async approve(
     id: string,
     input: { amount: string; paidAt: string; channel?: Channel; months: number; reason: string; revision?: number },
     ctx: Actor,
+    opts: { open?: boolean } = {},
   ) {
     const row = await this.rowOf(id);
     // A retry of the approval answers with it; an approval of a revision the Owner has since corrected is refused (0135).
-    if (row.status === 'approved' || row.openedAt) return adminView(row);
+    if (row.status === 'approved') return adminView(row);
+    if (row.openedAt && row.status === 'under_review') {
+      if (opts.open) return adminView(row);
+      return this.confirm(id, { revision: input.revision, reason: input.reason }, ctx);
+    }
     if (input.revision !== undefined && input.revision !== row.revision) throw staleRevision(row.revision);
     if (row.status !== 'submitted' && row.status !== 'under_review') throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
     // 0134: extra seats and adjustments record money only; their months extend nothing.
@@ -510,8 +518,7 @@ export class PaymentProofsService {
     if (Number.isNaN(paidAt.getTime())) throw new BadRequestException({ code: 'paid_at_invalid', message: 'Enter the payment date.' });
     if (!input.reason?.trim()) throw new BadRequestException({ code: 'reason_required', message: 'Say why.' });
 
-    // 0138: an approval is the first administrator's step — the access opens, the payment is verified by another.
-    const request: ApplyRequest = { amount: input.amount, paidAt: paidAt.toISOString(), channel: input.channel, months: input.months, reason: input.reason, open: true };
+    const request: ApplyRequest = { amount: input.amount, paidAt: paidAt.toISOString(), channel: input.channel, months: input.months, reason: input.reason, ...(opts.open ? { open: true } : {}) };
     const claimed = await this.prisma.paymentProof.updateMany({
       where: { id: row.id, appliedAt: null, status: { in: ['submitted', 'under_review'] }, ...(input.revision !== undefined ? { revision: input.revision } : {}) },
       data: { appliedAt: new Date(), applyRequest: request as never },
@@ -613,22 +620,22 @@ export class PaymentProofsService {
       });
       if (decided.count) await this.record('payment_proof.approve', row.companyId, id, request.reason, { amount: request.amount, months: request.months, periodApplied: applyPeriod }, ctx, tx);
     });
-    return view(await this.rowOf(id));
+    return adminView(await this.rowOf(id));
   }
 
   /**
-   * 0138: the second administrator — never the one who opened it — confirms the deposit on the receiving account. The
-   * proof is approved and its payment confirmed. Revision-checked; a retry answers with the decision.
+   * 0138: a proof whose access was opened while reviewing, confirmed once the deposit is found on the receiving account —
+   * by any administrator, the one who opened it included. The proof is approved and its payment confirmed; the period
+   * was granted at the opening and is not granted again. Revision-checked; a retry answers with the decision.
    */
   async confirm(id: string, input: { revision?: number; reason?: string }, ctx: Actor) {
     const row = await this.rowOf(id);
     if (row.status === 'approved') return adminView(row);
-    if (!row.openedAt || row.status !== 'under_review') throw new ConflictException({ code: 'proof_not_opened', message: 'Open the access first; another administrator then confirms the deposit.' });
+    if (!row.openedAt || row.status !== 'under_review') throw new ConflictException({ code: 'proof_not_opened', message: 'This proof was not opened while reviewing: confirm its payment instead.' });
     if (input.revision !== undefined && input.revision !== row.revision) throw staleRevision(row.revision);
-    if (row.openedBy === ctx.admin.email) throw secondAdminRequired();
     await this.prisma.$transaction(async (tx) => {
       const decided = await tx.paymentProof.updateMany({
-        where: { id: row.id, status: 'under_review', openedAt: { not: null }, openedBy: { not: ctx.admin.email } },
+        where: { id: row.id, status: 'under_review', openedAt: { not: null } },
         data: { status: 'approved', confirmedBy: ctx.admin.email, decidedAt: new Date(), refusalReason: null },
       });
       if (!decided.count) throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
@@ -639,7 +646,7 @@ export class PaymentProofsService {
   }
 
   /**
-   * 0138: a refusal after the access was opened (a different administrator). Takes back only what this proof added — each
+   * 0138: a refusal after the access was opened while reviewing. Takes back only what this proof added — each
    * store's period it extended (when nothing has extended it since), the business's paid end it moved, the stores it
    * opened (made inactive, records kept) — and tells the Owner. Access paid for before is never touched; nothing is erased.
    */
