@@ -456,7 +456,7 @@ suite('a branch added in the app', () => {
     expect(sent).toMatchObject({ receiveService: 'sedad', receiveNumber: '37676827' });
     const fixed = await svc.correct(id, sent.id, undefined, { receiveService: 'bankily', receiveNumber: '36963839', revision: 1, userId: owner });
     expect(fixed).toMatchObject({ receiveService: 'bankily', receiveNumber: '36963839', revision: 2 });
-    expect((await svc.listForAdmin()).find((p) => p.id === sent.id)).toMatchObject({ receiveService: 'bankily', receiveNumber: '36963839', revision: 2 });
+    expect((await svc.listForCompany(id)).find((p) => p.id === sent.id)).toMatchObject({ receiveService: 'bankily', receiveNumber: '36963839', revision: 2 });
   });
 
   it('0138: two administrators — the first opens the access; the same person cannot confirm or refuse; a different one confirms the deposit', async () => {
