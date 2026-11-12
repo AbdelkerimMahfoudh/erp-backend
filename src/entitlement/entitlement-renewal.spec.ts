@@ -35,6 +35,8 @@ function makeWorld(now: { t: Date }, opts: { failRead?: boolean } = {}) {
     },
     planVersion: { findMany: async () => [{ id: Buffer.alloc(16, 3), planKey: 'standard', version: 3, branchMonthly: 500, agentMonthly: 300, bothMonthly: 700, includedStaffPerBranch: 1, extraStaffMonthly: 100, effectiveFrom: new Date('2026-01-01T00:00:00Z'), reason: 'v3' }] },
     branch: { findMany: async () => [] },
+    // 0137: no store opened with its own paid month.
+    seatAllocation: { findMany: async () => [] },
     subscriptionEvent: { create: async () => undefined },
     // The company's grace history (0099): none.
     graceEpisode: { findMany: async () => [] },

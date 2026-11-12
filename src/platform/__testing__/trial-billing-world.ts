@@ -685,6 +685,8 @@ export function makeTrialBillingWorld(opts: WorldOptions = {}) {
         .slice(0, 200)
         .map((c) => ({ company_id: c.companyId }));
     }
+    // 0137: a store paid for during the trial takes its own entitlement row's lock (applyPaidTx); nothing to hold here.
+    if (text === 'SELECT id FROM branch_entitlements WHERE branch_id = ? FOR UPDATE') return [];
     throw new Error(`trial-billing-world: unexpected raw query "${text}"`);
   }
 

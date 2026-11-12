@@ -437,7 +437,7 @@ export class BillingService {
         extraStaffMonthly: period.extraStaffMonthly,
       },
       await this.creditsOf(period.id),
-      await this.freeStoresOf(companyId, period.id, this.prisma),
+      await this.freeStoresOf(companyId, period.id, this.prisma, this.clock.now(), period.periodStart),
     );
 
     return {
@@ -500,7 +500,7 @@ export class BillingService {
       },
       // A store that took an archived one's place this period is charged only what that location was not paid (D158).
       await this.creditsOf(period.id, db),
-      await this.freeStoresOf(companyId, period.id, db, now),
+      await this.freeStoresOf(companyId, period.id, db, now, period.periodStart),
     );
 
     if (assessment.addedThisPeriod === 0) {
@@ -531,9 +531,23 @@ export class BillingService {
   }
 
   /** Stores granted free for exactly this period (D227): a renewal's new period does not match, and bills them. */
-  private async freeStoresOf(companyId: Buffer, periodId: Buffer, db: BillingDb, now: Date = this.clock.now()): Promise<Set<string>> {
+  private async freeStoresOf(companyId: Buffer, periodId: Buffer, db: BillingDb, now: Date = this.clock.now(), periodStart?: Date): Promise<Set<string>> {
     const rows = await db.seatAllocation.findMany({
       where: { companyId, kind: 'store', status: 'granted', freeUntilPeriodId: periodId, freeUntilAt: { gt: now }, branchId: { not: null } },
+      select: { branchId: true },
+    });
+    const free = new Set(rows.map((r) => binToUuid(r.branchId!)));
+    if (periodStart) for (const id of await this.ownCoveredOf(companyId, db, periodStart)) free.add(id);
+    return free;
+  }
+
+  /**
+   * 0137 (owner, 2026-11-12): additional stores whose own paid month still runs at a period's start. The period does not
+   * charge their store fee (their seats stay chargeable); a period starting after it ends bills them with the business.
+   */
+  private async ownCoveredOf(companyId: Buffer, db: BillingDb, periodStart: Date): Promise<Set<string>> {
+    const rows = await db.seatAllocation.findMany({
+      where: { companyId, kind: 'store', status: 'paid', ownPaidUntil: { gt: periodStart }, branchId: { not: null } },
       select: { branchId: true },
     });
     return new Set(rows.map((r) => binToUuid(r.branchId!)));
@@ -642,10 +656,13 @@ export class BillingService {
     const [size, plans] = await Promise.all([this.sizeOf(companyId, db), this.planAt(now, db)]);
     const plan = this.pricingOf(plans.current);
     const q = quoteFor(size, plan);
+    // 0137: a store still covered by its own paid month is not charged its store fee in a period starting now.
+    const covered = await this.ownCoveredOf(companyId, db, now);
+    const coveredFee = q.lines.reduce((n, line) => n + (line.branchId !== null && covered.has(line.branchId) ? line.activityFee : 0), 0);
 
     const assessedActivityFeeByBranch: Record<string, number> = {};
     for (const line of q.lines) {
-      if (line.branchId !== null) assessedActivityFeeByBranch[line.branchId] = line.activityFee;
+      if (line.branchId !== null && !covered.has(line.branchId)) assessedActivityFeeByBranch[line.branchId] = line.activityFee;
     }
 
     await db.billingPeriod.create({
@@ -665,9 +682,9 @@ export class BillingService {
         activeStaffCount: q.activeStaffCount,
         includedStaffCount: q.includedStaffCount,
         chargeableStaffCount: q.chargeableStaffCount,
-        assessedBranchFee: q.branchFee,
+        assessedBranchFee: q.branchFee - coveredFee,
         assessedStaffFee: q.staffFee,
-        assessedTotal: q.monthlyTotal,
+        assessedTotal: q.monthlyTotal - coveredFee,
         assessedActivityFeeByBranch,
         currency: 'MRU',
       },

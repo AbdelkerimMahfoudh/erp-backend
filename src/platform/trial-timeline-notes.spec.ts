@@ -79,14 +79,15 @@ describe('C7: a whole free trial, and not one instant in its notes', () => {
     expect(said('approved')).toEqual(['Paid by transfer Paid access starts when the free trial ends.']);
     expect(said('renewed')).toEqual(["First billing period opens when the free trial ends, at today's size and the prices in force then."]);
     expect(said('seat_paid')).toEqual([
-      'Store "B": payment confirmed, reference BK-1. It opens when the free trial ends; its first paid month starts then.',
+      'Store "B": payment confirmed, reference BK-1. It opened now, with its own paid month; it has no free trial.',
       'Seat at Main: payment confirmed, reference BK-2. It starts when the free trial ends; its first paid month starts then.',
     ]);
     expect(said('trial_expired')).toEqual(['The 7-day free trial ended. Nothing was charged.']);
     // The instants are data: the claim's own columns, the first period's start, each request's start.
     expect(w.claimOf(b)).toMatchObject({ startedAt: CLAIMED, endsAt: T });
     expect(w.periods(b)[0].periodStart).toEqual(T);
-    expect(w.requests(b).map((r) => r.effectiveAt)).toEqual([T, T]);
+    // The store from its own payment (0137), the seat from the trial's end.
+    expect(w.requests(b).map((r) => r.effectiveAt)).toEqual([new Date(CLAIMED.getTime() + HOUR), T]);
   });
 
   it('granted during it: the grant, its first period and the end — in words', async () => {
@@ -119,7 +120,7 @@ describe('C7: a whole free trial, and not one instant in its notes', () => {
     const notes = notesOf(w, b);
     expectNoInstant(notes);
     expect(notes.filter((n) => n.kind === 'seat_paid').map((n) => n.note)).toEqual([
-      'Store "B": payment confirmed, reference BK-1. It opens when paid access starts after the free trial; its first paid month starts then.',
+      'Store "B": payment confirmed, reference BK-1. It opened now, with its own paid month; it has no free trial.',
       'Seat at Main: payment confirmed, reference BK-2. It starts when paid access starts after the free trial; its first paid month starts then.',
     ]);
     expect(notes.filter((n) => n.kind === 'trial_expired').map((n) => n.note)).toEqual(['The 7-day free trial ended. Nothing was charged.']);

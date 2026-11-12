@@ -10,6 +10,7 @@ import { CLOCK, type Clock } from '../entitlement/clock';
 import { ACTIVITIES, type Activity } from '../entitlement/activity';
 import { decideActivityChange } from './activity-decision';
 import { openStoreTx as openStore, type StoreOpening } from './store-opening';
+import { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
 import { TrialEndRoll } from './trial/trial-end-roll';
 import { displayTimeZone, runningTrialEnd } from './trial/trial-rules';
 import { newUuidV7Bin, binToUuid, uuidToBin } from '../common/utils/uuid.util';
@@ -262,6 +263,9 @@ export class SeatAllocationService {
   /** What a free trial's end owes the business (D176): put in force before a confirmation decides anything. */
   private readonly trialEnd: TrialEndRoll;
 
+  /** 0137: a store paid for during the free trial gets its own paid period from the approval (docs/122). */
+  private readonly branchPeriods: BranchEntitlementService;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: PlatformAuditService,
@@ -272,6 +276,7 @@ export class SeatAllocationService {
   ) {
     this.renewal = new SubscriptionRenewal(prisma, billing, clock);
     this.trialEnd = new TrialEndRoll(prisma, clock);
+    this.branchPeriods = new BranchEntitlementService(prisma, clock);
   }
 
   view(row: Row, activation: AddOnActivationView | null = null): SeatAllocationView {
@@ -1234,6 +1239,10 @@ export class SeatAllocationService {
       // A seat or a store of its own — not one taking an archived store's place (D158, PQ16).
       const addOn = (before.kind === 'seat' || before.kind === 'store') && before.replacesBranchId === null;
       const trialEndsAt = runningTrialEnd(claim, now);
+      // 0137 (owner, 2026-11-12): an additional store gets no trial and opens when its own payment is approved,
+      // wherever the Owner asked for it — on the portal as in the app (activatePendingBranchesTx). Its own paid month
+      // starts now; the trial stays the first store's. A seat paid for during the trial still starts at its end (D176).
+      if (addOn && before.kind === 'store' && trialEndsAt) return this.confirmNowTx(tx, before, sub, payment, now, { ownPeriod: true });
       if (addOn && trialEndsAt) return this.scheduleTx(tx, before, sub, payment, { now, endsAt: trialEndsAt, period });
       if (addOn && !periodInForce(period, now) && (claim || eligibility) && (!period || period.periodStart.getTime() > now.getTime())) {
         throw PAID_PERIOD_NOT_STARTED();
@@ -1392,6 +1401,7 @@ export class SeatAllocationService {
     sub: { id: Buffer; subscribedBranchCount: number },
     p: ConfirmedPayment,
     now: Date,
+    opts: { ownPeriod?: boolean } = {},
   ): Promise<Confirmation> {
     const payment = await this.paymentTx(tx, before, sub.id, p, now);
 
@@ -1408,6 +1418,7 @@ export class SeatAllocationService {
         paymentId: payment.id,
         confirmedBy: p.by,
         confirmedAt: now,
+        ...(opts.ownPeriod ? { effectiveAt: now } : {}),
         version: { increment: 1 },
       },
     });
@@ -1432,8 +1443,15 @@ export class SeatAllocationService {
         activity,
         address: before.location,
         actor: p.by,
-        note: `Store "${storeName}" (${activity}) opened after payment ${p.reference}.`,
+        note: opts.ownPeriod
+          ? `Store "${storeName}" (${activity}) opened after payment ${p.reference}, with its own paid month; no free trial.`
+          : `Store "${storeName}" (${activity}) opened after payment ${p.reference}.`,
+        ...(opts.ownPeriod ? { entitlement: 'own' as const } : {}),
       });
+      if (opts.ownPeriod) {
+        const own = await this.branchPeriods.applyPaidTx(tx as never, { companyId: before.companyId, branchId, months: 1, amount: Number(p.amount), paymentId: payment.id, proofId: null, actor: p.by, now });
+        await tx.seatAllocation.updateMany({ where: { id: before.id }, data: { ownPaidUntil: own.endsAt } });
+      }
       if (slot) {
         replacement = {
           archivedBranchId: binToUuid(slot.archived.id),
@@ -1507,7 +1525,7 @@ export class SeatAllocationService {
         companyId: before.companyId,
         subscriptionId: sub.id,
         kind: 'seat_paid',
-        note: `${before.kind === 'store' ? 'Store' : requestLabel(before)}: payment confirmed, reference ${p.reference}.`.slice(0, 255),
+        note: `${before.kind === 'store' ? (opts.ownPeriod ? `Store "${before.label ?? ''}"` : 'Store') : requestLabel(before)}: payment confirmed, reference ${p.reference}.${opts.ownPeriod ? ' It opened now, with its own paid month; it has no free trial.' : ''}`.slice(0, 255),
         branchesAfter: sub.subscribedBranchCount + (before.kind === 'store' ? 1 : 0),
         actor: p.by,
       },
@@ -1515,7 +1533,8 @@ export class SeatAllocationService {
 
     // A seat, a store or an activity upgrade added mid-period costs the whole month, now — in this transaction, so the
     // payment, the change and the assessment commit together. A period that already ended is never raised.
-    await this.billing.assessNow(before.companyId, tx, now);
+    // 0137: a store with its own paid month is not added to the business's period, as in the app path (branch-activation.ts).
+    if (!opts.ownPeriod) await this.billing.assessNow(before.companyId, tx, now);
 
     return { payment, status: 'paid', storeName, replacement, startsAt: null, waitsFor: null };
   }

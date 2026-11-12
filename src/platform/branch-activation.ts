@@ -81,6 +81,8 @@ export async function activatePendingBranchesTx(
       actor: input.actor,
       now,
     });
+    // 0137: its own paid month covers it; the business's billing period skips its fee until then.
+    await tx.seatAllocation.updateMany({ where: { id: row.id }, data: { ownPaidUntil: period.endsAt } });
     done.push({ requestId: binToUuid(row.id), name, outcome: 'opened', branchId: binToUuid(branchId), startsAt: period.startsAt.toISOString(), endsAt: period.endsAt.toISOString() });
   }
 

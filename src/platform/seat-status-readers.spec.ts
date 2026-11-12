@@ -369,6 +369,10 @@ const UNREAD_PINNED: { at: string; why: string }[] = [];
  */
 const PINNED: { at: string; count?: number; why: string }[] = [
   {
+    at: 'src/billing/billing.service.ts BillingService.ownCoveredOf = paid',
+    why: 'A store opened with its own paid month (0137) is paid, never scheduled: no store is scheduled since 0137, and a scheduled seat has no store fee.',
+  },
+  {
     at: 'src/platform/branch-requests.service.ts BranchRequestsService.list = paid',
     why: 'Stores activated from an app request in the last 30 days, for the setup checklist (0130); a scheduled one is listed as waiting by the clause beside it.',
   },

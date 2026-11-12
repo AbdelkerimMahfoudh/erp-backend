@@ -254,6 +254,33 @@ suite('a branch added in the app', () => {
     expect(await facts(id)).toMatchObject({ branches: 2, claim: trial });
   });
 
+  it('0137: during an active trial, a store opens at its own approved payment on either path — the app’s proof or the portal’s request — with no trial, and its own month recorded', async () => {
+    const { uuid, id, owner } = await shop({ trial: true });
+    const trial = (await facts(id)).claim!;
+    // The app's path: a branch added in the app, paid by a proof the platform approves.
+    await requests.create(id, owner, { name: 'Port', requestKey: key() }, 'spec');
+    const proof = await proofFor(uuid, id, owner);
+    await proofs.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'paid' }, ctx);
+    // The portal's path: a store requested on the portal, its payment confirmed by the platform.
+    const asked = await allocations.requestStore(id, { name: 'Ksar', activity: 'electronics', requestedBy: 'spec' });
+    const before = Date.now();
+    const confirmed = await allocations.confirmPayment(Buffer.from(asked.allocation.id.replace(/-/g, ''), 'hex'), { amount: '600', paidAt: new Date(), reference: 'BK-0137' }, ctx);
+    expect(confirmed.allocation).toMatchObject({ status: 'paid', activation: null, branchName: 'Ksar' });
+
+    const rows = await root.seatAllocation.findMany({ where: { companyId: id, kind: 'store' }, orderBy: { requestedAt: 'asc' } });
+    expect(rows.map((r) => [r.label, r.status, r.branchId !== null])).toEqual([['Port', 'paid', true], ['Ksar', 'paid', true]]);
+    for (const r of rows) {
+      const own = await root.branchEntitlement.findUniqueOrThrow({ where: { branchId: r.branchId! } });
+      expect(own.trialEndsAt).toBeNull();
+      // Its own month, from its approval — never from the trial's end — and the same instant the billing reads.
+      expect(own.paidUntil!.getTime()).toBeGreaterThan(before - 60_000 + 27 * 86_400_000);
+      expect(own.paidUntil!.getTime()).toBeLessThan(trial.endsAt.getTime() + 27 * 86_400_000);
+      expect(r.ownPaidUntil?.getTime()).toBe(own.paidUntil!.getTime());
+    }
+    expect(await root.seatAllocation.count({ where: { companyId: id, status: 'scheduled' } })).toBe(0);
+    expect(await facts(id)).toMatchObject({ branches: 3, claim: trial });
+  });
+
 
   // 0134 (owner, 2026-11-08): what a payment is for, priced from the one price list; only subscriptions and activations
   // extend access. A proof service whose entitlement knows the business's real Main store.

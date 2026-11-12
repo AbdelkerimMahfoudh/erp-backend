@@ -4820,6 +4820,8 @@ model SeatAllocation {
   freeUntilPeriodId   Bytes?    @map("free_until_period_id") @db.Binary(16)
   /// When that exemption ends, as recorded at the grant. Only an audited extension moves it.
   freeUntilAt         DateTime? @map("free_until_at") @db.DateTime(6)
+  /// 0137: an additional store opened with its own paid month — the business period skips its fee in a period starting before this.
+  ownPaidUntil        DateTime? @map("own_paid_until") @db.DateTime(6)
 
   /// Integer MRU per month, copied from the plan when requested. Zero for a grant.
   monthlyAmount Int    @map("monthly_amount") @db.UnsignedInt

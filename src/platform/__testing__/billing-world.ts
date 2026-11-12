@@ -62,6 +62,9 @@ function matches(row: AnyRow, where: AnyRow | undefined): boolean {
     if (want !== null && typeof want === 'object' && !Buffer.isBuffer(want) && !(want instanceof Date)) {
       if ('in' in want) {
         if (!(want.in as unknown[]).some((x) => same(have, x))) return false;
+      } else if ('gt' in want) {
+        // 0137: own_paid_until > a period's start.
+        if (!(have instanceof Date) || !(want.gt instanceof Date) || have.getTime() <= want.gt.getTime()) return false;
       } else if ('not' in want) {
         if (same(have, want.not)) return false;
       } else {
