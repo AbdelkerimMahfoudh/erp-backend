@@ -522,4 +522,50 @@ suite('a branch added in the app', () => {
     expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'payment_proof.refuse' } })).toBe(1);
     await expect(svc.refuse(second.id, 'again', ctx, 1)).rejects.toMatchObject({ response: { code: 'proof_decided' } });
   });
+  // ── Terms 1.1 (owner, 2026-11-12): an additional store's own paid term begins on the date access opens ──────────
+
+  async function newStoreTerm(companyId: Buffer, name: string) {
+    const branch = await root.branch.findFirstOrThrow({ where: { companyId, name } });
+    const periods = await root.branchPeriod.findMany({ where: { companyId, branchId: branch.id } });
+    const own = await root.branchEntitlement.findUniqueOrThrow({ where: { branchId: branch.id } });
+    return { branch, periods, own };
+  }
+
+  it('terms 1.1: Confirm payment — a new store’s own term begins at the confirmation (when its access opens), once', async () => {
+    const { id, owner } = await shop();
+    const { svc } = await mainStore(id);
+    await requests.create(id, owner, { name: 'Port', requestKey: key() }, 'spec');
+    const proof = await svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, userId: owner } as never);
+    const before = Date.now() - 5;
+    await svc.approve(proof.id, { amount: proof.amount, paidAt: new Date(Date.now() - 3 * 86_400_000).toISOString(), months: 1, reason: 'deposit found', revision: 1 }, ctx);
+    const after = Date.now() + 5;
+    const { periods, own } = await newStoreTerm(id, 'Port');
+    expect(periods).toHaveLength(1);
+    // Not the date the Owner says they paid (three days ago): the moment the access opened.
+    expect(periods[0]!.startsAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(periods[0]!.startsAt.getTime()).toBeLessThanOrEqual(after);
+    expect(own.paidUntil!.getTime()).toBe(periods[0]!.endsAt!.getTime());
+  });
+
+  it('terms 1.1: Open access while reviewing, then confirm — the term begins at the opening; the confirmation keeps its dates and grants no second term', async () => {
+    const { id, owner } = await shop();
+    const { svc } = await mainStore(id);
+    await requests.create(id, owner, { name: 'Port', requestKey: key() }, 'spec');
+    const proof = await svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), category: 'store_activation', months: 1, userId: owner } as never);
+    const decision = { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'checking', revision: 1 };
+    const before = Date.now() - 5;
+    await svc.approve(proof.id, decision, ctx, { open: true });
+    const after = Date.now() + 5;
+    const opened = await newStoreTerm(id, 'Port');
+    expect(opened.branch.isActive).toBe(true);
+    expect(opened.periods).toHaveLength(1);
+    expect(opened.periods[0]!.startsAt.getTime()).toBeGreaterThanOrEqual(before);
+    expect(opened.periods[0]!.startsAt.getTime()).toBeLessThanOrEqual(after);
+    // Confirmed later: the same term, the same dates; nothing added.
+    await new Promise((r) => setTimeout(r, 50));
+    await svc.approve(proof.id, { ...decision, reason: 'deposit found' }, ctx);
+    const confirmed = await newStoreTerm(id, 'Port');
+    expect(confirmed.periods.map((p) => [p.id.toString('hex'), p.startsAt.getTime(), p.endsAt!.getTime()])).toEqual(opened.periods.map((p) => [p.id.toString('hex'), p.startsAt.getTime(), p.endsAt!.getTime()]));
+    expect(confirmed.own.paidUntil!.getTime()).toBe(opened.own.paidUntil!.getTime());
+  });
 });
