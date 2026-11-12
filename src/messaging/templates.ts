@@ -238,6 +238,32 @@ export const PAYMENT_SUBMITTED_TEMPLATE: TemplateDefinition = {
   configKey: 'WHATSAPP_TEMPLATE_PAYMENT_SUBMITTED',
 };
 
+/**
+ * 0138 (owner, 2026-11-12): the administrators' alerts, to their own numbers (PAYMENT_ALERT_NUMBERS) — no link, no
+ * customer or money details. "A payment proof was submitted. Please verify it in the admin portal." once per new proof
+ * (never for a correction); "review overdue" once, 24 hours after access was opened with no second decision. Off until
+ * the approved template's name is set.
+ */
+export const ADMIN_PROOF_TEMPLATE: TemplateDefinition = {
+  key: 'admin.proof_submitted',
+  category: 'operational',
+  variables: [],
+  languages: ['en'],
+  providerKind: 'utility',
+  use: 'operator',
+  configKey: 'WHATSAPP_TEMPLATE_ADMIN_PROOF',
+};
+
+export const ADMIN_OVERDUE_TEMPLATE: TemplateDefinition = {
+  key: 'admin.proof_overdue',
+  category: 'operational',
+  variables: [],
+  languages: ['en'],
+  providerKind: 'utility',
+  use: 'operator',
+  configKey: 'WHATSAPP_TEMPLATE_ADMIN_OVERDUE',
+};
+
 /*
  * The portal instructions and the subscription lifecycle messages (0099; the owner's brief of 2026-10-18; docs/101 §7).
  *
@@ -335,6 +361,8 @@ const REGISTRY: Record<string, TemplateDefinition> = {
   [CLOSING_MONTHLY_PDF_TEMPLATE.key]: CLOSING_MONTHLY_PDF_TEMPLATE,
   [DELIVERY_CHECK_TEMPLATE.key]: DELIVERY_CHECK_TEMPLATE,
   [PAYMENT_SUBMITTED_TEMPLATE.key]: PAYMENT_SUBMITTED_TEMPLATE,
+  [ADMIN_PROOF_TEMPLATE.key]: ADMIN_PROOF_TEMPLATE,
+  [ADMIN_OVERDUE_TEMPLATE.key]: ADMIN_OVERDUE_TEMPLATE,
   ...Object.fromEntries(SUBSCRIPTION_TEMPLATES.map((t) => [t.key, t])),
 };
 

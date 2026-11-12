@@ -37,6 +37,10 @@ suite('a branch added in the app', () => {
   const adminId = newUuidV7Bin();
   const admin = { id: adminId, email: `ops-${binToUuid(adminId).slice(-12)}@example.test`, name: 'Ops' };
   const ctx = { admin, ip: '127.0.0.1' } as never;
+  // 0138: the second administrator — a different person — who confirms or refuses what the first opened.
+  const admin2Id = newUuidV7Bin();
+  const admin2 = { id: admin2Id, email: `ops2-${binToUuid(admin2Id).slice(-12)}@example.test`, name: 'Ops 2' };
+  const ctx2 = { admin: admin2, ip: '127.0.0.1' } as never;
   const audit = url ? new PlatformAuditService(db) : (null as never);
   const billing = url ? new BillingService(db, clock as never) : (null as never);
   const lifecycle = url ? new SubscriptionLifecycleService(db, audit, billing, clock as never) : (null as never);
@@ -62,7 +66,10 @@ suite('a branch added in the app', () => {
   const entitlement = { forCompany: async () => ({ seatsByStore: [] }) };
   const proofs = url ? new PaymentProofsService(db, lifecycle, audit, entitlement as never, { proofSubmitted: async () => ({ sent: 0 }) } as never, new BranchEntitlementService(db as never, { now: () => new Date() })) : (null as never);
 
-  beforeAll(() => root.$executeRaw`INSERT INTO platform_admins (id, email, name, password_hash, updated_at) VALUES (${admin.id}, ${admin.email}, ${admin.name}, 'x', NOW(6))`);
+  beforeAll(async () => {
+    await root.$executeRaw`INSERT INTO platform_admins (id, email, name, password_hash, updated_at) VALUES (${admin.id}, ${admin.email}, ${admin.name}, 'x', NOW(6))`;
+    await root.$executeRaw`INSERT INTO platform_admins (id, email, name, password_hash, updated_at) VALUES (${admin2.id}, ${admin2.email}, ${admin2.name}, 'x', NOW(6))`;
+  });
   afterAll(() => root.$disconnect());
 
   let seq = 0;
@@ -361,9 +368,11 @@ suite('a branch added in the app', () => {
     expect((await root.seatAllocation.findUniqueOrThrow({ where: { id: ksar.id } })).status).toBe('pending_payment');
 
     // On revision 2: approved once; a retry answers with the same approval, and no correction is accepted any more.
-    const approved = await proofs.approve(first.id, { amount: '600', paidAt: new Date().toISOString(), months: 1, reason: 'paid', revision: 2 }, ctx);
+    const opened = await proofs.approve(first.id, { amount: '600', paidAt: new Date().toISOString(), months: 1, reason: 'paid', revision: 2 }, ctx);
+    expect(opened).toMatchObject({ status: 'under_review', revision: 2, review: { openedRevision: 2 } });
+    expect(await proofs.approve(first.id, { amount: '600', paidAt: new Date().toISOString(), months: 1, reason: 'paid', revision: 2 }, ctx)).toMatchObject({ status: 'under_review' });
+    const approved = await proofs.confirm(first.id, { revision: 2 }, ctx2);
     expect(approved).toMatchObject({ status: 'approved', revision: 2 });
-    expect(await proofs.approve(first.id, { amount: '600', paidAt: new Date().toISOString(), months: 1, reason: 'paid', revision: 2 }, ctx)).toMatchObject({ status: 'approved' });
     expect(await root.subscriptionPayment.count({ where: { companyId: id, reference: 'proof:' + first.id } })).toBe(1);
     expect((await root.seatAllocation.findUniqueOrThrow({ where: { id: ksar.id } })).status).toBe('paid');
     await expect(proofs.correct(id, first.id, undefined, { payerPhone: '36000004', userId: owner })).rejects.toMatchObject({ response: { code: 'proof_decided' } });
@@ -393,7 +402,7 @@ suite('a branch added in the app', () => {
     expect(CLAIM_LINK_TTL_MS).toBe(72 * 3_600_000);
     // Redeemed: the landing is that store; a second use is refused.
     const first = await links.redeem(token, (tx, link) => claimLanding(tx, link));
-    expect(first).toEqual({ ok: true, result: binToUuid(ksar.id) });
+    expect(first).toEqual({ ok: true, result: { id: binToUuid(ksar.id), kind: 'store' } });
     await expect(links.redeem(token, (tx, link) => claimLanding(tx, link))).resolves.toEqual({ ok: false, reason: 'used' });
     // Issued 72 hours ago and a second: expired, never opened.
     const old = await links.issue({ companyId: id, userId: owner, noticeId: notice.id }, new Date(Date.now() - CLAIM_LINK_TTL_MS - 1000));
@@ -436,4 +445,65 @@ suite('a branch added in the app', () => {
     expect((await proofs.file(sent.id, ctx)).fileName).toMatch(/\.bin$/);
   });
 
+  // ── 0138 (owner, 2026-11-12): where the money was sent, and a two-person review ─────────────────────────────
+
+  it('0138: the receiver is one the server offers — recorded, normalised, refused when the number does not take that service; a correction may change it', async () => {
+    const { id, owner } = await shop();
+    const { svc } = await mainStore(id);
+    await expect(svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), months: 1, receiveService: 'sedad', receiveNumber: '12345678', userId: owner } as never)).rejects.toMatchObject({ response: { code: 'receiver_invalid' } });
+    await expect(svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), months: 1, receiveService: 'masrivi', receiveNumber: '36963839', userId: owner } as never)).rejects.toMatchObject({ response: { code: 'receiver_invalid' } });
+    const sent = await svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), months: 1, receiveService: 'Sedad', receiveNumber: '+222 37 67 68 27', userId: owner } as never);
+    expect(sent).toMatchObject({ receiveService: 'sedad', receiveNumber: '37676827' });
+    const fixed = await svc.correct(id, sent.id, undefined, { receiveService: 'bankily', receiveNumber: '36963839', revision: 1, userId: owner });
+    expect(fixed).toMatchObject({ receiveService: 'bankily', receiveNumber: '36963839', revision: 2 });
+    expect((await svc.listForAdmin()).find((p) => p.id === sent.id)).toMatchObject({ receiveService: 'bankily', receiveNumber: '36963839', revision: 2 });
+  });
+
+  it('0138: two administrators — the first opens the access; the same person cannot confirm or refuse; a different one confirms the deposit', async () => {
+    const { uuid, id, owner } = await shop();
+    const { svc } = await mainStore(id);
+    const main = await root.branch.findFirstOrThrow({ where: { companyId: id, type: 'store' } });
+    const proof = await svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), months: 1, userId: owner });
+    const opened = await svc.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'first look', revision: 1 }, ctx);
+    expect(opened).toMatchObject({ status: 'under_review', review: { openedBy: admin.email, openedRevision: 1, confirmedBy: null, overdue: false } });
+    expect((await root.branchEntitlement.findUniqueOrThrow({ where: { branchId: main.id } })).paidUntil!.getTime()).toBeGreaterThan(Date.now() + 27 * 86_400_000);
+    expect(await root.subscriptionPayment.findFirstOrThrow({ where: { companyId: id, reference: `proof:${proof.id}` } })).toMatchObject({ confirmedAt: null });
+    expect((await svc.listForCompany(id)).find((p) => p.id === proof.id)).toMatchObject({ status: 'under_review' });
+    // Opened once: no second grant from the same proof; the Owner cannot correct it now.
+    await svc.approve(proof.id, { amount: proof.amount, paidAt: new Date().toISOString(), months: 1, reason: 'again', revision: 1 }, ctx2);
+    expect(await root.branchPeriod.count({ where: { companyId: id, paymentProofId: uuidToBin(proof.id) } })).toBe(1);
+    await expect(svc.correct(id, proof.id, undefined, { payerPhone: '36000001', userId: owner })).rejects.toMatchObject({ response: { code: 'proof_decided' } });
+    await expect(svc.confirm(proof.id, { revision: 1 }, ctx)).rejects.toMatchObject({ response: { code: 'second_admin_required' } });
+    await expect(svc.refuse(proof.id, 'mine', ctx, 1)).rejects.toMatchObject({ response: { code: 'second_admin_required' } });
+    expect(await svc.confirm(proof.id, { revision: 1, reason: 'seen on the Bankily account' }, ctx2)).toMatchObject({ status: 'approved', review: { confirmedBy: admin2.email } });
+    expect(await root.subscriptionPayment.findFirstOrThrow({ where: { companyId: id, reference: `proof:${proof.id}` } })).toMatchObject({ confirmedBy: admin2.email });
+  });
+
+  it('0138: refused after it was opened — only what this proof added is taken back; access paid before stays; the Owner is told; nothing is erased', async () => {
+    const { uuid, id, owner } = await shop();
+    const { svc } = await mainStore(id);
+    const main = await root.branch.findFirstOrThrow({ where: { companyId: id, type: 'store' } });
+    const paid = await svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), months: 1, userId: owner });
+    await svc.approve(paid.id, { amount: paid.amount, paidAt: new Date().toISOString(), months: 1, reason: 'paid', revision: 1 }, ctx);
+    await svc.confirm(paid.id, { revision: 1 }, ctx2);
+    const paidUntil = (await root.branchEntitlement.findUniqueOrThrow({ where: { branchId: main.id } })).paidUntil!;
+    const periodEnd = (await root.subscription.findFirstOrThrow({ where: { companyId: id } })).currentPeriodEnd;
+    await requests.create(id, owner, { name: 'Port', requestKey: key() }, 'spec');
+    const second = await svc.submit(id, { buffer: PNG() }, { idempotencyKey: key(), months: 1, userId: owner });
+    await svc.approve(second.id, { amount: second.amount, paidAt: new Date().toISOString(), months: 1, reason: 'looks right', revision: 1 }, ctx);
+    const port = await root.branch.findFirstOrThrow({ where: { companyId: id, name: 'Port' } });
+    expect(port.isActive).toBe(true);
+    expect((await root.branchEntitlement.findUniqueOrThrow({ where: { branchId: main.id } })).paidUntil!.getTime()).toBeGreaterThan(paidUntil.getTime());
+
+    const refused = await svc.refuse(second.id, 'No deposit on 36963839', ctx2, 1);
+    expect(refused).toMatchObject({ status: 'refused', refusalReason: 'No deposit on 36963839' });
+    expect((await root.branchEntitlement.findUniqueOrThrow({ where: { branchId: main.id } })).paidUntil!.getTime()).toBe(paidUntil.getTime());
+    expect((await root.subscription.findFirstOrThrow({ where: { companyId: id } })).currentPeriodEnd?.getTime()).toBe(periodEnd?.getTime());
+    expect(await root.branch.findUniqueOrThrow({ where: { id: port.id } })).toMatchObject({ isActive: false, name: 'Port' });
+    expect(await root.subscriptionPayment.findFirstOrThrow({ where: { companyId: id, reference: `proof:${second.id}` } })).toMatchObject({ confirmedAt: null, note: 'Not verified: No deposit on 36963839' });
+    expect(await root.subscriptionPayment.findFirstOrThrow({ where: { companyId: id, reference: `proof:${paid.id}` } })).toMatchObject({ confirmedBy: admin2.email });
+    expect(await root.notification.count({ where: { companyId: id, type: 'payment.refused', targetUserId: owner } })).toBe(1);
+    expect(await root.platformAuditEvent.count({ where: { targetId: id, action: 'payment_proof.refuse' } })).toBe(1);
+    await expect(svc.refuse(second.id, 'again', ctx2, 1)).rejects.toMatchObject({ response: { code: 'proof_decided' } });
+  });
 });

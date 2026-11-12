@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 /**
  * How a shop is told to pay — and, today, that it cannot be told yet.
  *
@@ -36,6 +37,8 @@ export interface PaymentProvider {
   enabled: boolean;
   /** What the shopkeeper types into their payment app. */
   code: string;
+  /** 0138 (owner, 2026-11-12): every number this service receives on — `code` is the first, for older pages and the app. */
+  codes?: readonly string[];
   /**
    * True while `code` is a stand-in rather than a real destination.
    *
@@ -59,6 +62,8 @@ export const PLACEHOLDER_CODE = '00000';
 
 /** Where an Owner pays by Bankily or Sedad (owner, 2026-11-05). A merchant number for customers to see, not a secret. */
 export const PAYMENT_NUMBER = '36963839';
+/** 0138: the second receiving number; the owner confirmed both receive Bankily and Sedad (2026-11-12). */
+export const PAYMENT_NUMBER_2 = '37676827';
 
 /**
  * The catalogue, in the order a shop would see it. None is offered: each still
@@ -66,9 +71,9 @@ export const PAYMENT_NUMBER = '36963839';
  */
 export const PAYMENT_PROVIDER_CATALOGUE: readonly PaymentProvider[] = [
   // The owner's real merchant number (2026-11-05), the same for both; shown without the country code, as the apps take it.
-  { key: 'bankily', label: 'Bankily', order: 1, enabled: true, code: PAYMENT_NUMBER, placeholder: false },
+  { key: 'bankily', label: 'Bankily', order: 1, enabled: true, code: PAYMENT_NUMBER, codes: [PAYMENT_NUMBER, PAYMENT_NUMBER_2], placeholder: false },
   { key: 'masrivi', label: 'Masrivi', order: 2, enabled: false, code: PLACEHOLDER_CODE, placeholder: true },
-  { key: 'sedad', label: 'Sedad', order: 3, enabled: true, code: PAYMENT_NUMBER, placeholder: false },
+  { key: 'sedad', label: 'Sedad', order: 3, enabled: true, code: PAYMENT_NUMBER, codes: [PAYMENT_NUMBER, PAYMENT_NUMBER_2], placeholder: false },
   { key: 'bimbank', label: 'Bimbank', order: 4, enabled: false, code: PLACEHOLDER_CODE, placeholder: true },
   { key: 'click', label: 'Click', order: 5, enabled: false, code: PLACEHOLDER_CODE, placeholder: true },
 ];
@@ -129,4 +134,20 @@ export function assertPaymentInstructionsSafeForProduction(
         '. Give each offered provider its real payment code before running in production.',
     );
   }
+}
+
+/**
+ * 0138: the service and receiving number the Owner chose, if it is one the server offers — null when none was named.
+ * A pairing not offered (a number that does not receive that service) is refused, never recorded.
+ */
+export function receiverOf(service: string | undefined, number: string | undefined, catalogue: readonly PaymentProvider[] = PAYMENT_PROVIDER_CATALOGUE): { service: PaymentProviderKey; number: string } | null {
+  const svc = service?.trim().toLowerCase() ?? '';
+  const num = (number ?? '').replace(/\D/g, '').replace(/^222(?=\d{8}$)/, '');
+  if (!svc && !num) return null;
+  const p = catalogue.find((x) => x.enabled && !x.placeholder && x.key === svc);
+  const codes = p ? (p.codes ?? [p.code]) : [];
+  if (!p || !codes.includes(num)) {
+    throw new BadRequestException({ code: 'receiver_invalid', message: 'Choose the service and number you sent the money to.' });
+  }
+  return { service: p.key, number: num };
 }

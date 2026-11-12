@@ -10,6 +10,8 @@ const url = process.env.PROVISIONING_ROOT_URL;
 const suite = url ? describe : describe.skip;
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(randomUUID())]);
 const ctx = { admin: { id: Buffer.alloc(16, 1), email: 'ops@example.test', name: 'Ops' }, ip: '127.0.0.1' } as never;
+/** 0138: the second administrator, who confirms what the first opened. */
+const ctx2 = { admin: { id: Buffer.alloc(16, 3), email: 'ops2@example.test', name: 'Ops 2' }, ip: '127.0.0.1' } as never;
 
 describe('what a proof may be', () => {
   it('goes by the bytes, not the name or the claimed type', () => {
@@ -73,6 +75,7 @@ suite('payment proofs', () => {
     expect(await service.refuse(first.id, 'Amount unreadable', ctx)).toMatchObject({ status: 'refused', refusalReason: 'Amount unreadable' });
     const again = await send(a, randomUUID(), file);
     await service.approve(again.id, decision, ctx);
+    await service.confirm(again.id, { revision: again.revision }, ctx2);
     await expect(send(a, randomUUID(), file)).rejects.toMatchObject({ response: { code: 'proof_duplicate' } });
   });
 
@@ -83,8 +86,16 @@ suite('payment proofs', () => {
     lifecycle.extend.mockRejectedValueOnce(new Error('down'));
     await expect(service.approve(proof.id, decision, ctx)).rejects.toThrow('down');
     expect((await service.listForCompany(a))[0]).toMatchObject({ status: 'submitted' });
-    expect(await service.approve(proof.id, decision, ctx)).toMatchObject({ status: 'approved', months: 1 });
-    expect(await service.approve(proof.id, decision, ctx)).toMatchObject({ status: 'approved' });
+    // 0138: the first administrator opens the access; the proof stays under review until another confirms.
+    expect(await service.approve(proof.id, decision, ctx)).toMatchObject({ status: 'under_review', months: 1, review: { openedBy: 'ops@example.test' } });
+    expect(await service.approve(proof.id, decision, ctx)).toMatchObject({ status: 'under_review' });
+    expect((await service.listForCompany(a))[0]).toMatchObject({ status: 'under_review' });
+    expect((await service.listForCompany(a))[0]).not.toHaveProperty('review');
+    await expect(service.confirm(proof.id, { revision: proof.revision }, ctx)).rejects.toMatchObject({ response: { code: 'second_admin_required' } });
+    expect(await service.confirm(proof.id, { revision: proof.revision }, ctx2)).toMatchObject({ status: 'approved', review: { openedBy: 'ops@example.test', confirmedBy: 'ops2@example.test' } });
+    expect(await service.confirm(proof.id, { revision: proof.revision }, ctx2)).toMatchObject({ status: 'approved' });
+    // Recorded unconfirmed by the first; confirmed by the second.
+    expect(lifecycle.recordPayment.mock.calls[0][1].confirm).toBe(false);
     expect(lifecycle.extend).toHaveBeenCalledTimes(2);
     // Recognised by its reference: the same payment both times.
     expect(lifecycle.recordPayment.mock.calls[0][1].reference).toBe(`proof:${proof.id}`);

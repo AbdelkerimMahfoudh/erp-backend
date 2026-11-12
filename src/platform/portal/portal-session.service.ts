@@ -46,7 +46,8 @@ export interface PortalOpened {
   refreshToken: string;
   session: PortalSessionView;
   /** A claim link's destination: the waiting store its activation message was about (owner, 2026-11-11). */
-  landing?: { store: string } | null;
+  /** The request the link was for: `store` kept for older pages; 0138 names the request and its kind (a store or a seat). */
+  landing?: { store: string; request: string; kind: 'store' | 'seat' } | null;
 }
 
 export type PortalSignInAnswer =
@@ -106,7 +107,7 @@ export class PortalSessionService {
     const refreshToken = this.tokens.buildRefreshToken(binToUuid(sessionId), secret);
     const named = await this.ownerOf(owner.id, owner.companyId);
     if (!named) throw new ForbiddenException(OWNER_ONLY);
-    return { accessToken: access.token, accessTtlSeconds: access.expiresIn, refreshToken, session: await this.viewOf(named, binToUuid(sessionId)), landing: store ? { store } : null };
+    return { accessToken: access.token, accessTtlSeconds: access.expiresIn, refreshToken, session: await this.viewOf(named, binToUuid(sessionId)), landing: store ? { store: store.id, request: store.id, kind: store.kind } : null };
   }
 
   /** The refresh cookie, rotated: a new pair of cookies for the same session — and the Owner checked again. */
@@ -174,11 +175,11 @@ export class PortalSessionService {
  * Where a claim link lands (owner, 2026-11-11): a store activation message opens that waiting store, by its id; every other
  * link, the subscription page (null). Only this business's own notice and store are read.
  */
-export async function claimLanding(tx: Prisma.TransactionClient, link: { companyId: Buffer; noticeId: Buffer | null }): Promise<string | null> {
+export async function claimLanding(tx: Prisma.TransactionClient, link: { companyId: Buffer; noticeId: Buffer | null }): Promise<{ id: string; kind: 'store' | 'seat' } | null> {
   if (!link.noticeId) return null;
   const notice = await tx.subscriptionNotice.findFirst({ where: { id: link.noticeId, companyId: link.companyId, kind: 'branch_activation' }, select: { periodKey: true } });
   const allocation = notice?.periodKey.startsWith('branch:') ? Buffer.from(notice.periodKey.slice(7), 'hex') : null;
   if (allocation?.length !== 16) return null;
-  const store = await tx.seatAllocation.findFirst({ where: { id: allocation, companyId: link.companyId, kind: 'store' }, select: { id: true } });
-  return store ? binToUuid(store.id) : null;
+  const found = await tx.seatAllocation.findFirst({ where: { id: allocation, companyId: link.companyId, kind: { in: ['store', 'seat'] } }, select: { id: true, kind: true } });
+  return found ? { id: binToUuid(found.id), kind: found.kind as 'store' | 'seat' } : null;
 }

@@ -17,6 +17,19 @@ import { MAX_PROOF_BYTES, PaymentProofsService } from './payment-proofs.service'
 import { contentDisposition } from './proof-file';
 import { isPaymentCategory, priceList } from '../billing/period-offers';
 
+/** 0138: the revision confirmed, and what was checked on the receiving account. */
+export class ConfirmProofDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  revision!: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+}
+
 export class RefuseProofDto {
   @IsOptional() @IsString() @MaxLength(200) confirmPassword?: string;
   @IsString() @MinLength(1) @MaxLength(500) reason!: string;
@@ -103,7 +116,7 @@ export class PaymentProofsController {
   @UseInterceptors(FileInterceptor('file', { limits: uploadLimits(MAX_PROOF_BYTES) }))
   submit(
     @UploadedFile() file: { buffer: Buffer; originalname?: string } | undefined,
-    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; branches?: string; reference?: string; note?: string; category?: string; seats?: string; payerPhone?: string },
+    @Body() body: { idempotencyKey?: string; amount?: string; paidAt?: string; months?: string; branches?: string; reference?: string; note?: string; category?: string; seats?: string; payerPhone?: string; receiveService?: string; receiveNumber?: string },
     @CurrentUser() user: AuthUser,
   ) {
     // A plan (1, 3 or 12 months, owner 2026-11-05) prices itself on the server; otherwise the amount and date are stated.
@@ -121,6 +134,9 @@ export class PaymentProofsController {
       category: body.category,
       seats: body.seats !== undefined && body.seats !== '' ? Number(body.seats) : undefined,
       payerPhone: body.payerPhone,
+      // 0138: where the Owner sent the money — a pairing the server offers.
+      receiveService: body.receiveService,
+      receiveNumber: body.receiveNumber,
       userId: uuidToBin(user.userId),
     });
   }
@@ -136,12 +152,12 @@ export class PaymentProofsController {
   correct(
     @Param('id') id: string,
     @UploadedFile() file: { buffer: Buffer; originalname?: string } | undefined,
-    @Body() body: { payerPhone?: string; reference?: string; note?: string; revision?: string },
+    @Body() body: { payerPhone?: string; reference?: string; note?: string; revision?: string; receiveService?: string; receiveNumber?: string },
     @CurrentUser() user: AuthUser,
     @Req() req: { ip?: string },
   ) {
     const revision = body?.revision !== undefined && body.revision !== '' ? Number(body.revision) : undefined;
-    return this.proofs.correct(this.tenant.companyId(), id, file, { payerPhone: body?.payerPhone, reference: body?.reference, note: body?.note, revision, userId: uuidToBin(user.userId) }, { ip: req.ip });
+    return this.proofs.correct(this.tenant.companyId(), id, file, { payerPhone: body?.payerPhone, reference: body?.reference, note: body?.note, revision, receiveService: body?.receiveService, receiveNumber: body?.receiveNumber, userId: uuidToBin(user.userId) }, { ip: req.ip });
   }
 
   @Public()
@@ -204,6 +220,16 @@ export class PaymentProofsController {
   async approve(@Param('id') id: string, @Body() dto: ApproveProofDto, @Req() req: AdminRequest) {
     await this.admins.requireStepUp(req.platformAdmin!);
     return this.proofs.approve(id, dto, { admin: req.platformAdmin!, ip: req.ip });
+  }
+
+  /** 0138: the second administrator — never the first — confirms the deposit on the receiving account. */
+  @Public()
+  @UseGuards(PlatformAdminGuard)
+  @Post('payment-proofs/:id/confirm')
+  @HttpCode(HttpStatus.OK)
+  async confirm(@Param('id') id: string, @Body() dto: ConfirmProofDto, @Req() req: AdminRequest) {
+    await this.admins.requireStepUp(req.platformAdmin!);
+    return this.proofs.confirm(id, dto, { admin: req.platformAdmin!, ip: req.ip });
   }
 
   @Public()

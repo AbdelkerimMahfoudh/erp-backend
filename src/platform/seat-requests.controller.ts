@@ -10,6 +10,7 @@ import {
   Query,
   Req,
   UseGuards,
+  NotFoundException,
 } from '@nestjs/common';
 import { IsArabicName, IsLatinNameOrLegacy, NormalizeName, NormalizeOptionalName } from '../common/bilingual-name';
 import { ApiExcludeController } from '@nestjs/swagger';
@@ -160,6 +161,21 @@ export class SeatRequestsController {
   @RequirePermissions('settings.manage')
   mySeatRequests() {
     return this.allocations.listForCompany(this.tenant.companyId());
+  }
+
+  /**
+   * 0138 (owner, 2026-11-12): one of the Owner's own requests still waiting for payment, by its id — what the activation
+   * message's link opens after its one-time sign-in, and what the portal's payment flow fills itself with. Only this
+   * business's, only one awaiting payment; anything else is unknown. Carries the store's names and activity or the
+   * seat's store and person's name, and the server's price — never a phone number.
+   */
+  @Get('my-subscription/pending/:rid')
+  @RequirePermissions('settings.manage')
+  async myPendingRequest(@Param('rid') rid: string) {
+    const all = await this.allocations.listForCompany(this.tenant.companyId());
+    const found = all.find((r) => r.id === rid.toLowerCase() && r.status === 'pending_payment' && (r.kind === 'store' || r.kind === 'seat'));
+    if (!found) throw new NotFoundException('Unknown request');
+    return { id: found.id, kind: found.kind, label: found.label, labelAr: (found as { labelAr?: string | null }).labelAr ?? null, activity: found.activityTo, store: found.store, person: found.person ? { name: found.person.name } : null, monthlyAmount: found.monthlyAmount };
   }
 
   @Post('my-subscription/seat-requests')

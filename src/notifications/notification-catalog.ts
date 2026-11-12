@@ -31,6 +31,8 @@ const EXACT: Record<string, Entry> = {
   'sale.recorded': { category: 'sales', importance: 'routine' },
   // 0130, 0132: a branch the Owner added in the app is open — its payment approved.
   'branch.activated': { category: 'other', importance: 'important' },
+  // 0138: a payment proof was not verified — the Owner is told why, in the app.
+  'payment.refused': { category: 'other', importance: 'important' },
   'stock.received': { category: 'stock', importance: 'routine' },
   'price.changed': { category: 'stock', importance: 'routine' },
   'closing.completed': { category: 'money', importance: 'routine' },

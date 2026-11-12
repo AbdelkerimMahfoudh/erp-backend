@@ -13,12 +13,16 @@ import { isOfferMonths, isPaymentCategory, MAX_EXTRA_SEATS, quote, seatsPrice, e
 import { PaymentAlertService } from './payment-alert.service';
 import { activatePendingBranchesTx } from './branch-activation';
 import { BranchEntitlementService } from '../entitlement/branch-entitlement.service';
+import { receiverOf } from './payment-instructions';
+import { lockSubscription } from '../billing/renewal';
 
 export const MAX_PROOF_BYTES = 5 * 1024 * 1024;
 /** How long a decided proof's file is kept. The decision and its figures stay; the image of somebody's receipt does not. */
 export const PROOF_RETENTION_DAYS = 365;
 /** How long a claim may belong to an approval still running, before anyone may act on it. */
 export const RECOVERY_AFTER_MS = 2 * 60 * 1000;
+/** 0138: the target for the second administrator's decision after access was opened — not an expiry of the access. */
+export const REVIEW_TARGET_MS = 24 * 60 * 60 * 1000;
 
 type Channel = 'manual' | 'bank_transfer' | 'mobile_money';
 interface ApplyRequest {
@@ -27,7 +31,20 @@ interface ApplyRequest {
   channel?: Channel;
   months: number;
   reason: string;
+  /** 0138: the first administrator's step — access opened, the payment recorded unconfirmed, the proof still under review. */
+  open?: boolean;
 }
+
+/** 0138: what opening a proof changed, so a refusal takes back exactly that and nothing paid before. */
+interface OpenChanges {
+  periodEndBefore: string | null;
+  periodEndAfter: string | null;
+  statusBefore: string | null;
+}
+
+/** 0138: the second step is a different person's. */
+const secondAdminRequired = () =>
+  new ConflictException({ code: 'second_admin_required', message: 'Another administrator must confirm or refuse this payment.' });
 class PeriodAlreadyApplied extends Error {}
 const refused = (state: { stopped: boolean; mayStillBeRunning: boolean }) =>
   new ConflictException(
@@ -52,6 +69,12 @@ const VIEW = {
   paidAt: true,
   reference: true,
   payerPhone: true,
+  receiveService: true,
+  receiveNumber: true,
+  openedBy: true,
+  openedAt: true,
+  openedRevision: true,
+  confirmedBy: true,
   revision: true,
   revisedAt: true,
   note: true,
@@ -80,6 +103,9 @@ function view(r: Row) {
     reference: r.reference,
     // 0135: the number paid from, and which revision of the proof this is (raised by each correction).
     payerPhone: r.payerPhone,
+    // 0138: where the Owner says the money was sent.
+    receiveService: r.receiveService,
+    receiveNumber: r.receiveNumber,
     revision: r.revision,
     revisedAt: r.revisedAt?.toISOString() ?? null,
     note: r.note,
@@ -97,6 +123,19 @@ function view(r: Row) {
     submittedAt: r.submittedAt.toISOString(),
     decidedAt: r.decidedAt?.toISOString() ?? null,
     fileAvailable: r.purgedAt === null,
+  };
+}
+
+/**
+ * 0138: the review's internal state, for the console only — never the Owner's view, who is told nothing of it: an opened
+ * proof stays "under review" for them, with the access it pays for already open.
+ */
+function adminView(r: Row) {
+  return {
+    ...view(r),
+    review: r.openedAt
+      ? { openedBy: r.openedBy, openedAt: r.openedAt.toISOString(), openedRevision: r.openedRevision, confirmedBy: r.confirmedBy, overdue: r.status === 'under_review' && Date.now() - r.openedAt.getTime() > REVIEW_TARGET_MS }
+      : null,
   };
 }
 
@@ -171,10 +210,12 @@ export class PaymentProofsService {
   async submit(
     companyId: Buffer,
     file: { buffer: Buffer; originalname?: string } | undefined,
-    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; branches?: string[]; reference?: string; note?: string; category?: string; seats?: number; payerPhone?: string; userId: Buffer },
+    input: { idempotencyKey: string; amount?: string; paidAt?: string; months?: number; branches?: string[]; reference?: string; note?: string; category?: string; seats?: number; payerPhone?: string; receiveService?: string; receiveNumber?: string; userId: Buffer },
   ) {
     const key = input.idempotencyKey?.trim();
     const payerPhone = payerPhoneOf(input.payerPhone);
+    // 0138: only a pairing the server offers; none named (an older page) records none.
+    const receiver = receiverOf(input.receiveService, input.receiveNumber);
     if (!key || key.length > 80) throw new BadRequestException({ code: 'proof_key_missing', message: 'Missing request key.' });
     // 0132: a retry is the same proof — the same file, plan and stores. A key reused with other contents is refused,
     // never answered with the first proof as though it were this one.
@@ -275,6 +316,8 @@ export class PaymentProofsService {
           paidAt,
           reference: input.reference?.trim().slice(0, 120) || null,
           payerPhone,
+          receiveService: receiver?.service ?? null,
+          receiveNumber: receiver?.number ?? null,
           note: input.note?.trim().slice(0, 500) || null,
           contentType,
           fileName: safeProofName(file.originalname, contentType),
@@ -304,7 +347,7 @@ export class PaymentProofsService {
     companyId: Buffer,
     id: string,
     file: { buffer: Buffer; originalname?: string } | undefined,
-    input: { payerPhone?: string; reference?: string; note?: string; revision?: number; userId: Buffer },
+    input: { payerPhone?: string; reference?: string; note?: string; revision?: number; receiveService?: string; receiveNumber?: string; userId: Buffer },
     ctx?: { ip?: string },
   ) {
     if (!isUuid(id)) throw new NotFoundException('Unknown proof');
@@ -320,6 +363,11 @@ export class PaymentProofsService {
     if (input.payerPhone !== undefined) data.payerPhone = payerPhoneOf(input.payerPhone);
     if (input.reference !== undefined) data.reference = input.reference.trim().slice(0, 120) || null;
     if (input.note !== undefined) data.note = input.note.trim().slice(0, 500) || null;
+    if (input.receiveService !== undefined || input.receiveNumber !== undefined) {
+      const receiver = receiverOf(input.receiveService, input.receiveNumber);
+      data.receiveService = receiver?.service ?? null;
+      data.receiveNumber = receiver?.number ?? null;
+    }
     if (file?.buffer?.length) {
       if (file.buffer.length > MAX_PROOF_BYTES) throw new BadRequestException({ code: 'proof_too_large', message: 'The file is too large.' });
       const contentType = sniffProof(file.buffer);
@@ -364,7 +412,7 @@ export class PaymentProofsService {
     // Said only to the administrator: the Owner's list stays Submitted until there is a decision.
     const stopped = await this.prisma.paymentProof.findMany({ where: { id: { in: rows.map((r) => r.id) }, appliedAt: { not: null } }, select: { id: true } });
     const isStopped = new Set(stopped.map((r) => r.id.toString('hex')));
-    return rows.map((r) => ({ ...view(r), applying: isStopped.has(r.id.toString('hex')) && !r.decidedAt }));
+    return rows.map((r) => ({ ...adminView(r), applying: isStopped.has(r.id.toString('hex')) && !r.decidedAt && !r.openedAt }));
   }
 
   /** On the administrator's own read: no job to fail silently, and at most a list's delay late. */
@@ -407,6 +455,28 @@ export class PaymentProofsService {
     if (!why) throw new BadRequestException({ code: 'reason_required', message: 'Say why: the Owner reads this.' });
     const row = await this.rowOf(id);
     if (revision !== undefined && row.status !== 'refused' && revision !== row.revision) throw staleRevision(row.revision);
+    if (row.openedAt && row.status === 'under_review') {
+      if (row.openedBy === ctx.admin.email) throw secondAdminRequired();
+      const full = await this.prisma.paymentProof.findUniqueOrThrow({ where: { id: row.id }, select: { openChanges: true, submittedBy: true } });
+      const now = new Date();
+      const taken = await this.prisma.$transaction(async (tx) => {
+        const moved = await tx.paymentProof.updateMany({
+          where: { id: row.id, status: 'under_review', openedAt: { not: null }, openedBy: { not: ctx.admin.email } },
+          data: { status: 'refused', refusalReason: why.slice(0, 500), decidedAt: now, confirmedBy: ctx.admin.email },
+        });
+        if (!moved.count) throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
+        const t = await this.takeBackTx(tx, row, id, full.openChanges as OpenChanges | null, now);
+        await tx.subscriptionPayment.updateMany({ where: { companyId: row.companyId, reference: `proof:${id}`, confirmedAt: null }, data: { note: `Not verified: ${why}`.slice(0, 500) } });
+        // The Owner is told in the app; the portal shows the refusal and its reason.
+        await tx.notification.create({
+          data: { id: newUuidV7Bin(), companyId: row.companyId, targetUserId: full.submittedBy, type: 'payment.refused', title: 'Payment not verified', body: why.slice(0, 250), dedupeKey: `proof-refused:${id}`, payload: { proofId: id }, createdAt: now },
+        });
+        await this.record('payment_proof.refuse', row.companyId, id, why, { afterOpen: true, openedBy: row.openedBy, ...t }, ctx, tx);
+        return t;
+      });
+      void taken;
+      return adminView(await this.rowOf(id));
+    }
     const moved = await this.prisma.paymentProof.updateMany({
       where: { id: row.id, status: { in: ['submitted', 'under_review'] }, appliedAt: null, ...(revision !== undefined ? { revision } : {}) },
       data: { status: 'refused', refusalReason: why.slice(0, 500), decidedAt: new Date() },
@@ -429,7 +499,7 @@ export class PaymentProofsService {
   ) {
     const row = await this.rowOf(id);
     // A retry of the approval answers with it; an approval of a revision the Owner has since corrected is refused (0135).
-    if (row.status === 'approved') return view(row);
+    if (row.status === 'approved' || row.openedAt) return adminView(row);
     if (input.revision !== undefined && input.revision !== row.revision) throw staleRevision(row.revision);
     if (row.status !== 'submitted' && row.status !== 'under_review') throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
     // 0134: extra seats and adjustments record money only; their months extend nothing.
@@ -440,7 +510,8 @@ export class PaymentProofsService {
     if (Number.isNaN(paidAt.getTime())) throw new BadRequestException({ code: 'paid_at_invalid', message: 'Enter the payment date.' });
     if (!input.reason?.trim()) throw new BadRequestException({ code: 'reason_required', message: 'Say why.' });
 
-    const request: ApplyRequest = { amount: input.amount, paidAt: paidAt.toISOString(), channel: input.channel, months: input.months, reason: input.reason };
+    // 0138: an approval is the first administrator's step — the access opens, the payment is verified by another.
+    const request: ApplyRequest = { amount: input.amount, paidAt: paidAt.toISOString(), channel: input.channel, months: input.months, reason: input.reason, open: true };
     const claimed = await this.prisma.paymentProof.updateMany({
       where: { id: row.id, appliedAt: null, status: { in: ['submitted', 'under_review'] }, ...(input.revision !== undefined ? { revision: input.revision } : {}) },
       data: { appliedAt: new Date(), applyRequest: request as never },
@@ -461,11 +532,12 @@ export class PaymentProofsService {
   /** Each step recognises its own work: the payment by its reference, the period by the proof's mark, the decision by its status. */
   private async applySteps(row: Row, id: string, request: ApplyRequest, ctx: Actor, applyPeriod = true) {
     const company = binToUuid(row.companyId);
+    let before: { status: string; currentPeriodEnd: Date | null } | null = null;
     const actor = { admin: ctx.admin, ip: ctx.ip ?? undefined } as never;
     await this.lifecycle.recordPayment(
       company,
       {
-        amount: request.amount, paidAt: new Date(request.paidAt), channel: request.channel, reference: `proof:${id}`, note: request.reason, confirm: true,
+        amount: request.amount, paidAt: new Date(request.paidAt), channel: request.channel, reference: `proof:${id}`, note: request.reason, confirm: !request.open,
         // 0134: the payment says what it was for — the proof's category, stores, months and seats.
         category: row.category ?? undefined,
         details: { proofId: id, months: row.months, seats: row.seats, stores: Array.isArray(row.lines) ? (row.lines as Array<{ branchId: string; name: string; amount: number }>).map((l) => ({ branchId: l.branchId, name: l.name, amount: l.amount })) : null },
@@ -509,6 +581,7 @@ export class PaymentProofsService {
         }
       };
       const decision = { months: request.months, reason: request.reason };
+      if (request.open) before = await this.prisma.subscription.findFirst({ where: { companyId: row.companyId }, select: { status: true, currentPeriodEnd: true } });
       try {
         const sub = await this.prisma.subscription.findFirst({ where: { companyId: row.companyId }, select: { status: true } });
         const first = sub?.status === 'pending_activation' || sub?.status === 'rejected';
@@ -520,6 +593,19 @@ export class PaymentProofsService {
       }
     }
 
+    if (request.open) {
+      // 0138: opened, not decided — the Owner still reads "under review"; nothing is sent to them.
+      const after = await this.prisma.subscription.findFirst({ where: { companyId: row.companyId }, select: { currentPeriodEnd: true } });
+      const changes: OpenChanges = { periodEndBefore: before?.currentPeriodEnd?.toISOString() ?? null, periodEndAfter: after?.currentPeriodEnd?.toISOString() ?? null, statusBefore: before?.status ?? null };
+      await this.prisma.$transaction(async (tx) => {
+        const opened = await tx.paymentProof.updateMany({
+          where: { id: row.id, openedAt: null, status: { in: ['submitted', 'under_review'] } },
+          data: { status: 'under_review', months: applyPeriod ? request.months : null, openedBy: ctx.admin.email, openedAt: new Date(), openedRevision: row.revision, openChanges: changes as never },
+        });
+        if (opened.count) await this.record('payment_proof.open', row.companyId, id, request.reason, { amount: request.amount, months: request.months, revision: row.revision, periodApplied: applyPeriod }, ctx, tx);
+      });
+      return adminView(await this.rowOf(id));
+    }
     await this.prisma.$transaction(async (tx) => {
       const decided = await tx.paymentProof.updateMany({
         where: { id: row.id, status: { in: ['submitted', 'under_review'] } },
@@ -528,6 +614,59 @@ export class PaymentProofsService {
       if (decided.count) await this.record('payment_proof.approve', row.companyId, id, request.reason, { amount: request.amount, months: request.months, periodApplied: applyPeriod }, ctx, tx);
     });
     return view(await this.rowOf(id));
+  }
+
+  /**
+   * 0138: the second administrator — never the one who opened it — confirms the deposit on the receiving account. The
+   * proof is approved and its payment confirmed. Revision-checked; a retry answers with the decision.
+   */
+  async confirm(id: string, input: { revision?: number; reason?: string }, ctx: Actor) {
+    const row = await this.rowOf(id);
+    if (row.status === 'approved') return adminView(row);
+    if (!row.openedAt || row.status !== 'under_review') throw new ConflictException({ code: 'proof_not_opened', message: 'Open the access first; another administrator then confirms the deposit.' });
+    if (input.revision !== undefined && input.revision !== row.revision) throw staleRevision(row.revision);
+    if (row.openedBy === ctx.admin.email) throw secondAdminRequired();
+    await this.prisma.$transaction(async (tx) => {
+      const decided = await tx.paymentProof.updateMany({
+        where: { id: row.id, status: 'under_review', openedAt: { not: null }, openedBy: { not: ctx.admin.email } },
+        data: { status: 'approved', confirmedBy: ctx.admin.email, decidedAt: new Date(), refusalReason: null },
+      });
+      if (!decided.count) throw new ConflictException({ code: 'proof_decided', message: 'This proof has already been decided.' });
+      await tx.subscriptionPayment.updateMany({ where: { companyId: row.companyId, reference: `proof:${id}`, confirmedAt: null }, data: { confirmedBy: ctx.admin.email, confirmedAt: new Date() } });
+      await this.record('payment_proof.confirm', row.companyId, id, input.reason?.trim() || null, { openedBy: row.openedBy, revision: row.revision }, ctx, tx);
+    });
+    return adminView(await this.rowOf(id));
+  }
+
+  /**
+   * 0138: a refusal after the access was opened (a different administrator). Takes back only what this proof added — each
+   * store's period it extended (when nothing has extended it since), the business's paid end it moved, the stores it
+   * opened (made inactive, records kept) — and tells the Owner. Access paid for before is never touched; nothing is erased.
+   */
+  private async takeBackTx(tx: Prisma.TransactionClient, row: Row, id: string, changes: OpenChanges | null, now: Date) {
+    await lockSubscription(tx as never, row.companyId);
+    const periods = await tx.branchPeriod.findMany({ where: { companyId: row.companyId, paymentProofId: row.id } });
+    const undone: string[] = [];
+    for (const p of periods) {
+      const own = await tx.branchEntitlement.findUnique({ where: { branchId: p.branchId } });
+      if (own?.paidUntil && p.endsAt && own.paidUntil.getTime() === p.endsAt.getTime()) {
+        await tx.branchEntitlement.update({ where: { branchId: p.branchId }, data: { paidUntil: p.startsAt, version: { increment: 1 } } });
+        undone.push(binToUuid(p.branchId));
+      }
+    }
+    // The stores this proof opened: inactive, with every record kept (read and export stay).
+    const opened = await tx.seatAllocation.findMany({ where: { companyId: row.companyId, kind: 'store', branchId: { not: null }, payment: { reference: `proof:${id}` } }, select: { branchId: true } });
+    for (const o of opened) await tx.branch.updateMany({ where: { id: o.branchId!, companyId: row.companyId }, data: { isActive: false } });
+    // The business's paid end, back to where it was — only when nothing moved it since.
+    const sub = await tx.subscription.findFirst({ where: { companyId: row.companyId }, select: { id: true, currentPeriodEnd: true } });
+    let periodRestored = false;
+    if (sub && changes?.periodEndAfter && sub.currentPeriodEnd?.toISOString() === changes.periodEndAfter) {
+      await tx.subscription.update({ where: { id: sub.id }, data: { currentPeriodEnd: changes.periodEndBefore ? new Date(changes.periodEndBefore) : null, ...(changes.statusBefore === 'pending_activation' ? { status: 'pending_activation' } : {}), version: { increment: 1 } } });
+      // Billing periods begun by this proof end now; the one it lengthened ends where it did before.
+      await tx.billingPeriod.updateMany({ where: { companyId: row.companyId, periodStart: { gte: row.openedAt ?? now }, OR: [{ periodEnd: null }, { periodEnd: { gt: now } }] }, data: { periodEnd: now } });
+      periodRestored = true;
+    }
+    return { storesTakenBack: undone, storesClosed: opened.map((o) => binToUuid(o.branchId!)), periodRestored };
   }
 
   private async progress(companyId: Buffer, proofId: Buffer, id: string) {
@@ -551,7 +690,8 @@ export class PaymentProofsService {
       select: { status: true, currentPeriodEnd: true, isComplimentary: true, complimentaryUntil: true },
     });
     const open = row.status === 'submitted' || row.status === 'under_review';
-    const stopped = open && full.appliedAt !== null;
+    // 0138: an opened proof (the first step done) is not a stopped approval.
+    const stopped = open && full.appliedAt !== null && !row.openedAt;
     const settled = stopped && Date.now() - full.appliedAt!.getTime() >= RECOVERY_AFTER_MS;
     const known = full.applyRequest !== null;
     return {

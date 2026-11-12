@@ -215,9 +215,8 @@ const ALLOWED: Record<string, [Cls, string]> = {
   'account/business-deletion.service.ts :: read :: read store.name': ['other', 'business deletion (post-Build-4): the name the administrator types back, compared exactly; never shown to a customer'],
   'platform/platform.controller.ts :: businesses :: select users.select': ['latin', 'platform console: the Owner in an account label, never stored'],
   'common/account-label.ts :: participantLabel :: read store.name': ['latin', 'the Latin half of a pair: participantLabelAr gives the Arabic'],
-  // The administrators' WhatsApp alert of a portal payment proof (owner, 2026-11-05): English, read by the platform team.
-  'platform/payment-alert.service.ts :: proofSubmitted :: select company.findUnique.select': ['latin', 'platform team alert (English operator template), not the Arabic interface'],
-  'platform/payment-alert.service.ts :: proofSubmitted :: read company.name': ['latin', 'platform team alert (English operator template), not the Arabic interface'],
+  // 0138: the portal prefills its payment flow with the person the Owner asked a seat for — the name as the Owner typed it.
+  'platform/seat-requests.controller.ts :: myPendingRequest :: read found.person.name': ['latin', 'the Owner’s own request read back to them as entered; the Team screen shows both names'],
   'notices/notice.service.ts :: readSubject :: read company.name': ['latin', 'the optional trading name in a message; without one, neutral words in the message’s language'],
   'platform/platform.controller.ts :: businesses :: select branches.select': ['latin', 'platform console: the stores in an account label, never stored'],
   'platform/portal/portal-session.service.ts :: viewOf :: read owner.company.name': ['latin', 'platform console, provisioning, invitation or billing text: read in the portal, null without a trading name'],

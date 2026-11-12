@@ -6548,45 +6548,57 @@ enum PaymentProofStatus {
 
 /// D227: an Owner's payment proof from the web portal. Asking changes nothing; only an administrator's approval records a payment.
 model PaymentProof {
-  id              Bytes              @id @db.Binary(16)
-  companyId       Bytes              @map("company_id") @db.Binary(16)
-  idempotencyKey  String             @map("idempotency_key") @db.VarChar(80)
-  status          PaymentProofStatus @default(submitted)
-  amount          Decimal            @db.Decimal(14, 2)
-  paidAt          DateTime           @map("paid_at") @db.DateTime(6)
-  reference       String?            @db.VarChar(120)
+  id               Bytes              @id @db.Binary(16)
+  companyId        Bytes              @map("company_id") @db.Binary(16)
+  idempotencyKey   String             @map("idempotency_key") @db.VarChar(80)
+  status           PaymentProofStatus @default(submitted)
+  amount           Decimal            @db.Decimal(14, 2)
+  paidAt           DateTime           @map("paid_at") @db.DateTime(6)
+  reference        String?            @db.VarChar(120)
   /// 0135: the number the Owner paid from, as they typed it on the portal.
-  payerPhone      String?            @map("payer_phone") @db.VarChar(32)
+  payerPhone       String?            @map("payer_phone") @db.VarChar(32)
+  /// 0138: the service (bankily | sedad) and receiving number the Owner says they paid to.
+  receiveService   String?            @map("receive_service") @db.VarChar(16)
+  receiveNumber    String?            @map("receive_number") @db.VarChar(16)
   /// 0135: raised by each correction before the decision; a decision names the revision it was made on.
-  revision        Int                @default(1) @db.UnsignedInt
-  revisedAt       DateTime?          @map("revised_at") @db.DateTime(6)
-  note            String?            @db.VarChar(500)
-  contentType     String             @map("content_type") @db.VarChar(40)
+  revision         Int                @default(1) @db.UnsignedInt
+  revisedAt        DateTime?          @map("revised_at") @db.DateTime(6)
+  note             String?            @db.VarChar(500)
+  contentType      String             @map("content_type") @db.VarChar(40)
   /// 0136: the name the file was sent with, made safe, its extension matching its sniffed type.
-  fileName        String?            @map("file_name") @db.VarChar(160)
-  byteSize        Int                @map("byte_size")
-  sha256          String             @db.Char(64)
-  file            Bytes?             @db.MediumBlob
-  submittedBy     Bytes              @map("submitted_by") @db.Binary(16)
-  submittedAt     DateTime           @default(now()) @map("submitted_at") @db.DateTime(6)
-  refusalReason   String?            @map("refusal_reason") @db.VarChar(500)
-  months          Int?
+  fileName         String?            @map("file_name") @db.VarChar(160)
+  byteSize         Int                @map("byte_size")
+  sha256           String             @db.Char(64)
+  file             Bytes?             @db.MediumBlob
+  submittedBy      Bytes              @map("submitted_by") @db.Binary(16)
+  submittedAt      DateTime           @default(now()) @map("submitted_at") @db.DateTime(6)
+  refusalReason    String?            @map("refusal_reason") @db.VarChar(500)
+  months           Int?
   /// 0134: what the Owner says this proof pays for; null before 0134.
-  category        PaymentCategory?
+  category         PaymentCategory?
   /// 0134: extra seats bought at one store (category extra_seats).
-  seats           Int?               @db.UnsignedInt
-  appliedAt       DateTime?          @map("applied_at") @db.DateTime(6)
-  applyRequest    Json?              @map("apply_request")
-  periodAppliedAt DateTime?          @map("period_applied_at") @db.DateTime(6)
+  seats            Int?               @db.UnsignedInt
+  appliedAt        DateTime?          @map("applied_at") @db.DateTime(6)
+  applyRequest     Json?              @map("apply_request")
+  periodAppliedAt  DateTime?          @map("period_applied_at") @db.DateTime(6)
   /// 0132: the quote's lines at submission (branch or waiting request, months, amount) — applied exactly at approval.
-  lines           Json?
-  decidedAt       DateTime?          @map("decided_at") @db.DateTime(6)
-  purgedAt        DateTime?          @map("purged_at") @db.DateTime(6)
-  company         Company            @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_proofs_company")
+  lines            Json?
+  decidedAt        DateTime?          @map("decided_at") @db.DateTime(6)
+  /// 0138: the first administrator opened the purchased access pending verification; the second confirmed it.
+  openedBy         String?            @map("opened_by") @db.VarChar(160)
+  openedAt         DateTime?          @map("opened_at") @db.DateTime(6)
+  openedRevision   Int?               @map("opened_revision") @db.UnsignedInt
+  openChanges      Json?              @map("open_changes")
+  confirmedBy      String?            @map("confirmed_by") @db.VarChar(160)
+  alertedAt        DateTime?          @map("alerted_at") @db.DateTime(6)
+  overdueAlertedAt DateTime?          @map("overdue_alerted_at") @db.DateTime(6)
+  purgedAt         DateTime?          @map("purged_at") @db.DateTime(6)
+  company          Company            @relation(fields: [companyId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_proofs_company")
 
   @@unique([companyId, idempotencyKey], map: "ux_payment_proofs_key")
   @@index([status, submittedAt], map: "ix_payment_proofs_status")
   @@index([companyId, sha256], map: "ix_payment_proofs_sha")
+  @@index([status, openedAt], map: "ix_payment_proofs_opened")
   @@map("payment_proofs")
 }
 

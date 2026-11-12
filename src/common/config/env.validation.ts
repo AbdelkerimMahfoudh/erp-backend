@@ -116,6 +116,9 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_TEMPLATE_TRIAL_REMINDER: Joi.string().allow('').default(''),
   /** The administrators' alert of a portal payment proof (owner, 2026-11-05). Empty: no alert is sent. */
   WHATSAPP_TEMPLATE_PAYMENT_SUBMITTED: Joi.string().allow('').default(''),
+  // 0138: the administrators' alerts — no link, no customer or money details; off until Meta approves each.
+  WHATSAPP_TEMPLATE_ADMIN_PROOF: Joi.string().allow('').default(''),
+  WHATSAPP_TEMPLATE_ADMIN_OVERDUE: Joi.string().allow('').default(''),
   /** 0130: a branch added in the app is ready for activation (`dukan_branch_activation_ready`). Empty: held, not sent. */
   WHATSAPP_TEMPLATE_BRANCH_ACTIVATION: Joi.string().allow('').default(''),
   /** 0131: the free trial started at registration (`dukan_trial_started`). Empty: held, not sent; the trial runs either way. */
