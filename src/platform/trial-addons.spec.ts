@@ -505,6 +505,25 @@ describe('7. one charge only', () => {
     expect(w.periods(b).map((p) => p.assessedTotal)).toEqual([500, 1000]);
   });
 
+  it('0137, its own term renewed on its own: a business period starting after the first month still does not charge it while the renewed term runs — and does once it ends', async () => {
+    const { w, b } = await trialWorld({ approve: true });
+    const store = (await askStore(w, b)).allocation.id;
+    await w.confirm(store, 500, { reference: 'BK-1' });
+    const opened = w.branch(b, 'B')!;
+    const first = w.request(store).ownPaidUntil!;
+    // The Owner renews B on its own for two more months (a proof's applyPaidTx moves the store's own paid end).
+    const own = w.t.branchEntitlement.find((e) => e.branchId.equals(opened.id))!;
+    own.paidUntil = new Date(first.getTime() + 61 * DAY);
+    // A business period starting after B's first month, inside its renewed term: Main only.
+    const sub = w.subscription(b).id;
+    await w.billing.openPeriod(b.companyId, sub, null, { startsAt: new Date(first.getTime() + DAY) });
+    expect(w.periods(b).at(-1)).toMatchObject({ assessedTotal: 500 });
+    expect(Object.keys(w.periods(b).at(-1)!.assessedActivityFeeByBranch)).toEqual([w.uuid(b.stores.Main)]);
+    // One starting after the renewed term ends: B renews with the business.
+    await w.billing.openPeriod(b.companyId, sub, null, { startsAt: new Date(own.paidUntil.getTime() + DAY) });
+    expect(w.periods(b).at(-1)).toMatchObject({ assessedTotal: 1000 });
+  });
+
   it('0137, approved first: the confirmation opens the store and raises nothing; at the end the first period is still 500', async () => {
     const { w, b } = await trialWorld({ approve: true });
     const store = (await askStore(w, b)).allocation.id;

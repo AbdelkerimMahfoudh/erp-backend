@@ -546,11 +546,26 @@ export class BillingService {
    * charge their store fee (their seats stay chargeable); a period starting after it ends bills them with the business.
    */
   private async ownCoveredOf(companyId: Buffer, db: BillingDb, periodStart: Date): Promise<Set<string>> {
-    const rows = await db.seatAllocation.findMany({
-      where: { companyId, kind: 'store', status: 'paid', ownPaidUntil: { gt: periodStart }, branchId: { not: null } },
-      select: { branchId: true },
+    // Which stores have a paid term of their own: marked when they opened with one (own_paid_until set).
+    const own = await db.seatAllocation.findMany({
+      where: { companyId, kind: 'store', status: 'paid', ownPaidUntil: { not: null }, branchId: { not: null } },
+      select: { branchId: true, ownPaidUntil: true },
     });
-    return new Set(rows.map((r) => binToUuid(r.branchId!)));
+    if (!own.length) return new Set();
+    // How far that term runs now: the store's own paid end, which every later payment for it moves (applyPaidTx) —
+    // never the first term alone, or a store renewed on its own would be charged again by the business's period.
+    const entitlements = await db.branchEntitlement.findMany({
+      where: { companyId, branchId: { in: own.map((o) => o.branchId!) } },
+      select: { branchId: true, paidUntil: true },
+    });
+    const until = new Map(entitlements.map((e) => [binToUuid(e.branchId), e.paidUntil]));
+    const covered = new Set<string>();
+    for (const o of own) {
+      const id = binToUuid(o.branchId!);
+      const end = until.get(id) ?? o.ownPaidUntil;
+      if (end && end.getTime() > periodStart.getTime()) covered.add(id);
+    }
+    return covered;
   }
 
   /** The running paid period in force, under the caller's lock; null when there is none. */
