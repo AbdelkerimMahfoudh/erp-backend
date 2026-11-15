@@ -57,7 +57,7 @@ export interface DeferralView {
  * hiding a control decides nothing:
  *
  *  1. a superadmin — every platform administrator is one — whose MFA is enabled;
- *  2. a fresh step-up on THIS session (password and an authenticator code, five minutes);
+ *  2. a fresh step-up on THIS session (password and an authenticator code, ten minutes);
  *  3. the protected platform routes — tenants, ordinary staff invitations and public registration have no such field,
  *     and the whitelist pipe rejects one sent anyway;
  *  4. the switch `PHONE_VERIFICATION_DEFERRAL=on` (off unless set).

@@ -35,7 +35,8 @@ import { generateRecoveryCodes, looksLikeRecoveryCode, normaliseRecoveryCode } f
  *    Never a secret, a code or a token in an audit row or a log line.
  */
 
-export const STEP_UP_TTL_MS = 5 * 60 * 1000;
+/** Owner, 2026-11-15: ten minutes (was five). */
+export const STEP_UP_TTL_MS = 10 * 60 * 1000;
 export const MFA_MAX_FAILURES = 5;
 export const MFA_LOCK_MS = 15 * 60 * 1000;
 export const ENROLMENT_TOKEN_TTL_MS = 30 * 60 * 1000;
@@ -217,7 +218,7 @@ export class PlatformMfaService {
   }
 
   /**
-   * The window a step-up opened on THIS session (post-Build-4, owner 2026-11-03): five minutes from the verification,
+   * The window a step-up opened on THIS session (post-Build-4, owner 2026-11-03): ten minutes from the verification (five until 2026-11-15),
    * absolute — nothing done inside it moves its end. Null when there is none, it ran out, or the session or its
    * administrator can no longer hold one (signed out, revoked, disabled, deleted). A new factor or password revokes
    * every session (`issueEnrolmentToken`, `create-platform-admin.ts`), so it ends the window with it. Administrators

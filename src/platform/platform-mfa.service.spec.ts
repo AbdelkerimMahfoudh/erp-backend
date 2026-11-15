@@ -132,8 +132,18 @@ describe('completing a sign-in', () => {
   });
 });
 
-describe('step-up: the password and a fresh code, on this session, for five minutes', () => {
-  it('a high-impact action refuses a password alone; after a step-up it runs; five minutes later it refuses again', async () => {
+describe('step-up: the password and a fresh code, on this session, for ten minutes', () => {
+  it('the window is ten minutes (owner, 2026-11-15; was five): still open at nine, closed at ten', async () => {
+    expect(STEP_UP_TTL_MS).toBe(10 * 60_000);
+    const h = harness();
+    const { secret, first } = await h.enrolled();
+    const now = at(60_000);
+    await h.mfa.stepUp(h.identity, first.s.sessionId, 'admin-pw', h.code(secret, now), null, now);
+    await expect(h.mfa.assertFreshStepUp(first.s.sessionId, new Date(now.getTime() + 9 * 60_000))).resolves.toBeUndefined();
+    await expect(h.mfa.assertFreshStepUp(first.s.sessionId, new Date(now.getTime() + 10 * 60_000))).rejects.toMatchObject({ response: { code: 'step_up_required' } });
+  });
+
+  it('a high-impact action refuses a password alone; after a step-up it runs; ten minutes later it refuses again', async () => {
     const h = harness();
     const { secret, first } = await h.enrolled();
     h.cls.set('platformSessionId', first.s.sessionId);
