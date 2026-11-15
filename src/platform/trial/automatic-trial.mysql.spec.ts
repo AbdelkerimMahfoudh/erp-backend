@@ -6,6 +6,7 @@ import { HashingService } from '../../common/security/hashing.service';
 import { uuidToBin } from '../../common/utils/uuid.util';
 import type { DeliveryResult, WhatsAppMessage } from '../../messaging/whatsapp-channel';
 import { NoticeService } from '../../notices/notice.service';
+import { ClaimLinkService, hashClaimToken } from '../../notices/claim-links.service';
 import { BranchRequestsService } from '../branch-requests.service';
 import { PlatformAuditService } from '../platform-audit.service';
 import { RegistrationService } from '../registration.service';
@@ -231,6 +232,7 @@ suite('the automatic free trial', () => {
 
   describe('the trial-started message', () => {
     let template = '';
+    let linkTemplate = '';
     let paidTemplate = '';
     const sent: WhatsAppMessage[] = [];
     let script: DeliveryResult[] = [];
@@ -246,17 +248,18 @@ suite('the automatic free trial', () => {
       portalLive: true,
       automaticTrial: true,
       portalSubscriptionUrl: 'https://dukan.tsxmr.com/subscription',
-      whatsappTemplateName: (k: string) => (k === 'WHATSAPP_TEMPLATE_TRIAL_STARTED' ? template : k === 'WHATSAPP_TEMPLATE_PAID_REMINDER' ? paidTemplate : ''),
+      whatsappTemplateName: (k: string) => (k === 'WHATSAPP_TEMPLATE_TRIAL_STARTED' ? template : k === 'WHATSAPP_TEMPLATE_TRIAL_STARTED_LINK' ? linkTemplate : k === 'WHATSAPP_TEMPLATE_PAID_REMINDER' ? paidTemplate : ''),
     };
     const email = { name: 'disabled', isEnabled: false, send: async () => ({ status: 'failed', reason: 'unavailable', detail: 'off', provider: 'disabled' }) };
     const records = { contactState: async () => ({ consented: true, consent: 'active', optOutScope: 'none', undeliverableAt: null, pendingLive: false }) };
     const notices = url
-      ? new NoticeService(db, config as never, entitlement as never, records as never, { hash: () => 'h'.repeat(64) } as never, whatsapp as never, email as never, { now: () => new Date() } as never)
+      ? new NoticeService(db, config as never, entitlement as never, records as never, { hash: () => 'h'.repeat(64) } as never, whatsapp as never, email as never, { now: () => new Date() } as never, new ClaimLinkService(db as never))
       : (null as never);
     beforeEach(() => {
       sent.length = 0;
       script = [];
       template = '';
+      linkTemplate = '';
       paidTemplate = '';
     });
 
@@ -368,6 +371,26 @@ suite('the automatic free trial', () => {
       const ends = (await facts(id)).claims[0].endsAt;
       const day = new Intl.DateTimeFormat('fr-FR', { timeZone: 'Africa/Nouakchott', day: 'numeric', month: 'long', year: 'numeric' }).format(ends);
       expect(sent[0].variables.ends).toContain(day);
+    });
+
+    it('owner 2026-11-15: with the signed-in template set, the welcome carries a single-use link that opens the portal for 12 hours', async () => {
+      const { id, owner } = await business();
+      await start(id, owner);
+      template = 'dukan_trial_started';
+      linkTemplate = 'dukan_trial_started_v2';
+      const [notice] = (await facts(id)).notices;
+      const before = Date.now();
+      await notices.deliverOne(notice.id);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ template: 'trial.started_link', language: 'fr' });
+      const token = sent[0].variables.claim;
+      expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      // Only its hash is kept, for this business's Owner and this message, expiring twelve hours on.
+      const link = await root.portalClaimLink.findUniqueOrThrow({ where: { tokenHash: hashClaimToken(token) } });
+      expect([link.companyId.equals(id), link.noticeId?.equals(notice.id)]).toEqual([true, true]);
+      const hours = (link.expiresAt.getTime() - before) / 3_600_000;
+      expect(hours).toBeGreaterThan(11.99);
+      expect(hours).toBeLessThan(12.01);
     });
 
     it('a held notice released after its 24 hours is superseded, never sent late', async () => {

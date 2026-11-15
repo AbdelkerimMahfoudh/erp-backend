@@ -334,6 +334,19 @@ export const BRANCH_ACTIVATION_TEMPLATE: TemplateDefinition = {
  */
 export const TRIAL_STARTED_TEMPLATE = subscriptionTemplate('trial.started', ['business', 'ends'], 'WHATSAPP_TEMPLATE_TRIAL_STARTED');
 
+/**
+ * The same welcome with a button that signs its Owner in (owner, 2026-11-15) — `dukan_trial_started_v2`, its button the
+ * portal's `/welcome/` address with a single-use link as its suffix (`claim`), valid {@link WELCOME_LINK_TTL_MS}. Used in
+ * place of {@link TRIAL_STARTED_TEMPLATE} once its own key is set; an email fallback keeps the plain message's words.
+ */
+export const TRIAL_STARTED_LINK_TEMPLATE: TemplateDefinition = {
+  ...subscriptionTemplate('trial.started_link', ['business', 'ends'], 'WHATSAPP_TEMPLATE_TRIAL_STARTED_LINK'),
+  linkVariable: 'claim',
+};
+
+/** How long the welcome's sign-in link opens the portal (owner, 2026-11-15): twelve hours. */
+export const WELCOME_LINK_TTL_MS = 12 * 60 * 60 * 1000;
+
 /** Every subscription message's template, in one list (the notices, the configuration, the documentation). */
 export const SUBSCRIPTION_TEMPLATES: readonly TemplateDefinition[] = [
   PORTAL_INSTRUCTIONS_TEMPLATE,
@@ -364,6 +377,7 @@ const REGISTRY: Record<string, TemplateDefinition> = {
   [ADMIN_PROOF_TEMPLATE.key]: ADMIN_PROOF_TEMPLATE,
   [ADMIN_OVERDUE_TEMPLATE.key]: ADMIN_OVERDUE_TEMPLATE,
   ...Object.fromEntries(SUBSCRIPTION_TEMPLATES.map((t) => [t.key, t])),
+  [TRIAL_STARTED_LINK_TEMPLATE.key]: TRIAL_STARTED_LINK_TEMPLATE,
 };
 
 export type TemplateKey = keyof typeof REGISTRY & string;

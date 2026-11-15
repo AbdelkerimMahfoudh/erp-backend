@@ -123,6 +123,8 @@ export const envValidationSchema = Joi.object({
   WHATSAPP_TEMPLATE_BRANCH_ACTIVATION: Joi.string().allow('').default(''),
   /** 0131: the free trial started at registration (`dukan_trial_started`). Empty: held, not sent; the trial runs either way. */
   WHATSAPP_TEMPLATE_TRIAL_STARTED: Joi.string().allow('').default(''),
+  /** The same message with a signed-in button (owner, 2026-11-15; `dukan_trial_started_v2`). Set: used in its place. */
+  WHATSAPP_TEMPLATE_TRIAL_STARTED_LINK: Joi.string().allow('').default(''),
   /** The administrators' WhatsApp numbers for that alert, comma-separated E.164. Kept in the server's environment only. */
   PAYMENT_ALERT_NUMBERS: Joi.string().allow('').default(''),
   WHATSAPP_TEMPLATE_TRIAL_EXPIRED: Joi.string().allow('').default(''),

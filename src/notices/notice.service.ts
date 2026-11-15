@@ -15,6 +15,8 @@ import { WhatsAppRecords } from '../messaging/whatsapp-records';
 import {
   BRANCH_ACTIVATION_TEMPLATE,
   TRIAL_STARTED_TEMPLATE,
+  TRIAL_STARTED_LINK_TEMPLATE,
+  WELCOME_LINK_TTL_MS,
   GRACE_ENDED_TEMPLATE,
   GRACE_REMINDER_TEMPLATE,
   GRACE_STARTED_TEMPLATE,
@@ -537,7 +539,9 @@ export class NoticeService {
 
     const recipient = await this.recipientOf(n);
     if (!recipient) return { state: 'failed', failureReason: 'no_recipient', completedAt: now };
-    const template = templateOf(n.kind, n.variant);
+    // The welcome with its signed-in button (owner, 2026-11-15) once that template is configured; email keeps the plain one.
+    const plain = templateOf(n.kind, n.variant);
+    const template = n.kind === 'trial_started' && this.config.whatsappTemplateName(TRIAL_STARTED_LINK_TEMPLATE.configKey) !== '' ? TRIAL_STARTED_LINK_TEMPLATE : plain;
     const language = (LANGUAGES as readonly string[]).includes(n.language) ? (n.language as MessageLanguage) : 'en';
     const variables = this.variablesOf(n, storeRow ?? row, slot, language, branchLabel, trialEnds);
 
@@ -552,9 +556,9 @@ export class NoticeService {
     if (n.fallbackReason === null) {
       const step = await this.tryWhatsApp(n, recipient, template, language, variables);
       if (step.done) return step.transition;
-      return this.tryEmail(n, recipient, template, language, variables, step.reason, step.whatsappOutcome, 1);
+      return this.tryEmail(n, recipient, plain, language, variables, step.reason, step.whatsappOutcome, 1);
     }
-    return this.tryEmail(n, recipient, template, language, variables, n.fallbackReason as FallbackReason, n.whatsappOutcome, n.attempts);
+    return this.tryEmail(n, recipient, plain, language, variables, n.fallbackReason as FallbackReason, n.whatsappOutcome, n.attempts);
   }
 
   /** WhatsApp's attempt: a final transition, or the reason email is tried now. */
@@ -586,7 +590,8 @@ export class NoticeService {
     let sent = variables;
     if (template.linkVariable) {
       if (!this.claimLinks) return { done: false, reason: 'whatsapp_disabled', whatsappOutcome: 'unavailable' };
-      const { token } = await this.claimLinks.issue({ companyId: n.companyId, userId: to.id, noticeId: n.id }, now);
+      const ttlMs = template === TRIAL_STARTED_LINK_TEMPLATE ? WELCOME_LINK_TTL_MS : undefined;
+      const { token } = await this.claimLinks.issue({ companyId: n.companyId, userId: to.id, noticeId: n.id, ttlMs }, now);
       sent = { ...variables, [template.linkVariable]: token };
     }
     let result: DeliveryResult;

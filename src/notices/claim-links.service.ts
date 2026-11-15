@@ -35,9 +35,10 @@ export class ClaimLinkService {
    * A new link for the business's Owner. The open links of any other message are revoked in the same transaction; a
    * retry of the same message keeps its earlier link valid too, in case that attempt did reach the phone.
    */
-  async issue(p: { companyId: Buffer; userId: Buffer; noticeId?: Buffer | null }, now = new Date()): Promise<{ token: string; expiresAt: Date }> {
+  async issue(p: { companyId: Buffer; userId: Buffer; noticeId?: Buffer | null; ttlMs?: number }, now = new Date()): Promise<{ token: string; expiresAt: Date }> {
     const token = randomBytes(32).toString('base64url');
-    const expiresAt = new Date(now.getTime() + CLAIM_LINK_TTL_MS);
+    // The welcome's link lives twelve hours (owner, 2026-11-15); every other message's, CLAIM_LINK_TTL_MS.
+    const expiresAt = new Date(now.getTime() + (p.ttlMs ?? CLAIM_LINK_TTL_MS));
     await this.prisma.$transaction(async (tx) => {
       const others = p.noticeId ? { OR: [{ noticeId: null }, { noticeId: { not: p.noticeId } }] } : {};
       await tx.portalClaimLink.updateMany({ where: { companyId: p.companyId, usedAt: null, revokedAt: null, ...others }, data: { revokedAt: now } });
