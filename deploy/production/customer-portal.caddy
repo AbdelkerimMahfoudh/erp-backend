@@ -4,9 +4,11 @@
 #
 # - Its own hostname, DNS only, so the edge obtains its own certificate. Never the console, never a test site.
 # - The release holds no console: no /admin route and none of its code (scripts/caddy-portal-release.mjs refuses it).
-# - /claim/<link> carries a single-use link (post-Build-4): those requests are never written to a log.
+# - /claim/<link> and /welcome/<link> (the trial welcome, 2026-11-15) carry a single-use link: those requests are never
+#   written to a log.
 {$PORTAL_HOST} {
 	log_skip /claim/*
+	log_skip /welcome/*
 	header {
 		X-Robots-Tag "noindex, nofollow, noarchive"
 		Referrer-Policy "no-referrer"

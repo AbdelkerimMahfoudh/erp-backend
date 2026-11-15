@@ -130,6 +130,7 @@ run('portal-site.sh, executed', () => {
     expect(r.stdout).toContain('PORTAL_LIVE stays as it is');
     expect(readlinkSync(join(w.web, 'portal', 'current'))).toMatch(/^releases\/\d{8}T\d{6}Z$/);
     expect(readFileSync(join(w.web, 'enabled', 'customer-portal.caddy'), 'utf8')).toContain('log_skip /claim/*');
+    expect(readFileSync(join(w.web, 'enabled', 'customer-portal.caddy'), 'utf8')).toContain('log_skip /welcome/*');
     expect(readFileSync(join(w.dir, 'backups', 'deployments.log'), 'utf8')).toMatch(/portal-site install release=\S+ previous=none host=dukan\.tsxmr\.com/);
   });
 
