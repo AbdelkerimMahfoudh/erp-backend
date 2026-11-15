@@ -156,6 +156,16 @@ export class DevicesService {
     return { id: device.id, reverifyRequired: device.reverifyRequired };
   }
 
+  /**
+   * Whether a presented device id is one of THIS user's devices — revoked or not (owner, 2026-11-15). Only a claim on
+   * one's own device can fail closed at sign-in; any other id proves nothing and is treated as no credential at all.
+   */
+  async isOwnDevice(userId: Buffer, deviceIdStr: string | undefined): Promise<boolean> {
+    if (!deviceIdStr || !isUuid(deviceIdStr)) return false;
+    const device = await this.prisma.userDevice.findUnique({ where: { id: uuidToBin(deviceIdStr) }, select: { userId: true } });
+    return !!device && device.userId.equals(userId);
+  }
+
   /** Bind a session to an already-recognised device, and touch `lastSeenAt`. */
   async attach(sessionId: Buffer, deviceId: Buffer): Promise<void> {
     await this.prisma.$transaction([

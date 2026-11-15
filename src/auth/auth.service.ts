@@ -201,7 +201,16 @@ export class AuthService {
         presented!.deviceId && presented!.deviceSecret
           ? await this.devices.recognise(user.id, presented!.deviceId, presented!.deviceSecret)
           : null;
-      if (!known) {
+      /*
+       * Owner, 2026-11-15: a credential that names no device of THIS user — an id never issued to them, one of a
+       * business since deleted and recreated on the same number, another person's on a shared phone — proves nothing
+       * either way, and presenting it buys nothing that presenting none (case A) would not: the password was verified,
+       * so it is enrolled fresh, as a new install is. Only a claim on one of this user's own devices fails closed — a
+       * wrong secret, or a revoked device — which is what the refusal protects.
+       */
+      if (!known && !(await this.devices.isOwnDevice(user.id, presented!.deviceId))) {
+        // Fall through to case A below: a fresh enrollment.
+      } else if (!known) {
         // Fail closed. The message names no id and echoes no secret, so the
         // failure cannot enumerate whether a device id exists or leak the claim.
         throw new UnauthorizedException({
@@ -210,7 +219,7 @@ export class AuthService {
             'This device could not be verified. Clear the saved device and sign in again to enroll it fresh.',
         });
       }
-      recognisedDeviceId = known.id;
+      recognisedDeviceId = known?.id ?? null;
     }
 
     const secret = this.tokens.generateRefreshSecret();

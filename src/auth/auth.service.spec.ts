@@ -109,6 +109,8 @@ function makeService(opts: {
   const devices = {
     recognise: jest.fn(async () => (opts.recognise === undefined ? null : opts.recognise)),
     attach: jest.fn(async () => undefined),
+    // Owner 2026-11-15: ids starting 'own', 'known' or 'revoked' are this user's devices; any other id is not.
+    isOwnDevice: jest.fn(async (_u: unknown, id?: string) => !!id && /^(own|known|revoked)/.test(id)),
     enroll: jest.fn(async () => ({ deviceId: 'new-device-id', deviceSecret: 'ISSUED-SECRET', trustMethod: 'password' })),
   };
   const prisma = {
@@ -381,8 +383,12 @@ describe('device — cases C/D/E: a failed claim fails CLOSED', () => {
     expect(JSON.stringify(res)).not.toContain('WRONG');
   });
 
-  it('D — unknown id with a secret: fails closed', async () => {
-    await failClosed({ ...meta, deviceId: 'unknown', deviceSecret: 'stale' });
+  it('D — an id that is not one of this user’s devices (a deleted business’s, another person’s): enrolled fresh, as a new install (owner, 2026-11-15)', async () => {
+    const { service, devices, sessions } = makeService({ recognise: null });
+    const res: any = await doLogin(service, { deviceCredential: { ...meta, deviceId: 'unknown', deviceSecret: 'stale' } });
+    expect(sessions.create).toHaveBeenCalledTimes(1);
+    expect(devices.enroll).toHaveBeenCalledTimes(1);
+    expect(res.device).toEqual(expect.objectContaining({ deviceId: 'new-device-id' }));
   });
 
   it('E — revoked id with its credential: fails closed', async () => {
@@ -391,7 +397,7 @@ describe('device — cases C/D/E: a failed claim fails CLOSED', () => {
 
   it('a half-supplied pair fails closed without calling recognise', async () => {
     const { service, devices, sessions } = makeService({ recognise: null });
-    await expect(doLogin(service, { deviceCredential: { deviceId: 'known' } })).rejects.toBeInstanceOf(
+    await expect(doLogin(service, { deviceCredential: { deviceId: 'known-own' } })).rejects.toBeInstanceOf(
       UnauthorizedException,
     );
     expect(devices.recognise).not.toHaveBeenCalled();
@@ -400,12 +406,12 @@ describe('device — cases C/D/E: a failed claim fails CLOSED', () => {
   });
 });
 
-describe('repeated invalid device claims cannot grow the device table', () => {
+describe('repeated invalid claims on this user’s own devices cannot grow the device table', () => {
   it('20 rejected claims create zero devices and zero sessions', async () => {
     const { service, devices, sessions } = makeService({ recognise: null });
     for (let i = 0; i < 20; i++) {
       await expect(
-        doLogin(service, { deviceCredential: { deviceId: `id-${i}`, deviceSecret: `guess-${i}` } }),
+        doLogin(service, { deviceCredential: { deviceId: `own-${i}`, deviceSecret: `guess-${i}` } }),
       ).rejects.toBeInstanceOf(UnauthorizedException);
     }
     expect(devices.enroll).not.toHaveBeenCalled();
