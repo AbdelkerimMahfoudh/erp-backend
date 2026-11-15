@@ -208,7 +208,7 @@ run('deferred WhatsApp verification on real MySQL (0109)', () => {
     const noMfa = { admin: NO_MFA, sessionId: await session(NO_MFA.id, 0), ip: '127.0.0.1' };
     expect(codeOf(await a.provisioning.createStaff(lab.companyId, input('M'), noMfa).catch((e: unknown) => e))).toBe('deferral_mfa_required');
 
-    const stale = { ...actor, sessionId: await session(ADMIN.id, 6 * 60_000) };
+    const stale = { ...actor, sessionId: await session(ADMIN.id, 11 * 60_000) }; // past the ten-minute window (owner, 2026-11-15)
     expect(codeOf(await a.provisioning.createStaff(lab.companyId, input('S'), stale).catch((e: unknown) => e))).toBe('step_up_required');
     const never = { ...actor, sessionId: await session(ADMIN.id, null) };
     expect(codeOf(await a.provisioning.createStaff(lab.companyId, input('N'), never).catch((e: unknown) => e))).toBe('step_up_required');
